@@ -169,6 +169,9 @@ fn redacted_runtime_snapshot(runtime: &Value) -> Value {
         "max_reconnect_backoff_ms": u64_field(runtime, "max_reconnect_backoff_ms"),
         "queue_depth": u64_field(runtime, "queue_depth"),
         "max_queue_depth": u64_field(runtime, "max_queue_depth"),
+        "peer_queue_count": u64_field(runtime, "peer_queue_count"),
+        "largest_peer_queue_depth": u64_field(runtime, "largest_peer_queue_depth"),
+        "max_peer_queue_depth": u64_field(runtime, "max_peer_queue_depth"),
         "dedupe_size": u64_field(runtime, "dedupe_size"),
         "dedupe_window_size": u64_field(runtime, "dedupe_window_size"),
         "reply_reference_count": u64_field(runtime, "reply_reference_count"),
@@ -965,6 +968,119 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(queue_full["lifecycle"]["action"], "none");
     log_projection_step(&mut logs, "queue_full_backpressure_drop", "ok", &queue_full);
 
+    let peer_queue_instance_id = InstanceId::new();
+    let mut peer_queue_connector = QqConnector::new();
+    peer_queue_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "max_queue_depth": 3,
+                "max_peer_queue_depth": 1,
+                "policy": {
+                    "group_policy": "allowlist",
+                    "group_allow_from": ["group-peer-a", "group-peer-b"],
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure peer-queue QQ connector");
+    peer_queue_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            peer_queue_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake peer-queue QQ connector");
+    let peer_first = invoke_projection(
+        &peer_queue_connector,
+        &signing_key,
+        &peer_queue_instance_id,
+        "qq-gateway-peer-queue-first",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-peer-queue-first",
+            "d": {
+                "id": "msg-peer-queue-first",
+                "content": "first peer queue message",
+                "group_openid": "group-peer-a",
+                "group_member_openid": "member-peer-1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(peer_first["accepted"], true);
+    assert_eq!(peer_first["runtime"]["queue_depth"], 1);
+    assert_eq!(peer_first["runtime"]["peer_queue_count"], 1);
+    assert_eq!(peer_first["runtime"]["largest_peer_queue_depth"], 1);
+    assert_eq!(peer_first["runtime"]["max_peer_queue_depth"], 1);
+    log_projection_step(&mut logs, "peer_queue_first_accepted", "ok", &peer_first);
+
+    let peer_full = invoke_projection(
+        &peer_queue_connector,
+        &signing_key,
+        &peer_queue_instance_id,
+        "qq-gateway-peer-queue-full",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-peer-queue-full",
+            "d": {
+                "id": "msg-peer-queue-full",
+                "content": "same peer should hit per-peer cap",
+                "group_openid": "group-peer-a",
+                "group_member_openid": "member-peer-2"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(peer_full["accepted"], false);
+    assert_eq!(peer_full["reason_code"], "peer_queue_full");
+    assert_eq!(peer_full["normalized"], Value::Null);
+    assert_eq!(peer_full["policy"], Value::Null);
+    assert_eq!(peer_full["runtime"]["queue_depth"], 1);
+    assert_eq!(peer_full["runtime"]["peer_queue_count"], 1);
+    assert_eq!(peer_full["runtime"]["largest_peer_queue_depth"], 1);
+    assert_eq!(peer_full["runtime"]["dropped_events"], 1);
+    log_projection_step(&mut logs, "peer_queue_full_drop", "ok", &peer_full);
+
+    let peer_other = invoke_projection(
+        &peer_queue_connector,
+        &signing_key,
+        &peer_queue_instance_id,
+        "qq-gateway-peer-queue-other",
+        json!({
+            "op": 0,
+            "s": 3,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-peer-queue-other",
+            "d": {
+                "id": "msg-peer-queue-other",
+                "content": "different peer should still drain later",
+                "group_openid": "group-peer-b",
+                "group_member_openid": "member-peer-3"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(peer_other["accepted"], true);
+    assert_eq!(peer_other["runtime"]["queue_depth"], 2);
+    assert_eq!(peer_other["runtime"]["peer_queue_count"], 2);
+    assert_eq!(peer_other["runtime"]["largest_peer_queue_depth"], 1);
+    log_projection_step(
+        &mut logs,
+        "peer_queue_other_peer_allowed",
+        "ok",
+        &peer_other,
+    );
+
     let hello = invoke_projection(
         &connector,
         &signing_key,
@@ -972,7 +1088,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-hello",
         json!({
             "op": 10,
-            "d": { "session_id": "session-1" },
+            "d": {
+                "session_id": "session-1",
+                "heartbeat_interval": 41_250
+            },
             "id": "hello-1"
         }),
     )
@@ -982,6 +1101,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(hello["lifecycle"]["action"], "resume");
     assert_eq!(hello["lifecycle"]["resume_session_id"], "session-1");
     assert_eq!(hello["lifecycle"]["resume_sequence"], 0);
+    assert_eq!(hello["runtime"]["heartbeat_interval_ms"], 41_250);
+    assert_eq!(hello["lifecycle"]["heartbeat_interval_ms"], 41_250);
     log_projection_step(&mut logs, "hello_session_restore", "ok", &hello);
 
     let malformed_control_id = "x".repeat(257);
@@ -1461,6 +1582,46 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &media_type_malformed,
     );
 
+    let media_url_denied = invoke_projection(
+        &media_type_connector,
+        &signing_key,
+        &media_type_instance_id,
+        "qq-gateway-media-url-denied",
+        json!({
+            "op": 0,
+            "s": 3,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-media-url-denied",
+            "d": {
+                "id": "msg-media-url-denied",
+                "content": "bot-openid unsafe media url",
+                "group_openid": "group-media-type",
+                "group_member_openid": "member-media-type",
+                "attachments": [
+                    {
+                        "url": "https://user:secret@cdn.qq.example/private/credentialed.png",
+                        "filename": "credentialed.png",
+                        "content_type": "image/png",
+                        "size": 512
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(media_url_denied["accepted"], false);
+    assert_eq!(
+        media_url_denied["reason_code"],
+        "attachment_url_not_allowed"
+    );
+    assert_eq!(
+        media_url_denied["policy"]["reason_code"],
+        "attachment_url_not_allowed"
+    );
+    assert_eq!(media_url_denied["runtime"]["accepted_events"], 0);
+    assert_eq!(media_url_denied["runtime"]["queue_depth"], 0);
+    log_projection_step(&mut logs, "media_url_policy_drop", "ok", &media_url_denied);
+
     let media_type_allowed = invoke_projection(
         &media_type_connector,
         &signing_key,
@@ -1468,7 +1629,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-media-type-allowed",
         json!({
             "op": 0,
-            "s": 3,
+            "s": 4,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-media-type-allowed",
             "d": {
@@ -1716,20 +1877,32 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &stale_sequence,
     );
 
-    let heartbeat = invoke_projection(
+    let unmatched_heartbeat_ack = invoke_projection(
         &connector,
         &signing_key,
         &instance_id,
-        "qq-gateway-heartbeat",
+        "qq-gateway-unmatched-heartbeat-ack",
         json!({
             "op": 11
         }),
     )
     .await;
-    assert_eq!(heartbeat["reason_code"], "heartbeat_ack");
-    assert_eq!(heartbeat["runtime"]["heartbeat_ack_count"], 1);
-    assert_eq!(heartbeat["lifecycle"]["action"], "none");
-    log_projection_step(&mut logs, "heartbeat_ack", "ok", &heartbeat);
+    assert_eq!(
+        unmatched_heartbeat_ack["reason_code"],
+        "heartbeat_ack_unmatched"
+    );
+    assert_eq!(
+        unmatched_heartbeat_ack["runtime"]["heartbeat_sent_count"],
+        0
+    );
+    assert_eq!(unmatched_heartbeat_ack["runtime"]["heartbeat_ack_count"], 0);
+    assert_eq!(unmatched_heartbeat_ack["lifecycle"]["action"], "none");
+    log_projection_step(
+        &mut logs,
+        "heartbeat_ack_unmatched",
+        "ok",
+        &unmatched_heartbeat_ack,
+    );
 
     let heartbeat_request = invoke_projection(
         &connector,
@@ -1744,7 +1917,25 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(heartbeat_request["reason_code"], "heartbeat_request");
     assert_eq!(heartbeat_request["lifecycle"]["action"], "send_heartbeat");
     assert_eq!(heartbeat_request["lifecycle"]["resume_sequence"], 7);
+    assert_eq!(heartbeat_request["runtime"]["heartbeat_sent_count"], 1);
+    assert_eq!(heartbeat_request["runtime"]["heartbeat_ack_count"], 0);
     log_projection_step(&mut logs, "heartbeat_request", "ok", &heartbeat_request);
+
+    let heartbeat = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-heartbeat",
+        json!({
+            "op": 11
+        }),
+    )
+    .await;
+    assert_eq!(heartbeat["reason_code"], "heartbeat_ack");
+    assert_eq!(heartbeat["runtime"]["heartbeat_sent_count"], 1);
+    assert_eq!(heartbeat["runtime"]["heartbeat_ack_count"], 1);
+    assert_eq!(heartbeat["lifecycle"]["action"], "none");
+    log_projection_step(&mut logs, "heartbeat_ack", "ok", &heartbeat);
 
     let reconnect = invoke_projection(
         &connector,
@@ -1853,6 +2044,96 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "restored_session_reconnect_resume",
         "ok",
         &restored_reconnect,
+    );
+
+    let ready_resumed_instance_id = InstanceId::new();
+    let mut ready_resumed_connector = QqConnector::new();
+    ready_resumed_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "reconnect_backoff_ms": 125,
+                "max_reconnect_backoff_ms": 500,
+                "policy": {
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure ready/resumed QQ connector");
+    ready_resumed_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            ready_resumed_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake ready/resumed QQ connector");
+    let ready_dispatch = invoke_projection(
+        &ready_resumed_connector,
+        &signing_key,
+        &ready_resumed_instance_id,
+        "qq-gateway-ready-dispatch",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "READY",
+            "id": "evt-ready-dispatch",
+            "d": {
+                "session_id": "session-ready-dispatch"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(ready_dispatch["accepted"], false);
+    assert_eq!(ready_dispatch["reason_code"], "gateway_ready");
+    assert_eq!(
+        ready_dispatch["runtime"]["session_id"],
+        "session-ready-dispatch"
+    );
+    assert_eq!(ready_dispatch["runtime"]["last_sequence"], 1);
+    assert_eq!(ready_dispatch["runtime"]["reconnect_attempts"], 0);
+    assert_eq!(ready_dispatch["runtime"]["dedupe_size"], 1);
+    assert_eq!(ready_dispatch["lifecycle"]["action"], "none");
+    log_projection_step(
+        &mut logs,
+        "ready_dispatch_session_persisted",
+        "ok",
+        &ready_dispatch,
+    );
+
+    let resumed_dispatch = invoke_projection(
+        &ready_resumed_connector,
+        &signing_key,
+        &ready_resumed_instance_id,
+        "qq-gateway-resumed-dispatch",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "RESUMED",
+            "id": "evt-resumed-dispatch",
+            "d": {}
+        }),
+    )
+    .await;
+    assert_eq!(resumed_dispatch["accepted"], false);
+    assert_eq!(resumed_dispatch["reason_code"], "gateway_resumed");
+    assert_eq!(
+        resumed_dispatch["runtime"]["session_id"],
+        "session-ready-dispatch"
+    );
+    assert_eq!(resumed_dispatch["runtime"]["last_sequence"], 2);
+    assert_eq!(resumed_dispatch["runtime"]["reconnect_attempts"], 0);
+    assert_eq!(resumed_dispatch["runtime"]["dedupe_size"], 2);
+    assert_eq!(resumed_dispatch["lifecycle"]["action"], "none");
+    log_projection_step(
+        &mut logs,
+        "resumed_dispatch_replay_complete",
+        "ok",
+        &resumed_dispatch,
     );
 
     let identify_required_instance_id = InstanceId::new();
@@ -2383,6 +2664,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "test-secret",
         "session-1",
         "restored-session",
+        "session-ready-dispatch",
         "session-should-not-stick",
         "session-after-exhaustion",
         "hello-1",
@@ -2395,6 +2677,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-oversized-media",
         "evt-unknown-size-media",
         "evt-media-type-denied",
+        "evt-media-url-denied",
         "evt-media-type-allowed",
         "evt-disabled",
         "evt-missing-binding",
@@ -2407,10 +2690,15 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-queue-fill",
         "evt-queue-full-policy-denied",
         "evt-queue-full",
+        "evt-peer-queue-first",
+        "evt-peer-queue-full",
+        "evt-peer-queue-other",
         "evt-stale-sequence",
         "evt-reconnect-requested",
         "evt-invalid-session",
         "evt-restored-reconnect",
+        "evt-ready-dispatch",
+        "evt-resumed-dispatch",
         "evt-reconnect-cap-first",
         "evt-reconnect-cap-capped",
         "evt-reconnect-exhausted",
@@ -2426,6 +2714,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-oversized-media",
         "msg-unknown-size-media",
         "msg-media-type-denied",
+        "msg-media-url-denied",
         "msg-media-type-allowed",
         "msg-disabled",
         "msg-missing-binding",
@@ -2438,6 +2727,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-queue-fill",
         "msg-queue-full-policy-denied",
         "msg-queue-full",
+        "msg-peer-queue-first",
+        "msg-peer-queue-full",
+        "msg-peer-queue-other",
         "msg-stale-sequence",
         "msg-after-shutdown",
         "bot-openid",
@@ -2447,6 +2739,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "group-binding",
         "group-denied",
         "group-queue",
+        "group-peer-a",
+        "group-peer-b",
         "group-voice",
         "group-media-type",
         "channel-denied",
@@ -2457,6 +2751,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "member-slash",
         "member-disabled",
         "member-queue",
+        "member-peer",
         "member-voice",
         "member-media-type",
         "member-c2c-denied",
@@ -2471,6 +2766,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "queue fill message",
         "queue should not hide denied sender policy",
         "queue backpressure message",
+        "first peer queue message",
+        "same peer should hit per-peer cap",
+        "different peer should still drain later",
         "stale sequence should drop",
         "deploy status",
         "plain message",
@@ -2480,18 +2778,21 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "too large",
         "missing size metadata",
         "blocked media type",
+        "unsafe media url",
         "allowed media type",
         "after shutdown should deny",
         "approve deployment from voice",
         "/approve rollout-42",
         "rollout-42",
         "cdn.qq.example",
+        "user:secret",
         "trace.png",
         "voice.amr",
         "oversized.bin",
         "missing-size.pdf",
         "disallowed.exe",
         "malformed.png",
+        "credentialed.png",
         "allowed.png",
     ] {
         assert!(
@@ -2515,6 +2816,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_size_unknown"));
     assert!(log_contents.contains("attachment_content_type_not_allowed"));
     assert!(log_contents.contains("attachment_content_type_missing"));
+    assert!(log_contents.contains("attachment_url_not_allowed"));
+    assert!(log_contents.contains("media_url_policy_drop"));
     assert!(log_contents.contains("media_content_type_malformed_drop"));
     assert!(log_contents.contains("media_content_type_policy_allowed"));
     assert!(log_contents.contains("queue_full_policy_denied"));

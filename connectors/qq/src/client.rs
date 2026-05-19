@@ -29,12 +29,16 @@ const QQ_GATEWAY_ACTION_RECONNECT_IDENTIFY: &str = "reconnect_identify";
 const QQ_GATEWAY_ACTION_RECONNECT_RESUME: &str = "reconnect_resume";
 const QQ_GATEWAY_ACTION_STOP_RECONNECT: &str = "stop_reconnect";
 
+const QQ_GATEWAY_EVENT_READY: &str = "READY";
+const QQ_GATEWAY_EVENT_RESUMED: &str = "RESUMED";
+
 const QQ_GATEWAY_EVENT_TYPE_MAX_CHARS: usize = 64;
 const QQ_GATEWAY_ID_MAX_CHARS: usize = 256;
 const QQ_GATEWAY_TEXT_MAX_CHARS: usize = 8_192;
 const QQ_GATEWAY_ATTACHMENT_FIELD_MAX_CHARS: usize = 1_024;
 const QQ_GATEWAY_ATTACHMENTS_MAX_COUNT: usize = 32;
 const QQ_GATEWAY_COMMAND_NAME_MAX_CHARS: usize = 64;
+const QQ_GATEWAY_HELLO_HEARTBEAT_INTERVAL_MAX_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Clone)]
 struct CachedAccessToken {
@@ -325,6 +329,7 @@ pub struct QqGatewayRuntime {
     seen_event_ids: VecDeque<String>,
     reply_references: VecDeque<String>,
     pending_events: VecDeque<QqGatewayQueuedEvent>,
+    heartbeat_interval_ms: u64,
     heartbeat_sent_count: u64,
     heartbeat_ack_count: u64,
     reconnect_attempts: u32,
@@ -347,12 +352,14 @@ impl QqGatewayRuntime {
         if let Some(sequence) = config.restore_sequence {
             session.set_sequence(sequence);
         }
+        let heartbeat_interval_ms = config.heartbeat_interval_ms;
         Self {
             config,
             session,
             seen_event_ids: VecDeque::new(),
             reply_references: VecDeque::new(),
             pending_events: VecDeque::new(),
+            heartbeat_interval_ms,
             heartbeat_sent_count: 0,
             heartbeat_ack_count: 0,
             reconnect_attempts: 0,
@@ -368,11 +375,12 @@ impl QqGatewayRuntime {
 
     #[must_use]
     pub fn snapshot(&self) -> QqGatewayRuntimeSnapshot {
+        let (peer_queue_count, largest_peer_queue_depth) = self.peer_queue_stats();
         QqGatewayRuntimeSnapshot {
             enabled: self.config.enabled,
             session_id: self.session.resume_token(),
             last_sequence: self.session.sequence(),
-            heartbeat_interval_ms: self.config.heartbeat_interval_ms,
+            heartbeat_interval_ms: self.heartbeat_interval_ms,
             heartbeat_sent_count: self.heartbeat_sent_count,
             heartbeat_ack_count: self.heartbeat_ack_count,
             reconnect_attempts: self.reconnect_attempts,
@@ -382,6 +390,9 @@ impl QqGatewayRuntime {
             max_reconnect_backoff_ms: self.config.max_reconnect_backoff_ms,
             queue_depth: self.pending_events.len(),
             max_queue_depth: self.config.max_queue_depth,
+            peer_queue_count,
+            largest_peer_queue_depth,
+            max_peer_queue_depth: self.config.max_peer_queue_depth,
             dedupe_size: self.seen_event_ids.len(),
             dedupe_window_size: self.config.dedupe_window_size,
             reply_reference_count: self.reply_references.len(),
@@ -421,6 +432,9 @@ impl QqGatewayRuntime {
                 ))
             }
             10 => {
+                if let Some(heartbeat_interval_ms) = gateway_hello_heartbeat_interval_ms(&event)? {
+                    self.heartbeat_interval_ms = heartbeat_interval_ms;
+                }
                 if let Some(session_id) = event
                     .d
                     .as_ref()
@@ -449,6 +463,13 @@ impl QqGatewayRuntime {
                 Ok(self.reconnect_projection(event.s, event.id, reason_code, resumable))
             }
             11 => {
+                if self.session.heartbeat_seq() <= self.session.ack_seq() {
+                    return Ok(self.dropped_projection(
+                        event.s,
+                        event.id,
+                        "heartbeat_ack_unmatched",
+                    ));
+                }
                 self.session.record_heartbeat_ack(Instant::now());
                 self.heartbeat_ack_count = self.heartbeat_ack_count.saturating_add(1);
                 Ok(self.dropped_projection(event.s, event.id, "heartbeat_ack"))
@@ -506,13 +527,12 @@ impl QqGatewayRuntime {
             return Ok(self.dropped_projection(event.s, event_id, "duplicate_event"));
         }
 
-        if let Some(sequence) = event.s {
-            let current = self.session.sequence();
-            if current != 0 && sequence <= current {
-                self.stale_sequence_events = self.stale_sequence_events.saturating_add(1);
-                return Ok(self.dropped_projection(event.s, event_id, "stale_sequence"));
-            }
-            self.session.set_sequence(sequence);
+        if let Some(control_projection) = self.project_session_dispatch(event, event_id.clone())? {
+            return Ok(control_projection);
+        }
+
+        if let Some(stale_projection) = self.record_dispatch_sequence(event.s, event_id.clone()) {
+            return Ok(stale_projection);
         }
 
         let normalized = match normalize_message_event(event) {
@@ -544,6 +564,9 @@ impl QqGatewayRuntime {
         if self.pending_events.len() >= self.config.max_queue_depth {
             return Ok(self.dropped_projection(event.s, event_id, "queue_full"));
         }
+        if self.peer_queue_depth_for_policy(&policy) >= self.config.max_peer_queue_depth {
+            return Ok(self.dropped_projection(event.s, event_id, "peer_queue_full"));
+        }
 
         self.record_reply_reference_status(&normalized);
         self.remember_reply_reference(normalized.message_id.as_deref());
@@ -566,6 +589,52 @@ impl QqGatewayRuntime {
             runtime: self.snapshot(),
             lifecycle: self.lifecycle_directive(QQ_GATEWAY_ACTION_DRAIN_EVENTS, "accepted"),
         })
+    }
+
+    fn project_session_dispatch(
+        &mut self,
+        event: &QqGatewayEvent,
+        event_id: Option<String>,
+    ) -> QqResult<Option<QqGatewayEventProjection>> {
+        let Some(event_type) = event.t.as_deref().map(str::trim) else {
+            return Ok(None);
+        };
+
+        let (reason_code, session_id) = match event_type {
+            QQ_GATEWAY_EVENT_READY => ("gateway_ready", Some(required_ready_session_id(event)?)),
+            QQ_GATEWAY_EVENT_RESUMED => ("gateway_resumed", optional_dispatch_session_id(event)?),
+            _ => return Ok(None),
+        };
+
+        if let Some(stale_projection) = self.record_dispatch_sequence(event.s, event_id.clone()) {
+            return Ok(Some(stale_projection));
+        }
+        if let Some(session_id) = session_id {
+            self.session.set_resume_token(session_id);
+        }
+        self.reconnect_attempts = 0;
+        self.remember_event_id(event_id.as_deref());
+        Ok(Some(self.dropped_projection_with_lifecycle(
+            event.s,
+            event_id,
+            reason_code,
+            QQ_GATEWAY_ACTION_NONE,
+        )))
+    }
+
+    fn record_dispatch_sequence(
+        &mut self,
+        sequence: Option<u64>,
+        event_id: Option<String>,
+    ) -> Option<QqGatewayEventProjection> {
+        let sequence = sequence?;
+        let current = self.session.sequence();
+        if current != 0 && sequence <= current {
+            self.stale_sequence_events = self.stale_sequence_events.saturating_add(1);
+            return Some(self.dropped_projection(Some(sequence), event_id, "stale_sequence"));
+        }
+        self.session.set_sequence(sequence);
+        None
     }
 
     fn remember_event_id(&mut self, id: Option<&str>) {
@@ -608,6 +677,44 @@ impl QqGatewayRuntime {
 
     const fn max_reply_references(&self) -> usize {
         self.config.max_queue_depth
+    }
+
+    fn peer_queue_depth_for_policy(&self, policy: &QqInboundPolicyDecision) -> usize {
+        let Some(target_id) = policy.target_id.as_deref() else {
+            return 0;
+        };
+        self.pending_events
+            .iter()
+            .filter(|event| {
+                event.policy.routing == policy.routing
+                    && event.policy.target_id.as_deref() == Some(target_id)
+            })
+            .count()
+    }
+
+    fn peer_queue_stats(&self) -> (usize, usize) {
+        let mut keys: Vec<(QqRouting, &str)> = Vec::new();
+        let mut largest_depth = 0;
+        for event in &self.pending_events {
+            let Some(target_id) = event.policy.target_id.as_deref() else {
+                continue;
+            };
+            let key = (event.policy.routing, target_id);
+            if keys.contains(&key) {
+                continue;
+            }
+            let depth = self
+                .pending_events
+                .iter()
+                .filter(|queued| {
+                    queued.policy.routing == key.0
+                        && queued.policy.target_id.as_deref() == Some(key.1)
+                })
+                .count();
+            largest_depth = largest_depth.max(depth);
+            keys.push(key);
+        }
+        (keys.len(), largest_depth)
     }
 
     fn dropped_projection(
@@ -666,7 +773,7 @@ impl QqGatewayRuntime {
             reason_code,
             resume_session_id,
             resume_sequence: self.session.sequence(),
-            heartbeat_interval_ms: self.config.heartbeat_interval_ms,
+            heartbeat_interval_ms: self.heartbeat_interval_ms,
             reconnect_after_ms,
         }
     }
@@ -720,6 +827,11 @@ fn validate_gateway_config(config: &QqGatewayRuntimeConfig) -> QqResult<()> {
             "gateway.max_queue_depth must be greater than zero".into(),
         ));
     }
+    if config.max_peer_queue_depth == 0 {
+        return Err(QqError::Config(
+            "gateway.max_peer_queue_depth must be greater than zero".into(),
+        ));
+    }
     if config.dedupe_window_size > 10_000 {
         return Err(QqError::Config(
             "gateway.dedupe_window_size must be <= 10000".into(),
@@ -728,6 +840,11 @@ fn validate_gateway_config(config: &QqGatewayRuntimeConfig) -> QqResult<()> {
     if config.max_queue_depth > 10_000 {
         return Err(QqError::Config(
             "gateway.max_queue_depth must be <= 10000".into(),
+        ));
+    }
+    if config.max_peer_queue_depth > 10_000 {
+        return Err(QqError::Config(
+            "gateway.max_peer_queue_depth must be <= 10000".into(),
         ));
     }
     for content_type in &config.policy.allowed_attachment_content_types {
@@ -755,6 +872,32 @@ fn gateway_event_id(event: &QqGatewayEvent) -> Option<String> {
                 .map(str::to_string)
         })
         .filter(|id| !id.trim().is_empty())
+}
+
+fn gateway_hello_heartbeat_interval_ms(event: &QqGatewayEvent) -> QqResult<Option<u64>> {
+    let Some(raw_interval) = event
+        .d
+        .as_ref()
+        .and_then(|data| data.get("heartbeat_interval"))
+    else {
+        return Ok(None);
+    };
+    let Some(interval_ms) = raw_interval.as_u64() else {
+        return Err(QqError::InvalidInput(
+            "gateway hello heartbeat_interval must be a positive integer".into(),
+        ));
+    };
+    if interval_ms == 0 {
+        return Err(QqError::InvalidInput(
+            "gateway hello heartbeat_interval must be greater than zero".into(),
+        ));
+    }
+    if interval_ms > QQ_GATEWAY_HELLO_HEARTBEAT_INTERVAL_MAX_MS {
+        return Err(QqError::InvalidInput(format!(
+            "gateway hello heartbeat_interval {interval_ms}ms exceeds the {QQ_GATEWAY_HELLO_HEARTBEAT_INTERVAL_MAX_MS}ms limit"
+        )));
+    }
+    Ok(Some(interval_ms))
 }
 
 /// Validate top-level gateway frame fields before they can affect runtime state.
@@ -797,7 +940,47 @@ pub fn validate_gateway_event_envelope(event: &QqGatewayEvent) -> QqResult<()> {
             QQ_GATEWAY_ID_MAX_CHARS,
         )?;
     }
+    if event.op == 0
+        && matches!(
+            event.t.as_deref().map(str::trim),
+            Some(QQ_GATEWAY_EVENT_READY | QQ_GATEWAY_EVENT_RESUMED)
+        )
+        && let Some(session_id) = event
+            .d
+            .as_ref()
+            .and_then(|data| data.get("session_id"))
+            .and_then(Value::as_str)
+    {
+        validate_optional_chars(
+            "gateway session id",
+            Some(session_id),
+            QQ_GATEWAY_ID_MAX_CHARS,
+        )?;
+    }
     Ok(())
+}
+
+fn required_ready_session_id(event: &QqGatewayEvent) -> QqResult<String> {
+    optional_dispatch_session_id(event)?
+        .ok_or_else(|| QqError::InvalidInput("READY dispatch missing gateway session_id".into()))
+}
+
+fn optional_dispatch_session_id(event: &QqGatewayEvent) -> QqResult<Option<String>> {
+    let session_id = event
+        .d
+        .as_ref()
+        .and_then(|data| data.get("session_id"))
+        .and_then(Value::as_str)
+        .and_then(nonblank_trimmed)
+        .map(str::to_owned);
+    if let Some(session_id) = session_id.as_deref() {
+        validate_optional_chars(
+            "gateway session id",
+            Some(session_id),
+            QQ_GATEWAY_ID_MAX_CHARS,
+        )?;
+    }
+    Ok(session_id)
 }
 
 #[must_use]
@@ -1129,6 +1312,17 @@ fn attachment_policy_denial(
         return None;
     }
 
+    for attachment in attachments {
+        if let Some(raw_url) = attachment
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(nonblank_trimmed)
+            && !attachment_url_is_fanout_safe(raw_url)
+        {
+            return Some("attachment_url_not_allowed");
+        }
+    }
+
     if let Some(max_attachment_bytes) = policy.max_attachment_bytes {
         let mut total_bytes = 0_u64;
         for attachment in attachments {
@@ -1168,6 +1362,17 @@ fn attachment_policy_denial(
     }
 
     None
+}
+
+fn attachment_url_is_fanout_safe(raw: &str) -> bool {
+    let Ok(url) = Url::parse(raw.trim()) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
 }
 
 fn canonical_attachment_content_type(raw: &str) -> Option<String> {
@@ -2537,6 +2742,217 @@ mod tests {
         );
         assert_eq!(runtime.snapshot().session_id, None);
         assert_eq!(runtime.snapshot().last_sequence, 0);
+
+        let oversized_ready_session_id = "r".repeat(QQ_GATEWAY_ID_MAX_CHARS + 1);
+        let ready_session_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some(QQ_GATEWAY_EVENT_READY.into()),
+                d: Some(json!({ "session_id": oversized_ready_session_id })),
+                id: Some("evt-ready-oversized-session".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(ready_session_error, QqError::InvalidInput(ref message) if message.contains("gateway session id exceeds parser bounds")),
+            "unexpected READY session-id error: {ready_session_error:?}"
+        );
+        assert_eq!(runtime.snapshot().session_id, None);
+        assert_eq!(runtime.snapshot().last_sequence, 0);
+
+        let ready_missing_session_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some(QQ_GATEWAY_EVENT_READY.into()),
+                d: Some(json!({})),
+                id: Some("evt-ready-missing-session".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(ready_missing_session_error, QqError::InvalidInput(ref message) if message.contains("READY dispatch missing gateway session_id")),
+            "unexpected READY missing-session error: {ready_missing_session_error:?}"
+        );
+        assert_eq!(runtime.snapshot().session_id, None);
+        assert_eq!(runtime.snapshot().last_sequence, 0);
+    }
+
+    #[test]
+    fn gateway_runtime_negotiates_hello_heartbeat_interval() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            heartbeat_interval_ms: 45_000,
+            ..Default::default()
+        });
+
+        let hello = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({
+                    "session_id": "session-from-hello",
+                    "heartbeat_interval": 41_250
+                })),
+                id: Some("evt-hello-heartbeat".into()),
+            })
+            .unwrap();
+
+        assert_eq!(hello.reason_code, "hello");
+        assert_eq!(hello.runtime.heartbeat_interval_ms, 41_250);
+        assert_eq!(hello.lifecycle.heartbeat_interval_ms, 41_250);
+        assert_eq!(
+            runtime.snapshot().session_id.as_deref(),
+            Some("session-from-hello")
+        );
+    }
+
+    #[test]
+    fn gateway_runtime_rejects_bad_hello_heartbeat_interval_without_state_mutation() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            heartbeat_interval_ms: 45_000,
+            ..Default::default()
+        });
+
+        let zero_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({
+                    "session_id": "session-zero-interval",
+                    "heartbeat_interval": 0
+                })),
+                id: Some("evt-hello-zero-interval".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(zero_error, QqError::InvalidInput(ref message) if message.contains("heartbeat_interval must be greater than zero")),
+            "unexpected zero heartbeat error: {zero_error:?}"
+        );
+        assert_eq!(runtime.snapshot().heartbeat_interval_ms, 45_000);
+        assert_eq!(runtime.snapshot().session_id, None);
+
+        let too_large_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({
+                    "session_id": "session-large-interval",
+                    "heartbeat_interval": QQ_GATEWAY_HELLO_HEARTBEAT_INTERVAL_MAX_MS + 1
+                })),
+                id: Some("evt-hello-large-interval".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(too_large_error, QqError::InvalidInput(ref message) if message.contains("heartbeat_interval") && message.contains("exceeds")),
+            "unexpected large heartbeat error: {too_large_error:?}"
+        );
+        assert_eq!(runtime.snapshot().heartbeat_interval_ms, 45_000);
+        assert_eq!(runtime.snapshot().session_id, None);
+
+        let string_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({
+                    "session_id": "session-string-interval",
+                    "heartbeat_interval": "41250"
+                })),
+                id: Some("evt-hello-string-interval".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(string_error, QqError::InvalidInput(ref message) if message.contains("positive integer")),
+            "unexpected string heartbeat error: {string_error:?}"
+        );
+        assert_eq!(runtime.snapshot().heartbeat_interval_ms, 45_000);
+        assert_eq!(runtime.snapshot().session_id, None);
+    }
+
+    #[test]
+    fn gateway_runtime_persists_ready_and_resumed_dispatch_sessions() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            reconnect_backoff_ms: 50,
+            max_reconnect_backoff_ms: 100,
+            ..Default::default()
+        });
+
+        let reconnect = runtime
+            .project_event(QqGatewayEvent {
+                op: 7,
+                s: None,
+                t: None,
+                d: None,
+                id: Some("evt-before-ready-reconnect".into()),
+            })
+            .unwrap();
+        assert_eq!(reconnect.reason_code, "reconnect_requested");
+        assert_eq!(reconnect.runtime.reconnect_attempts, 1);
+
+        let ready = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some(QQ_GATEWAY_EVENT_READY.into()),
+                d: Some(json!({ "session_id": "session-ready-dispatch" })),
+                id: Some("evt-ready-dispatch".into()),
+            })
+            .unwrap();
+        assert!(!ready.accepted);
+        assert_eq!(ready.reason_code, "gateway_ready");
+        assert_eq!(
+            ready.runtime.session_id.as_deref(),
+            Some("session-ready-dispatch")
+        );
+        assert_eq!(ready.runtime.last_sequence, 1);
+        assert_eq!(ready.runtime.reconnect_attempts, 0);
+        assert_eq!(ready.runtime.dedupe_size, 1);
+        assert_eq!(ready.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
+        assert!(ready.lifecycle.resume_session_id.is_none());
+        assert_eq!(ready.lifecycle.resume_sequence, 1);
+
+        let duplicate_ready = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some(QQ_GATEWAY_EVENT_READY.into()),
+                d: Some(json!({ "session_id": "session-ignored-duplicate-ready" })),
+                id: Some("evt-ready-dispatch".into()),
+            })
+            .unwrap();
+        assert_eq!(duplicate_ready.reason_code, "duplicate_event");
+        assert_eq!(
+            duplicate_ready.runtime.session_id.as_deref(),
+            Some("session-ready-dispatch")
+        );
+        assert_eq!(duplicate_ready.runtime.last_sequence, 1);
+        assert_eq!(duplicate_ready.runtime.duplicate_events, 1);
+
+        let resumed = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some(QQ_GATEWAY_EVENT_RESUMED.into()),
+                d: Some(json!({})),
+                id: Some("evt-resumed-dispatch".into()),
+            })
+            .unwrap();
+        assert!(!resumed.accepted);
+        assert_eq!(resumed.reason_code, "gateway_resumed");
+        assert_eq!(
+            resumed.runtime.session_id.as_deref(),
+            Some("session-ready-dispatch")
+        );
+        assert_eq!(resumed.runtime.last_sequence, 2);
+        assert_eq!(resumed.runtime.reconnect_attempts, 0);
+        assert_eq!(resumed.runtime.dedupe_size, 2);
+        assert_eq!(resumed.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
+        assert_eq!(resumed.lifecycle.resume_sequence, 2);
     }
 
     // ─── Event normalization tests ──────────────────────────────
@@ -3098,6 +3514,79 @@ mod tests {
             .unwrap();
         assert!(!overflow.accepted);
         assert_eq!(overflow.reason_code, "queue_full");
+    }
+
+    #[test]
+    fn gateway_runtime_enforces_per_peer_queue_bounds() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 3,
+            max_peer_queue_depth: 1,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.group_require_mention = false;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let first_peer_event = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-peer-first",
+                    "content": "first group message",
+                    "group_openid": "group-a",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-peer-first".into()),
+            })
+            .unwrap();
+        assert!(first_peer_event.accepted);
+        assert_eq!(first_peer_event.runtime.queue_depth, 1);
+        assert_eq!(first_peer_event.runtime.peer_queue_count, 1);
+        assert_eq!(first_peer_event.runtime.largest_peer_queue_depth, 1);
+        assert_eq!(first_peer_event.runtime.max_peer_queue_depth, 1);
+
+        let same_peer_overflow = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-peer-overflow",
+                    "content": "same group should not starve others",
+                    "group_openid": "group-a",
+                    "group_member_openid": "member-2"
+                })),
+                id: Some("evt-peer-overflow".into()),
+            })
+            .unwrap();
+        assert!(!same_peer_overflow.accepted);
+        assert_eq!(same_peer_overflow.reason_code, "peer_queue_full");
+        assert!(same_peer_overflow.normalized.is_none());
+        assert!(same_peer_overflow.policy.is_none());
+        assert_eq!(same_peer_overflow.runtime.queue_depth, 1);
+        assert_eq!(same_peer_overflow.runtime.peer_queue_count, 1);
+        assert_eq!(same_peer_overflow.runtime.largest_peer_queue_depth, 1);
+
+        let other_peer = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-peer-other",
+                    "content": "other group still has capacity",
+                    "group_openid": "group-b",
+                    "group_member_openid": "member-3"
+                })),
+                id: Some("evt-peer-other".into()),
+            })
+            .unwrap();
+        assert!(other_peer.accepted);
+        assert_eq!(other_peer.runtime.queue_depth, 2);
+        assert_eq!(other_peer.runtime.peer_queue_count, 2);
+        assert_eq!(other_peer.runtime.largest_peer_queue_depth, 1);
     }
 
     #[test]
@@ -3786,6 +4275,60 @@ mod tests {
     }
 
     #[test]
+    fn gateway_runtime_rejects_attachment_urls_unsafe_for_fanout() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 8,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.allowed_attachment_content_types = vec!["image/png".into()];
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let unsafe_scheme = runtime
+            .project_event(group_attachment_gateway_event(
+                1,
+                "msg-attachment-file-url",
+                "evt-attachment-file-url",
+                "bot see local file",
+                json!({
+                    "url": "file:///private/qq/trace.png",
+                    "content_type": "image/png",
+                    "size": 512
+                }),
+            ))
+            .unwrap();
+        assert!(!unsafe_scheme.accepted);
+        assert_eq!(unsafe_scheme.reason_code, "attachment_url_not_allowed");
+        assert_eq!(
+            unsafe_scheme
+                .policy
+                .as_ref()
+                .map(|policy| policy.reason_code),
+            Some("attachment_url_not_allowed")
+        );
+        assert_eq!(unsafe_scheme.runtime.accepted_events, 0);
+        assert_eq!(unsafe_scheme.runtime.queue_depth, 0);
+
+        let credentialed_url = runtime
+            .project_event(group_attachment_gateway_event(
+                2,
+                "msg-attachment-credential-url",
+                "evt-attachment-credential-url",
+                "bot see credentialed url",
+                json!({
+                    "url": "https://user:secret@example.com/trace.png",
+                    "content_type": "image/png",
+                    "size": 512
+                }),
+            ))
+            .unwrap();
+        assert!(!credentialed_url.accepted);
+        assert_eq!(credentialed_url.reason_code, "attachment_url_not_allowed");
+        assert_eq!(credentialed_url.runtime.accepted_events, 0);
+        assert_eq!(credentialed_url.runtime.queue_depth, 0);
+    }
+
+    #[test]
     fn gateway_runtime_tracks_bounded_reply_references() {
         let mut config = QqGatewayRuntimeConfig {
             enabled: true,
@@ -4002,7 +4545,7 @@ mod tests {
         assert_eq!(stale.reason_code, "stale_sequence");
         assert_eq!(stale.runtime.stale_sequence_events, 1);
 
-        let heartbeat = runtime
+        let unmatched_heartbeat_ack = runtime
             .project_event(QqGatewayEvent {
                 op: 11,
                 s: None,
@@ -4011,9 +4554,16 @@ mod tests {
                 id: None,
             })
             .unwrap();
-        assert_eq!(heartbeat.reason_code, "heartbeat_ack");
-        assert_eq!(heartbeat.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
-        assert_eq!(heartbeat.runtime.heartbeat_ack_count, 1);
+        assert_eq!(
+            unmatched_heartbeat_ack.reason_code,
+            "heartbeat_ack_unmatched"
+        );
+        assert_eq!(
+            unmatched_heartbeat_ack.lifecycle.action,
+            QQ_GATEWAY_ACTION_NONE
+        );
+        assert_eq!(unmatched_heartbeat_ack.runtime.heartbeat_sent_count, 0);
+        assert_eq!(unmatched_heartbeat_ack.runtime.heartbeat_ack_count, 0);
 
         let heartbeat_request = runtime
             .project_event(QqGatewayEvent {
@@ -4030,6 +4580,22 @@ mod tests {
             QQ_GATEWAY_ACTION_SEND_HEARTBEAT
         );
         assert_eq!(heartbeat_request.lifecycle.resume_sequence, 10);
+        assert_eq!(heartbeat_request.runtime.heartbeat_sent_count, 1);
+        assert_eq!(heartbeat_request.runtime.heartbeat_ack_count, 0);
+
+        let heartbeat = runtime
+            .project_event(QqGatewayEvent {
+                op: 11,
+                s: None,
+                t: None,
+                d: None,
+                id: None,
+            })
+            .unwrap();
+        assert_eq!(heartbeat.reason_code, "heartbeat_ack");
+        assert_eq!(heartbeat.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
+        assert_eq!(heartbeat.runtime.heartbeat_sent_count, 1);
+        assert_eq!(heartbeat.runtime.heartbeat_ack_count, 1);
     }
 
     #[test]

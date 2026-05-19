@@ -125,10 +125,13 @@ run_absence_scan() {
 
 rch_remote_summary_present() {
   local log_path="$1"
-  grep -Fq "[RCH] remote" "${log_path}"
+  grep -E '^\[RCH\][[:space:]]+remote[[:space:]]+' "${log_path}" \
+    | grep -Ev '^\[RCH\][[:space:]]+remote[[:space:]]+required([;[:space:]]|$)' >/dev/null
 }
 
-run_rch_cargo_step() {
+run_rch_cargo_step_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
   local name="$1"
   shift
   run_step "${name}" env \
@@ -140,7 +143,7 @@ run_rch_cargo_step() {
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
-  if [[ "${LAST_STEP_STATUS}" == "passed" ]]; then
+  if [[ "${LAST_STEP_STATUS}" == "passed" && "${require_remote_proof}" == "1" ]]; then
     if ! rch_remote_summary_present "${OUT_ROOT}/logs/${name}.log"; then
       echo "[gmail-verification] ${name}: rch command did not produce remote proof" >&2
       echo "rch command did not produce remote proof" >>"${OUT_ROOT}/logs/${name}.log"
@@ -150,11 +153,20 @@ run_rch_cargo_step() {
   fi
 }
 
+run_rch_cargo_step() {
+  run_rch_cargo_step_with_remote_policy 1 "$@"
+}
+
+run_rch_format_step() {
+  # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
+  run_rch_cargo_step_with_remote_policy 0 "$@"
+}
+
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 run_graduation_gauntlet_step
 graduation_gauntlet_status="${LAST_STEP_STATUS}"
-run_rch_cargo_step format_check cargo fmt -p fcp-gmail -- --check
+run_rch_format_step format_check cargo fmt -p fcp-gmail -- --check
 format_check_status="${LAST_STEP_STATUS}"
 run_rch_cargo_step local_non_mock_acceptance \
   cargo test -p fcp-gmail --test local_non_mock -- --nocapture

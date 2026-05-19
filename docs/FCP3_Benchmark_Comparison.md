@@ -112,7 +112,14 @@ unsafe-rejection reason; `fallback_on_demand` must carry
 `fallback_reason` with `error_mapping="fallback_on_demand:<fallback_reason>"`,
 and `reject_unsafe` must carry `warm_checkout=false` plus a non-empty
 `unsafe_rejection_reason` with
-`error_mapping="reject_unsafe:<unsafe_rejection_reason>"`. Its default lane is
+`error_mapping="reject_unsafe:<unsafe_rejection_reason>"`. Warm admissions must
+also report `pool_state="warm_hit"`. Pool-derived fallback and rejection reasons
+must preserve the host decision model in replayable evidence: `empty_pool`
+requires `pool_state="empty"`, `warm_entry_stale` requires
+`pool_state="stale"`, `crash_before_checkout` requires
+`pool_state="crash_before_checkout"`, `sandbox_limits_unavailable` requires
+`sandbox_layer="limits_unavailable"`, and `warm_entry_rejected` requires
+`pool_state="rejected"`. Its default lane is
 deterministic smoke
 evidence with `execution_mode=smoke` and `source_kind=offline`; final
 production-soak acceptance must run with
@@ -180,8 +187,9 @@ key/value markers, macOS/Linux/Windows private-user paths, Linux project
 checkout paths, private-var-path, mounted-volume-path, raw `operation:`,
 `principal:`, or `zone:` labels, raw `z:` zone labels, provider payload
 markers, reviewer private-contact markers, and `private_absolute` target-dir
-evidence before export. Evidence also cannot use the exact shared target roots
-`/tmp`, `/private/tmp`, `target`, or `./target`;
+evidence before export. Evidence also cannot use shared target roots such as
+`/tmp`, `/private/tmp`, `target`, or `./target`, including trailing slash or
+`/.` variants of those roots;
 use a dedicated child directory so the target-dir hash identifies one proof run;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,
 `absolute`, or `relative`, so novel labels cannot bypass the redaction gate.

@@ -68,13 +68,38 @@ run_step() {
   fi
 }
 
-run_rch_cargo_step() {
+rch_remote_summary_present() {
+  local log_path="$1"
+  grep -E '^\[RCH\][[:space:]]+remote[[:space:]]+' "${log_path}" \
+    | grep -Ev '^\[RCH\][[:space:]]+remote[[:space:]]+required([;[:space:]]|$)' >/dev/null
+}
+
+run_rch_cargo_step_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
   local name="$1"
   shift
   run_step "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
+  if [[ "${LAST_STEP_STATUS}" == "passed" && "${require_remote_proof}" == "1" ]]; then
+    if ! rch_remote_summary_present "${OUT_ROOT}/logs/${name}.log"; then
+      echo "[telegram-verification] ${name}: rch command did not produce remote proof" >&2
+      echo "rch command did not produce remote proof" >>"${OUT_ROOT}/logs/${name}.log"
+      promote_status infra_blocked
+      LAST_STEP_STATUS="infra_blocked"
+    fi
+  fi
+}
+
+run_rch_cargo_step() {
+  run_rch_cargo_step_with_remote_policy 1 "$@"
+}
+
+run_rch_format_step() {
+  # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
+  run_rch_cargo_step_with_remote_policy 0 "$@"
 }
 
 json_bool_for_env() {
@@ -91,7 +116,7 @@ token_present="$(json_bool_for_env TELEGRAM_BOT_TOKEN)"
 secret_present="$(json_bool_for_env TELEGRAM_WEBHOOK_SECRET_TOKEN)"
 approval_present="$(json_bool_for_env TELEGRAM_LIVE_WRITE_APPROVAL)"
 
-run_rch_cargo_step format_check cargo fmt -p fcp-telegram -- --check
+run_rch_format_step format_check cargo fmt -p fcp-telegram -- --check
 format_check_status="${LAST_STEP_STATUS}"
 
 run_rch_cargo_step loopback_jsonl \

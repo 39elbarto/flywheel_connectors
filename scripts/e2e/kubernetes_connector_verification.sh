@@ -112,7 +112,8 @@ require_rch_remote_proof() {
     return 0
   fi
 
-  if grep -Fq "[RCH] remote" "${log_path}"; then
+  if grep -E '^\[RCH\][[:space:]]+remote[[:space:]]+' "${log_path}" \
+    | grep -Ev '^\[RCH\][[:space:]]+remote[[:space:]]+required([;[:space:]]|$)' >/dev/null; then
     return 0
   fi
 
@@ -121,7 +122,9 @@ require_rch_remote_proof() {
   return 1
 }
 
-run_logged() {
+run_logged_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
@@ -135,7 +138,7 @@ run_logged() {
   ) >"${log_path}" 2>&1
   rc="$?"
   status="passed"
-  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}" "$@"; then
+  if [[ "${rc}" -eq 0 && "${require_remote_proof}" == "1" ]] && ! require_rch_remote_proof "${name}" "${log_path}" "$@"; then
     rc=1
   fi
   if [[ "${rc}" -ne 0 ]]; then
@@ -145,6 +148,10 @@ run_logged() {
   end_seconds="$(date -u +%s)"
   duration_ms="$(((end_seconds - start_seconds) * 1000))"
   record_step "${name}" "${status}" "${duration_ms}" "${log_path}" "$@"
+}
+
+run_logged() {
+  run_logged_with_remote_policy 1 "$@"
 }
 
 graduation_gauntlet_pre_promotion_pending() {
@@ -242,6 +249,22 @@ run_rch_cargo_step() {
     "$@"
 }
 
+run_rch_format_step() {
+  local name="$1"
+  shift
+
+  # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
+  run_logged_with_remote_policy 0 "${name}" env \
+    RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \
+    RCH_FORCE_REMOTE=1 \
+    RCH_VISIBILITY=verbose \
+    rch exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
+    CARGO_TARGET_DIR="${TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    "$@"
+}
+
 for required in jq git rg rch; do
   if ! command -v "${required}" >/dev/null 2>&1; then
     echo "Missing required command: ${required}" >&2
@@ -287,7 +310,7 @@ run_rch_cargo_step \
   local_non_mock_acceptance \
   cargo test -p fcp-kubernetes --test local_non_mock -- --nocapture
 
-run_rch_cargo_step \
+run_rch_format_step \
   format_check \
   cargo fmt -p fcp-kubernetes -- --check
 

@@ -67,7 +67,8 @@ command_uses_rch_exec() {
 
 rch_remote_summary_present() {
   local log_path="$1"
-  rg -q '\[RCH\][[:space:]]+remote' "${log_path}"
+  grep -E '^\[RCH\][[:space:]]+remote[[:space:]]+' "${log_path}" \
+    | grep -Ev '^\[RCH\][[:space:]]+remote[[:space:]]+required([;[:space:]]|$)' >/dev/null
 }
 
 record_step() {
@@ -106,7 +107,9 @@ record_step() {
     }' >>"${STATUS_JSONL}"
 }
 
-run_logged() {
+run_logged_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
@@ -119,7 +122,7 @@ run_logged() {
     "$@"
   ) >"${log_path}" 2>&1
   rc="$?"
-  if [[ "${rc}" -eq 0 ]] && command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
+  if [[ "${rc}" -eq 0 && "${require_remote_proof}" == "1" ]] && command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
     echo "[postgresql-verification] ${name}: rch command did not produce remote proof" >&2
     echo "rch command did not produce remote proof" >>"${log_path}"
     rc=1
@@ -132,6 +135,10 @@ run_logged() {
   end_seconds="$(date -u +%s)"
   duration_ms="$(((end_seconds - start_seconds) * 1000))"
   record_step "${name}" "${status}" "${duration_ms}" "${log_path}" "$@"
+}
+
+run_logged() {
+  run_logged_with_remote_policy 1 "$@"
 }
 
 graduation_gauntlet_pre_promotion_pending() {
@@ -224,6 +231,17 @@ run_rch_cargo_step() {
     "$@"
 }
 
+run_rch_format_step() {
+  local name="$1"
+  shift
+
+  # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
+  run_logged_with_remote_policy 0 "${name}" env RCH_VISIBILITY=verbose RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" rch exec -- env \
+    CARGO_TARGET_DIR="${TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    "$@"
+}
+
 for required in jq git rg rch; do
   if ! command -v "${required}" >/dev/null 2>&1; then
     echo "Missing required command: ${required}" >&2
@@ -261,7 +279,7 @@ run_rch_cargo_step \
   unit_suite \
   cargo test -p fcp-postgresql -- --nocapture
 
-run_rch_cargo_step \
+run_rch_format_step \
   format_check \
   cargo fmt -p fcp-postgresql -- --check
 

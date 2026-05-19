@@ -339,6 +339,9 @@ if [[ "${overall_status}" == "passed" ]]; then
           "c2c_policy_allowed",
           "queue_full_policy_denied",
           "queue_full_backpressure_drop",
+          "peer_queue_first_accepted",
+          "peer_queue_full_drop",
+          "peer_queue_other_peer_allowed",
           "hello_session_restore",
           "malformed_control_envelope_denied",
           "malformed_data_id_envelope_denied",
@@ -352,17 +355,21 @@ if [[ "${overall_status}" == "passed" ]]; then
           "unknown_media_size_policy_drop",
           "media_content_type_policy_drop",
           "media_content_type_malformed_drop",
+          "media_url_policy_drop",
           "media_content_type_policy_allowed",
           "reply_media_projection",
           "voice_asr_projection",
           "slash_approval_projection",
           "duplicate_drop",
           "stale_sequence_replay_drop",
+          "heartbeat_ack_unmatched",
           "heartbeat_ack",
           "heartbeat_request",
           "reconnect_requested",
           "invalid_session_resumable",
           "restored_session_reconnect_resume",
+          "ready_dispatch_session_persisted",
+          "resumed_dispatch_replay_complete",
           "invalid_session_identify_required",
           "reconnect_backoff_capped",
           "reconnect_attempts_exhausted",
@@ -433,6 +440,36 @@ if [[ "${overall_status}" == "passed" ]]; then
             and .details.lifecycle.action == "none"
           )
         ),
+        peer_queue_shape_ok: (
+          any(.[];
+            .step == "peer_queue_first_accepted"
+            and .details.accepted == true
+            and .details.reason_code == "accepted"
+            and .details.runtime.queue_depth == 1
+            and .details.runtime.peer_queue_count == 1
+            and .details.runtime.largest_peer_queue_depth == 1
+            and .details.runtime.max_peer_queue_depth == 1
+          )
+          and any(.[];
+            .step == "peer_queue_full_drop"
+            and .details.accepted == false
+            and .details.reason_code == "peer_queue_full"
+            and .details.normalized == null
+            and .details.policy == null
+            and .details.runtime.queue_depth == 1
+            and .details.runtime.peer_queue_count == 1
+            and .details.runtime.largest_peer_queue_depth == 1
+            and .details.lifecycle.action == "none"
+          )
+          and any(.[];
+            .step == "peer_queue_other_peer_allowed"
+            and .details.accepted == true
+            and .details.reason_code == "accepted"
+            and .details.runtime.queue_depth == 2
+            and .details.runtime.peer_queue_count == 2
+            and .details.runtime.largest_peer_queue_depth == 1
+          )
+        ),
         group_policy_shape_ok: (
           any(.[]; .step == "allowed_group_mention" and .details.accepted == true and .details.policy.reason_code == "group_allowed")
           and any(.[]; .step == "missing_group_mention_drop" and .details.reason_code == "missing_group_mention")
@@ -489,6 +526,17 @@ if [[ "${overall_status}" == "passed" ]]; then
             and .details.runtime.queue_depth == 0
           )
           and any(.[];
+            .step == "media_url_policy_drop"
+            and .details.accepted == false
+            and .details.reason_code == "attachment_url_not_allowed"
+            and .details.policy.reason_code == "attachment_url_not_allowed"
+            and .details.normalized.has_attachments == true
+            and (.details.normalized.attachment_url_hashes | type) == "array"
+            and (.details.normalized.attachment_url_hashes | length) == 1
+            and .details.runtime.accepted_events == 0
+            and .details.runtime.queue_depth == 0
+          )
+          and any(.[];
             .step == "media_content_type_policy_allowed"
             and .details.accepted == true
             and .details.policy.reason_code == "group_allowed"
@@ -524,8 +572,10 @@ if [[ "${overall_status}" == "passed" ]]; then
           )
         ),
         heartbeat_shape_ok: (
-          any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack")
-          and any(.[]; .step == "heartbeat_request" and .details.reason_code == "heartbeat_request" and .details.lifecycle.action == "send_heartbeat")
+          any(.[]; .step == "hello_session_restore" and .details.reason_code == "hello" and .details.runtime.heartbeat_interval_ms == 41250 and .details.lifecycle.heartbeat_interval_ms == 41250)
+          and any(.[]; .step == "heartbeat_ack_unmatched" and .details.reason_code == "heartbeat_ack_unmatched" and .details.runtime.heartbeat_sent_count == 0 and .details.runtime.heartbeat_ack_count == 0)
+          and any(.[]; .step == "heartbeat_request" and .details.reason_code == "heartbeat_request" and .details.lifecycle.action == "send_heartbeat" and .details.runtime.heartbeat_sent_count == 1 and .details.runtime.heartbeat_ack_count == 0)
+          and any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack" and .details.runtime.heartbeat_sent_count == 1 and .details.runtime.heartbeat_ack_count == 1)
         ),
         reconnect_shape_ok: (
           any(.[]; .step == "reconnect_requested" and .details.reason_code == "reconnect_requested" and .details.runtime.reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 0)
@@ -592,6 +642,34 @@ if [[ "${overall_status}" == "passed" ]]; then
           and .details.runtime.reconnect_attempts == 1
           and .details.runtime.terminal_reconnect_failures == 0
         ),
+        ready_resumed_shape_ok: (
+          any(.[];
+            .step == "ready_dispatch_session_persisted"
+            and .details.accepted == false
+            and .details.reason_code == "gateway_ready"
+            and .details.normalized == null
+            and .details.policy == null
+            and .details.lifecycle.action == "none"
+            and (.details.runtime.session_id_hash | type) == "string"
+            and (.details.runtime.session_id_hash | test("^[0-9a-f]{24}$"))
+            and .details.runtime.last_sequence == 1
+            and .details.runtime.reconnect_attempts == 0
+            and .details.runtime.dedupe_size == 1
+          )
+          and any(.[];
+            .step == "resumed_dispatch_replay_complete"
+            and .details.accepted == false
+            and .details.reason_code == "gateway_resumed"
+            and .details.normalized == null
+            and .details.policy == null
+            and .details.lifecycle.action == "none"
+            and (.details.runtime.session_id_hash | type) == "string"
+            and (.details.runtime.session_id_hash | test("^[0-9a-f]{24}$"))
+            and .details.runtime.last_sequence == 2
+            and .details.runtime.reconnect_attempts == 0
+            and .details.runtime.dedupe_size == 2
+          )
+        ),
         drain_shape_ok: (
           any(.[]; .step == "gateway_drain_first_batch" and .details.drained_count == 2 and .details.remaining_count == 1)
           and any(.[]; .step == "gateway_drain_final_batch" and .details.drained_count == 1 and .details.remaining_count == 0 and .details.runtime.queue_depth == 0)
@@ -617,7 +695,7 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok and $v.pending_shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.peer_queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.ready_resumed_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok and $v.pending_shutdown_shape_ok)
           then "passed"
           else "failed"
           end
@@ -657,6 +735,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "test-secret" \
     "session-1" \
     "restored-session" \
+    "session-ready-dispatch" \
     "session-should-not-stick" \
     "session-after-exhaustion" \
     "hello-1" \
@@ -671,6 +750,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-oversized-media" \
     "evt-unknown-size-media" \
     "evt-media-type-denied" \
+    "evt-media-url-denied" \
     "evt-media-type-allowed" \
     "evt-malformed-data-id" \
     "evt-disabled" \
@@ -688,6 +768,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-reconnect-requested" \
     "evt-invalid-session" \
     "evt-restored-reconnect" \
+    "evt-ready-dispatch" \
+    "evt-resumed-dispatch" \
     "evt-reconnect-cap-first" \
     "evt-reconnect-cap-capped" \
     "evt-reconnect-exhausted" \
@@ -705,6 +787,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-oversized-media" \
     "msg-unknown-size-media" \
     "msg-media-type-denied" \
+    "msg-media-url-denied" \
     "msg-media-type-allowed" \
     "msg-disabled" \
     "msg-missing-binding" \
@@ -763,17 +846,20 @@ if [[ "${overall_status}" == "passed" ]]; then
     "too large" \
     "missing size metadata" \
     "blocked media type" \
+    "unsafe media url" \
     "allowed media type" \
     "after shutdown should deny" \
     "approve deployment from voice" \
     "/approve rollout-42" \
     "rollout-42" \
     "cdn.qq.example" \
+    "user:secret" \
     "trace.png" \
     "voice.amr" \
     "oversized.bin" \
     "missing-size.pdf" \
     "disallowed.exe" \
+    "credentialed.png" \
     "allowed.png"
   do
     if grep -aF -- "${forbidden}" "${EVIDENCE_JSONL}" >/dev/null; then

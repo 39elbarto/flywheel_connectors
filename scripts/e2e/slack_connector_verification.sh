@@ -87,6 +87,16 @@ run_rch_cargo_step() {
   run_legacy_rch_cargo_step "${name}" "$@"
 }
 
+run_rch_format_step() {
+  local name="$1"
+  shift
+  # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
+  run_step "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+    CARGO_TARGET_DIR="${TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    "$@"
+}
+
 run_legacy_rch_cargo_step() {
   local name="$1"
   shift
@@ -204,7 +214,7 @@ run_governed_rch_cargo_step() {
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-run_rch_cargo_step format_check cargo fmt -p fcp-slack -- --check
+run_rch_format_step format_check cargo fmt -p fcp-slack -- --check
 format_check_status="${LAST_STEP_STATUS}"
 run_rch_cargo_step loopback_jsonl \
   FCP_SLACK_E2E_GIT_REVISION="${git_revision}" \
@@ -266,7 +276,7 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "git_revision": "${git_revision}",
   "target_dir": "${TARGET_DIR}",
   "proof_governor_enabled": "${PROOF_GOVERNOR}",
-  "proof_governor": "Cargo-backed verifier steps run through fwc proof run; accepted_remote_proof is the only passing rch proof classification. refused_local_fallback and infra_blocked keep the verifier non-green.",
+  "proof_governor": "Cargo-backed verifier steps run through fwc proof run; accepted_remote_proof is the only passing rch proof classification. refused_local_fallback and infra_blocked keep the verifier non-green. format_check is a source-state check, not accepted remote Cargo proof.",
   "proof_artifacts": "${OUT_ROOT}/proof",
   "fixture_mode": "no-live-credential Slack Socket Mode/Web API loopback",
   "live_mode": "side-effect-gated live Slack smoke emits structured skips unless operator credentials and explicit write approval are provided",

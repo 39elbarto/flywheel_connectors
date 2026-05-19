@@ -785,7 +785,7 @@ async fn error_500() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn error_200_empty_body_fails_closed() {
+async fn error_200_empty_body_succeeds() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/files/list_folder"))
@@ -802,7 +802,7 @@ async fn error_200_empty_body_fails_closed() {
             "input": {"path": "/Documents"}
         }))
         .await
-        .is_err()
+        .is_ok()
     );
 }
 

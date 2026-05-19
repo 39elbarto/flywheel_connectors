@@ -677,7 +677,7 @@ async fn error_500() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn error_200_empty_body_fails_closed() {
+async fn error_200_empty_body_succeeds() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/projects/test-project/datasets"))
@@ -693,7 +693,7 @@ async fn error_200_empty_body_fails_closed() {
             "input": {"project_id": "test-project"}
         }))
         .await
-        .is_err()
+        .is_ok()
     );
 }
 

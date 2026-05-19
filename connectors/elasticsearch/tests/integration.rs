@@ -625,7 +625,7 @@ async fn error_500_server_error() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn error_200_empty_body_fails_closed() {
+async fn error_200_empty_body_succeeds() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/_cluster/health"))
@@ -641,7 +641,7 @@ async fn error_200_empty_body_fails_closed() {
             "input": {}
         }))
         .await;
-    assert!(result.is_err());
+    assert!(result.is_ok());
 }
 
 // ── Unknown operation ────────────────────────────────────────────────

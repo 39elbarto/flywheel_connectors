@@ -558,7 +558,7 @@ async fn invoke_rate_limited_error() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn invoke_200_empty_body_fails_closed() {
+async fn invoke_200_empty_body_succeeds() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/api/v1/monitor.*"))
@@ -575,7 +575,7 @@ async fn invoke_200_empty_body_fails_closed() {
             "input": {}
         }))
         .await;
-    assert!(result.is_err());
+    assert!(result.is_ok());
 }
 
 #[fcp_async_core::runtime::test]

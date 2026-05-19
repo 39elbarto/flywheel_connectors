@@ -9897,7 +9897,14 @@ mod tests {
 
     #[test]
     fn swarm_gauntlet_manifest_rejects_missing_phase() {
-        let mut manifest = SwarmGauntletManifest::smoke(vec!["cargo".to_string()]);
+        let mut manifest = SwarmGauntletManifest::smoke(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+            "--test".to_string(),
+            "swarm_gauntlet_e2e".to_string(),
+        ]);
         manifest
             .required_phases
             .retain(|phase| *phase != SwarmGauntletPhase::Backpressure);

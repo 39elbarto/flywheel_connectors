@@ -49,10 +49,10 @@ fn render_cell(
     let chosen = negotiate_suite(initiator, responder);
     let init_render: Vec<String> = initiator.iter().map(|s| format!("{}", s.id())).collect();
     let resp_render: Vec<String> = responder.iter().map(|s| format!("{}", s.id())).collect();
-    let result_render = match chosen {
-        None => "<none>".to_string(),
-        Some(s) => format!("id={} label={}", s.id(), s.as_str()),
-    };
+    let result_render = chosen.map_or_else(
+        || "<none>".to_string(),
+        |s| format!("id={} label={}", s.id(), s.as_str()),
+    );
     format!(
         "{label:<48} | initiator=[{}] responder=[{}] -> {result_render}",
         init_render.join(","),

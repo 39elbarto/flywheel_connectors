@@ -36,6 +36,8 @@
 //! structured events tagged with `scenario_id` so a failed run can be
 //! grep'd for the exact phase that diverged.
 
+#![allow(clippy::used_underscore_binding, clippy::items_after_statements)]
+
 use std::time::Instant;
 
 use chrono::{Duration as ChronoDuration, Utc};

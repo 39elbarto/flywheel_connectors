@@ -18,6 +18,9 @@
 //!    `with_trace_capture_config`, `with_trace_capture_zones`)
 //!    preserve the `node_id` and other untouched fields.
 //! 3. **`sender_instance_id` is non-deterministic by default** —
+
+#![allow(clippy::unreadable_literal)]
+
 //!    two fresh configs MAY differ (UUID/random per-construction,
 //!    reboot-safety).
 //! 4. **`MeshNodeError` Display literal substrings** for the 14

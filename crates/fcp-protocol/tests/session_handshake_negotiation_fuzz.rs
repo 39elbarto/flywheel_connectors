@@ -74,7 +74,7 @@ const fn reference_rank(s: SessionCryptoSuite) -> u8 {
     }
 }
 
-fn floor_rank() -> u8 {
+const fn floor_rank() -> u8 {
     reference_rank(MINIMUM_SUITE)
 }
 
@@ -164,8 +164,8 @@ proptest! {
         // permutation seed.
         let mut rng = permutation_seed;
         for i in (1..initiator.len()).rev() {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let j = (rng as usize) % (i + 1);
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let j = usize::try_from(rng).unwrap_or(0) % (i + 1);
             initiator.swap(i, j);
         }
         let permuted = negotiate_suite(&initiator, &responder);

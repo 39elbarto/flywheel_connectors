@@ -20,6 +20,8 @@
 //! Pattern: spec-derived test matrix with metamorphic relation
 //! (zone-and-capability orthogonality).
 
+#![allow(clippy::match_same_arms)]
+
 use fcp_cbor::SchemaId;
 use fcp_prelude::{
     CapabilityId, ConnectorId, Decision, DecisionReasonCode, NodeId, NodeSignature, ObjectHeader,

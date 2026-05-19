@@ -12,8 +12,13 @@
 //!      doc explicitly labels that cell as `fixture` (acceptable
 //!      ratchet state — no live evidence yet, but the cell is
 //!      declared and the bench will be run when CI promotes it).
+//!   4. For every `fixture` cell, the corresponding row and target in
+//!      the Markdown document states exactly "fixture" (lowercased) so
+//!      tools parse it as a sentinel.
 //!
 //! Filed under `flywheel_connectors-angoc.1.4` (Phase B.4).
+
+#![allow(clippy::option_if_let_else)]
 
 use std::collections::BTreeSet;
 use std::fs;

@@ -13,12 +13,10 @@
 //! categories — `FcpcGoldenVector` and `FcpsGoldenVector` — only exercised
 //! `verify()` on tampered / negative-path cases. Their happy-path encode
 //! bytes were never asserted to round-trip end-to-end.
-//!
-//! This harness closes that gap and makes serialization conformance a
-//! single deterministic gate: one failure in any vector category fails
-//! the whole suite. It also prints a markdown compliance matrix (category
-//! × vectors × pass/fail) to stderr so a CI log parse can extract the
-//! score directly.
+
+#![allow(clippy::too_many_lines, clippy::cast_precision_loss, clippy::format_push_string)]
+
+use std::any::type_name;
 
 use fcp_conformance::{
     CanonicalPayloadGoldenVector, CapabilityTokenGoldenVector, FcpcGoldenVector, FcpsGoldenVector,

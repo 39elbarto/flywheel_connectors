@@ -1088,7 +1088,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-hello",
         json!({
             "op": 10,
-            "d": { "session_id": "session-1" },
+            "d": {
+                "session_id": "session-1",
+                "heartbeat_interval": 41_250
+            },
             "id": "hello-1"
         }),
     )
@@ -1098,6 +1101,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(hello["lifecycle"]["action"], "resume");
     assert_eq!(hello["lifecycle"]["resume_session_id"], "session-1");
     assert_eq!(hello["lifecycle"]["resume_sequence"], 0);
+    assert_eq!(hello["runtime"]["heartbeat_interval_ms"], 41_250);
+    assert_eq!(hello["lifecycle"]["heartbeat_interval_ms"], 41_250);
     log_projection_step(&mut logs, "hello_session_restore", "ok", &hello);
 
     let malformed_control_id = "x".repeat(257);

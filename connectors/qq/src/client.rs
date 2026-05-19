@@ -38,6 +38,7 @@ const QQ_GATEWAY_TEXT_MAX_CHARS: usize = 8_192;
 const QQ_GATEWAY_ATTACHMENT_FIELD_MAX_CHARS: usize = 1_024;
 const QQ_GATEWAY_ATTACHMENTS_MAX_COUNT: usize = 32;
 const QQ_GATEWAY_COMMAND_NAME_MAX_CHARS: usize = 64;
+const QQ_GATEWAY_HELLO_HEARTBEAT_INTERVAL_MAX_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Clone)]
 struct CachedAccessToken {
@@ -328,6 +329,7 @@ pub struct QqGatewayRuntime {
     seen_event_ids: VecDeque<String>,
     reply_references: VecDeque<String>,
     pending_events: VecDeque<QqGatewayQueuedEvent>,
+    heartbeat_interval_ms: u64,
     heartbeat_sent_count: u64,
     heartbeat_ack_count: u64,
     reconnect_attempts: u32,
@@ -350,12 +352,14 @@ impl QqGatewayRuntime {
         if let Some(sequence) = config.restore_sequence {
             session.set_sequence(sequence);
         }
+        let heartbeat_interval_ms = config.heartbeat_interval_ms;
         Self {
             config,
             session,
             seen_event_ids: VecDeque::new(),
             reply_references: VecDeque::new(),
             pending_events: VecDeque::new(),
+            heartbeat_interval_ms,
             heartbeat_sent_count: 0,
             heartbeat_ack_count: 0,
             reconnect_attempts: 0,
@@ -376,7 +380,7 @@ impl QqGatewayRuntime {
             enabled: self.config.enabled,
             session_id: self.session.resume_token(),
             last_sequence: self.session.sequence(),
-            heartbeat_interval_ms: self.config.heartbeat_interval_ms,
+            heartbeat_interval_ms: self.heartbeat_interval_ms,
             heartbeat_sent_count: self.heartbeat_sent_count,
             heartbeat_ack_count: self.heartbeat_ack_count,
             reconnect_attempts: self.reconnect_attempts,
@@ -428,6 +432,9 @@ impl QqGatewayRuntime {
                 ))
             }
             10 => {
+                if let Some(heartbeat_interval_ms) = gateway_hello_heartbeat_interval_ms(&event)? {
+                    self.heartbeat_interval_ms = heartbeat_interval_ms;
+                }
                 if let Some(session_id) = event
                     .d
                     .as_ref()
@@ -766,7 +773,7 @@ impl QqGatewayRuntime {
             reason_code,
             resume_session_id,
             resume_sequence: self.session.sequence(),
-            heartbeat_interval_ms: self.config.heartbeat_interval_ms,
+            heartbeat_interval_ms: self.heartbeat_interval_ms,
             reconnect_after_ms,
         }
     }
@@ -865,6 +872,32 @@ fn gateway_event_id(event: &QqGatewayEvent) -> Option<String> {
                 .map(str::to_string)
         })
         .filter(|id| !id.trim().is_empty())
+}
+
+fn gateway_hello_heartbeat_interval_ms(event: &QqGatewayEvent) -> QqResult<Option<u64>> {
+    let Some(raw_interval) = event
+        .d
+        .as_ref()
+        .and_then(|data| data.get("heartbeat_interval"))
+    else {
+        return Ok(None);
+    };
+    let Some(interval_ms) = raw_interval.as_u64() else {
+        return Err(QqError::InvalidInput(
+            "gateway hello heartbeat_interval must be a positive integer".into(),
+        ));
+    };
+    if interval_ms == 0 {
+        return Err(QqError::InvalidInput(
+            "gateway hello heartbeat_interval must be greater than zero".into(),
+        ));
+    }
+    if interval_ms > QQ_GATEWAY_HELLO_HEARTBEAT_INTERVAL_MAX_MS {
+        return Err(QqError::InvalidInput(format!(
+            "gateway hello heartbeat_interval {interval_ms}ms exceeds the {QQ_GATEWAY_HELLO_HEARTBEAT_INTERVAL_MAX_MS}ms limit"
+        )));
+    }
+    Ok(Some(interval_ms))
 }
 
 /// Validate top-level gateway frame fields before they can affect runtime state.
@@ -2742,6 +2775,102 @@ mod tests {
         );
         assert_eq!(runtime.snapshot().session_id, None);
         assert_eq!(runtime.snapshot().last_sequence, 0);
+    }
+
+    #[test]
+    fn gateway_runtime_negotiates_hello_heartbeat_interval() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            heartbeat_interval_ms: 45_000,
+            ..Default::default()
+        });
+
+        let hello = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({
+                    "session_id": "session-from-hello",
+                    "heartbeat_interval": 41_250
+                })),
+                id: Some("evt-hello-heartbeat".into()),
+            })
+            .unwrap();
+
+        assert_eq!(hello.reason_code, "hello");
+        assert_eq!(hello.runtime.heartbeat_interval_ms, 41_250);
+        assert_eq!(hello.lifecycle.heartbeat_interval_ms, 41_250);
+        assert_eq!(
+            runtime.snapshot().session_id.as_deref(),
+            Some("session-from-hello")
+        );
+    }
+
+    #[test]
+    fn gateway_runtime_rejects_bad_hello_heartbeat_interval_without_state_mutation() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            heartbeat_interval_ms: 45_000,
+            ..Default::default()
+        });
+
+        let zero_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({
+                    "session_id": "session-zero-interval",
+                    "heartbeat_interval": 0
+                })),
+                id: Some("evt-hello-zero-interval".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(zero_error, QqError::InvalidInput(ref message) if message.contains("heartbeat_interval must be greater than zero")),
+            "unexpected zero heartbeat error: {zero_error:?}"
+        );
+        assert_eq!(runtime.snapshot().heartbeat_interval_ms, 45_000);
+        assert_eq!(runtime.snapshot().session_id, None);
+
+        let too_large_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({
+                    "session_id": "session-large-interval",
+                    "heartbeat_interval": QQ_GATEWAY_HELLO_HEARTBEAT_INTERVAL_MAX_MS + 1
+                })),
+                id: Some("evt-hello-large-interval".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(too_large_error, QqError::InvalidInput(ref message) if message.contains("heartbeat_interval") && message.contains("exceeds")),
+            "unexpected large heartbeat error: {too_large_error:?}"
+        );
+        assert_eq!(runtime.snapshot().heartbeat_interval_ms, 45_000);
+        assert_eq!(runtime.snapshot().session_id, None);
+
+        let string_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({
+                    "session_id": "session-string-interval",
+                    "heartbeat_interval": "41250"
+                })),
+                id: Some("evt-hello-string-interval".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(string_error, QqError::InvalidInput(ref message) if message.contains("positive integer")),
+            "unexpected string heartbeat error: {string_error:?}"
+        );
+        assert_eq!(runtime.snapshot().heartbeat_interval_ms, 45_000);
+        assert_eq!(runtime.snapshot().session_id, None);
     }
 
     #[test]

@@ -572,7 +572,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           )
         ),
         heartbeat_shape_ok: (
-          any(.[]; .step == "heartbeat_ack_unmatched" and .details.reason_code == "heartbeat_ack_unmatched" and .details.runtime.heartbeat_sent_count == 0 and .details.runtime.heartbeat_ack_count == 0)
+          any(.[]; .step == "hello_session_restore" and .details.reason_code == "hello" and .details.runtime.heartbeat_interval_ms == 41250 and .details.lifecycle.heartbeat_interval_ms == 41250)
+          and any(.[]; .step == "heartbeat_ack_unmatched" and .details.reason_code == "heartbeat_ack_unmatched" and .details.runtime.heartbeat_sent_count == 0 and .details.runtime.heartbeat_ack_count == 0)
           and any(.[]; .step == "heartbeat_request" and .details.reason_code == "heartbeat_request" and .details.lifecycle.action == "send_heartbeat" and .details.runtime.heartbeat_sent_count == 1 and .details.runtime.heartbeat_ack_count == 0)
           and any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack" and .details.runtime.heartbeat_sent_count == 1 and .details.runtime.heartbeat_ack_count == 1)
         ),

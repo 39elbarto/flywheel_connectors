@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "fcp://schemas/fwc/context-current/truth-source-envelope/v1",
+  "title": "FWC context current truth-source envelope v1",
+  "description": "Top-level provenance envelope for `fwc context current --json`.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["status", "command", "subcommand", "schema_version", "_truth_source"],
+  "properties": {
+    "status": { "type": "string", "minLength": 1 },
+    "command": { "const": "context" },
+    "subcommand": { "const": "current" },
+    "schema_version": { "const": "fcp.fwc.truth-source.v1" },
+    "_truth_source": {
+      "type": "string",
+      "enum": ["mesh", "host", "node-local", "offline", "degraded", "fallback-derived", "simulated", "unavailable"]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

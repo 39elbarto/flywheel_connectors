@@ -248,6 +248,111 @@ append_tool_versions() {
     '{cargo:$cargo,rustc:$rustc,rustfmt:$rustfmt,clippy:$clippy,rch:$rch,lake:$lake,jq:$jq,git:$git,ubs:$ubs,cleanup_result:"not_applicable"}')"
 }
 
+append_rch_capacity_preflight() {
+  local step="rch_capacity_preflight"
+  local cargo_probe="cargo test --locked -p fcp-crypto-pq --test representation_profile -- --nocapture"
+  local diagnose_log="${LOG_PREFIX}.${step}.diagnose.json"
+  local status_log="${LOG_PREFIX}.${step}.status.json"
+  local diagnose_command_status="ok"
+  local status_command_status="ok"
+  local diagnose_json_ok="true"
+  local status_json_ok="true"
+  local selected_worker
+  local selected_worker_hash_json="null"
+  local details
+  local decision
+
+  if ! "${RCH_BIN}" --json diagnose --dry-run "${cargo_probe}" >"${diagnose_log}" 2>&1; then
+    diagnose_command_status="failed"
+  fi
+  if ! "${RCH_BIN}" --json status --workers --jobs >"${status_log}" 2>&1; then
+    status_command_status="failed"
+  fi
+
+  if ! jq empty "${diagnose_log}" >/dev/null 2>&1; then
+    diagnose_json_ok="false"
+  fi
+  if ! jq empty "${status_log}" >/dev/null 2>&1; then
+    status_json_ok="false"
+  fi
+
+  if [ "${diagnose_command_status}" != "ok" ] ||
+    [ "${status_command_status}" != "ok" ] ||
+    [ "${diagnose_json_ok}" != "true" ] ||
+    [ "${status_json_ok}" != "true" ]; then
+    fail_step "${step}" "$(jq -cn \
+      --arg cargo_probe "${cargo_probe}" \
+      --arg diagnose_command_status "${diagnose_command_status}" \
+      --arg status_command_status "${status_command_status}" \
+      --argjson diagnose_json_ok "${diagnose_json_ok}" \
+      --argjson status_json_ok "${status_json_ok}" \
+      --arg remote_required "${RCH_REQUIRE_REMOTE}" \
+      --arg diagnose_log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.diagnose.json" \
+      --arg diagnose_log_hash "sha256:$(sha256_file "${diagnose_log}")" \
+      --arg status_log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.status.json" \
+      --arg status_log_hash "sha256:$(sha256_file "${status_log}")" \
+      '{preflight_command:"rch --json diagnose --dry-run <cargo probe>",cargo_probe:$cargo_probe,remote_required:($remote_required == "1"),decision:"proof_infra_blocked",diagnose_command_status:$diagnose_command_status,status_command_status:$status_command_status,diagnose_json_ok:$diagnose_json_ok,status_json_ok:$status_json_ok,diagnose_log_artifact:$diagnose_log_artifact,diagnose_log_hash:$diagnose_log_hash,status_log_artifact:$status_log_artifact,status_log_hash:$status_log_hash,cleanup_result:"not_applicable"}')"
+  fi
+
+  selected_worker="$(jq -r '(.data.worker_selection.worker // empty) | if type == "string" then . else tojson end' "${diagnose_log}")"
+  if [ -n "${selected_worker}" ]; then
+    selected_worker_hash_json="$(jq -cn --arg hash "sha256:$(hash_text "${selected_worker}")" '$hash')"
+  fi
+
+  details="$(jq -cn \
+    --slurpfile diagnose "${diagnose_log}" \
+    --slurpfile status "${status_log}" \
+    --arg cargo_probe "${cargo_probe}" \
+    --arg remote_required "${RCH_REQUIRE_REMOTE}" \
+    --arg diagnose_log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.diagnose.json" \
+    --arg diagnose_log_hash "sha256:$(sha256_file "${diagnose_log}")" \
+    --arg status_log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.status.json" \
+    --arg status_log_hash "sha256:$(sha256_file "${status_log}")" \
+    --argjson selected_worker_hash "${selected_worker_hash_json}" \
+    '
+      def string_or_json:
+        if type == "string" then .
+        elif . == null then null
+        else tojson
+        end;
+      ($diagnose[0].data // {}) as $d |
+      ($status[0].data // {}) as $s |
+      ($d.worker_selection.worker // null) as $worker |
+      ($d.worker_selection.reason.no_admissible_workers // $d.worker_selection.reason // null) as $no_admissible |
+      ($d.decision.would_intercept // false) as $would_intercept |
+      ($s.daemon.workers // []) as $workers |
+      {
+        preflight_command:"rch --json diagnose --dry-run <cargo probe>",
+        cargo_probe:$cargo_probe,
+        remote_required:($remote_required == "1"),
+        decision:(if $would_intercept and ($worker != null) then "admissible" else "proof_infra_blocked" end),
+        would_intercept:$would_intercept,
+        selected_worker_hash:$selected_worker_hash,
+        no_admissible_reason:($no_admissible | string_or_json),
+        diagnose_log_artifact:$diagnose_log_artifact,
+        diagnose_log_hash:$diagnose_log_hash,
+        status_log_artifact:$status_log_artifact,
+        status_log_hash:$status_log_hash,
+        status_posture:($s.posture // null),
+        workers_total:($workers | length),
+        workers_healthy:([$workers[] | select(.status == "healthy")] | length),
+        slots_total:(([$workers[] | (.total_slots // 0)] | add) // 0),
+        slots_available:(([$workers[] | select(.status == "healthy" and (.pressure_state // "unknown") != "critical") | ((.total_slots // 0) - (.used_slots // 0))] | add) // 0),
+        critical_pressure_workers:([$workers[] | select((.pressure_state // "unknown") == "critical")] | length),
+        unreachable_workers:([$workers[] | select(.status == "unreachable")] | length),
+        degraded_workers:([$workers[] | select(.status == "degraded")] | length),
+        cleanup_result:"not_applicable"
+      }
+    ')"
+
+  decision="$(printf '%s' "${details}" | jq -r '.decision')"
+  if [ "${RCH_REQUIRE_REMOTE}" = "1" ] && [ "${decision}" != "admissible" ]; then
+    fail_step "${step}" "${details}"
+  fi
+
+  append_json "${step}" "pass" "${details}"
+}
+
 extract_passed_tests() {
   local log="$1"
   sed -n 's/.*test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "${log}" | tail -n 1
@@ -1461,6 +1566,7 @@ validate_gauntlet_contract() {
     def required_singleton_steps:
       [
         "tool_versions",
+        "rch_capacity_preflight",
         "validate_lean_ids"
       ] +
       required_command_steps +
@@ -1511,6 +1617,28 @@ validate_gauntlet_contract() {
       any(.[]; .step == $step and .result == "pass" and
         .details.artifact_path == $path and
         (.details.artifact_hash | sha256_hash) and
+        (.details.cleanup_result | type == "string"));
+    def required_rch_capacity_preflight:
+      any(.[]; .step == "rch_capacity_preflight" and .result == "pass" and
+        .details.preflight_command == "rch --json diagnose --dry-run <cargo probe>" and
+        .details.cargo_probe == "cargo test --locked -p fcp-crypto-pq --test representation_profile -- --nocapture" and
+        .details.remote_required == true and
+        .details.decision == "admissible" and
+        .details.would_intercept == true and
+        (.details.selected_worker_hash | sha256_hash) and
+        (.details.no_admissible_reason == null) and
+        .details.diagnose_log_artifact == ("target/fcp-crypto-pq/" + .run_id + ".rch_capacity_preflight.diagnose.json") and
+        (.details.diagnose_log_hash | sha256_hash) and
+        .details.status_log_artifact == ("target/fcp-crypto-pq/" + .run_id + ".rch_capacity_preflight.status.json") and
+        (.details.status_log_hash | sha256_hash) and
+        (.details.status_posture | type == "string" and length > 0) and
+        (.details.workers_total | nonnegative_integer) and
+        (.details.workers_healthy | nonnegative_integer) and
+        (.details.slots_total | nonnegative_integer) and
+        (.details.slots_available | nonnegative_integer) and
+        (.details.critical_pressure_workers | nonnegative_integer) and
+        (.details.unreachable_workers | nonnegative_integer) and
+        (.details.degraded_workers | nonnegative_integer) and
         (.details.cleanup_result | type == "string"));
     def non_rch_command_proof:
       (.details.command_line | contains("rch exec") | not) and
@@ -1644,6 +1772,7 @@ validate_gauntlet_contract() {
       (.details | type == "object") and
       command_record_contract) and
     required_tool_versions and
+    required_rch_capacity_preflight and
     required_command_steps_present and
     required_test_counts_present and
     benchmark_group_coverage_present and
@@ -1693,6 +1822,7 @@ append_tool_versions
 require_known_git_revision
 assert_stable_revision "preflight_stable_revision"
 assert_clean_tree "preflight_clean_tree"
+append_rch_capacity_preflight
 
 LEAN_FILE="lean/Fcp/Invariants/LatticeDelegation.lean"
 for theorem in \

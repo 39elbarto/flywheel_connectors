@@ -367,6 +367,16 @@ without overwriting the installed `rch` binary. The gauntlet still records the
 stable `rch exec` command shape and only captures the selected binary's
 `--version` output, not the private filesystem path.
 
+Before the Lean or Cargo proof lanes run, the gauntlet records an
+`rch_capacity_preflight` record from `rch --json diagnose --dry-run` and
+`rch --json status --workers --jobs`. With the default `RCH_REQUIRE_REMOTE=1`,
+no admissible worker is a proof-infrastructure blocker: the script fails before
+running the proof lanes and records only hashed diagnostic/status logs plus
+sanitized capacity counts. A reusable passing gauntlet artifact must have
+`decision:"admissible"`, `would_intercept:true`, a hashed selected worker, and
+remote-required capacity evidence before any command-run proof can satisfy the
+self-contract.
+
 That script is the highest-level command bundle for the KYOPB lattice proof
 chain. It runs the Lean ID checks, Rust/Lean correspondence fixtures,
 `fcp-crypto-pq` representation and V4 unit coverage, the no-mock
@@ -557,21 +567,24 @@ requires every named command lane in the
 gauntlet to be represented by a passing command-run record, including Lean, Rust
 test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a partial
 artifact cannot pass by carrying only a summary and materialized hashes. The
-Lean lane first runs `lake env lean --version` as a workspace/load preflight
-before `lake build`, so filesystem-level Lake configuration failures such as
-unsupported file locking are attributed to a precise probe step rather than
-being collapsed into the proof build itself. Both Lean command records are
-required for reusable evidence. The
+RCH capacity preflight runs before the Lean and Cargo proof lanes, and the Lean
+lane first runs `lake env lean --version` as a workspace/load preflight before
+`lake build`, so remote-capacity failures and filesystem-level Lake
+configuration failures such as unsupported file locking are attributed to
+precise probe steps rather than being collapsed into the proof build itself.
+The capacity preflight and both Lean command records are required for reusable
+evidence. The
 Cargo test command lanes must also carry a positive parsed `passed_tests` count
 before the gauntlet can pass, so a truncated or non-test log cannot satisfy the
 reviewer evidence contract.
 The critical proof steps must appear exactly once in the top-level JSONL:
-`tool_versions`, `validate_lean_ids`, every named command lane, every
-materialized artifact hash lane, `jsonl_contract_validation`, `redaction_scan`,
-`summary`, and `final_redaction_scan`. Duplicate critical records fail the
-self-contract instead of being treated as harmless extra evidence. Unexpected
-top-level gauntlet steps also fail the self-contract, so a passing artifact
-cannot carry unreviewed supplemental records before the summary.
+`tool_versions`, `rch_capacity_preflight`, `validate_lean_ids`, every named
+command lane, every materialized artifact hash lane,
+`jsonl_contract_validation`, `redaction_scan`, `summary`, and
+`final_redaction_scan`. Duplicate critical records fail the self-contract
+instead of being treated as harmless extra evidence. Unexpected top-level
+gauntlet steps also fail the self-contract, so a passing artifact cannot carry
+unreviewed supplemental records before the summary.
 The normal `redaction_scan` must be ordered after every materialized artifact
 hash lane and after `jsonl_contract_validation`, and it must appear before the
 summary. This prevents a reusable artifact from moving the scan ahead of the

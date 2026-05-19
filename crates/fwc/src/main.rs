@@ -3488,18 +3488,39 @@ fn render_dispatch(
         &effective_render_options,
     );
 
-    let text = if let Some(rendered) =
+    let footer = truth_source_footer(&dispatch.payload, format, &effective_render_options);
+    let mut text = if let Some(rendered) =
         render_human_dispatch(&dispatch.payload, format, &effective_render_options)
     {
         rendered
     } else {
         render_with_options(dispatch.payload, format, &effective_render_options)?
     };
+    if let Some(footer) = footer {
+        text.push_str(&footer);
+    }
 
     Ok(ExecutionOutcome {
         text,
         exit_code: dispatch.exit_code.into(),
     })
+}
+
+fn truth_source_footer(
+    payload: &Value,
+    format: OutputFormat,
+    render_options: &RenderOptions,
+) -> Option<String> {
+    if format != OutputFormat::Toon || render_options.has_transform() {
+        return None;
+    }
+
+    let source = payload.get("_truth_source").and_then(Value::as_str)?;
+    if source == "mesh" {
+        return None;
+    }
+
+    Some(format!("(answer source: {source})\n"))
 }
 
 fn render_human_dispatch(
@@ -29882,6 +29903,72 @@ mod tests {
         (outcome.exit_code, outcome.text)
     }
 
+    #[test]
+    fn truth_source_footer_appends_to_default_toon_output() {
+        let outcome = super::render_dispatch(
+            super::DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "history",
+                    "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+                    "_truth_source": "offline",
+                }),
+                exit_code: CliExitCode::Success,
+            },
+            super::OutputFormat::Toon,
+            false,
+            &super::RenderOptions::default(),
+        )
+        .expect("truth-source payload should render");
+
+        assert!(outcome.text.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn truth_source_footer_is_not_added_to_json_output() {
+        let outcome = super::render_dispatch(
+            super::DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "history",
+                    "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+                    "_truth_source": "offline",
+                }),
+                exit_code: CliExitCode::Success,
+            },
+            super::OutputFormat::Json,
+            false,
+            &super::RenderOptions::default(),
+        )
+        .expect("truth-source payload should render");
+
+        assert!(!outcome.text.contains("answer source"));
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should remain parseable");
+        assert_eq!(payload["_truth_source"], "offline");
+    }
+
+    #[test]
+    fn truth_source_footer_is_not_added_for_mesh_truth() {
+        let outcome = super::render_dispatch(
+            super::DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "list",
+                    "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+                    "_truth_source": "mesh",
+                }),
+                exit_code: CliExitCode::Success,
+            },
+            super::OutputFormat::Toon,
+            false,
+            &super::RenderOptions::default(),
+        )
+        .expect("mesh truth-source payload should render");
+
+        assert!(!outcome.text.contains("answer source"));
+    }
+
     fn mock_direct_green_cutover_gate_snapshot() -> Value {
         mock_direct_green_cutover_gate_snapshot_with_schema(
             super::HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
@@ -36535,6 +36622,14 @@ deny_ptrace = true
                     connector["slug"] == "github" && connector["canonical_id"] == "fcp.github"
                 })
         );
+    }
+
+    #[test]
+    fn execute_list_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "list", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
     }
 
     #[test]

@@ -1270,13 +1270,113 @@ fn handle_initialized_notification(id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, json!({}))
 }
 
+/// Top-level JSON-Schema keywords that OpenAI's / Codex's function-tool validator
+/// rejects in a tool's `parameters` schema (HTTP 400 `invalid_function_parameters`).
+/// A single offending tool fails the *entire* `tools` array, so one connector with a
+/// top-level `anyOf` (e.g. `gmail.send_message`) makes every tool unusable from Codex.
+const OPENAI_INCOMPATIBLE_TOP_LEVEL_KEYS: [&str; 5] = ["anyOf", "oneOf", "allOf", "enum", "not"];
+
+/// Rewrite a tool input schema so it imports cleanly as an OpenAI/Codex function tool
+/// while staying faithful to the connector's parameter surface.
+///
+/// Connector manifests legitimately use top-level `anyOf`/`oneOf`/`allOf` to express
+/// XOR-style required-field constraints (`gmail.send_message` needs `raw` *or*
+/// `to`+`subject`+`body`; `stripe.update_customer` needs `email` *or* `name`). These
+/// are valid JSON Schema and remain enforced at invoke time against the connector's
+/// stored schema — but OpenAI's stricter validator rejects them at the *top level*.
+///
+/// This flattens only the top level: it drops the offending keywords, guarantees
+/// `type: "object"` with a `properties` map, and folds any `properties` declared
+/// inside the combinator branches back up (top-level definitions win) so no parameter
+/// is lost even if a manifest declares fields only inside branches. Nested combinators
+/// inside individual properties are valid for OpenAI and are deliberately left intact.
+///
+/// The stored schema is never mutated — only the value emitted in `tools/list` is
+/// rewritten — so the full constraint is preserved for runtime validation and for the
+/// richer `resource://` inventory views.
+fn sanitize_schema_for_openai_tool_import(schema: &Value) -> Value {
+    let Some(obj) = schema.as_object() else {
+        return schema.clone();
+    };
+    // Fast path: nothing OpenAI dislikes at the top level — emit verbatim and untouched.
+    if !OPENAI_INCOMPATIBLE_TOP_LEVEL_KEYS
+        .iter()
+        .any(|key| obj.contains_key(*key))
+    {
+        return schema.clone();
+    }
+
+    let mut sanitized = obj.clone();
+
+    // Salvage `properties` from combinator branches so schemas that declare fields only
+    // inside branches don't lose them. `allOf` branches must all hold, so their
+    // `required` is cumulative; `anyOf`/`oneOf` branches are alternatives, so folding
+    // their `required` up would over-constrain the tool — we drop it (the real XOR is
+    // still enforced at invoke time against the unmodified stored schema).
+    let mut merged_properties = serde_json::Map::new();
+    let mut required: Vec<Value> = match obj.get("required") {
+        Some(Value::Array(reqs)) => reqs.clone(),
+        _ => Vec::new(),
+    };
+    for key in ["allOf", "anyOf", "oneOf"] {
+        let Some(Value::Array(branches)) = obj.get(key) else {
+            continue;
+        };
+        for branch in branches {
+            let Some(branch_obj) = branch.as_object() else {
+                continue;
+            };
+            if let Some(Value::Object(props)) = branch_obj.get("properties") {
+                for (name, value) in props {
+                    merged_properties
+                        .entry(name.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+            if key == "allOf" {
+                if let Some(Value::Array(reqs)) = branch_obj.get("required") {
+                    required.extend(reqs.iter().cloned());
+                }
+            }
+        }
+    }
+
+    for key in OPENAI_INCOMPATIBLE_TOP_LEVEL_KEYS {
+        sanitized.remove(key);
+    }
+
+    // Top-level `properties` win over branch-salvaged ones.
+    if let Some(Value::Object(top_properties)) = sanitized.remove("properties") {
+        for (name, value) in top_properties {
+            merged_properties.insert(name, value);
+        }
+    }
+
+    sanitized.insert("type".to_owned(), Value::String("object".to_owned()));
+    sanitized.insert("properties".to_owned(), Value::Object(merged_properties));
+
+    // De-duplicate `required` (preserving order); omit entirely if empty.
+    if required.is_empty() {
+        sanitized.remove("required");
+    } else {
+        let mut seen = std::collections::HashSet::new();
+        required.retain(|value| match value.as_str() {
+            Some(name) => seen.insert(name.to_owned()),
+            None => true,
+        });
+        sanitized.insert("required".to_owned(), Value::Array(required));
+    }
+
+    Value::Object(sanitized)
+}
+
 fn handle_tools_list(state: &McpServerState, id: Value) -> JsonRpcResponse {
     let tools: Vec<Value> = filtered_tools(state)
         .map(|t| {
             let mut payload = json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": t.input_schema,
+                "inputSchema": sanitize_schema_for_openai_tool_import(&t.input_schema),
             });
             if let Some(object) = payload.as_object_mut() {
                 if let Some(annotations) = &t.annotations {
@@ -2900,6 +3000,123 @@ mod tests {
         let result = resp.result().unwrap();
         let tool = &result["tools"][0];
         assert!(tool["inputSchema"]["properties"]["owner"].is_object());
+    }
+
+    #[test]
+    fn handle_tools_list_strips_top_level_combinators_for_openai_import() {
+        // gmail.send_message-style schema: a top-level `anyOf` expressing a required
+        // XOR (raw OR to+subject+body). OpenAI/Codex rejects top-level combinators.
+        let schema = json!({
+            "type": "object",
+            "anyOf": [
+                { "required": ["raw"] },
+                { "required": ["to", "subject", "body"] }
+            ],
+            "properties": {
+                "raw": { "type": "string" },
+                "to": { "type": "string" },
+                "subject": { "type": "string" },
+                "body": { "type": "string" }
+            },
+            "additionalProperties": false
+        });
+        let state = McpServerState::builder()
+            .with_tool(McpToolDefinition::new(
+                "gmail.send_message",
+                "Send a message",
+                schema,
+                "gmail",
+                "gmail.send_message",
+            ))
+            .build();
+
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let emitted = &resp.result().unwrap()["tools"][0]["inputSchema"];
+
+        // Emitted schema is OpenAI/Codex-importable: a flat object, no top-level combinators.
+        assert_eq!(emitted["type"], "object");
+        assert!(emitted.get("anyOf").is_none());
+        assert!(emitted.get("oneOf").is_none());
+        assert!(emitted.get("allOf").is_none());
+        // Every parameter is preserved, along with sibling keywords.
+        assert!(emitted["properties"]["raw"].is_object());
+        assert!(emitted["properties"]["to"].is_object());
+        assert!(emitted["properties"]["subject"].is_object());
+        assert!(emitted["properties"]["body"].is_object());
+        assert_eq!(emitted["additionalProperties"], false);
+
+        // The stored schema is untouched — the full XOR constraint is kept for runtime
+        // validation and the resource:// inventory views.
+        assert!(state.tools[0].input_schema.get("anyOf").is_some());
+    }
+
+    #[test]
+    fn handle_tools_list_salvages_branch_properties_and_top_level_required() {
+        // bluebubbles.send_media-style: top-level `required` + a `oneOf` whose branches
+        // carry their own `required`/`properties`. Branch properties must survive.
+        let schema = json!({
+            "type": "object",
+            "required": ["local_path"],
+            "oneOf": [
+                { "required": ["chat_guid"], "properties": { "chat_guid": { "type": "string" } } },
+                { "required": ["chat_id"], "properties": { "chat_id": { "type": "integer" } } }
+            ],
+            "properties": {
+                "local_path": { "type": "string" }
+            }
+        });
+        let state = McpServerState::builder()
+            .with_tool(McpToolDefinition::new(
+                "bluebubbles.send_media",
+                "Send media",
+                schema,
+                "bluebubbles",
+                "bluebubbles.send_media",
+            ))
+            .build();
+
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let emitted = &resp.result().unwrap()["tools"][0]["inputSchema"];
+
+        assert_eq!(emitted["type"], "object");
+        assert!(emitted.get("oneOf").is_none());
+        // Top-level required is retained; alternative-branch required is dropped (the
+        // XOR is enforced at invoke time, not advertised as universally required).
+        assert_eq!(emitted["required"], json!(["local_path"]));
+        // Properties from both the top level and the oneOf branches are present.
+        assert!(emitted["properties"]["local_path"].is_object());
+        assert!(emitted["properties"]["chat_guid"].is_object());
+        assert!(emitted["properties"]["chat_id"].is_object());
+    }
+
+    #[test]
+    fn handle_tools_list_preserves_nested_combinators() {
+        // A combinator nested inside a property is valid for OpenAI and must NOT be
+        // stripped; such a schema must pass through byte-for-byte (fast path).
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "thread": { "anyOf": [ { "type": "object" }, { "type": "null" } ] }
+            }
+        });
+        let state = McpServerState::builder()
+            .with_tool(McpToolDefinition::new(
+                "demo.op",
+                "demo",
+                schema.clone(),
+                "demo",
+                "demo.op",
+            ))
+            .build();
+
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let emitted = &resp.result().unwrap()["tools"][0]["inputSchema"];
+
+        assert!(emitted["properties"]["thread"].get("anyOf").is_some());
+        assert_eq!(emitted, &schema);
     }
 
     #[test]

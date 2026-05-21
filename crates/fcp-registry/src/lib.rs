@@ -6,6 +6,12 @@
 //! (Mirroring and Sovereignty). Mirrored symbols are stored durably and
 //! MUST be packable into FCPS frames per §9.8.2.
 
+// `std::os::windows::fs::MetadataExt::number_of_links()` (used by
+// `file_has_multiple_links` on Windows) is behind the unstable `windows_by_handle`
+// feature. Gate it on Windows only — this is a nightly-toolchain project (see
+// .github/workflows); Unix/other targets are unaffected by this attribute.
+#![cfg_attr(windows, feature(windows_by_handle))]
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -2614,7 +2620,9 @@ fn file_has_multiple_links(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        metadata.number_of_links() > 1
+        // number_of_links() returns Option<u32> on Windows (None if the FS doesn't
+        // report it); treat a missing count as "not multiply-linked".
+        metadata.number_of_links().is_some_and(|count| count > 1)
     }
     #[cfg(not(any(unix, windows)))]
     {

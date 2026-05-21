@@ -129,7 +129,11 @@ fn connector_state_snapshot_golden_path(connector_id: &ConnectorId, seq: u64) ->
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("golden")
         .join("connector_state_snapshot")
-        .join(connector_id.as_str())
+        // Sanitize the connector id for the on-disk path: a ConnectorId's canonical
+        // `name:archetype:version` form contains colons, which are illegal in Windows
+        // (NTFS) filenames and abort `git checkout` on Windows runners (exit 128). The
+        // golden's *content* still serializes the real (colon-bearing) id.
+        .join(connector_id.as_str().replace(':', "_"))
         .join(format!("{seq}.cbor"))
 }
 

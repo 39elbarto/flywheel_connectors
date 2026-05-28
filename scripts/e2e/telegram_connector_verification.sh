@@ -6,8 +6,19 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-/tmp/fcp-telegram-e2e/${RUN_ID}}"
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-telegram-e2e-target}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+PROOF_GOVERNOR="${PROOF_GOVERNOR:-1}"
+if [[ -z "${FWC_BIN:-}" ]]; then
+  if [[ -x "${REPO_ROOT}/target/debug/fwc" ]]; then
+    FWC_BIN="${REPO_ROOT}/target/debug/fwc"
+  else
+    FWC_BIN="fwc"
+  fi
+fi
+export RCH_FORCE_REMOTE=1
 
-mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
+mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence" "${OUT_ROOT}/proof"
 
 OVERALL_STATUS="ok"
 EXIT_CODE=0
@@ -36,10 +47,17 @@ classify_failure() {
     return
   fi
   # shellcheck disable=SC2016
-  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|remote required; refusing local fallback|no admissible workers|no worker assigned|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
+  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|no admissible workers|no worker assigned|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error|not a valid fwc command|local_fallback_refused' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
+  fi
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    return 1
   fi
 }
 
@@ -74,12 +92,140 @@ rch_remote_summary_present() {
     | grep -Ev '^\[RCH\][[:space:]]+remote[[:space:]]+required([;[:space:]]|$)' >/dev/null
 }
 
-run_rch_cargo_step_with_remote_policy() {
+json_array_from_args() {
+  if [[ $# -eq 0 ]]; then
+    printf '[]'
+    return
+  fi
+  printf '%s\n' "$@" | jq -R . | jq -s .
+}
+
+write_proof_corpus() {
+  local name="$1"
+  local corpus_path="$2"
+  shift 2
+  local claim_key="telegram-connector-verifier-${name}"
+  local argv_json
+  argv_json="$(json_array_from_args "$@")"
+  jq -n \
+    --arg claim_key "${claim_key}" \
+    --arg purpose "Run Telegram connector verifier step ${name} through the fail-closed rch proof governor." \
+    --argjson rerun_argv "${argv_json}" \
+    '{
+      schema: "fcp.proof-graph-indexer-corpus.v1",
+      verification_scripts: [
+        {
+          claim_key: $claim_key,
+          script_path: "scripts/e2e/telegram_connector_verification.sh",
+          purpose: $purpose,
+          rerun_argv: $rerun_argv,
+          required_env_keys: [],
+          source: {
+            source_id: "telegram.connector.verifier",
+            path: "scripts/e2e/telegram_connector_verification.sh",
+            line: 1
+          }
+        }
+      ]
+    }' >"${corpus_path}"
+}
+
+governor_step_status() {
+  local classification="$1"
+  case "${classification}" in
+    accepted_remote_proof)
+      echo "passed"
+      ;;
+    infra_blocked|refused_local_fallback)
+      echo "infra_blocked"
+      ;;
+    remote_command_failed|not_proof|failed_closed|missing)
+      echo "failed"
+      ;;
+    *)
+      echo "failed"
+      ;;
+  esac
+}
+
+run_governed_rch_cargo_step() {
+  local name="$1"
+  shift
+  local corpus_path="${OUT_ROOT}/proof/${name}.corpus.json"
+  local proof_json="${OUT_ROOT}/proof/${name}.proof.json"
+  local proof_jsonl="${OUT_ROOT}/proof/${name}.rch_remote_proof.jsonl"
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local claim_key="telegram-connector-verifier-${name}"
+  local classification status rch_summary_line
+
+  echo "[telegram-verification] ${name}: fwc proof run ${claim_key} --execute" >&2
+  if ! require_cmd jq >"${log_path}" 2>&1; then
+    LAST_STEP_STATUS="infra_blocked"
+    promote_status infra_blocked
+    return
+  fi
+  if ! require_cmd "${FWC_BIN}" >>"${log_path}" 2>&1; then
+    LAST_STEP_STATUS="infra_blocked"
+    promote_status infra_blocked
+    return
+  fi
+
+  # shellcheck disable=SC2129
+  write_proof_corpus "${name}" "${corpus_path}" "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" "$@" >>"${log_path}" 2>&1
+  (
+    cd "${REPO_ROOT}" || exit
+    "${FWC_BIN}" --json proof run "${claim_key}" --corpus "${corpus_path}" --execute
+  ) >"${proof_json}" 2>>"${log_path}"
+
+  cat "${proof_json}" >>"${log_path}"
+  classification="$(jq -r '
+    if .status == "error"
+      and (
+        .error.type == "unknown-command"
+        or ((.error.message // "") | test("not a valid fwc command"))
+      )
+    then
+      "infra_blocked"
+    else
+      .execution.rch_remote_proof.classification_label // "missing"
+    end
+  ' "${proof_json}" 2>>"${log_path}" || echo missing)"
+  rch_summary_line="$(jq -r '.execution.rch_remote_proof.evidence.rch_summary_line // ""' "${proof_json}" 2>>"${log_path}" || true)"
+  if [[ "${rch_summary_line}" == *"remote required; refusing local fallback"* ]]; then
+    classification="refused_local_fallback"
+    jq -c '
+      (.execution.rch_remote_proof.jsonl_record // empty) as $record
+      | if $record == "" then
+          empty
+        else
+          ($record | fromjson)
+          | .worker_id = null
+          | .selector_reason = "local_fallback_refused"
+          | .blocker_reason = "local_fallback_refused"
+          | .exit_kind = {state: "blocked"}
+        end
+    ' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  else
+    jq -r '.execution.rch_remote_proof.jsonl_record // empty' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  fi
+  status="$(governor_step_status "${classification}")"
+  if [[ "${status}" != "passed" ]]; then
+    promote_status "${status}"
+  fi
+  LAST_STEP_STATUS="${status}"
+}
+
+run_legacy_rch_cargo_step_with_remote_policy() {
   local require_remote_proof="$1"
   shift
   local name="$1"
   shift
-  run_step "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+  run_step "${name}" env \
+    RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" \
+    RCH_FORCE_REMOTE=1 \
+    RCH_VISIBILITY=verbose \
+    rch exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
@@ -91,6 +237,20 @@ run_rch_cargo_step_with_remote_policy() {
       LAST_STEP_STATUS="infra_blocked"
     fi
   fi
+}
+
+run_rch_cargo_step_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
+  local name="$1"
+  shift
+
+  if [[ "${require_remote_proof}" == "1" && "${PROOF_GOVERNOR}" == "1" ]]; then
+    run_governed_rch_cargo_step "${name}" "$@"
+    return
+  fi
+
+  run_legacy_rch_cargo_step_with_remote_policy "${require_remote_proof}" "${name}" "$@"
 }
 
 run_rch_cargo_step() {
@@ -182,6 +342,11 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "artifact_root": "${OUT_ROOT}",
   "git_revision": "${git_revision}",
   "target_dir": "${TARGET_DIR}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
+  "proof_governor_enabled": "${PROOF_GOVERNOR}",
+  "proof_governor": "Cargo-backed verifier steps run through fwc proof run; accepted_remote_proof is the only passing rch proof classification. refused_local_fallback and infra_blocked keep the verifier non-green. format_check is a source-state check, not accepted remote Cargo proof.",
+  "proof_artifacts": "${OUT_ROOT}/proof",
   "fixture_mode": "no-live-credential Telegram Bot API loopback plus host-forwarded webhook ingest through the connector boundary",
   "live_mode": "side-effect-gated live Telegram smoke emits structured skips unless operator credentials and explicit approval are provided",
   "redaction": "no Telegram bot token, webhook secret, raw user id, raw chat id, update id, message text, media id, file id, or provider payload is emitted; evidence carries hashes, route classes, outcome enums, status codes, byte counts, and skip reasons"
@@ -194,6 +359,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "connector": "fcp-telegram",
   "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "steps": {
     "format_check": "${format_check_status}",
     "loopback_jsonl": "${loopback_jsonl_status}",
@@ -207,6 +374,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
     "loopback_jsonl": "${OUT_ROOT}/evidence/loopback_matrix.jsonl",
     "loopback_stdout_jsonl": "${OUT_ROOT}/evidence/loopback_stdout.jsonl",
     "live_optional_jsonl": "${live_skip_jsonl_path}",
+    "proof_governor_json": "${OUT_ROOT}/proof/*.proof.json",
+    "proof_governor_jsonl": "${OUT_ROOT}/proof/*.rch_remote_proof.jsonl",
     "environment": "${OUT_ROOT}/environment.json"
   }
 }

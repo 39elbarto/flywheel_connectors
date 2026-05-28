@@ -226,10 +226,11 @@ The current implementation does not include:
 ## Verification
 
 The connector proof lane is tracked at `scripts/e2e/telegram_connector_verification.sh`.
-It offloads Cargo work through `rch`, runs format, the no-live-credential
-loopback JSONL matrix, the connector-local `local_non_mock` acceptance test,
-the Telegram conformance contract, optional live-smoke structured skip handling,
-clippy, and a diff whitespace check on the owned Telegram proof files.
+It offloads Cargo work through fail-closed `fwc proof run` / `rch` evidence,
+runs format, the no-live-credential loopback JSONL matrix, the connector-local
+`local_non_mock` acceptance test, the Telegram conformance contract, optional
+live-smoke structured skip handling, clippy, and a diff whitespace check on the
+owned Telegram proof files.
 
 ```bash
 bash scripts/e2e/telegram_connector_verification.sh
@@ -238,7 +239,15 @@ bash scripts/e2e/telegram_connector_verification.sh
 By default the script writes artifacts under `/tmp/fcp-telegram-e2e/<run-id>/`.
 The primary evidence file is `evidence/loopback_matrix.jsonl`; the live lane
 emits `evidence/live_optional_skip.jsonl` unless `TELEGRAM_BOT_TOKEN` and
-`TELEGRAM_LIVE_WRITE_APPROVAL=yes` are both present.
+`TELEGRAM_LIVE_WRITE_APPROVAL=yes` are both present. Cargo-backed steps also
+write proof-governor artifacts under `${OUT_ROOT}/proof`.
+
+Only `accepted_remote_proof` rows in `*.rch_remote_proof.jsonl` are green
+closeout evidence for Cargo-backed steps. `refused_local_fallback`,
+`infra_blocked`, `remote_command_failed`, `failed_closed`, `not_proof`, or a
+missing proof row keep the verifier non-green. `format_check` is a source-state
+check, not accepted remote Cargo proof. Set `PROOF_GOVERNOR=0` only for legacy
+diagnostics; the default `PROOF_GOVERNOR=1` is the tracked proof lane.
 
 The loopback evidence records are redaction-safe and include command line, git
 revision, fixture ID, operation, update/chat/user hashes, sender-policy
@@ -252,6 +261,8 @@ Rerun commands:
 
 ```bash
 bash scripts/e2e/telegram_connector_verification.sh
+PROOF_GOVERNOR=1 bash scripts/e2e/telegram_connector_verification.sh
+FWC_BIN=/path/to/current/target/debug/fwc PROOF_GOVERNOR=1 bash scripts/e2e/telegram_connector_verification.sh
 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telegram-local-non-mock CARGO_INCREMENTAL=0 cargo test -p fcp-telegram --test local_non_mock -- --nocapture
 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telegram-conformance CARGO_INCREMENTAL=0 cargo test -p fcp-telegram --test conformance_contract -- --nocapture
 ```

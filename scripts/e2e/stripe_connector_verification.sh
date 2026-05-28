@@ -9,8 +9,19 @@ TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-stripe-e2e-target}"
 STATUS_JSONL="${OUT_ROOT}/evidence/verification_steps.jsonl"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 STRIPE_RUN_LIVE_TESTS="${STRIPE_RUN_LIVE_TESTS:-0}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+PROOF_GOVERNOR="${PROOF_GOVERNOR:-1}"
+if [[ -z "${FWC_BIN:-}" ]]; then
+  if [[ -x "${REPO_ROOT}/target/debug/fwc" ]]; then
+    FWC_BIN="${REPO_ROOT}/target/debug/fwc"
+  else
+    FWC_BIN="fwc"
+  fi
+fi
+export RCH_FORCE_REMOTE=1
 
-mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
+mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence" "${OUT_ROOT}/proof"
 
 OVERALL_STATUS="passed"
 EXIT_CODE=0
@@ -39,10 +50,17 @@ classify_failure() {
     return
   fi
 
-  if grep -Eqi 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process' "${log_path}"; then
+  if grep -Eqi 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process|not a valid fwc command|local_fallback_refused' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
+  fi
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    return 1
   fi
 }
 
@@ -237,14 +255,163 @@ run_no_match() {
   record_step "${name}" "${status}" "${duration_ms}" "${log_path}" rg -n "${pattern}" "$@"
 }
 
-run_rch_cargo_step() {
+write_proof_corpus() {
+  local name="$1"
+  local corpus_path="$2"
+  shift 2
+  local claim_key="stripe-connector-verifier-${name}"
+  local argv_json
+  argv_json="$(json_array_from_args "$@")"
+  jq -n \
+    --arg claim_key "${claim_key}" \
+    --arg purpose "Run Stripe connector verifier step ${name} through the fail-closed rch proof governor." \
+    --argjson rerun_argv "${argv_json}" \
+    '{
+      schema: "fcp.proof-graph-indexer-corpus.v1",
+      verification_scripts: [
+        {
+          claim_key: $claim_key,
+          script_path: "scripts/e2e/stripe_connector_verification.sh",
+          purpose: $purpose,
+          rerun_argv: $rerun_argv,
+          required_env_keys: [],
+          source: {
+            source_id: "stripe.connector.verifier",
+            path: "scripts/e2e/stripe_connector_verification.sh",
+            line: 1
+          }
+        }
+      ]
+    }' >"${corpus_path}"
+}
+
+governor_step_status() {
+  local classification="$1"
+  case "${classification}" in
+    accepted_remote_proof)
+      echo "passed"
+      ;;
+    infra_blocked|refused_local_fallback)
+      echo "infra_blocked"
+      ;;
+    remote_command_failed|not_proof|failed_closed|missing)
+      echo "failed"
+      ;;
+    *)
+      echo "failed"
+      ;;
+  esac
+}
+
+run_governed_rch_cargo_step() {
+  local name="$1"
+  shift
+  local corpus_path="${OUT_ROOT}/proof/${name}.corpus.json"
+  local proof_json="${OUT_ROOT}/proof/${name}.proof.json"
+  local proof_jsonl="${OUT_ROOT}/proof/${name}.rch_remote_proof.jsonl"
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local claim_key="stripe-connector-verifier-${name}"
+  local classification status rch_summary_line
+  local start_seconds end_seconds duration_ms
+
+  echo "[stripe-verification] ${name}: fwc proof run ${claim_key} --execute" >&2
+  start_seconds="$(date -u +%s)"
+  if ! require_cmd jq >"${log_path}" 2>&1; then
+    end_seconds="$(date -u +%s)"
+    duration_ms="$(((end_seconds - start_seconds) * 1000))"
+    promote_status infra_blocked
+    record_step "${name}" infra_blocked "${duration_ms}" "${log_path}" require_cmd jq
+    return
+  fi
+  if ! require_cmd "${FWC_BIN}" >>"${log_path}" 2>&1; then
+    end_seconds="$(date -u +%s)"
+    duration_ms="$(((end_seconds - start_seconds) * 1000))"
+    promote_status infra_blocked
+    record_step "${name}" infra_blocked "${duration_ms}" "${log_path}" require_cmd "${FWC_BIN}"
+    return
+  fi
+
+  # shellcheck disable=SC2129
+  write_proof_corpus "${name}" "${corpus_path}" "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" "$@" >>"${log_path}" 2>&1
+  (
+    cd "${REPO_ROOT}" || exit
+    "${FWC_BIN}" --json proof run "${claim_key}" --corpus "${corpus_path}" --execute
+  ) >"${proof_json}" 2>>"${log_path}"
+
+  cat "${proof_json}" >>"${log_path}"
+  classification="$(jq -r '
+    if .status == "error"
+      and (
+        .error.type == "unknown-command"
+        or ((.error.message // "") | test("not a valid fwc command"))
+      )
+    then
+      "infra_blocked"
+    else
+      .execution.rch_remote_proof.classification_label // "missing"
+    end
+  ' "${proof_json}" 2>>"${log_path}" || echo missing)"
+  rch_summary_line="$(jq -r '.execution.rch_remote_proof.evidence.rch_summary_line // ""' "${proof_json}" 2>>"${log_path}" || true)"
+  if [[ "${rch_summary_line}" == *"remote required; refusing local fallback"* ]]; then
+    classification="refused_local_fallback"
+    jq -c '
+      (.execution.rch_remote_proof.jsonl_record // empty) as $record
+      | if $record == "" then
+          empty
+        else
+          ($record | fromjson)
+          | .worker_id = null
+          | .selector_reason = "local_fallback_refused"
+          | .blocker_reason = "local_fallback_refused"
+          | .exit_kind = {state: "blocked"}
+        end
+    ' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  else
+    jq -r '.execution.rch_remote_proof.jsonl_record // empty' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  fi
+  status="$(governor_step_status "${classification}")"
+  if [[ "${status}" != "passed" ]]; then
+    promote_status "${status}"
+  fi
+  end_seconds="$(date -u +%s)"
+  duration_ms="$(((end_seconds - start_seconds) * 1000))"
+  record_step "${name}" "${status}" "${duration_ms}" "${log_path}" \
+    "${FWC_BIN}" --json proof run "${claim_key}" --corpus "${corpus_path}" --execute
+}
+
+run_legacy_rch_cargo_step_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
   local name="$1"
   shift
 
-  run_logged "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" rch exec -- env \
+  run_logged_with_remote_policy "${require_remote_proof}" "${name}" env \
+    RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \
+    RCH_FORCE_REMOTE=1 \
+    RCH_VISIBILITY=verbose \
+    rch exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
+}
+
+run_rch_cargo_step_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
+  local name="$1"
+  shift
+
+  if [[ "${require_remote_proof}" == "1" && "${PROOF_GOVERNOR}" == "1" ]]; then
+    run_governed_rch_cargo_step "${name}" "$@"
+    return
+  fi
+
+  run_legacy_rch_cargo_step_with_remote_policy "${require_remote_proof}" "${name}" "$@"
+}
+
+run_rch_cargo_step() {
+  run_rch_cargo_step_with_remote_policy 1 "$@"
 }
 
 run_rch_format_step() {
@@ -252,10 +419,7 @@ run_rch_format_step() {
   shift
 
   # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
-  run_logged_with_remote_policy 0 "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" rch exec -- env \
-    CARGO_TARGET_DIR="${TARGET_DIR}" \
-    CARGO_INCREMENTAL=0 \
-    "$@"
+  run_rch_cargo_step_with_remote_policy 0 "${name}" "$@"
 }
 
 record_skipped() {
@@ -365,6 +529,11 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "target_dir": "${TARGET_DIR}",
   "rch_require_remote": "${RCH_REQUIRE_REMOTE}",
   "stripe_run_live_tests": "${STRIPE_RUN_LIVE_TESTS}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
+  "proof_governor_enabled": "${PROOF_GOVERNOR}",
+  "proof_governor": "Cargo-backed verifier steps run through fwc proof run; accepted_remote_proof is the only passing rch proof classification. refused_local_fallback and infra_blocked keep the verifier non-green. format_check is a source-state check, not accepted remote Cargo proof.",
+  "proof_artifacts": "${OUT_ROOT}/proof",
   "fixture_mode": "deterministic connector fixtures by default; live Stripe sandbox tests are opt-in",
   "redaction": "logs and JSONL must not contain Stripe secret keys, restricted keys, webhook secrets, bearer authorization headers, signature headers, credential IDs, client secrets, or raw card numbers"
 }
@@ -379,6 +548,10 @@ OUT_ROOT="${OUT_ROOT}" \\
 CARGO_TARGET_DIR="${TARGET_DIR}" \\
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \\
 STRIPE_RUN_LIVE_TESTS="${STRIPE_RUN_LIVE_TESTS}" \\
+RCH_FORCE_REMOTE=1 \\
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN}" \\
+PROOF_GOVERNOR="${PROOF_GOVERNOR}" \\
+FWC_BIN="${FWC_BIN}" \\
 scripts/e2e/stripe_connector_verification.sh
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
@@ -390,9 +563,13 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "status": "${OVERALL_STATUS}",
   "exit_code": ${EXIT_CODE},
   "artifacts_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "artifacts": {
     "status_jsonl": "${STATUS_JSONL}",
     "graduation_gauntlet": "${OUT_ROOT}/evidence/graduation_gauntlet.jsonl",
+    "proof_governor_json": "${OUT_ROOT}/proof/*.proof.json",
+    "proof_governor_jsonl": "${OUT_ROOT}/proof/*.rch_remote_proof.jsonl",
     "environment": "${OUT_ROOT}/environment.json",
     "replay": "${OUT_ROOT}/replay.sh",
     "logs": "${OUT_ROOT}/logs"

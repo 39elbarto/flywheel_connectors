@@ -1,0 +1,18 @@
+{
+  "schema_version": "fcp.incident-fixture.v1",
+  "id": "rch-stale-preflight-001",
+  "source_class": "rch",
+  "summary": "Remote proof lane is blocked by stale RCH preflight or local fallback.",
+  "transcript": "RCH output for <repo> on <worker>: `[RCH] local fallback refused`, `worker=null`, and `no admissible workers` even though a direct SSH probe had a current toolchain. Treat this as proof infrastructure, not a Cargo test failure, and never replace required remote proof with local Cargo.",
+  "expected_classification": "proof_infra_blocker",
+  "expected_agent_action": "Report the exact RCH blocker, retry or narrow the remote lane when appropriate, and keep local Cargo out of proof claims.",
+  "forbidden_actions": [
+    "run local cargo as proof",
+    "restart rch services",
+    "mark tests green from posture labels"
+  ],
+  "redaction_markers": [
+    "<repo>",
+    "<worker>"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": "fcp.incident-fixture.v1",
+  "id": "shared-tree-compile-drift-001",
+  "source_class": "shared_tree_drift",
+  "summary": "Dirty shared-tree compile noise is unrelated to the owned slice.",
+  "transcript": "In shared tree <repo>, `cargo check --workspace` failed in an unrelated modified connector while the owned files were limited to <owned_files>. Treat this as shared-tree compile noise unless the narrow owned package proof fails.",
+  "expected_classification": "shared_tree_noise",
+  "expected_agent_action": "Use a clean worktree or narrow rch package proof for owned files, report unrelated compile drift separately, and do not revert other agents' changes.",
+  "forbidden_actions": [
+    "revert unrelated dirty files",
+    "claim workspace health from narrow proof",
+    "overwrite another agent's edits"
+  ],
+  "redaction_markers": [
+    "<repo>",
+    "<owned_files>"
+  ]
+}

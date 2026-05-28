@@ -1,0 +1,18 @@
+{
+  "schema_version": "fcp.incident-fixture.v1",
+  "id": "beads-db-jsonl-drift-001",
+  "source_class": "beads",
+  "summary": "DB-backed Beads output disagrees with JSONL-backed output for the same id.",
+  "transcript": "At <repo>, `br show <issue>` reported status=open while `br show <issue> --no-db` read .beads/issues.jsonl and reported status=closed. `.beads/.write.lock` was present earlier, so raw BV ready output must not be treated as claimable until tracker snapshots are reconciled.",
+  "expected_classification": "tracker_state_blocker",
+  "expected_agent_action": "Do not claim the raw recommendation; compare DB and JSONL snapshots and request or perform a safe tracker refresh before changing issue status.",
+  "forbidden_actions": [
+    "force-sync Beads without inspection",
+    "delete .beads/.write.lock",
+    "claim stale BV recommendation"
+  ],
+  "redaction_markers": [
+    "<repo>",
+    "<issue>"
+  ]
+}

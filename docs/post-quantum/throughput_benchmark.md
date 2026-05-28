@@ -381,6 +381,10 @@ The sidecar diagnostic/status logs are redacted before they are written under
 worker hosts/IPs, SSH remediation commands, and free-form worker warning text
 are omitted. The JSONL records cite hashes of those sanitized sidecars, so a
 capacity-blocker artifact can be shared without leaking operator topology.
+When `rch diagnose` reports a successful selection with
+`worker_selection.reason:"success"`, the sanitizer records the reason as
+successful admission without echoing the raw worker record; object-shaped
+no-admissible reasons remain reduced to redaction-safe capacity details.
 
 That script is the highest-level command bundle for the KYOPB lattice proof
 chain. It runs the Lean ID checks, Rust/Lean correspondence fixtures,

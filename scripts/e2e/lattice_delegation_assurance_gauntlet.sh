@@ -276,7 +276,8 @@ write_redacted_rch_diagnose_log() {
   if ! printf '%s' "${raw_output}" | jq -c \
     --arg command_status "${command_status}" \
     --argjson selected_worker_hash "${selected_worker_hash_json}" \
-    '{
+    '(.data.worker_selection.reason // null) as $selection_reason |
+    {
       api_version:(.api_version // null),
       command:(.command // "diagnose"),
       success:(.success // null),
@@ -312,9 +313,17 @@ write_redacted_rch_diagnose_log() {
         worker_selection:{
           estimated_cores:(.data.worker_selection.estimated_cores // null),
           worker_hash:$selected_worker_hash,
-          reason:{
-            no_admissible_workers:(.data.worker_selection.reason.no_admissible_workers // null)
-          }
+          reason:(
+            if ($selection_reason | type) == "object" then
+              {no_admissible_workers:($selection_reason.no_admissible_workers // null)}
+            elif $selection_reason == "success" then
+              null
+            elif ($selection_reason | type) == "string" then
+              {no_admissible_workers:"redacted_string_reason"}
+            else
+              null
+            end
+          )
         },
         dry_run:{
           would_offload:(.data.dry_run.would_offload // null),

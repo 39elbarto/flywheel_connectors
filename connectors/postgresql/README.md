@@ -193,10 +193,21 @@ The deterministic evidence is currently split:
 
 ## Verification Bundle
 
+The closeout surface is the verifier, crate-local test suite, and fail-closed
+`fwc proof run` evidence for Cargo-backed `rch` proof commands. The verifier
+writes proof-governor artifacts under `${OUT_ROOT}/proof`. Only
+`accepted_remote_proof` rows in `*.rch_remote_proof.jsonl` are green closeout
+evidence for Cargo-backed steps. `refused_local_fallback`, `infra_blocked`,
+`remote_command_failed`, `failed_closed`, `not_proof`, or a missing proof row
+keep the batch bead open. `format_check` is a source-state check, not accepted
+remote Cargo proof.
+
 Run these after changing this connector contract:
 
 ```bash
 scripts/e2e/postgresql_connector_verification.sh
+PROOF_GOVERNOR=1 scripts/e2e/postgresql_connector_verification.sh
+FWC_BIN=/path/to/current/target/debug/fwc PROOF_GOVERNOR=1 scripts/e2e/postgresql_connector_verification.sh
 git diff --check -- connectors/postgresql/README.md
 ubs connectors/postgresql/README.md
 LC_ALL=C rg -n '[^ -~]' connectors/postgresql/README.md

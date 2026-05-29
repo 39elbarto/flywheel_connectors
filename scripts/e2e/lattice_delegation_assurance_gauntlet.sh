@@ -773,13 +773,37 @@ artifact_log_path() {
 
 materialize_logged_artifact() {
   local path="$1"
-  local log materialized
+  local log materialized jq_filter
   log="$(artifact_log_path "${path}")" || return 0
-  if [ ! -s "${path}" ] && [ -s "${log}" ]; then
+  case "${path}" in
+    target/fcp-crypto-pq/representation-profile-evidence.jsonl)
+      jq_filter='fromjson? | select(.artifact_path == $artifact)'
+      ;;
+    target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl)
+      jq_filter='fromjson? | select(has("primitive_route_id") and has("primitive_timings_ms") and has("allocation_summary") and has("cleanup") and has("root_relation_result") and has("child_relation_result") and (has("public_matrix_material_version") | not) and (has("h_fixture_id") | not))'
+      ;;
+    target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl)
+      jq_filter='fromjson? | select(has("public_matrix_material_version") and has("public_material_summary") and has("reconstruction_result"))'
+      ;;
+    target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl)
+      jq_filter='fromjson? | select(has("h_fixture_id") and has("verify_outcome") and has("timeout_cancel_result"))'
+      ;;
+    target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl)
+      jq_filter='fromjson? | select(.schema == "fcp.crypto_pq.lattice_formal_correspondence.v1")'
+      ;;
+    target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl)
+      jq_filter='fromjson? | select(.schema == "fcp.policy.lattice_formal_correspondence.v1")'
+      ;;
+    target/fcp-host/lattice-policy-dispatcher-evidence.jsonl)
+      jq_filter='fromjson? | select(.artifact_path == $artifact)'
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  if [ -s "${log}" ]; then
     mkdir -p "$(dirname "${path}")"
-    materialized="$(jq -R -c --arg artifact "${path}" \
-      'fromjson? | select(.artifact_path == $artifact)' \
-      "${log}")"
+    materialized="$(jq -R -c --arg artifact "${path}" "${jq_filter}" "${log}")"
     if [ -n "${materialized}" ]; then
       printf '%s\n' "${materialized}" > "${path}"
     fi

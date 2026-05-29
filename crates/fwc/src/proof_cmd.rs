@@ -36,6 +36,7 @@ const PROOF_QUEUE_SCHEMA: &str = "fcp.fwc.proof.queue.v1";
 const PROOF_QUEUE_EVENT_SCHEMA: &str = "fcp.fwc.proof.queue-event.v1";
 const PROOF_OUTCOME_BUNDLE_SCHEMA: &str = "fcp.fwc.proof.outcome-bundle.v1";
 const PROOF_ARTIFACTS_SCHEMA: &str = "fcp.fwc.proof.artifact-pressure.v1";
+const PROOF_HANDOFF_SCHEMA: &str = "fcp.fwc.proof.handoff.v1";
 const DEFAULT_NEXT_LIMIT: usize = 10;
 const DEFAULT_OUTPUT_PREVIEW_BYTES: usize = 16 * 1024;
 const DEFAULT_PROOF_JOB_TIMEOUT_SECS: u64 = 1_800;
@@ -77,6 +78,8 @@ pub enum ProofCommand {
     Status(ProofStatusArgs),
     /// Report proof artifact pressure without deleting or mutating artifacts.
     Artifacts(ProofArtifactsArgs),
+    /// Attach a proof outcome to Beads and record bounded coordination state.
+    Handoff(ProofHandoffArgs),
     /// Normalize RCH worker telemetry into a remote-proof capacity decision.
     #[command(name = "rch-status")]
     RchStatus(ProofRchStatusArgs),
@@ -313,6 +316,54 @@ pub struct ProofArtifactsArgs {
     pub pressure_threshold_bytes: u64,
 }
 
+/// Arguments for `fwc proof handoff`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct ProofHandoffArgs {
+    /// Beads JSONL file to update with a durable proof comment.
+    #[arg(long = "issues-jsonl", value_name = "PATH")]
+    pub issues_jsonl: PathBuf,
+
+    /// Beads issue id that owns the proof job.
+    #[arg(long = "bead-id", value_name = "ID")]
+    pub bead_id: String,
+
+    /// Canonical proof outcome to record.
+    #[arg(long, value_enum)]
+    pub outcome: ProofHandoffOutcome,
+
+    /// Outcome reason label, usually from an RCH proof outcome bundle.
+    #[arg(long = "outcome-reason", value_name = "REASON")]
+    pub outcome_reason: Option<String>,
+
+    /// Durable proof bundle or JSONL artifact path.
+    #[arg(long = "bundle-path", value_name = "PATH")]
+    pub bundle_path: Option<PathBuf>,
+
+    /// RCH worker classification label, e.g. `accepted_remote_proof`.
+    #[arg(long = "worker-classification", value_name = "CLASSIFICATION")]
+    pub worker_classification: Option<String>,
+
+    /// Capacity or topology blocker reason when proof infrastructure blocked.
+    #[arg(long = "blocker-reason", value_name = "REASON")]
+    pub blocker_reason: Option<String>,
+
+    /// Reporting agent name used for comment authorship and assignee checks.
+    #[arg(long = "agent-name", value_name = "NAME", default_value = "fwc-proof")]
+    pub agent_name: String,
+
+    /// Simulated/fake Agent Mail transport state for deterministic handoff tests.
+    #[arg(long = "agent-mail-mode", value_enum, default_value = "unavailable")]
+    pub agent_mail_mode: ProofHandoffAgentMailMode,
+
+    /// Optional JSONL audit log to append one handoff event.
+    #[arg(long = "event-log", value_name = "PATH")]
+    pub event_log: Option<PathBuf>,
+
+    /// Evaluation time in Unix milliseconds. Defaults to the current clock.
+    #[arg(long = "now-unix-ms")]
+    pub now_unix_ms: Option<u64>,
+}
+
 /// Arguments for `fwc proof rch-status`.
 #[derive(Args, Debug, Clone, Default, Serialize)]
 pub struct ProofRchStatusArgs {
@@ -487,6 +538,138 @@ impl ProofOutcomeReason {
             Self::RedactionValidationFailed => "redaction_validation_failed",
         }
     }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofHandoffOutcome {
+    #[value(name = "accepted")]
+    Accepted,
+    #[value(name = "cargo_failed")]
+    CargoFailed,
+    #[value(name = "proof_infra_blocked")]
+    ProofInfraBlocked,
+    #[value(name = "cancelled")]
+    Cancelled,
+    #[value(name = "skipped")]
+    Skipped,
+    #[value(name = "redaction_error")]
+    RedactionError,
+}
+
+impl ProofHandoffOutcome {
+    const fn to_outcome(self) -> ProofOutcome {
+        match self {
+            Self::Accepted => ProofOutcome::Accepted,
+            Self::CargoFailed => ProofOutcome::CargoFailed,
+            Self::ProofInfraBlocked => ProofOutcome::ProofInfraBlocked,
+            Self::Cancelled => ProofOutcome::Cancelled,
+            Self::Skipped => ProofOutcome::Skipped,
+            Self::RedactionError => ProofOutcome::RedactionError,
+        }
+    }
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofHandoffAgentMailMode {
+    #[value(name = "healthy")]
+    Healthy,
+    #[value(name = "unavailable")]
+    Unavailable,
+    #[value(name = "read_only")]
+    ReadOnly,
+    #[value(name = "disabled")]
+    Disabled,
+}
+
+impl ProofHandoffAgentMailMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Unavailable => "unavailable",
+            Self::ReadOnly => "read_only",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProofHandoffBeadCommentWrite {
+    issues_jsonl_path: String,
+    bead_id: String,
+    comment_id: u64,
+    author: String,
+    created_at: String,
+    assignee: Option<String>,
+    status: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProofHandoffOwnership {
+    mode: &'static str,
+    assignee: Option<String>,
+    reporting_agent: String,
+    ownership_modified: bool,
+    warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProofHandoffAgentMail {
+    mode: &'static str,
+    attempted: bool,
+    sent: bool,
+    update_count: usize,
+    retry_attempts: u8,
+    degraded_reason: Option<&'static str>,
+    thread_id: String,
+    bounded_update: Option<String>,
+    service_repair_attempted: bool,
+    service_restart_attempted: bool,
+    process_signal_attempted: bool,
+    final_coordination_state: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProofHandoffIssueForWrite {
+    next_comment_id: u64,
+    assignee: Option<String>,
+    status: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProofHandoffArtifactRef {
+    display_path: String,
+    path_hash: String,
+    path_redactions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProofHandoffCommentInput<'a> {
+    outcome: ProofOutcome,
+    outcome_reason: &'a str,
+    artifact: Option<&'a ProofHandoffArtifactRef>,
+    worker_classification: Option<&'a str>,
+    blocker_reason: Option<&'a str>,
+    ownership: &'a ProofHandoffOwnership,
+    mail: &'a ProofHandoffAgentMail,
+    remediation: &'a [&'a str],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProofHandoffEventInput<'a> {
+    bead_id: &'a str,
+    comment_id: u64,
+    outcome: ProofOutcome,
+    outcome_reason: &'a str,
+    artifact: Option<&'a ProofHandoffArtifactRef>,
+    worker_classification: Option<&'a str>,
+    blocker_reason: Option<&'a str>,
+    mail: &'a ProofHandoffAgentMail,
+    ownership: &'a ProofHandoffOwnership,
+    now_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -931,6 +1114,7 @@ pub fn run(args: &ProofArgs) -> Result<ProofCommandResult> {
         ProofCommand::Passport(args) => passport(args),
         ProofCommand::Status(args) => status(args),
         ProofCommand::Artifacts(args) => artifacts(args),
+        ProofCommand::Handoff(args) => handoff(args),
         ProofCommand::RchStatus(args) => rch_status(args),
     }
 }
@@ -1428,6 +1612,106 @@ fn artifacts(args: &ProofArtifactsArgs) -> Result<ProofCommandResult> {
     Ok(ProofCommandResult { payload, success })
 }
 
+fn handoff(args: &ProofHandoffArgs) -> Result<ProofCommandResult> {
+    let now_unix_ms = args.now_unix_ms.unwrap_or_else(current_unix_ms);
+    let Some(issue) = proof_handoff_issue_for_write(&args.issues_jsonl, &args.bead_id)? else {
+        return Ok(proof_handoff_validation_error(
+            "unknown-bead-id",
+            format!(
+                "No Beads issue `{}` exists in `{}`.",
+                args.bead_id,
+                args.issues_jsonl.display()
+            ),
+            &args.issues_jsonl,
+            &args.bead_id,
+        ));
+    };
+    let outcome = args.outcome.to_outcome();
+    let outcome_reason = args
+        .outcome_reason
+        .clone()
+        .unwrap_or_else(|| default_proof_handoff_reason(outcome).to_owned());
+    let artifact = args.bundle_path.as_deref().map(proof_handoff_artifact_ref);
+    let ownership = proof_handoff_ownership(issue.assignee.clone(), &args.agent_name);
+    let mail = proof_handoff_agent_mail(
+        args.agent_mail_mode,
+        &args.bead_id,
+        outcome,
+        issue.next_comment_id,
+    );
+    let remediation = proof_handoff_remediation(outcome);
+    let comment_text = proof_handoff_comment_text(ProofHandoffCommentInput {
+        outcome,
+        outcome_reason: &outcome_reason,
+        artifact: artifact.as_ref(),
+        worker_classification: args.worker_classification.as_deref(),
+        blocker_reason: args.blocker_reason.as_deref(),
+        ownership: &ownership,
+        mail: &mail,
+        remediation,
+    });
+    let created_at = unix_ms_to_rfc3339(now_unix_ms);
+    append_beads_handoff_comment(
+        &args.issues_jsonl,
+        &args.bead_id,
+        issue.next_comment_id,
+        &args.agent_name,
+        &created_at,
+        &comment_text,
+    )?;
+    let comment = ProofHandoffBeadCommentWrite {
+        issues_jsonl_path: args.issues_jsonl.display().to_string(),
+        bead_id: args.bead_id.clone(),
+        comment_id: issue.next_comment_id,
+        author: args.agent_name.clone(),
+        created_at,
+        assignee: issue.assignee,
+        status: issue.status,
+        title: issue.title,
+    };
+    let event_jsonl = proof_handoff_event_jsonl(ProofHandoffEventInput {
+        bead_id: &args.bead_id,
+        comment_id: comment.comment_id,
+        outcome,
+        outcome_reason: &outcome_reason,
+        artifact: artifact.as_ref(),
+        worker_classification: args.worker_classification.as_deref(),
+        blocker_reason: args.blocker_reason.as_deref(),
+        mail: &mail,
+        ownership: &ownership,
+        now_unix_ms,
+    })?;
+    append_proof_queue_event(args.event_log.as_deref(), &event_jsonl)?;
+
+    let mut payload = json!({
+        "status": "ok",
+        "command": "proof",
+        "subcommand": "handoff",
+        "schema_version": PROOF_HANDOFF_SCHEMA,
+        "now_unix_ms": now_unix_ms,
+        "beads": comment,
+        "comment": {
+            "text": comment_text,
+            "outcome": outcome.as_str(),
+            "outcome_reason": outcome_reason,
+            "artifact": artifact,
+            "worker_classification": args.worker_classification.as_deref(),
+            "blocker_reason": args.blocker_reason.as_deref(),
+        },
+        "ownership": ownership,
+        "agent_mail": mail,
+        "jsonl_event": event_jsonl,
+        "event_log": args.event_log.as_ref().map(|path| path.display().to_string()),
+        "remediation": remediation,
+        "message": "Attached proof handoff to Beads and recorded bounded coordination state.",
+    });
+    insert_toon(
+        &mut payload,
+        "Recorded a durable proof handoff without repairing shared services.",
+    );
+    Ok(ok(payload))
+}
+
 fn rch_status(args: &ProofRchStatusArgs) -> Result<ProofCommandResult> {
     let report = rch_capacity_report_from_args(args);
     let success = report.telemetry_parse_errors.is_empty();
@@ -1449,6 +1733,389 @@ fn rch_status(args: &ProofRchStatusArgs) -> Result<ProofCommandResult> {
         "Normalized read-only RCH telemetry into a remote-proof capacity decision.",
     );
     Ok(ProofCommandResult { payload, success })
+}
+
+fn proof_handoff_issue_for_write(
+    path: &Path,
+    bead_id: &str,
+) -> Result<Option<ProofHandoffIssueForWrite>> {
+    let body = fs::read_to_string(path)
+        .with_context(|| format!("reading Beads JSONL `{}`", path.display()))?;
+    let mut found = None;
+    let mut max_comment_id = 0u64;
+    for (line_index, line) in body.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = parse_beads_issue_line(path, line_index, line)?;
+        max_comment_id = max_comment_id.max(max_beads_comment_id(&value));
+        if value.get("id").and_then(Value::as_str) == Some(bead_id) {
+            found = Some(ProofHandoffIssueForWrite {
+                next_comment_id: max_comment_id.saturating_add(1),
+                assignee: value
+                    .get("assignee")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                status: value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                title: value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            });
+        }
+    }
+    if let Some(mut issue) = found {
+        issue.next_comment_id = max_comment_id.saturating_add(1);
+        Ok(Some(issue))
+    } else {
+        Ok(None)
+    }
+}
+
+fn append_beads_handoff_comment(
+    path: &Path,
+    bead_id: &str,
+    comment_id: u64,
+    author: &str,
+    created_at: &str,
+    text: &str,
+) -> Result<()> {
+    let body = fs::read_to_string(path)
+        .with_context(|| format!("reading Beads JSONL `{}`", path.display()))?;
+    let had_trailing_newline = body.ends_with('\n');
+    let mut found = false;
+    let mut output_lines = Vec::new();
+    for (line_index, line) in body.lines().enumerate() {
+        if line.trim().is_empty() {
+            output_lines.push(line.to_owned());
+            continue;
+        }
+        let mut value = parse_beads_issue_line(path, line_index, line)?;
+        if value.get("id").and_then(Value::as_str) == Some(bead_id) {
+            let issue = value.as_object_mut().with_context(|| {
+                format!(
+                    "Beads JSONL `{}` line {} is not an issue object",
+                    path.display(),
+                    line_index + 1
+                )
+            })?;
+            let comments_value = issue
+                .entry("comments")
+                .or_insert_with(|| Value::Array(Vec::new()));
+            let comments = comments_value.as_array_mut().with_context(|| {
+                format!(
+                    "Beads issue `{bead_id}` in `{}` has non-array comments",
+                    path.display()
+                )
+            })?;
+            comments.push(json!({
+                "id": comment_id,
+                "issue_id": bead_id,
+                "author": author,
+                "text": text,
+                "created_at": created_at,
+            }));
+            output_lines.push(
+                serde_json::to_string(&value)
+                    .context("serializing updated Beads issue JSONL row")?,
+            );
+            found = true;
+        } else {
+            output_lines.push(line.to_owned());
+        }
+    }
+    if !found {
+        bail!(
+            "Beads issue `{bead_id}` disappeared while updating `{}`",
+            path.display()
+        );
+    }
+    let mut output = output_lines.join("\n");
+    if had_trailing_newline || !output.is_empty() {
+        output.push('\n');
+    }
+    fs::write(path, output).with_context(|| format!("writing Beads JSONL `{}`", path.display()))
+}
+
+fn parse_beads_issue_line(path: &Path, line_index: usize, line: &str) -> Result<Value> {
+    serde_json::from_str(line).with_context(|| {
+        format!(
+            "parsing Beads JSONL `{}` line {}",
+            path.display(),
+            line_index + 1
+        )
+    })
+}
+
+fn max_beads_comment_id(issue: &Value) -> u64 {
+    issue
+        .get("comments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|comment| comment.get("id").and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0)
+}
+
+fn proof_handoff_artifact_ref(path: &Path) -> ProofHandoffArtifactRef {
+    let roots = path
+        .parent()
+        .map(|parent| vec![parent.to_path_buf()])
+        .unwrap_or_default();
+    let (display_path, path_redactions) = redacted_artifact_display_path(path, &roots);
+    ProofHandoffArtifactRef {
+        display_path,
+        path_hash: proof_artifact_path_hash(path),
+        path_redactions,
+    }
+}
+
+fn proof_handoff_ownership(
+    assignee: Option<String>,
+    reporting_agent: &str,
+) -> ProofHandoffOwnership {
+    let conflict = assignee
+        .as_deref()
+        .is_some_and(|assignee| assignee != reporting_agent);
+    let warning = conflict.then(|| {
+        format!(
+            "observe-only handoff: bead assignee `{}` differs from reporting agent `{reporting_agent}`; ownership was not modified",
+            assignee.as_deref().unwrap_or_default()
+        )
+    });
+    ProofHandoffOwnership {
+        mode: if conflict {
+            "observe_only"
+        } else {
+            "owner_or_unassigned"
+        },
+        assignee,
+        reporting_agent: reporting_agent.to_owned(),
+        ownership_modified: false,
+        warning,
+    }
+}
+
+fn proof_handoff_agent_mail(
+    mode: ProofHandoffAgentMailMode,
+    bead_id: &str,
+    outcome: ProofOutcome,
+    comment_id: u64,
+) -> ProofHandoffAgentMail {
+    let bounded_update = format!(
+        "[{bead_id}] proof handoff `{}` recorded in Beads comment #{comment_id}.",
+        outcome.as_str()
+    );
+    let (attempted, sent, update_count, degraded_reason, final_coordination_state) = match mode {
+        ProofHandoffAgentMailMode::Healthy => (true, true, 1, None, "mail_thread_updated"),
+        ProofHandoffAgentMailMode::Unavailable => (
+            true,
+            false,
+            0,
+            Some("agent_mail_unavailable"),
+            "beads_comment_only_mail_unavailable",
+        ),
+        ProofHandoffAgentMailMode::ReadOnly => (
+            true,
+            false,
+            0,
+            Some("agent_mail_read_only"),
+            "beads_comment_only_mail_read_only",
+        ),
+        ProofHandoffAgentMailMode::Disabled => {
+            (false, false, 0, None, "beads_comment_only_mail_disabled")
+        }
+    };
+    ProofHandoffAgentMail {
+        mode: mode.as_str(),
+        attempted,
+        sent,
+        update_count,
+        retry_attempts: 0,
+        degraded_reason,
+        thread_id: bead_id.to_owned(),
+        bounded_update: sent.then_some(bounded_update),
+        service_repair_attempted: false,
+        service_restart_attempted: false,
+        process_signal_attempted: false,
+        final_coordination_state,
+    }
+}
+
+fn proof_handoff_comment_text(input: ProofHandoffCommentInput<'_>) -> String {
+    let mut lines = vec![
+        format!("Proof handoff: `{}`.", input.outcome.as_str()),
+        format!(
+            "Standard meaning: {}",
+            proof_handoff_outcome_wording(input.outcome)
+        ),
+        format!("Outcome reason: `{}`.", input.outcome_reason),
+    ];
+    if let Some(artifact) = input.artifact {
+        lines.push(format!(
+            "Bundle: `{}` (`{}`).",
+            artifact.display_path, artifact.path_hash
+        ));
+    } else {
+        lines.push("Bundle: not supplied.".to_owned());
+    }
+    lines.push(format!(
+        "Worker classification: `{}`.",
+        input.worker_classification.unwrap_or("not_supplied")
+    ));
+    lines.push(format!(
+        "Blocker reason: `{}`.",
+        input.blocker_reason.unwrap_or("not_supplied")
+    ));
+    lines.push(format!(
+        "Agent Mail: `{}` via `{}`.",
+        input.mail.final_coordination_state, input.mail.mode
+    ));
+    if let Some(reason) = input.mail.degraded_reason {
+        lines.push(format!(
+            "Agent Mail degraded reason: `{reason}`; no retry loop or service repair was attempted."
+        ));
+    }
+    lines.push(format!(
+        "Ownership: `{}`; ownership_modified={}.",
+        input.ownership.mode, input.ownership.ownership_modified
+    ));
+    if let Some(warning) = &input.ownership.warning {
+        lines.push(format!("Ownership warning: {warning}."));
+    }
+    lines.push(format!("Remediation: {}.", input.remediation.join(" ")));
+    lines.join("\n")
+}
+
+fn proof_handoff_event_jsonl(input: ProofHandoffEventInput<'_>) -> Result<String> {
+    let value = json!({
+        "schema_version": PROOF_HANDOFF_SCHEMA,
+        "event": "proof_handoff",
+        "bead_id": input.bead_id,
+        "comment_id": input.comment_id,
+        "outcome": input.outcome.as_str(),
+        "outcome_reason": input.outcome_reason,
+        "bundle_path": input.artifact.map(|artifact| artifact.display_path.clone()),
+        "bundle_path_hash": input.artifact.map(|artifact| artifact.path_hash.clone()),
+        "worker_classification": input.worker_classification,
+        "blocker_reason": input.blocker_reason,
+        "mail_attempted": input.mail.attempted,
+        "mail_degraded_reason": input.mail.degraded_reason,
+        "final_coordination_state": input.mail.final_coordination_state,
+        "ownership_mode": input.ownership.mode,
+        "observe_only": input.ownership.mode == "observe_only",
+        "created_at_unix_ms": input.now_unix_ms,
+    });
+    serde_json::to_string(&value).context("serializing proof handoff event")
+}
+
+fn default_proof_handoff_reason(outcome: ProofOutcome) -> &'static str {
+    match outcome {
+        ProofOutcome::Accepted => ProofOutcomeReason::RemoteCargoPassed.as_str(),
+        ProofOutcome::CargoFailed => ProofOutcomeReason::RemoteCargoFailed.as_str(),
+        ProofOutcome::ProofInfraBlocked => ProofOutcomeReason::UnknownProofState.as_str(),
+        ProofOutcome::Cancelled => ProofOutcomeReason::ProcessCancelled.as_str(),
+        ProofOutcome::Skipped => ProofOutcomeReason::OperatorSkipped.as_str(),
+        ProofOutcome::RedactionError => ProofOutcomeReason::RedactionValidationFailed.as_str(),
+    }
+}
+
+fn proof_handoff_outcome_wording(outcome: ProofOutcome) -> &'static str {
+    match outcome {
+        ProofOutcome::Accepted => {
+            "Code proof accepted: the referenced remote proof passed and may count as green only with its bundle."
+        }
+        ProofOutcome::CargoFailed => {
+            "Code failure: Cargo started remotely and failed; treat this as implementation or test failure, not proof infrastructure."
+        }
+        ProofOutcome::ProofInfraBlocked => {
+            "Proof infrastructure blocked: Cargo proof did not complete; do not mark the code red from this result."
+        }
+        ProofOutcome::Cancelled => {
+            "Proof cancelled: execution ended before a proof outcome could be established."
+        }
+        ProofOutcome::Skipped => {
+            "Proof skipped: no code proof was attempted, or the lane recorded a structured skip."
+        }
+        ProofOutcome::RedactionError => {
+            "Proof redaction failed: preserve the failure but do not publish unredacted evidence."
+        }
+    }
+}
+
+fn proof_handoff_remediation(outcome: ProofOutcome) -> &'static [&'static str] {
+    match outcome {
+        ProofOutcome::Accepted => &[
+            "Record the commit and close only if all acceptance gates are covered.",
+            "Keep the bundle available for replay.",
+        ],
+        ProofOutcome::CargoFailed => &[
+            "Fix the code or test failure.",
+            "Rerun the same remote lane with an isolated CARGO_TARGET_DIR.",
+        ],
+        ProofOutcome::ProofInfraBlocked => &[
+            "Refresh read-only RCH telemetry or wait for worker capacity.",
+            "Escalate to the operator if topology remains blocked.",
+        ],
+        ProofOutcome::Cancelled => &[
+            "Rerun the exact lane when capacity is available.",
+            "Keep cancellation separate from code failure.",
+        ],
+        ProofOutcome::Skipped => &[
+            "Record why the lane was skipped.",
+            "Do not count a structured skip as green live proof.",
+        ],
+        ProofOutcome::RedactionError => &[
+            "Repair the redaction policy before sharing artifacts.",
+            "Preserve only redaction-safe summaries.",
+        ],
+    }
+}
+
+fn unix_ms_to_rfc3339(unix_ms: u64) -> String {
+    let Ok(secs) = i64::try_from(unix_ms / 1_000) else {
+        return chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    };
+    let nanos = u32::try_from((unix_ms % 1_000) * 1_000_000).unwrap_or(0);
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn proof_handoff_validation_error(
+    error_type: &'static str,
+    message: String,
+    issues_jsonl: &Path,
+    bead_id: &str,
+) -> ProofCommandResult {
+    let mut payload = json!({
+        "status": "error",
+        "command": "proof",
+        "subcommand": "handoff",
+        "schema_version": PROOF_HANDOFF_SCHEMA,
+        "source": {
+            "issues_jsonl": issues_jsonl.display().to_string(),
+            "bead_id": bead_id,
+        },
+        "error": {
+            "type": error_type,
+            "message": message,
+            "recoverable": true,
+            "next_actions": [
+                "Check the bead id before executing or recording proof work.",
+                "Use Beads as the durable source of truth for the proof handoff."
+            ],
+        },
+    });
+    insert_toon(&mut payload, "Proof handoff refused an unknown bead id.");
+    ProofCommandResult {
+        payload,
+        success: false,
+    }
 }
 
 fn load_graph(args: &ProofCorpusArgs) -> Result<LoadedProofGraph> {
@@ -5001,6 +5668,283 @@ mod tests {
         let file = NamedTempFile::new().expect("create temp text");
         std::fs::write(file.path(), body).expect("write text fixture");
         file
+    }
+
+    fn write_handoff_issue(path: &Path, id: &str, assignee: Option<&str>) {
+        let issue = serde_json::json!({
+            "id": id,
+            "title": "proof handoff fixture",
+            "status": "in_progress",
+            "assignee": assignee,
+            "comments": [
+                {
+                    "id": 41,
+                    "issue_id": id,
+                    "author": "jemanuel",
+                    "text": "existing comment",
+                    "created_at": "2026-05-01T00:00:00Z"
+                }
+            ]
+        });
+        std::fs::write(
+            path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&issue).expect("serialize handoff issue")
+            ),
+        )
+        .expect("write handoff issue fixture");
+    }
+
+    fn read_handoff_issue(path: &Path, id: &str) -> Value {
+        let body = std::fs::read_to_string(path).expect("read handoff issue fixture");
+        body.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).expect("parse handoff issue row"))
+            .find(|value| value["id"] == id)
+            .expect("handoff issue exists")
+    }
+
+    fn handoff_args(
+        issues_jsonl: &Path,
+        outcome: ProofHandoffOutcome,
+        agent_mail_mode: ProofHandoffAgentMailMode,
+    ) -> ProofHandoffArgs {
+        ProofHandoffArgs {
+            issues_jsonl: issues_jsonl.to_path_buf(),
+            bead_id: "flywheel_connectors-angoc.6.3.4".to_owned(),
+            outcome,
+            outcome_reason: None,
+            bundle_path: Some(PathBuf::from(
+                "/tmp/proof/flywheel_connectors-angoc.6.3.4.proof_outcome_bundle.json",
+            )),
+            worker_classification: Some("accepted_remote_proof".to_owned()),
+            blocker_reason: None,
+            agent_name: "SwiftGull".to_owned(),
+            agent_mail_mode,
+            event_log: None,
+            now_unix_ms: Some(NOW),
+        }
+    }
+
+    #[test]
+    fn proof_handoff_writes_standard_comments_for_outcomes() {
+        let cases = [
+            (
+                ProofHandoffOutcome::Accepted,
+                "Code proof accepted",
+                "remote_cargo_passed",
+            ),
+            (
+                ProofHandoffOutcome::CargoFailed,
+                "Code failure",
+                "remote_cargo_failed",
+            ),
+            (
+                ProofHandoffOutcome::ProofInfraBlocked,
+                "Proof infrastructure blocked",
+                "unknown_proof_state",
+            ),
+            (
+                ProofHandoffOutcome::Skipped,
+                "Proof skipped",
+                "operator_skipped",
+            ),
+            (
+                ProofHandoffOutcome::Cancelled,
+                "Proof cancelled",
+                "process_cancelled",
+            ),
+        ];
+        for (outcome, expected_wording, expected_reason) in cases {
+            let tempdir = tempfile::tempdir().expect("tempdir creates");
+            let issues_jsonl = tempdir.path().join("issues.jsonl");
+            write_handoff_issue(
+                &issues_jsonl,
+                "flywheel_connectors-angoc.6.3.4",
+                Some("SwiftGull"),
+            );
+
+            let result = run(&ProofArgs {
+                command: ProofCommand::Handoff(handoff_args(
+                    &issues_jsonl,
+                    outcome,
+                    ProofHandoffAgentMailMode::Disabled,
+                )),
+            })
+            .expect("proof handoff runs");
+
+            assert!(result.success);
+            assert_eq!(result.payload["subcommand"], "handoff");
+            assert_eq!(
+                result.payload["comment"]["outcome"],
+                outcome.to_outcome().as_str()
+            );
+            assert_eq!(result.payload["comment"]["outcome_reason"], expected_reason);
+            let comment_text = result.payload["comment"]["text"]
+                .as_str()
+                .expect("comment text string");
+            assert!(comment_text.contains(expected_wording));
+            assert!(comment_text.contains("Bundle:"));
+
+            let issue = read_handoff_issue(&issues_jsonl, "flywheel_connectors-angoc.6.3.4");
+            let comments = issue["comments"]
+                .as_array()
+                .expect("comments array persisted");
+            assert_eq!(comments.len(), 2);
+            assert_eq!(comments[1]["id"], 42);
+            assert_eq!(comments[1]["author"], "SwiftGull");
+            assert!(
+                comments[1]["text"]
+                    .as_str()
+                    .expect("persisted comment text")
+                    .contains(expected_wording)
+            );
+        }
+    }
+
+    #[test]
+    fn proof_handoff_agent_mail_modes_are_bounded_and_logged() {
+        let cases = [
+            (
+                ProofHandoffAgentMailMode::Healthy,
+                true,
+                true,
+                Value::Null,
+                "mail_thread_updated",
+            ),
+            (
+                ProofHandoffAgentMailMode::Unavailable,
+                true,
+                false,
+                serde_json::json!("agent_mail_unavailable"),
+                "beads_comment_only_mail_unavailable",
+            ),
+            (
+                ProofHandoffAgentMailMode::ReadOnly,
+                true,
+                false,
+                serde_json::json!("agent_mail_read_only"),
+                "beads_comment_only_mail_read_only",
+            ),
+        ];
+        for (mode, attempted, sent, degraded_reason, final_state) in cases {
+            let tempdir = tempfile::tempdir().expect("tempdir creates");
+            let issues_jsonl = tempdir.path().join("issues.jsonl");
+            let event_log = tempdir.path().join("handoff.jsonl");
+            write_handoff_issue(
+                &issues_jsonl,
+                "flywheel_connectors-angoc.6.3.4",
+                Some("SwiftGull"),
+            );
+            let mut args = handoff_args(&issues_jsonl, ProofHandoffOutcome::Accepted, mode);
+            args.event_log = Some(event_log.clone());
+
+            let result = run(&ProofArgs {
+                command: ProofCommand::Handoff(args),
+            })
+            .expect("proof handoff runs");
+
+            assert!(result.success);
+            assert_eq!(result.payload["agent_mail"]["attempted"], attempted);
+            assert_eq!(result.payload["agent_mail"]["sent"], sent);
+            assert_eq!(result.payload["agent_mail"]["retry_attempts"], 0);
+            assert_eq!(
+                result.payload["agent_mail"]["service_repair_attempted"],
+                false
+            );
+            assert_eq!(
+                result.payload["agent_mail"]["service_restart_attempted"],
+                false
+            );
+            assert_eq!(
+                result.payload["agent_mail"]["process_signal_attempted"],
+                false
+            );
+            assert_eq!(
+                result.payload["agent_mail"]["final_coordination_state"],
+                final_state
+            );
+            let serialized =
+                serde_json::to_string(&result.payload).expect("serialize handoff payload");
+            assert!(!serialized.contains("service restart"));
+            assert!(!serialized.contains("service stop"));
+            assert!(!serialized.contains("doctor repair"));
+            assert!(!serialized.contains("doctor reconstruct"));
+
+            let log = std::fs::read_to_string(&event_log).expect("handoff event log");
+            let event: Value = serde_json::from_str(log.trim()).expect("handoff event json");
+            assert_eq!(event["bead_id"], "flywheel_connectors-angoc.6.3.4");
+            assert_eq!(event["comment_id"], 42);
+            assert_eq!(event["mail_attempted"], attempted);
+            assert_eq!(event["mail_degraded_reason"], degraded_reason);
+            assert_eq!(event["final_coordination_state"], final_state);
+        }
+    }
+
+    #[test]
+    fn proof_handoff_unknown_bead_rejects_without_mutating_issues_or_log() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let issues_jsonl = tempdir.path().join("issues.jsonl");
+        let event_log = tempdir.path().join("handoff.jsonl");
+        write_handoff_issue(&issues_jsonl, "flywheel_connectors-other", None);
+        let before = std::fs::read_to_string(&issues_jsonl).expect("read before");
+        let mut args = handoff_args(
+            &issues_jsonl,
+            ProofHandoffOutcome::Accepted,
+            ProofHandoffAgentMailMode::Healthy,
+        );
+        args.event_log = Some(event_log.clone());
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Handoff(args),
+        })
+        .expect("unknown handoff rejects");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["error"]["type"], "unknown-bead-id");
+        let after = std::fs::read_to_string(&issues_jsonl).expect("read after");
+        assert_eq!(after, before);
+        assert!(!event_log.exists());
+    }
+
+    #[test]
+    fn proof_handoff_assignee_conflict_is_observe_only_without_ownership_change() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let issues_jsonl = tempdir.path().join("issues.jsonl");
+        write_handoff_issue(
+            &issues_jsonl,
+            "flywheel_connectors-angoc.6.3.4",
+            Some("OtherAgent"),
+        );
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Handoff(handoff_args(
+                &issues_jsonl,
+                ProofHandoffOutcome::ProofInfraBlocked,
+                ProofHandoffAgentMailMode::Unavailable,
+            )),
+        })
+        .expect("proof handoff runs");
+
+        assert!(result.success);
+        assert_eq!(result.payload["ownership"]["mode"], "observe_only");
+        assert_eq!(result.payload["ownership"]["ownership_modified"], false);
+        assert!(
+            result.payload["ownership"]["warning"]
+                .as_str()
+                .expect("ownership warning")
+                .contains("observe-only")
+        );
+        let issue = read_handoff_issue(&issues_jsonl, "flywheel_connectors-angoc.6.3.4");
+        assert_eq!(issue["assignee"], "OtherAgent");
+        let comments = issue["comments"].as_array().expect("comments array");
+        assert!(
+            comments[1]["text"]
+                .as_str()
+                .expect("comment text")
+                .contains("observe-only")
+        );
     }
 
     #[test]

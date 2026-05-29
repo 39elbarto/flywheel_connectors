@@ -722,6 +722,27 @@ If `rch` or Agent Mail are unavailable, do not restart, repair, or kill shared
 services as part of this workflow. Preserve the evidence, record the
 `infra_blocked` status, and continue with Beads as the coordination surface.
 
+### Proof artifact pressure
+
+Use the artifact pressure report before widening proof queues or after a proof
+lane reports disk-pressure symptoms:
+
+```bash
+fwc proof artifacts --path target/proof --queue <proof-queue.json> --json
+```
+
+The report is read-only. It classifies proof bundles, Cargo target trees,
+scanner outputs, and remote-worker scratch metadata as `active_job`, `current`,
+`stale`, or `unknown_owner`, then summarizes bytes by class and category. When
+the configured pressure threshold is reached, the command reports
+`proof_infra_blocked` so proof lanes stay blocked until a human approves an
+archival plan.
+
+The command never removes artifacts and never generates destructive cleanup
+commands. Its recommendations are operator-approval records with redacted path
+display values plus stable path hashes. Treat them as review input for a human
+cleanup decision, not as authorization to mutate the tree.
+
 ### Fastest path from a failed run to a reproducible case
 
 Use the bundle in this order when a `fwc` scenario or host-backed workflow fails:

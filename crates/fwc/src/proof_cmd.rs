@@ -35,6 +35,7 @@ const RCH_STATUS_SCHEMA: &str = "fcp.fwc.proof.rch-status.v1";
 const PROOF_QUEUE_SCHEMA: &str = "fcp.fwc.proof.queue.v1";
 const PROOF_QUEUE_EVENT_SCHEMA: &str = "fcp.fwc.proof.queue-event.v1";
 const PROOF_OUTCOME_BUNDLE_SCHEMA: &str = "fcp.fwc.proof.outcome-bundle.v1";
+const PROOF_ARTIFACTS_SCHEMA: &str = "fcp.fwc.proof.artifact-pressure.v1";
 const DEFAULT_NEXT_LIMIT: usize = 10;
 const DEFAULT_OUTPUT_PREVIEW_BYTES: usize = 16 * 1024;
 const DEFAULT_PROOF_JOB_TIMEOUT_SECS: u64 = 1_800;
@@ -43,6 +44,8 @@ const MAX_CUSTOM_PROOF_TIMEOUT_SECS: u64 = 3_600;
 const DEFAULT_PROOF_QUEUE_MAX_DEPTH: usize = 64;
 const MAX_PROOF_JOB_ESTIMATED_SLOTS: usize = 32;
 const DEFAULT_PROOF_RUN_ARTIFACT_DIR: &str = "target/proof/fwc-proof-run";
+const DEFAULT_PROOF_ARTIFACT_STALE_AFTER_SECS: u64 = 7 * 24 * 60 * 60;
+const DEFAULT_PROOF_ARTIFACT_PRESSURE_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Arguments for `fwc proof`.
 #[derive(Args, Debug, Clone, Serialize)]
@@ -72,6 +75,8 @@ pub enum ProofCommand {
     Passport(ProofPassportArgs),
     /// Validate proof-bundle freshness and artifact status as deterministic JSON.
     Status(ProofStatusArgs),
+    /// Report proof artifact pressure without deleting or mutating artifacts.
+    Artifacts(ProofArtifactsArgs),
     /// Normalize RCH worker telemetry into a remote-proof capacity decision.
     #[command(name = "rch-status")]
     RchStatus(ProofRchStatusArgs),
@@ -276,6 +281,36 @@ pub struct ProofStatusArgs {
     /// Evaluation time in Unix milliseconds. Defaults to the current clock.
     #[arg(long = "now-unix-ms")]
     pub now_unix_ms: Option<u64>,
+}
+
+/// Arguments for `fwc proof artifacts`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct ProofArtifactsArgs {
+    /// Artifact tree, bundle file, target directory, or scanner output to inspect.
+    #[arg(long = "path", value_name = "PATH", required = true)]
+    pub paths: Vec<PathBuf>,
+
+    /// Optional file-backed proof queue used to identify active and owned artifacts.
+    #[arg(long = "queue", value_name = "PATH")]
+    pub queue: Option<PathBuf>,
+
+    /// Evaluation time in Unix milliseconds. Defaults to the current clock.
+    #[arg(long = "now-unix-ms")]
+    pub now_unix_ms: Option<u64>,
+
+    /// Age threshold used to classify inactive artifacts as stale.
+    #[arg(
+        long = "stale-after-secs",
+        default_value_t = DEFAULT_PROOF_ARTIFACT_STALE_AFTER_SECS
+    )]
+    pub stale_after_secs: u64,
+
+    /// Total-byte threshold where artifact pressure becomes proof-infra blocking.
+    #[arg(
+        long = "pressure-threshold-bytes",
+        default_value_t = DEFAULT_PROOF_ARTIFACT_PRESSURE_THRESHOLD_BYTES
+    )]
+    pub pressure_threshold_bytes: u64,
 }
 
 /// Arguments for `fwc proof rch-status`.
@@ -496,6 +531,91 @@ struct RchCapacityReport {
     warnings: Vec<String>,
     telemetry_parse_errors: Vec<String>,
     next_actions: Vec<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum ProofArtifactCategory {
+    ProofBundle,
+    TargetDir,
+    ScannerOutput,
+    RemoteWorkerScratch,
+    Unknown,
+}
+
+impl ProofArtifactCategory {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProofBundle => "proof_bundle",
+            Self::TargetDir => "target_dir",
+            Self::ScannerOutput => "scanner_output",
+            Self::RemoteWorkerScratch => "remote_worker_scratch",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum ProofArtifactClassification {
+    ActiveJob,
+    Stale,
+    UnknownOwner,
+    Current,
+}
+
+impl ProofArtifactClassification {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActiveJob => "active_job",
+            Self::Stale => "stale",
+            Self::UnknownOwner => "unknown_owner",
+            Self::Current => "current",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProofArtifactEntry {
+    display_path: String,
+    path_hash: String,
+    path_redactions: Vec<String>,
+    category: ProofArtifactCategory,
+    classification: ProofArtifactClassification,
+    bytes: u64,
+    file_count: usize,
+    owner_bead_id: Option<String>,
+    active_job_id: Option<String>,
+    last_referenced_bundle: Option<String>,
+    modified_unix_ms: Option<u64>,
+    age_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProofArtifactRecommendation {
+    path_hash: String,
+    category: ProofArtifactCategory,
+    classification: ProofArtifactClassification,
+    action: &'static str,
+    requires_human_approval: bool,
+    destructive_command_generated: bool,
+    approval_command: String,
+    rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProofArtifactScanContext {
+    roots: Vec<PathBuf>,
+    queue_path: Option<String>,
+    active_targets: Vec<ProofArtifactActiveTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ProofArtifactActiveTarget {
+    job_id: String,
+    bead_id: String,
+    path: PathBuf,
+    last_referenced_bundle: Option<String>,
 }
 
 /// Canonical proof queue lane kinds.
@@ -810,6 +930,7 @@ pub fn run(args: &ProofArgs) -> Result<ProofCommandResult> {
         ProofCommand::Drain(args) => drain_queue(args),
         ProofCommand::Passport(args) => passport(args),
         ProofCommand::Status(args) => status(args),
+        ProofCommand::Artifacts(args) => artifacts(args),
         ProofCommand::RchStatus(args) => rch_status(args),
     }
 }
@@ -1199,6 +1320,110 @@ fn status(args: &ProofStatusArgs) -> Result<ProofCommandResult> {
     insert_toon(
         &mut payload,
         "Validated proof-bundle freshness without executing rerun commands.",
+    );
+    Ok(ProofCommandResult { payload, success })
+}
+
+fn artifacts(args: &ProofArtifactsArgs) -> Result<ProofCommandResult> {
+    let now_unix_ms = args.now_unix_ms.unwrap_or_else(current_unix_ms);
+    let queue = args
+        .queue
+        .as_deref()
+        .map(load_proof_queue)
+        .transpose()
+        .with_context(|| {
+            format!(
+                "loading proof queue for artifact pressure scan `{}`",
+                args.queue
+                    .as_ref()
+                    .map_or_else(|| "<none>".to_owned(), |path| path.display().to_string())
+            )
+        })?;
+    let context = ProofArtifactScanContext {
+        roots: args.paths.clone(),
+        queue_path: args.queue.as_ref().map(|path| path.display().to_string()),
+        active_targets: queue
+            .as_ref()
+            .map_or_else(Vec::new, proof_artifact_active_targets),
+    };
+    let mut artifacts = Vec::new();
+    for path in &args.paths {
+        scan_proof_artifact_path(
+            path,
+            &context,
+            now_unix_ms,
+            args.stale_after_secs,
+            &mut artifacts,
+        )?;
+    }
+    artifacts.sort_by(|left, right| {
+        (
+            left.classification,
+            left.category,
+            left.display_path.as_str(),
+            left.path_hash.as_str(),
+        )
+            .cmp(&(
+                right.classification,
+                right.category,
+                right.display_path.as_str(),
+                right.path_hash.as_str(),
+            ))
+    });
+    let total_bytes = artifacts.iter().map(|entry| entry.bytes).sum::<u64>();
+    let pressure_blocked = args.pressure_threshold_bytes > 0
+        && total_bytes >= args.pressure_threshold_bytes
+        && !artifacts.is_empty();
+    let pressure_status = if pressure_blocked {
+        "proof_infra_blocked"
+    } else if artifacts.iter().any(|entry| {
+        matches!(
+            entry.classification,
+            ProofArtifactClassification::Stale | ProofArtifactClassification::UnknownOwner
+        )
+    }) {
+        "attention_needed"
+    } else {
+        "ok"
+    };
+    let recommendations = proof_artifact_recommendations(&artifacts, pressure_blocked);
+    let success = !pressure_blocked;
+    let mut payload = json!({
+        "status": if success { "ok" } else { "error" },
+        "command": "proof",
+        "subcommand": "artifacts",
+        "schema_version": PROOF_ARTIFACTS_SCHEMA,
+        "source": {
+            "paths": args.paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+            "queue": context.queue_path.clone(),
+        },
+        "now_unix_ms": now_unix_ms,
+        "stale_after_secs": args.stale_after_secs,
+        "pressure_threshold_bytes": args.pressure_threshold_bytes,
+        "pressure_status": pressure_status,
+        "capacity": {
+            "decision": pressure_status,
+            "remote_required_allowed": !pressure_blocked,
+            "blockers": if pressure_blocked { vec!["artifact_pressure"] } else { Vec::<&str>::new() },
+        },
+        "summary": proof_artifact_summary(&artifacts, args.pressure_threshold_bytes, pressure_status),
+        "artifacts": artifacts,
+        "recommendations": recommendations,
+        "cleanup_command_policy": {
+            "automatic_cleanup": false,
+            "human_approval_required": true,
+            "destructive_commands_generated": false,
+            "allowed_action": "operator-approved archival only",
+        },
+        "message": if pressure_blocked {
+            "Artifact pressure reached the configured threshold; proof lanes should stay blocked until a human approves archival."
+        } else {
+            "Reported proof artifact pressure without mutating or cleaning artifact files."
+        },
+    });
+    insert_toon(
+        &mut payload,
+        "Scanned proof artifact pressure without mutating artifact files.",
     );
     Ok(ProofCommandResult { payload, success })
 }
@@ -2069,6 +2294,400 @@ fn proof_queue_jobs(queue: &ProofQueueFile) -> Vec<Value> {
             json!({
                 "rank": rank + 1,
                 "job": job,
+            })
+        })
+        .collect()
+}
+
+fn proof_artifact_active_targets(queue: &ProofQueueFile) -> Vec<ProofArtifactActiveTarget> {
+    let mut targets = Vec::new();
+    for job in &queue.jobs {
+        if !job.state.is_pending() {
+            continue;
+        }
+        if let Some(target_dir) = job.environment.get("CARGO_TARGET_DIR") {
+            targets.push(ProofArtifactActiveTarget {
+                job_id: job.job_id.clone(),
+                bead_id: job.bead_id.clone(),
+                path: PathBuf::from(target_dir),
+                last_referenced_bundle: job.environment.get("PROOF_ARTIFACT_DIR").cloned(),
+            });
+        }
+        if matches!(job.target_dir_policy, ProofTargetDirPolicy::ProbeLocal) {
+            if let Some(working_directory) = &job.working_directory {
+                targets.push(ProofArtifactActiveTarget {
+                    job_id: job.job_id.clone(),
+                    bead_id: job.bead_id.clone(),
+                    path: PathBuf::from(working_directory).join("target"),
+                    last_referenced_bundle: job.environment.get("PROOF_ARTIFACT_DIR").cloned(),
+                });
+            }
+        }
+    }
+    targets.sort_by(|left, right| {
+        (left.bead_id.as_str(), left.job_id.as_str(), &left.path).cmp(&(
+            right.bead_id.as_str(),
+            right.job_id.as_str(),
+            &right.path,
+        ))
+    });
+    targets.dedup_by(|left, right| {
+        left.job_id == right.job_id && left.bead_id == right.bead_id && left.path == right.path
+    });
+    targets
+}
+
+fn scan_proof_artifact_path(
+    path: &Path,
+    context: &ProofArtifactScanContext,
+    now_unix_ms: u64,
+    stale_after_secs: u64,
+    artifacts: &mut Vec<ProofArtifactEntry>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("reading proof artifact metadata `{}`", path.display()))?;
+    if metadata.is_dir() {
+        let category = proof_artifact_category(path, true);
+        if matches!(
+            category,
+            ProofArtifactCategory::TargetDir
+                | ProofArtifactCategory::RemoteWorkerScratch
+                | ProofArtifactCategory::ScannerOutput
+        ) {
+            artifacts.push(build_proof_artifact_entry(
+                path,
+                &metadata,
+                category,
+                context,
+                now_unix_ms,
+                stale_after_secs,
+            )?);
+            return Ok(());
+        }
+        for entry in fs::read_dir(path)
+            .with_context(|| format!("reading proof artifact directory `{}`", path.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("reading entry under `{}`", path.display()))?;
+            scan_proof_artifact_path(
+                &entry.path(),
+                context,
+                now_unix_ms,
+                stale_after_secs,
+                artifacts,
+            )?;
+        }
+        return Ok(());
+    }
+    let category = proof_artifact_category(path, false);
+    if matches!(category, ProofArtifactCategory::Unknown) {
+        return Ok(());
+    }
+    artifacts.push(build_proof_artifact_entry(
+        path,
+        &metadata,
+        category,
+        context,
+        now_unix_ms,
+        stale_after_secs,
+    )?);
+    Ok(())
+}
+
+fn build_proof_artifact_entry(
+    path: &Path,
+    metadata: &fs::Metadata,
+    category: ProofArtifactCategory,
+    context: &ProofArtifactScanContext,
+    now_unix_ms: u64,
+    stale_after_secs: u64,
+) -> Result<ProofArtifactEntry> {
+    let (bytes, file_count) = if metadata.is_dir() {
+        proof_artifact_directory_size(path)?
+    } else {
+        (metadata.len(), 1)
+    };
+    let modified_unix_ms = metadata_modified_unix_ms(metadata);
+    let age_secs = modified_unix_ms.map(|modified| now_unix_ms.saturating_sub(modified) / 1_000);
+    let active_target = proof_artifact_active_target_for_path(path, context);
+    let mut owner_bead_id = active_target
+        .map(|target| target.bead_id.clone())
+        .or_else(|| extract_known_bead_id_from_path(path));
+    if owner_bead_id.is_none() && matches!(category, ProofArtifactCategory::ProofBundle) {
+        owner_bead_id = extract_known_bead_id_from_proof_bundle(path)?;
+    }
+    let classification = if active_target.is_some() {
+        ProofArtifactClassification::ActiveJob
+    } else if owner_bead_id.is_none() {
+        ProofArtifactClassification::UnknownOwner
+    } else if age_secs.is_some_and(|age| age >= stale_after_secs) {
+        ProofArtifactClassification::Stale
+    } else {
+        ProofArtifactClassification::Current
+    };
+    let (display_path, path_redactions) = redacted_artifact_display_path(path, &context.roots);
+    let last_referenced_bundle = active_target
+        .and_then(|target| target.last_referenced_bundle.clone())
+        .or_else(|| {
+            matches!(category, ProofArtifactCategory::ProofBundle).then(|| display_path.clone())
+        });
+    Ok(ProofArtifactEntry {
+        display_path,
+        path_hash: proof_artifact_path_hash(path),
+        path_redactions,
+        category,
+        classification,
+        bytes,
+        file_count,
+        owner_bead_id,
+        active_job_id: active_target.map(|target| target.job_id.clone()),
+        last_referenced_bundle,
+        modified_unix_ms,
+        age_secs,
+    })
+}
+
+fn proof_artifact_directory_size(path: &Path) -> Result<(u64, usize)> {
+    let mut bytes = 0u64;
+    let mut file_count = 0usize;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        let metadata = fs::symlink_metadata(&next)
+            .with_context(|| format!("reading proof artifact metadata `{}`", next.display()))?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&next)
+                .with_context(|| format!("reading proof artifact directory `{}`", next.display()))?
+            {
+                let entry =
+                    entry.with_context(|| format!("reading entry under `{}`", next.display()))?;
+                stack.push(entry.path());
+            }
+        } else if metadata.is_file() {
+            bytes = bytes.saturating_add(metadata.len());
+            file_count += 1;
+        }
+    }
+    Ok((bytes, file_count))
+}
+
+fn proof_artifact_category(path: &Path, is_dir: bool) -> ProofArtifactCategory {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if filename.ends_with(".proof_outcome_bundle.json")
+        || filename.ends_with(".rch_remote_proof.jsonl")
+        || filename == "summary.json"
+        || filename == "trace.jsonl"
+    {
+        return ProofArtifactCategory::ProofBundle;
+    }
+    if components.iter().any(|component| {
+        component.contains("rch")
+            && (component.contains("scratch")
+                || component.contains("worker")
+                || component.contains("remote"))
+    }) {
+        return ProofArtifactCategory::RemoteWorkerScratch;
+    }
+    if components.iter().any(|component| component == "target") {
+        return ProofArtifactCategory::TargetDir;
+    }
+    if components.iter().any(|component| {
+        component.contains("scanner")
+            || component.contains("scan")
+            || component.contains("clippy")
+            || component.contains("cargo-check")
+    }) {
+        return ProofArtifactCategory::ScannerOutput;
+    }
+    if !is_dir && components.iter().any(|component| component == "proof") {
+        return ProofArtifactCategory::ProofBundle;
+    }
+    ProofArtifactCategory::Unknown
+}
+
+fn proof_artifact_active_target_for_path<'a>(
+    path: &Path,
+    context: &'a ProofArtifactScanContext,
+) -> Option<&'a ProofArtifactActiveTarget> {
+    context
+        .active_targets
+        .iter()
+        .find(|target| path.starts_with(&target.path) || target.path.starts_with(path))
+}
+
+fn extract_known_bead_id_from_path(path: &Path) -> Option<String> {
+    let text = path.to_string_lossy();
+    let start = text.find("flywheel_connectors-")?;
+    let tail = &text[start..];
+    let bead = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .collect::<String>();
+    (!bead.is_empty()).then_some(bead)
+}
+
+fn extract_known_bead_id_from_proof_bundle(path: &Path) -> Result<Option<String>> {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        return Ok(None);
+    }
+    let file =
+        File::open(path).with_context(|| format!("opening proof bundle `{}`", path.display()))?;
+    let value: Value = serde_json::from_reader(file)
+        .with_context(|| format!("parsing proof bundle `{}`", path.display()))?;
+    Ok(value
+        .get("bead_id")
+        .and_then(Value::as_str)
+        .filter(|bead| bead.starts_with("flywheel_connectors-"))
+        .map(str::to_owned))
+}
+
+fn metadata_modified_unix_ms(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+fn proof_artifact_path_hash(path: &Path) -> String {
+    format!("blake3:{}", blake3::hash(path.to_string_lossy().as_bytes()))
+}
+
+fn redacted_artifact_display_path(path: &Path, roots: &[PathBuf]) -> (String, Vec<String>) {
+    let relative = proof_artifact_relative_path(path, roots);
+    let mut redactions = BTreeSet::new();
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        let component = component.as_os_str().to_string_lossy();
+        let (display, reason) = redact_path_component(&component);
+        if let Some(reason) = reason {
+            redactions.insert(reason.to_owned());
+        }
+        parts.push(display);
+    }
+    let display_path = if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    };
+    (display_path, redactions.into_iter().collect())
+}
+
+fn proof_artifact_relative_path(path: &Path, roots: &[PathBuf]) -> PathBuf {
+    for root in roots {
+        if root == path {
+            return root
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+        }
+        if let Ok(relative) = path.strip_prefix(root) {
+            if !relative.as_os_str().is_empty() {
+                return relative.to_path_buf();
+            }
+        }
+    }
+    path.file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn redact_path_component(component: &str) -> (String, Option<&'static str>) {
+    let lower = component.to_ascii_lowercase();
+    if lower.contains('@') {
+        return ("[REDACTED]".to_owned(), Some("email_component"));
+    }
+    if value_sensitive_key(&lower) {
+        return ("[REDACTED]".to_owned(), Some("sensitive_component"));
+    }
+    (component.to_owned(), None)
+}
+
+fn proof_artifact_summary(
+    artifacts: &[ProofArtifactEntry],
+    pressure_threshold_bytes: u64,
+    pressure_status: &'static str,
+) -> Value {
+    let mut by_category = BTreeMap::<&'static str, usize>::new();
+    let mut bytes_by_category = BTreeMap::<&'static str, u64>::new();
+    let mut by_classification = BTreeMap::<&'static str, usize>::new();
+    let mut bytes_by_classification = BTreeMap::<&'static str, u64>::new();
+    let mut total_bytes = 0u64;
+    let mut file_count = 0usize;
+    let mut oldest_age_secs = None::<u64>;
+    for artifact in artifacts {
+        let category = artifact.category.as_str();
+        let classification = artifact.classification.as_str();
+        *by_category.entry(category).or_default() += 1;
+        *bytes_by_category.entry(category).or_default() += artifact.bytes;
+        *by_classification.entry(classification).or_default() += 1;
+        *bytes_by_classification.entry(classification).or_default() += artifact.bytes;
+        total_bytes = total_bytes.saturating_add(artifact.bytes);
+        file_count += artifact.file_count;
+        if let Some(age) = artifact.age_secs {
+            oldest_age_secs = Some(oldest_age_secs.map_or(age, |oldest| oldest.max(age)));
+        }
+    }
+    json!({
+        "artifact_count": artifacts.len(),
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+        "pressure_threshold_bytes": pressure_threshold_bytes,
+        "pressure_status": pressure_status,
+        "oldest_age_secs": oldest_age_secs,
+        "by_category": by_category,
+        "bytes_by_category": bytes_by_category,
+        "by_classification": by_classification,
+        "bytes_by_classification": bytes_by_classification,
+    })
+}
+
+fn proof_artifact_recommendations(
+    artifacts: &[ProofArtifactEntry],
+    pressure_blocked: bool,
+) -> Vec<ProofArtifactRecommendation> {
+    artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let (action, rationale) = match artifact.classification {
+                ProofArtifactClassification::ActiveJob => (
+                    "retain_active_job",
+                    "artifact is referenced by an active or queued proof job",
+                ),
+                ProofArtifactClassification::Current if !pressure_blocked => return None,
+                ProofArtifactClassification::Current => (
+                    "operator_review",
+                    "artifact pressure reached the configured threshold",
+                ),
+                ProofArtifactClassification::Stale => (
+                    "operator_approved_archival",
+                    "artifact age exceeds the configured stale threshold",
+                ),
+                ProofArtifactClassification::UnknownOwner => (
+                    "identify_owner_or_archive",
+                    "artifact has no bead owner or active proof-job reference",
+                ),
+            };
+            Some(ProofArtifactRecommendation {
+                path_hash: artifact.path_hash.clone(),
+                category: artifact.category,
+                classification: artifact.classification,
+                action,
+                requires_human_approval: true,
+                destructive_command_generated: false,
+                approval_command: format!(
+                    "operator-approval action={action} path_hash={} path={}",
+                    artifact.path_hash, artifact.display_path
+                ),
+                rationale: rationale.to_owned(),
             })
         })
         .collect()
@@ -5629,6 +6248,191 @@ related = []
             "stale, missing, mismatch, structured skip, and replay rows must not count toward a final PASS"
         );
         assert_redaction_safe(&result.payload);
+    }
+
+    fn write_artifact_fixture(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create artifact fixture parent");
+        }
+        std::fs::write(path, body).expect("write artifact fixture");
+    }
+
+    fn active_artifact_queue(target_dir: &Path) -> ProofQueueFile {
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "CARGO_TARGET_DIR".to_owned(),
+            target_dir.display().to_string(),
+        );
+        environment.insert(
+            "PROOF_ARTIFACT_DIR".to_owned(),
+            target_dir.join("proof").display().to_string(),
+        );
+        ProofQueueFile {
+            schema_version: PROOF_QUEUE_SCHEMA.to_owned(),
+            jobs: vec![ProofJob {
+                schema_version: PROOF_QUEUE_SCHEMA.to_owned(),
+                job_id: "proof-job-active".to_owned(),
+                bead_id: "flywheel_connectors-angoc.6.3.5".to_owned(),
+                lane: ProofLaneKind::CrateTest,
+                state: ProofJobState::Active,
+                priority: 1,
+                estimated_slots: 1,
+                timeout_secs: DEFAULT_PROOF_JOB_TIMEOUT_SECS,
+                remote_required: true,
+                argv: vec![
+                    "cargo".to_owned(),
+                    "test".to_owned(),
+                    "-p".to_owned(),
+                    "fwc".to_owned(),
+                    "proof_artifacts".to_owned(),
+                ],
+                working_directory: None,
+                target_dir_policy: ProofTargetDirPolicy::IsolatedTemp,
+                environment,
+                redaction_policy: vec!["standard-secrets".to_owned()],
+                admission: ProofJobAdmission {
+                    decision: ProofAdmissionDecision::Accepted,
+                    capacity_decision: Some("admissible".to_owned()),
+                    worker_selection: Some("worker-a".to_owned()),
+                    blocker_reason: None,
+                    reason: "test active target".to_owned(),
+                },
+                created_at_unix_ms: NOW,
+                updated_at_unix_ms: NOW,
+            }],
+        }
+    }
+
+    #[test]
+    fn proof_artifacts_classifies_current_unknown_and_active_without_mutating_files() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let root = tempdir.path();
+        let current_bundle =
+            root.join("proof/flywheel_connectors-angoc.6.3.5-current.proof_outcome_bundle.json");
+        let unknown_scan = root.join("scanner-output/scan.json");
+        let active_target = root.join("target/flywheel_connectors-angoc.6.3.5-active");
+        let active_file = active_target.join("debug/libfwc.rlib");
+        write_artifact_fixture(
+            &current_bundle,
+            r#"{"bead_id":"flywheel_connectors-angoc.6.3.5","status":"accepted_remote_proof"}"#,
+        );
+        write_artifact_fixture(&unknown_scan, r#"{"scanner":"ubs"}"#);
+        write_artifact_fixture(&active_file, "compiled bytes");
+        let queue_path = root.join("proof-queue.json");
+        save_proof_queue(&queue_path, &active_artifact_queue(&active_target))
+            .expect("write proof queue");
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Artifacts(ProofArtifactsArgs {
+                paths: vec![root.to_path_buf()],
+                queue: Some(queue_path),
+                now_unix_ms: Some(current_unix_ms()),
+                stale_after_secs: DEFAULT_PROOF_ARTIFACT_STALE_AFTER_SECS,
+                pressure_threshold_bytes: u64::MAX,
+            }),
+        })
+        .expect("scan proof artifacts");
+
+        assert!(result.success);
+        assert_eq!(result.payload["subcommand"], "artifacts");
+        assert_eq!(result.payload["summary"]["by_classification"]["current"], 1);
+        assert_eq!(
+            result.payload["summary"]["by_classification"]["unknown_owner"],
+            1
+        );
+        assert_eq!(
+            result.payload["summary"]["by_classification"]["active_job"],
+            1
+        );
+        assert!(current_bundle.exists());
+        assert!(unknown_scan.exists());
+        assert!(active_file.exists());
+        let serialized = serde_json::to_string(&result.payload).expect("serialize artifacts");
+        assert!(!serialized.contains("rm -rf"));
+        assert!(!serialized.contains("rm "));
+        assert!(!serialized.contains("delete"));
+        assert!(!serialized.contains("unlink"));
+    }
+
+    #[test]
+    fn proof_artifacts_reports_stale_and_threshold_pressure_without_losing_rows() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let root = tempdir.path();
+        let bundle =
+            root.join("proof/flywheel_connectors-angoc.6.3.5-stale.proof_outcome_bundle.json");
+        write_artifact_fixture(
+            &bundle,
+            r#"{"bead_id":"flywheel_connectors-angoc.6.3.5","status":"accepted_remote_proof"}"#,
+        );
+        let stale_result = run(&ProofArgs {
+            command: ProofCommand::Artifacts(ProofArtifactsArgs {
+                paths: vec![root.to_path_buf()],
+                queue: None,
+                now_unix_ms: Some(current_unix_ms() + 2_000),
+                stale_after_secs: 1,
+                pressure_threshold_bytes: u64::MAX,
+            }),
+        })
+        .expect("scan stale proof artifacts");
+        assert!(stale_result.success);
+        assert_eq!(
+            stale_result.payload["summary"]["by_classification"]["stale"],
+            1
+        );
+
+        let blocked_result = run(&ProofArgs {
+            command: ProofCommand::Artifacts(ProofArtifactsArgs {
+                paths: vec![root.to_path_buf()],
+                queue: None,
+                now_unix_ms: Some(current_unix_ms()),
+                stale_after_secs: DEFAULT_PROOF_ARTIFACT_STALE_AFTER_SECS,
+                pressure_threshold_bytes: 1,
+            }),
+        })
+        .expect("scan pressure proof artifacts");
+        assert!(!blocked_result.success);
+        assert_eq!(
+            blocked_result.payload["pressure_status"],
+            "proof_infra_blocked"
+        );
+        assert_eq!(
+            blocked_result.payload["summary"]["artifact_count"],
+            stale_result.payload["summary"]["artifact_count"]
+        );
+        assert!(bundle.exists());
+    }
+
+    #[test]
+    fn proof_artifacts_redacts_sensitive_path_components() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let root = tempdir.path();
+        let bundle = root.join(
+            "proof/secret-token/user@example.com/flywheel_connectors-angoc.6.3.5.proof_outcome_bundle.json",
+        );
+        write_artifact_fixture(
+            &bundle,
+            r#"{"bead_id":"flywheel_connectors-angoc.6.3.5","status":"accepted_remote_proof"}"#,
+        );
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Artifacts(ProofArtifactsArgs {
+                paths: vec![root.to_path_buf()],
+                queue: None,
+                now_unix_ms: Some(current_unix_ms()),
+                stale_after_secs: DEFAULT_PROOF_ARTIFACT_STALE_AFTER_SECS,
+                pressure_threshold_bytes: u64::MAX,
+            }),
+        })
+        .expect("scan redacted proof artifacts");
+
+        assert!(result.success);
+        let serialized = serde_json::to_string(&result.payload).expect("serialize artifacts");
+        assert!(!serialized.contains("secret-token"));
+        assert!(!serialized.contains("user@example.com"));
+        assert!(serialized.contains("sensitive_component"));
+        assert!(serialized.contains("email_component"));
+        assert!(serialized.contains("path_hash"));
+        assert!(bundle.exists());
     }
 
     #[test]

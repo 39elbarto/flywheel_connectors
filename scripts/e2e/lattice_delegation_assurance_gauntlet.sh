@@ -5,7 +5,9 @@ SCRIPT_NAME="scripts/e2e/lattice_delegation_assurance_gauntlet.sh"
 RUN_ID="${RUN_ID:-lattice-assurance-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_DIR="${OUT_DIR:-target/fcp-crypto-pq}"
 ARTIFACT="${ARTIFACT:-${OUT_DIR}/lattice-delegation-assurance-gauntlet.${RUN_ID}.jsonl}"
-TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-lattice-assurance-${RUN_ID}}"
+# Keep proof runs isolated from a workstation-wide CARGO_TARGET_DIR; rch syncs
+# the target dir after remote lanes, so shared caches make the gauntlet unbounded.
+TARGET_DIR="${FCP_LATTICE_CARGO_TARGET_DIR:-/tmp/fcp-lattice-assurance-${RUN_ID}}"
 ARTIFACT_STAGE_ROOT="${ARTIFACT_STAGE_ROOT:-${OUT_DIR}/rch-lattice-evidence/${RUN_ID}}"
 LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
 RCH_BIN="${RCH_BIN:-rch}"
@@ -2027,8 +2029,8 @@ run_rch_cargo "criterion_lattice_crypto_bench" \
   "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo bench --locked -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- --sample-size 10 --measurement-time 1 --warm-up-time 1" \
   cargo bench --locked -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- --sample-size 10 --measurement-time 1 --warm-up-time 1
 
-run_rch_cargo "rustfmt_lattice_surfaces" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> rustfmt --edition 2024 --check lattice proof Rust surfaces" \
+run_and_capture "rustfmt_lattice_surfaces" \
+  "rustfmt --edition 2024 --check lattice proof Rust surfaces" \
   rustfmt --edition 2024 --check \
     crates/fcp-crypto-pq/tests/representation_profile.rs \
     crates/fcp-policy/tests/lattice_delegation_proptest.rs \

@@ -226,3 +226,93 @@ fn proof_run_cli_refuses_remote_execution_before_spawning_rch_when_capacity_is_q
         "Remote-required proof execution refused by RCH capacity preflight."
     );
 }
+
+#[test]
+fn proof_queue_cli_enqueues_statuses_and_drains_without_execution() {
+    let tempdir = tempfile::tempdir().expect("tempdir creates");
+    let queue_path = tempdir.path().join("proof-queue.json");
+    let event_log_path = tempdir.path().join("events.jsonl");
+    let workers_path = tempdir.path().join("workers.json");
+    write_json(
+        &workers_path,
+        &json!({"workers": [{"id": "worker-a", "healthy": true, "available_slots": 1, "total_slots": 4}]}),
+    );
+
+    let enqueue = run_fwc(&[
+        "--json",
+        "proof",
+        "enqueue",
+        "--queue",
+        queue_path.to_str().expect("queue path is UTF-8"),
+        "--bead-id",
+        "flywheel_connectors-angoc.6.3.2",
+        "--lane",
+        "crate-test",
+        "--crate",
+        "fwc",
+        "--test-filter",
+        "proof_queue",
+        "--workers-json",
+        workers_path.to_str().expect("workers path is UTF-8"),
+        "--event-log",
+        event_log_path.to_str().expect("event log path is UTF-8"),
+    ]);
+    assert!(
+        enqueue.status.success(),
+        "enqueue should succeed:\\n{}",
+        String::from_utf8_lossy(&enqueue.stderr)
+    );
+    let enqueue_payload = stdout_json(&enqueue);
+    assert_eq!(enqueue_payload["subcommand"], "enqueue");
+    assert_eq!(enqueue_payload["job"]["state"], "active");
+    assert_eq!(enqueue_payload["job"]["admission"]["decision"], "accepted");
+    assert_eq!(enqueue_payload["job"]["target_dir_policy"], "isolated-temp");
+    assert_eq!(
+        enqueue_payload["job"]["environment"]["CARGO_INCREMENTAL"],
+        "0"
+    );
+    let job_id = enqueue_payload["job"]["job_id"]
+        .as_str()
+        .expect("job id")
+        .to_owned();
+
+    let status = run_fwc(&[
+        "--json",
+        "proof",
+        "queue",
+        "--queue",
+        queue_path.to_str().expect("queue path is UTF-8"),
+    ]);
+    assert!(status.status.success());
+    let status_payload = stdout_json(&status);
+    assert_eq!(status_payload["subcommand"], "queue");
+    assert_eq!(status_payload["summary"]["pending_jobs"], 1);
+    assert_eq!(status_payload["jobs"][0]["job"]["argv"][0], "cargo");
+
+    let drain = run_fwc(&[
+        "--json",
+        "proof",
+        "drain",
+        "--queue",
+        queue_path.to_str().expect("queue path is UTF-8"),
+        "--cancel-job",
+        &job_id,
+        "--reason",
+        "duplicate queued proof",
+        "--event-log",
+        event_log_path.to_str().expect("event log path is UTF-8"),
+    ]);
+    assert!(
+        drain.status.success(),
+        "drain should succeed:\\n{}",
+        String::from_utf8_lossy(&drain.stderr)
+    );
+    let drain_payload = stdout_json(&drain);
+    assert_eq!(drain_payload["summary"]["pending_jobs"], 0);
+    assert_eq!(drain_payload["jobs"][0]["job"]["state"], "cancelled");
+    let event_log = std::fs::read_to_string(event_log_path).expect("event log reads");
+    let events = event_log.lines().collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert!(events[0].contains("\"event\":\"enqueue\""));
+    assert!(events[1].contains("\"event\":\"cancel\""));
+}

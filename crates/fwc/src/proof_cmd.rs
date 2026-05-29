@@ -7,13 +7,14 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use fcp_evidence::{
     ClaimId, ClaimNode, ClaimStatus, EvidenceKind, EvidenceNode, ObservedProofArtifact,
     ProofBundleRegistry, ProofBundleValidationReport, ProofBundleValidator, ProofGapStatus,
@@ -24,15 +25,22 @@ use fcp_evidence::{
     RerunCommand, SupportEdge, SupportRelationship,
 };
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::readiness::{idempotency_label, risk_level_label, safety_tier_label};
 
 const CAPABILITY_PASSPORT_SCHEMA: &str = "fcp.capability-passport.v1";
 const RCH_STATUS_SCHEMA: &str = "fcp.fwc.proof.rch-status.v1";
+const PROOF_QUEUE_SCHEMA: &str = "fcp.fwc.proof.queue.v1";
+const PROOF_QUEUE_EVENT_SCHEMA: &str = "fcp.fwc.proof.queue-event.v1";
 const DEFAULT_NEXT_LIMIT: usize = 10;
 const DEFAULT_OUTPUT_PREVIEW_BYTES: usize = 16 * 1024;
+const DEFAULT_PROOF_JOB_TIMEOUT_SECS: u64 = 1_800;
+const MAX_PROOF_JOB_TIMEOUT_SECS: u64 = 7_200;
+const MAX_CUSTOM_PROOF_TIMEOUT_SECS: u64 = 3_600;
+const DEFAULT_PROOF_QUEUE_MAX_DEPTH: usize = 64;
+const MAX_PROOF_JOB_ESTIMATED_SLOTS: usize = 32;
 
 /// Arguments for `fwc proof`.
 #[derive(Args, Debug, Clone, Serialize)]
@@ -52,6 +60,12 @@ pub enum ProofCommand {
     Explain(ProofExplainArgs),
     /// Plan or explicitly execute one known redaction-safe rerun command.
     Run(ProofRunArgs),
+    /// Add a bounded proof job to a file-backed queue without executing it.
+    Enqueue(ProofEnqueueArgs),
+    /// Show file-backed proof queue state.
+    Queue(ProofQueueArgs),
+    /// Mark queued proof jobs drained or cancelled without deleting them.
+    Drain(ProofDrainArgs),
     /// Generate connector capability passports from manifests and proof state.
     Passport(ProofPassportArgs),
     /// Validate proof-bundle freshness and artifact status as deterministic JSON.
@@ -121,6 +135,106 @@ pub struct ProofRunArgs {
     /// Optional read-only RCH telemetry used to refuse remote-required execution before spawning.
     #[command(flatten)]
     pub rch_capacity: ProofRchStatusArgs,
+}
+
+/// Arguments for `fwc proof enqueue`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct ProofEnqueueArgs {
+    /// File-backed proof queue JSON document.
+    #[arg(long, value_name = "PATH")]
+    pub queue: PathBuf,
+
+    /// Owning Beads issue id.
+    #[arg(long = "bead-id", value_name = "ID")]
+    pub bead_id: String,
+
+    /// Canonical proof lane kind.
+    #[arg(long, value_enum)]
+    pub lane: ProofLaneKind,
+
+    /// Priority where 1 is highest.
+    #[arg(long, default_value_t = 2)]
+    pub priority: u8,
+
+    /// Maximum runtime for this job if a later drain executor runs it.
+    #[arg(long = "timeout-secs", default_value_t = DEFAULT_PROOF_JOB_TIMEOUT_SECS)]
+    pub timeout_secs: u64,
+
+    /// Estimated remote worker slots required by the lane.
+    #[arg(long = "estimated-slots", default_value_t = 1)]
+    pub estimated_slots: usize,
+
+    /// Maximum pending jobs allowed in the queue file.
+    #[arg(long = "max-depth", default_value_t = DEFAULT_PROOF_QUEUE_MAX_DEPTH)]
+    pub max_depth: usize,
+
+    /// Permit local execution for this queued job. Remote is required by default.
+    #[arg(long = "allow-local", default_value_t = false)]
+    pub allow_local: bool,
+
+    /// Mark a custom lane as explicitly reviewed by the operator/agent.
+    #[arg(long = "reviewed-custom", default_value_t = false)]
+    pub reviewed_custom: bool,
+
+    /// Crate name for `crate-test` lanes.
+    #[arg(long = "crate", value_name = "CRATE")]
+    pub crate_name: Option<String>,
+
+    /// Optional test filter for `crate-test` lanes.
+    #[arg(long = "test-filter", value_name = "FILTER")]
+    pub test_filter: Option<String>,
+
+    /// Probe directory for `probe-check` lanes.
+    #[arg(long = "probe-dir", value_name = "PATH")]
+    pub probe_dir: Option<PathBuf>,
+
+    /// Working directory for scanner/custom lanes.
+    #[arg(long = "working-directory", value_name = "PATH")]
+    pub working_directory: Option<PathBuf>,
+
+    /// Explicit argv item for scanner/custom lanes. Repeat once per argument.
+    #[arg(long = "arg", value_name = "ARG")]
+    pub argv: Vec<String>,
+
+    /// Redaction policy tags that later evidence capture must apply.
+    #[arg(long = "redaction-policy", value_name = "POLICY")]
+    pub redaction_policy: Vec<String>,
+
+    /// Optional read-only RCH telemetry used to classify admission before execution.
+    #[command(flatten)]
+    pub rch_capacity: ProofRchStatusArgs,
+
+    /// Optional JSONL transition log to append one redaction-safe event per change.
+    #[arg(long = "event-log", value_name = "PATH")]
+    pub event_log: Option<PathBuf>,
+}
+
+/// Arguments for `fwc proof queue`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct ProofQueueArgs {
+    /// File-backed proof queue JSON document.
+    #[arg(long, value_name = "PATH")]
+    pub queue: PathBuf,
+}
+
+/// Arguments for `fwc proof drain`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct ProofDrainArgs {
+    /// File-backed proof queue JSON document.
+    #[arg(long, value_name = "PATH")]
+    pub queue: PathBuf,
+
+    /// Cancel one queued/blocked job instead of draining every pending job.
+    #[arg(long = "cancel-job", value_name = "JOB_ID")]
+    pub cancel_job: Option<String>,
+
+    /// Final state reason recorded on affected jobs.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+
+    /// Optional JSONL transition log to append one redaction-safe event per change.
+    #[arg(long = "event-log", value_name = "PATH")]
+    pub event_log: Option<PathBuf>,
 }
 
 /// Arguments for `fwc proof passport`.
@@ -275,6 +389,151 @@ struct RchCapacityReport {
     warnings: Vec<String>,
     telemetry_parse_errors: Vec<String>,
     next_actions: Vec<&'static str>,
+}
+
+/// Canonical proof queue lane kinds.
+#[derive(ValueEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum ProofLaneKind {
+    Fmt,
+    WorkspaceCheck,
+    WorkspaceClippy,
+    CrateTest,
+    ProbeCheck,
+    ScannerCommand,
+    Custom,
+}
+
+impl ProofLaneKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fmt => "fmt",
+            Self::WorkspaceCheck => "workspace-check",
+            Self::WorkspaceClippy => "workspace-clippy",
+            Self::CrateTest => "crate-test",
+            Self::ProbeCheck => "probe-check",
+            Self::ScannerCommand => "scanner-command",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ProofJobState {
+    Active,
+    Queued,
+    Blocked,
+    Drained,
+    Cancelled,
+}
+
+impl ProofJobState {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Queued => "queued",
+            Self::Blocked => "blocked",
+            Self::Drained => "drained",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    const fn is_pending(&self) -> bool {
+        matches!(self, Self::Active | Self::Queued | Self::Blocked)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ProofAdmissionDecision {
+    Accepted,
+    QueuedCapacity,
+    BlockedCapacity,
+}
+
+impl ProofAdmissionDecision {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::QueuedCapacity => "queued-capacity",
+            Self::BlockedCapacity => "blocked-capacity",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ProofTargetDirPolicy {
+    None,
+    IsolatedTemp,
+    ProbeLocal,
+    OperatorReviewed,
+}
+
+impl ProofTargetDirPolicy {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::IsolatedTemp => "isolated-temp",
+            Self::ProbeLocal => "probe-local",
+            Self::OperatorReviewed => "operator-reviewed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ProofJobAdmission {
+    decision: ProofAdmissionDecision,
+    capacity_decision: Option<String>,
+    worker_selection: Option<String>,
+    blocker_reason: Option<String>,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ProofJob {
+    schema_version: String,
+    job_id: String,
+    bead_id: String,
+    lane: ProofLaneKind,
+    state: ProofJobState,
+    priority: u8,
+    estimated_slots: usize,
+    timeout_secs: u64,
+    remote_required: bool,
+    argv: Vec<String>,
+    working_directory: Option<String>,
+    target_dir_policy: ProofTargetDirPolicy,
+    environment: BTreeMap<String, String>,
+    redaction_policy: Vec<String>,
+    admission: ProofJobAdmission,
+    created_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ProofQueueFile {
+    schema_version: String,
+    jobs: Vec<ProofJob>,
+}
+
+impl Default for ProofQueueFile {
+    fn default() -> Self {
+        Self {
+            schema_version: PROOF_QUEUE_SCHEMA.to_owned(),
+            jobs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProofJobMaterialization {
+    argv: Vec<String>,
+    working_directory: Option<String>,
+    target_dir_policy: ProofTargetDirPolicy,
+    environment: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -439,6 +698,9 @@ pub fn run(args: &ProofArgs) -> Result<ProofCommandResult> {
         ProofCommand::Next(args) => next(args),
         ProofCommand::Explain(args) => explain(args),
         ProofCommand::Run(args) => run_known_command(args),
+        ProofCommand::Enqueue(args) => enqueue(args),
+        ProofCommand::Queue(args) => queue_status(args),
+        ProofCommand::Drain(args) => drain_queue(args),
         ProofCommand::Passport(args) => passport(args),
         ProofCommand::Status(args) => status(args),
         ProofCommand::RchStatus(args) => rch_status(args),
@@ -611,6 +873,151 @@ fn run_known_command(args: &ProofRunArgs) -> Result<ProofCommandResult> {
     insert_toon(
         &mut payload,
         "Prepared a fail-closed ProofGraph rerun plan.",
+    );
+    Ok(ProofCommandResult { payload, success })
+}
+
+fn enqueue(args: &ProofEnqueueArgs) -> Result<ProofCommandResult> {
+    let mut queue = load_proof_queue(&args.queue)?;
+    let now_unix_ms = current_unix_ms();
+    let pending_jobs = queue
+        .jobs
+        .iter()
+        .filter(|job| job.state.is_pending())
+        .count();
+    if pending_jobs >= args.max_depth {
+        return Ok(proof_queue_validation_error(
+            "queue-depth-exceeded",
+            format!(
+                "proof queue has {pending_jobs} pending job(s), at or above max-depth {}",
+                args.max_depth
+            ),
+            &args.queue,
+        ));
+    }
+    let job = match build_proof_job(args, now_unix_ms, &queue) {
+        Ok(job) => job,
+        Err(error) => {
+            return Ok(proof_queue_validation_error(
+                "invalid-proof-job",
+                error.to_string(),
+                &args.queue,
+            ));
+        }
+    };
+    let success = job.state != ProofJobState::Blocked;
+    queue.jobs.push(job.clone());
+    sort_proof_jobs(&mut queue.jobs);
+    save_proof_queue(&args.queue, &queue)?;
+    let jsonl_event = proof_queue_event_jsonl("enqueue", None, &job)?;
+    append_proof_queue_event(args.event_log.as_deref(), &jsonl_event)?;
+
+    let mut payload = json!({
+        "status": if success { "ok" } else { "error" },
+        "command": "proof",
+        "subcommand": "enqueue",
+        "schema_version": PROOF_QUEUE_SCHEMA,
+        "queue_path": args.queue.display().to_string(),
+        "job": job,
+        "summary": proof_queue_summary(&queue),
+        "jsonl_event": jsonl_event,
+        "message": if success {
+            "Proof job admitted into the bounded queue without executing Cargo."
+        } else {
+            "Proof job recorded as blocked; remote-required execution must not start."
+        },
+    });
+    insert_toon(
+        &mut payload,
+        "Admitted a bounded proof job without executing its command.",
+    );
+    Ok(ProofCommandResult { payload, success })
+}
+
+fn queue_status(args: &ProofQueueArgs) -> Result<ProofCommandResult> {
+    let queue = load_proof_queue(&args.queue)?;
+    let mut payload = json!({
+        "status": "ok",
+        "command": "proof",
+        "subcommand": "queue",
+        "schema_version": PROOF_QUEUE_SCHEMA,
+        "queue_path": args.queue.display().to_string(),
+        "summary": proof_queue_summary(&queue),
+        "jobs": proof_queue_jobs(&queue),
+        "message": "Rendered bounded proof queue state without executing any job.",
+    });
+    insert_toon(
+        &mut payload,
+        "Rendered proof queue state without executing Cargo or RCH.",
+    );
+    Ok(ok(payload))
+}
+
+fn drain_queue(args: &ProofDrainArgs) -> Result<ProofCommandResult> {
+    let mut queue = load_proof_queue(&args.queue)?;
+    let now_unix_ms = current_unix_ms();
+    let reason = args
+        .reason
+        .as_deref()
+        .unwrap_or(if args.cancel_job.is_some() {
+            "cancelled by proof drain request"
+        } else {
+            "drained without execution"
+        });
+    let mut affected = Vec::new();
+    let mut jsonl_events = Vec::new();
+    for job in &mut queue.jobs {
+        let target_matches = args
+            .cancel_job
+            .as_ref()
+            .is_none_or(|target| target == &job.job_id);
+        if target_matches && job.state.is_pending() {
+            let previous_state = job.state.as_str();
+            job.state = if args.cancel_job.is_some() {
+                ProofJobState::Cancelled
+            } else {
+                ProofJobState::Drained
+            };
+            job.updated_at_unix_ms = now_unix_ms;
+            job.admission.reason = reason.to_owned();
+            let event_kind = if args.cancel_job.is_some() {
+                "cancel"
+            } else {
+                "drain"
+            };
+            jsonl_events.push(proof_queue_event_jsonl(
+                event_kind,
+                Some(previous_state),
+                job,
+            )?);
+            affected.push(job.job_id.clone());
+        }
+    }
+    sort_proof_jobs(&mut queue.jobs);
+    save_proof_queue(&args.queue, &queue)?;
+    for event in &jsonl_events {
+        append_proof_queue_event(args.event_log.as_deref(), event)?;
+    }
+    let success = args.cancel_job.is_none() || !affected.is_empty();
+    let mut payload = json!({
+        "status": if success { "ok" } else { "error" },
+        "command": "proof",
+        "subcommand": "drain",
+        "schema_version": PROOF_QUEUE_SCHEMA,
+        "queue_path": args.queue.display().to_string(),
+        "affected_jobs": affected,
+        "summary": proof_queue_summary(&queue),
+        "jobs": proof_queue_jobs(&queue),
+        "jsonl_events": jsonl_events,
+        "message": if success {
+            "Recorded final queue state without deleting queue entries."
+        } else {
+            "No pending job matched the requested cancellation id."
+        },
+    });
+    insert_toon(
+        &mut payload,
+        "Recorded non-destructive proof queue drain state.",
     );
     Ok(ProofCommandResult { payload, success })
 }
@@ -1124,6 +1531,470 @@ fn rch_capacity_next_actions(decision: &str) -> Vec<&'static str> {
             vec!["Fix or refresh malformed RCH telemetry JSON before using this decision."]
         }
         _ => vec!["Inspect RCH telemetry shape and add a fixture before relying on this status."],
+    }
+}
+
+fn build_proof_job(
+    args: &ProofEnqueueArgs,
+    now_unix_ms: u64,
+    queue: &ProofQueueFile,
+) -> Result<ProofJob> {
+    validate_bead_id(&args.bead_id)?;
+    validate_proof_job_bounds(args)?;
+    let remote_required = !args.allow_local;
+    let capacity_report = remote_required
+        .then(|| rch_capacity_report_from_args(&args.rch_capacity))
+        .filter(|_| rch_capacity_input_present(&args.rch_capacity));
+    let job_id = format!(
+        "proofjob-{}-{}-{now_unix_ms}",
+        safe_target_slug(&args.bead_id),
+        args.lane.as_str()
+    );
+    let materialized = materialize_proof_lane(args, &job_id)?;
+    let active_slots = queue
+        .jobs
+        .iter()
+        .filter(|job| job.state == ProofJobState::Active)
+        .map(|job| job.estimated_slots)
+        .sum();
+    let (state, admission) = proof_job_admission(
+        remote_required,
+        capacity_report.as_ref(),
+        active_slots,
+        args.estimated_slots,
+    );
+
+    Ok(ProofJob {
+        schema_version: PROOF_QUEUE_SCHEMA.to_owned(),
+        job_id,
+        bead_id: args.bead_id.clone(),
+        lane: args.lane,
+        state,
+        priority: args.priority,
+        estimated_slots: args.estimated_slots,
+        timeout_secs: args.timeout_secs,
+        remote_required,
+        argv: materialized.argv,
+        working_directory: materialized.working_directory,
+        target_dir_policy: materialized.target_dir_policy,
+        environment: materialized.environment,
+        redaction_policy: proof_job_redaction_policy(args),
+        admission,
+        created_at_unix_ms: now_unix_ms,
+        updated_at_unix_ms: now_unix_ms,
+    })
+}
+
+fn validate_bead_id(bead_id: &str) -> Result<()> {
+    let valid = bead_id.starts_with("flywheel_connectors-")
+        && bead_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    if valid {
+        Ok(())
+    } else {
+        bail!("proof jobs require a concrete flywheel_connectors-* bead id")
+    }
+}
+
+fn validate_proof_job_bounds(args: &ProofEnqueueArgs) -> Result<()> {
+    if args.priority == 0 {
+        bail!("proof job priority must be >= 1");
+    }
+    if args.max_depth == 0 {
+        bail!("proof queue max-depth must be >= 1");
+    }
+    if args.estimated_slots == 0 {
+        bail!("proof job estimated-slots must be >= 1");
+    }
+    if args.estimated_slots > MAX_PROOF_JOB_ESTIMATED_SLOTS {
+        bail!("proof job estimated-slots must be <= {MAX_PROOF_JOB_ESTIMATED_SLOTS}");
+    }
+    if args.timeout_secs == 0 || args.timeout_secs > MAX_PROOF_JOB_TIMEOUT_SECS {
+        bail!("proof job timeout must be between 1 and {MAX_PROOF_JOB_TIMEOUT_SECS} seconds");
+    }
+    if args.lane == ProofLaneKind::Custom {
+        if !args.reviewed_custom {
+            bail!("custom proof jobs require --reviewed-custom");
+        }
+        if args.timeout_secs > MAX_CUSTOM_PROOF_TIMEOUT_SECS {
+            bail!("custom proof jobs are capped at {MAX_CUSTOM_PROOF_TIMEOUT_SECS} seconds");
+        }
+    }
+    Ok(())
+}
+
+fn proof_job_redaction_policy(args: &ProofEnqueueArgs) -> Vec<String> {
+    if args.redaction_policy.is_empty() {
+        vec!["standard-secrets".to_owned(), "provider-pii".to_owned()]
+    } else {
+        args.redaction_policy.clone()
+    }
+}
+
+fn proof_job_target_dir(bead_id: &str, job_id: &str) -> String {
+    format!(
+        "/tmp/fcp-proof-{}-{}",
+        safe_target_slug(bead_id),
+        safe_target_slug(job_id)
+    )
+}
+
+fn materialize_proof_lane(
+    args: &ProofEnqueueArgs,
+    job_id: &str,
+) -> Result<ProofJobMaterialization> {
+    let working_directory = args
+        .working_directory
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let mut cargo_env = BTreeMap::new();
+    cargo_env.insert(
+        "CARGO_TARGET_DIR".to_owned(),
+        proof_job_target_dir(&args.bead_id, job_id),
+    );
+    cargo_env.insert("CARGO_INCREMENTAL".to_owned(), "0".to_owned());
+    let materialized = match args.lane {
+        ProofLaneKind::Fmt => ProofJobMaterialization {
+            argv: vec!["cargo".to_owned(), "fmt".to_owned(), "--check".to_owned()],
+            working_directory,
+            target_dir_policy: ProofTargetDirPolicy::None,
+            environment: BTreeMap::new(),
+        },
+        ProofLaneKind::WorkspaceCheck => ProofJobMaterialization {
+            argv: vec![
+                "cargo".to_owned(),
+                "check".to_owned(),
+                "--workspace".to_owned(),
+                "--all-targets".to_owned(),
+            ],
+            working_directory,
+            target_dir_policy: ProofTargetDirPolicy::IsolatedTemp,
+            environment: cargo_env,
+        },
+        ProofLaneKind::WorkspaceClippy => ProofJobMaterialization {
+            argv: vec![
+                "cargo".to_owned(),
+                "clippy".to_owned(),
+                "--workspace".to_owned(),
+                "--all-targets".to_owned(),
+                "--".to_owned(),
+                "-D".to_owned(),
+                "warnings".to_owned(),
+            ],
+            working_directory,
+            target_dir_policy: ProofTargetDirPolicy::IsolatedTemp,
+            environment: cargo_env,
+        },
+        ProofLaneKind::CrateTest => {
+            let crate_name = args
+                .crate_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .context("crate-test proof jobs require --crate")?;
+            let mut argv = vec!["cargo".to_owned(), "test".to_owned(), "-p".to_owned()];
+            argv.push(crate_name.to_owned());
+            if let Some(filter) = args
+                .test_filter
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                argv.push(filter.to_owned());
+            }
+            ProofJobMaterialization {
+                argv,
+                working_directory,
+                target_dir_policy: ProofTargetDirPolicy::IsolatedTemp,
+                environment: cargo_env,
+            }
+        }
+        ProofLaneKind::ProbeCheck => {
+            let probe_dir = args
+                .probe_dir
+                .as_ref()
+                .context("probe-check proof jobs require --probe-dir")?;
+            ProofJobMaterialization {
+                argv: vec!["cargo".to_owned(), "check".to_owned()],
+                working_directory: Some(probe_dir.display().to_string()),
+                target_dir_policy: ProofTargetDirPolicy::ProbeLocal,
+                environment: cargo_env,
+            }
+        }
+        ProofLaneKind::ScannerCommand | ProofLaneKind::Custom => {
+            if args.argv.is_empty() {
+                bail!(
+                    "{} proof jobs require at least one --arg item",
+                    args.lane.as_str()
+                );
+            }
+            ProofJobMaterialization {
+                argv: args.argv.clone(),
+                working_directory,
+                target_dir_policy: ProofTargetDirPolicy::OperatorReviewed,
+                environment: BTreeMap::new(),
+            }
+        }
+    };
+    Ok(materialized)
+}
+
+fn proof_job_admission(
+    remote_required: bool,
+    capacity_report: Option<&RchCapacityReport>,
+    active_slots: usize,
+    estimated_slots: usize,
+) -> (ProofJobState, ProofJobAdmission) {
+    let Some(report) = capacity_report else {
+        return (
+            ProofJobState::Queued,
+            ProofJobAdmission {
+                decision: if remote_required {
+                    ProofAdmissionDecision::QueuedCapacity
+                } else {
+                    ProofAdmissionDecision::Accepted
+                },
+                capacity_decision: remote_required.then(|| "missing_input".to_owned()),
+                worker_selection: None,
+                blocker_reason: None,
+                reason: if remote_required {
+                    "queued without capacity input; executor must re-check RCH before start"
+                } else {
+                    "queued local-permitted proof job"
+                }
+                .to_owned(),
+            },
+        );
+    };
+    match report.decision {
+        "admissible" => {
+            let has_slot = active_slots.saturating_add(estimated_slots) <= report.available_slots;
+            (
+                if has_slot {
+                    ProofJobState::Active
+                } else {
+                    ProofJobState::Queued
+                },
+                ProofJobAdmission {
+                    decision: if has_slot {
+                        ProofAdmissionDecision::Accepted
+                    } else {
+                        ProofAdmissionDecision::QueuedCapacity
+                    },
+                    capacity_decision: Some(report.decision.to_owned()),
+                    worker_selection: report.selected_worker.clone(),
+                    blocker_reason: None,
+                    reason: if has_slot {
+                        "remote capacity currently admissible and slot budget available"
+                    } else {
+                        "remote capacity exists but queue slot budget is already active"
+                    }
+                    .to_owned(),
+                },
+            )
+        }
+        "queued" => (
+            ProofJobState::Queued,
+            ProofJobAdmission {
+                decision: ProofAdmissionDecision::QueuedCapacity,
+                capacity_decision: Some(report.decision.to_owned()),
+                worker_selection: report.selected_worker.clone(),
+                blocker_reason: None,
+                reason: "remote workers are healthy but no slot is currently available".to_owned(),
+            },
+        ),
+        other => (
+            ProofJobState::Blocked,
+            ProofJobAdmission {
+                decision: ProofAdmissionDecision::BlockedCapacity,
+                capacity_decision: Some(other.to_owned()),
+                worker_selection: report.selected_worker.clone(),
+                blocker_reason: report
+                    .blockers
+                    .first()
+                    .cloned()
+                    .or_else(|| Some(other.to_owned())),
+                reason: "remote-required proof blocked by RCH capacity preflight".to_owned(),
+            },
+        ),
+    }
+}
+
+fn load_proof_queue(path: &Path) -> Result<ProofQueueFile> {
+    if !path.exists() {
+        return Ok(ProofQueueFile::default());
+    }
+    let file =
+        File::open(path).with_context(|| format!("opening proof queue `{}`", path.display()))?;
+    let queue: ProofQueueFile = serde_json::from_reader(file)
+        .with_context(|| format!("parsing proof queue `{}`", path.display()))?;
+    if queue.schema_version != PROOF_QUEUE_SCHEMA {
+        bail!(
+            "proof queue `{}` has unsupported schema `{}`",
+            path.display(),
+            queue.schema_version
+        );
+    }
+    Ok(queue)
+}
+
+fn save_proof_queue(path: &Path, queue: &ProofQueueFile) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating proof queue directory `{}`", parent.display()))?;
+    }
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(queue).expect("proof queue serializes"),
+    )
+    .with_context(|| format!("writing proof queue `{}`", path.display()))
+}
+
+fn append_proof_queue_event(path: Option<&Path>, jsonl_event: &str) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("creating proof event-log directory `{}`", parent.display())
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening proof event log `{}`", path.display()))?;
+    file.write_all(jsonl_event.as_bytes())
+        .with_context(|| format!("writing proof event log `{}`", path.display()))?;
+    file.write_all(b"\n")
+        .with_context(|| format!("terminating proof event log `{}`", path.display()))
+}
+
+fn proof_queue_event_jsonl(
+    event: &'static str,
+    previous_state: Option<&'static str>,
+    job: &ProofJob,
+) -> Result<String> {
+    let value = json!({
+        "schema_version": PROOF_QUEUE_EVENT_SCHEMA,
+        "event": event,
+        "job_id": job.job_id.clone(),
+        "bead_id": job.bead_id.clone(),
+        "lane": job.lane.as_str(),
+        "admission_decision": job.admission.decision.as_str(),
+        "capacity_decision": job.admission.capacity_decision.clone(),
+        "worker_selection": job.admission.worker_selection.clone(),
+        "state_transition": {
+            "from": previous_state,
+            "to": job.state.as_str(),
+        },
+        "blocker_reason": job.admission.blocker_reason.clone(),
+        "target_dir_policy": job.target_dir_policy.as_str(),
+        "created_at_unix_ms": job.created_at_unix_ms,
+        "updated_at_unix_ms": job.updated_at_unix_ms,
+    });
+    serde_json::to_string(&value).context("serializing proof queue event")
+}
+
+fn sort_proof_jobs(jobs: &mut [ProofJob]) {
+    jobs.sort_by_key(|job| {
+        (
+            job.priority,
+            proof_job_state_rank(&job.state),
+            job.created_at_unix_ms,
+            job.job_id.clone(),
+        )
+    });
+}
+
+fn proof_job_state_rank(state: &ProofJobState) -> u8 {
+    match state {
+        ProofJobState::Active => 0,
+        ProofJobState::Queued => 1,
+        ProofJobState::Blocked => 2,
+        ProofJobState::Drained => 3,
+        ProofJobState::Cancelled => 4,
+    }
+}
+
+fn proof_queue_summary(queue: &ProofQueueFile) -> Value {
+    let mut by_state = BTreeMap::<&'static str, usize>::new();
+    let mut by_admission = BTreeMap::<&'static str, usize>::new();
+    let mut by_target_dir_policy = BTreeMap::<&'static str, usize>::new();
+    let mut remote_required = 0usize;
+    let mut active_slots = 0usize;
+    for job in &queue.jobs {
+        *by_state.entry(job.state.as_str()).or_default() += 1;
+        *by_admission
+            .entry(job.admission.decision.as_str())
+            .or_default() += 1;
+        *by_target_dir_policy
+            .entry(job.target_dir_policy.as_str())
+            .or_default() += 1;
+        remote_required += usize::from(job.remote_required);
+        if job.state == ProofJobState::Active {
+            active_slots += job.estimated_slots;
+        }
+    }
+    json!({
+        "total_jobs": queue.jobs.len(),
+        "pending_jobs": queue.jobs.iter().filter(|job| job.state.is_pending()).count(),
+        "active_slots": active_slots,
+        "remote_required_jobs": remote_required,
+        "by_state": by_state,
+        "by_admission": by_admission,
+        "by_target_dir_policy": by_target_dir_policy,
+    })
+}
+
+fn proof_queue_jobs(queue: &ProofQueueFile) -> Vec<Value> {
+    let mut jobs = queue.jobs.clone();
+    sort_proof_jobs(&mut jobs);
+    jobs.into_iter()
+        .enumerate()
+        .map(|(rank, job)| {
+            json!({
+                "rank": rank + 1,
+                "job": job,
+            })
+        })
+        .collect()
+}
+
+fn proof_queue_validation_error(
+    error_type: &'static str,
+    message: String,
+    queue: &Path,
+) -> ProofCommandResult {
+    let mut payload = json!({
+        "status": "error",
+        "command": "proof",
+        "subcommand": "enqueue",
+        "schema_version": PROOF_QUEUE_SCHEMA,
+        "queue_path": queue.display().to_string(),
+        "error": {
+            "type": error_type,
+            "message": message,
+            "recoverable": true,
+            "next_actions": [
+                "Use a concrete flywheel_connectors-* bead id.",
+                "Use canonical lanes or mark custom lanes with --reviewed-custom.",
+                "Keep custom lanes bounded with an explicit timeout and redaction policy."
+            ],
+        },
+    });
+    insert_toon(
+        &mut payload,
+        "Proof queue rejected an invalid job before writing queue state.",
+    );
+    ProofCommandResult {
+        payload,
+        success: false,
     }
 }
 
@@ -3229,6 +4100,386 @@ mod tests {
         assert_eq!(result.payload["capacity"]["decision"], "admissible");
         assert_eq!(result.payload["capacity"]["remote_required_allowed"], true);
         assert_eq!(result.payload["capacity"]["selected_worker"], "worker-a");
+    }
+
+    fn enqueue_args(queue: &Path, lane: ProofLaneKind) -> ProofEnqueueArgs {
+        ProofEnqueueArgs {
+            queue: queue.to_path_buf(),
+            bead_id: "flywheel_connectors-angoc.6.3.2".to_owned(),
+            lane,
+            priority: 2,
+            timeout_secs: DEFAULT_PROOF_JOB_TIMEOUT_SECS,
+            estimated_slots: 1,
+            max_depth: DEFAULT_PROOF_QUEUE_MAX_DEPTH,
+            allow_local: false,
+            reviewed_custom: false,
+            crate_name: None,
+            test_filter: None,
+            probe_dir: None,
+            working_directory: None,
+            argv: Vec::new(),
+            redaction_policy: Vec::new(),
+            rch_capacity: ProofRchStatusArgs::default(),
+            event_log: None,
+        }
+    }
+
+    #[test]
+    fn proof_enqueue_materializes_canonical_lanes_and_orders_by_priority() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let queue_path = tempdir.path().join("proof-queue.json");
+        let workers = write_json_value(&serde_json::json!({
+            "workers": [
+                {"id": "worker-a", "healthy": true, "available_slots": 2, "total_slots": 8}
+            ]
+        }));
+        let mut crate_test = enqueue_args(&queue_path, ProofLaneKind::CrateTest);
+        crate_test.priority = 3;
+        crate_test.crate_name = Some("fwc".to_owned());
+        crate_test.test_filter = Some("proof_queue".to_owned());
+        crate_test.rch_capacity.workers_json = Some(workers.path().to_path_buf());
+
+        let first = run(&ProofArgs {
+            command: ProofCommand::Enqueue(crate_test),
+        })
+        .expect("enqueue crate test");
+        assert!(first.success);
+        assert_eq!(first.payload["job"]["state"], "active");
+        assert_eq!(first.payload["job"]["lane"], "crate-test");
+        assert_eq!(first.payload["job"]["argv"][0], "cargo");
+        assert_eq!(first.payload["job"]["argv"][1], "test");
+        assert_eq!(first.payload["job"]["argv"][3], "fwc");
+        assert_eq!(first.payload["job"]["target_dir_policy"], "isolated-temp");
+        assert_eq!(
+            first.payload["job"]["environment"]["CARGO_INCREMENTAL"],
+            "0"
+        );
+        assert!(
+            first.payload["job"]["environment"]["CARGO_TARGET_DIR"]
+                .as_str()
+                .expect("target dir string")
+                .starts_with("/tmp/fcp-proof-")
+        );
+        assert_eq!(first.payload["job"]["admission"]["decision"], "accepted");
+
+        let mut fmt = enqueue_args(&queue_path, ProofLaneKind::Fmt);
+        fmt.priority = 1;
+        let second = run(&ProofArgs {
+            command: ProofCommand::Enqueue(fmt),
+        })
+        .expect("enqueue fmt");
+        assert!(second.success);
+
+        let status = run(&ProofArgs {
+            command: ProofCommand::Queue(ProofQueueArgs { queue: queue_path }),
+        })
+        .expect("queue status");
+        assert!(status.success);
+        assert_eq!(status.payload["summary"]["total_jobs"], 2);
+        assert_eq!(status.payload["summary"]["active_slots"], 1);
+        assert_eq!(status.payload["jobs"][0]["job"]["lane"], "fmt");
+        assert_eq!(status.payload["jobs"][1]["job"]["lane"], "crate-test");
+    }
+
+    #[test]
+    fn proof_enqueue_materializes_required_lane_inventory() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let queue_path = tempdir.path().join("proof-queue.json");
+
+        let mut workspace_check = enqueue_args(&queue_path, ProofLaneKind::WorkspaceCheck);
+        workspace_check.allow_local = true;
+        let check = run(&ProofArgs {
+            command: ProofCommand::Enqueue(workspace_check),
+        })
+        .expect("enqueue workspace check");
+        assert_eq!(
+            check.payload["job"]["argv"],
+            serde_json::json!(["cargo", "check", "--workspace", "--all-targets"])
+        );
+        assert_eq!(check.payload["job"]["target_dir_policy"], "isolated-temp");
+        assert!(
+            check.payload["job"]["environment"]["CARGO_TARGET_DIR"]
+                .as_str()
+                .expect("target dir")
+                .starts_with("/tmp/fcp-proof-")
+        );
+
+        let mut workspace_clippy = enqueue_args(&queue_path, ProofLaneKind::WorkspaceClippy);
+        workspace_clippy.allow_local = true;
+        let clippy = run(&ProofArgs {
+            command: ProofCommand::Enqueue(workspace_clippy),
+        })
+        .expect("enqueue workspace clippy");
+        assert_eq!(
+            clippy.payload["job"]["argv"],
+            serde_json::json!([
+                "cargo",
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings"
+            ])
+        );
+
+        let mut probe = enqueue_args(&queue_path, ProofLaneKind::ProbeCheck);
+        probe.allow_local = true;
+        probe.probe_dir = Some(PathBuf::from(".rch/probes/fcp-core"));
+        let probe_result = run(&ProofArgs {
+            command: ProofCommand::Enqueue(probe),
+        })
+        .expect("enqueue probe check");
+        assert_eq!(
+            probe_result.payload["job"]["working_directory"],
+            ".rch/probes/fcp-core"
+        );
+        assert_eq!(
+            probe_result.payload["job"]["argv"],
+            serde_json::json!(["cargo", "check"])
+        );
+        assert_eq!(
+            probe_result.payload["job"]["target_dir_policy"],
+            "probe-local"
+        );
+
+        let mut scanner = enqueue_args(&queue_path, ProofLaneKind::ScannerCommand);
+        scanner.allow_local = true;
+        scanner.argv = vec![
+            "jq".to_owned(),
+            "empty".to_owned(),
+            "schema.json".to_owned(),
+        ];
+        let scanner_result = run(&ProofArgs {
+            command: ProofCommand::Enqueue(scanner),
+        })
+        .expect("enqueue scanner command");
+        assert_eq!(
+            scanner_result.payload["job"]["argv"],
+            serde_json::json!(["jq", "empty", "schema.json"])
+        );
+        assert_eq!(
+            scanner_result.payload["job"]["target_dir_policy"],
+            "operator-reviewed"
+        );
+
+        let mut custom = enqueue_args(&queue_path, ProofLaneKind::Custom);
+        custom.allow_local = true;
+        custom.reviewed_custom = true;
+        custom.timeout_secs = 60;
+        custom.argv = vec!["bash".to_owned(), "-n".to_owned(), "script.sh".to_owned()];
+        custom.redaction_policy = vec!["standard-secrets".to_owned(), "custom-pii".to_owned()];
+        let custom_result = run(&ProofArgs {
+            command: ProofCommand::Enqueue(custom),
+        })
+        .expect("enqueue reviewed custom command");
+        assert_eq!(custom_result.payload["job"]["timeout_secs"], 60);
+        assert_eq!(
+            custom_result.payload["job"]["redaction_policy"],
+            serde_json::json!(["standard-secrets", "custom-pii"])
+        );
+    }
+
+    #[test]
+    fn proof_enqueue_rejects_depth_overflow_without_mutating_queue() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let queue_path = tempdir.path().join("proof-queue.json");
+        let mut first_args = enqueue_args(&queue_path, ProofLaneKind::Fmt);
+        first_args.max_depth = 1;
+        let first = run(&ProofArgs {
+            command: ProofCommand::Enqueue(first_args),
+        })
+        .expect("enqueue first bounded job");
+        assert!(first.success);
+
+        let mut second_args = enqueue_args(&queue_path, ProofLaneKind::Fmt);
+        second_args.max_depth = 1;
+        let second = run(&ProofArgs {
+            command: ProofCommand::Enqueue(second_args),
+        })
+        .expect("reject depth overflow");
+        assert!(!second.success);
+        assert_eq!(second.payload["error"]["type"], "queue-depth-exceeded");
+        let queue = load_proof_queue(&queue_path).expect("queue persisted");
+        assert_eq!(queue.jobs.len(), 1);
+    }
+
+    #[test]
+    fn proof_enqueue_records_remote_required_local_fallback_as_blocked() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let queue_path = tempdir.path().join("proof-queue.json");
+        let mut args = enqueue_args(&queue_path, ProofLaneKind::CrateTest);
+        args.crate_name = Some("fwc".to_owned());
+        args.rch_capacity.summary_lines =
+            vec!["[RCH] local (no admissible workers: critical_pressure=5)".to_owned()];
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Enqueue(args),
+        })
+        .expect("enqueue blocked job");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["status"], "error");
+        assert_eq!(result.payload["job"]["state"], "blocked");
+        assert_eq!(
+            result.payload["job"]["admission"]["decision"],
+            "blocked-capacity"
+        );
+        assert_eq!(
+            result.payload["job"]["admission"]["capacity_decision"],
+            "proof_infra_blocked"
+        );
+
+        let queue = load_proof_queue(&queue_path).expect("queue persisted");
+        assert_eq!(queue.jobs.len(), 1);
+        assert_eq!(queue.jobs[0].state, ProofJobState::Blocked);
+    }
+
+    #[test]
+    fn proof_enqueue_records_remote_required_no_worker_as_blocked() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let queue_path = tempdir.path().join("proof-queue.json");
+        let workers = write_json_value(&serde_json::json!({
+            "workers": []
+        }));
+        let mut args = enqueue_args(&queue_path, ProofLaneKind::CrateTest);
+        args.crate_name = Some("fwc".to_owned());
+        args.rch_capacity.workers_json = Some(workers.path().to_path_buf());
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Enqueue(args),
+        })
+        .expect("enqueue no-worker job");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["job"]["state"], "blocked");
+        assert_eq!(
+            result.payload["job"]["admission"]["capacity_decision"],
+            "unknown"
+        );
+        assert_eq!(
+            result.payload["job"]["admission"]["decision"],
+            "blocked-capacity"
+        );
+    }
+
+    #[test]
+    fn proof_enqueue_uses_available_slots_for_active_then_queued_jobs() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let queue_path = tempdir.path().join("proof-queue.json");
+        let event_log = tempdir.path().join("events.jsonl");
+        let workers = write_json_value(&serde_json::json!({
+            "workers": [
+                {"id": "worker-a", "healthy": true, "available_slots": 2, "total_slots": 4}
+            ]
+        }));
+        for index in 0..3 {
+            let mut args = enqueue_args(&queue_path, ProofLaneKind::CrateTest);
+            args.crate_name = Some("fwc".to_owned());
+            args.test_filter = Some(format!("proof_queue_{index}"));
+            args.rch_capacity.workers_json = Some(workers.path().to_path_buf());
+            args.rch_capacity.summary_lines =
+                vec!["[RCH] remote worker-a (proof slot available)".to_owned()];
+            args.event_log = Some(event_log.clone());
+            let result = run(&ProofArgs {
+                command: ProofCommand::Enqueue(args),
+            })
+            .expect("enqueue proof slot job");
+            assert_eq!(result.payload["subcommand"], "enqueue");
+        }
+
+        let queue = load_proof_queue(&queue_path).expect("queue persisted");
+        let active = queue
+            .jobs
+            .iter()
+            .filter(|job| job.state == ProofJobState::Active)
+            .count();
+        let queued = queue
+            .jobs
+            .iter()
+            .filter(|job| job.state == ProofJobState::Queued)
+            .count();
+        assert_eq!(active, 2);
+        assert_eq!(queued, 1);
+
+        let log = std::fs::read_to_string(event_log).expect("event log reads");
+        let events = log.lines().collect::<Vec<_>>();
+        assert_eq!(events.len(), 3);
+        let first: Value = serde_json::from_str(events[0]).expect("first event json");
+        let third: Value = serde_json::from_str(events[2]).expect("third event json");
+        assert_eq!(first["event"], "enqueue");
+        assert_eq!(first["worker_selection"], "worker-a");
+        assert_eq!(third["state_transition"]["from"], Value::Null);
+        assert_eq!(third["state_transition"]["to"], "queued");
+    }
+
+    #[test]
+    fn proof_enqueue_rejects_unreviewed_custom_command_without_writing_queue() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let queue_path = tempdir.path().join("proof-queue.json");
+        let mut args = enqueue_args(&queue_path, ProofLaneKind::Custom);
+        args.argv = vec!["echo".to_owned(), "ok".to_owned()];
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Enqueue(args),
+        })
+        .expect("enqueue custom validation");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["error"]["type"], "invalid-proof-job");
+        assert!(
+            result.payload["error"]["message"]
+                .as_str()
+                .expect("error message")
+                .contains("--reviewed-custom")
+        );
+        assert!(
+            !queue_path.exists(),
+            "invalid custom job should not create queue state"
+        );
+    }
+
+    #[test]
+    fn proof_drain_marks_pending_jobs_final_without_deleting_entries() {
+        let tempdir = tempfile::tempdir().expect("tempdir creates");
+        let queue_path = tempdir.path().join("proof-queue.json");
+        let event_log = tempdir.path().join("events.jsonl");
+        let result = run(&ProofArgs {
+            command: ProofCommand::Enqueue(enqueue_args(&queue_path, ProofLaneKind::Fmt)),
+        })
+        .expect("enqueue fmt");
+        assert!(result.success);
+        let job_id = result.payload["job"]["job_id"]
+            .as_str()
+            .expect("job id")
+            .to_owned();
+
+        let drained = run(&ProofArgs {
+            command: ProofCommand::Drain(ProofDrainArgs {
+                queue: queue_path.clone(),
+                cancel_job: Some(job_id),
+                reason: Some("operator cancelled duplicate proof".to_owned()),
+                event_log: Some(event_log.clone()),
+            }),
+        })
+        .expect("drain proof queue");
+
+        assert!(drained.success);
+        assert_eq!(
+            drained.payload["affected_jobs"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(drained.payload["summary"]["total_jobs"], 1);
+        assert_eq!(drained.payload["summary"]["pending_jobs"], 0);
+        assert_eq!(drained.payload["jobs"][0]["job"]["state"], "cancelled");
+
+        let queue = load_proof_queue(&queue_path).expect("queue persisted");
+        assert_eq!(queue.jobs.len(), 1);
+        assert_eq!(queue.jobs[0].state, ProofJobState::Cancelled);
+        let log = std::fs::read_to_string(event_log).expect("event log reads");
+        let event: Value = serde_json::from_str(log.trim()).expect("event json");
+        assert_eq!(event["event"], "cancel");
+        assert_eq!(event["bead_id"], "flywheel_connectors-angoc.6.3.2");
     }
 
     fn assert_redaction_safe(value: &Value) {

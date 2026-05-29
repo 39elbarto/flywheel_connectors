@@ -331,7 +331,9 @@ write_redacted_rch_diagnose_log() {
           estimated_cores:(.data.worker_selection.estimated_cores // null),
           worker_hash:$selected_worker_hash,
           reason:(
-            if ($selection_reason | type) == "object" then
+            if $selected_worker_hash != null then
+              null
+            elif ($selection_reason | type) == "object" then
               {no_admissible_workers:($selection_reason.no_admissible_workers // null)}
             elif $selection_reason == "success" then
               null
@@ -504,7 +506,7 @@ append_rch_capacity_preflight() {
         decision:(if $would_intercept and $selected_worker_present then "admissible" else "proof_infra_blocked" end),
         would_intercept:$would_intercept,
         selected_worker_hash:$selected_worker_hash,
-        no_admissible_reason:($no_admissible | string_or_json),
+        no_admissible_reason:(if $would_intercept and $selected_worker_present then null else ($no_admissible | string_or_json) end),
         diagnose_log_artifact:$diagnose_log_artifact,
         diagnose_log_hash:$diagnose_log_hash,
         status_log_artifact:$status_log_artifact,

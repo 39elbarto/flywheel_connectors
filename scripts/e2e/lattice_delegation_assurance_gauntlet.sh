@@ -12,6 +12,8 @@ ARTIFACT_STAGE_ROOT="${ARTIFACT_STAGE_ROOT:-${OUT_DIR}/rch-lattice-evidence/${RU
 LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+RCH_STEP_RETRIES="${RCH_STEP_RETRIES:-1}"
+RCH_STEP_RETRY_SLEEP_SECONDS="${RCH_STEP_RETRY_SLEEP_SECONDS:-5}"
 
 run_id_redaction_pattern() {
   printf '%s' '(bearer|access_token|refresh_token|id_token|client_secret|api_key|secret_seed|private_key|secret_key|password|cookie|credential|provider_body|provider_response_body|provider_payload_body|reviewer_contact|reviewer_email|reviewer_phone|trapdoor_material|trapdoor_coefficients|preimage_coefficients|preimage_bytes|expanded_secret_matrix|raw_operation|raw_principal|raw_zone|send_message|agent-alpha|agent-beta)'
@@ -80,10 +82,23 @@ validate_artifact_stage_root() {
   fi
 }
 
+validate_nonnegative_integer_env() {
+  local name="$1"
+  local value="$2"
+  case "${value}" in
+    ""|*[!0-9]*)
+      printf 'invalid %s: use a nonnegative integer\n' "${name}" >&2
+      exit 64
+      ;;
+  esac
+}
+
 validate_run_id
 validate_artifact_path
 validate_out_dir
 validate_artifact_stage_root
+validate_nonnegative_integer_env "RCH_STEP_RETRIES" "${RCH_STEP_RETRIES}"
+validate_nonnegative_integer_env "RCH_STEP_RETRY_SLEEP_SECONDS" "${RCH_STEP_RETRY_SLEEP_SECONDS}"
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 
@@ -618,6 +633,38 @@ is_rch_exec_command() {
   esac
 }
 
+retryable_rch_transport_failure() {
+  local display_command="$1"
+  local log="$2"
+  local fallback_decision="$3"
+  local worker_execution_class="$4"
+  if ! is_rch_exec_command "${display_command}"; then
+    return 1
+  fi
+  case "${fallback_decision}" in
+    rch_local_fallback_refused|rch_remote_failed) ;;
+    *) return 1 ;;
+  esac
+  case "${worker_execution_class}" in
+    local_fallback_refused|remote_failed|unknown) ;;
+    *) return 1 ;;
+  esac
+  grep -Eiq \
+    'remote execution failed|rsync (error|failed)|ssh: connect to host|Connection reset|Connection timed out|Operation timed out|kex_exchange_identification|No route to host|Connection refused|Broken pipe' \
+    "${log}"
+}
+
+append_attempt_log() {
+  local aggregate_log="$1"
+  local attempt="$2"
+  local attempt_log="$3"
+  {
+    printf '\n# lattice-assurance attempt=%s artifact=%s begin\n' "${attempt}" "${attempt_log}"
+    cat "${attempt_log}"
+    printf '\n# lattice-assurance attempt=%s artifact=%s end\n' "${attempt}" "${attempt_log}"
+  } >> "${aggregate_log}"
+}
+
 require_remote_rch_success() {
   local step="$1"
   local display_command="$2"
@@ -650,59 +697,81 @@ run_and_capture() {
   local fallback_decision worker_execution_class rch_summary rch_summary_json
   assert_stable_revision "stable_revision_before_${step}"
   started="$(date -u +%s)"
-  if "$@" >"${log}" 2>&1; then
-    local ended duration hash passed_tests passed_tests_json benchmark_group_details
-    ended="$(date -u +%s)"
-    duration=$((ended - started))
-    hash="$(sha256_file "${log}")"
-    passed_tests="$(extract_passed_tests "${log}")"
-    passed_tests_json="$(json_string_or_null "${passed_tests}")"
-    fallback_decision="$(fallback_decision_for_log "${display_command}" "${log}")"
-    worker_execution_class="$(worker_execution_class_for_log "${display_command}" "${log}")"
-    rch_summary="$(rch_summary_line "${log}")"
-    rch_summary_json="$(json_string_or_null "${rch_summary}")"
-    benchmark_group_details="$(benchmark_group_details_for_step "${step}" "${log}")"
-    require_remote_rch_success \
-      "${step}" \
-      "${display_command}" \
-      "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
-      "${hash}" \
-      "${duration}" \
-      "${fallback_decision}" \
-      "${worker_execution_class}" \
-      "${rch_summary_json}"
-    assert_stable_revision "stable_revision_after_${step}"
-    assert_clean_tree "clean_tree_after_${step}"
-    append_json "${step}" "pass" "$(jq -cn \
-      --arg command_line "${display_command}" \
-      --arg log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
-      --arg log_hash "sha256:${hash}" \
-      --arg fallback_decision "${fallback_decision}" \
-      --arg worker_execution_class "${worker_execution_class}" \
-      --argjson duration_seconds "${duration}" \
-      --argjson passed_tests "${passed_tests_json}" \
-      --argjson rch_summary "${rch_summary_json}" \
-      --argjson benchmark_group_details "${benchmark_group_details}" \
-      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,passed_tests:$passed_tests,retry_count:0,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"} + $benchmark_group_details')"
-  else
-    local ended duration hash
-    ended="$(date -u +%s)"
-    duration=$((ended - started))
-    hash="$(sha256_file "${log}")"
-    fallback_decision="$(fallback_decision_for_log "${display_command}" "${log}")"
-    worker_execution_class="$(worker_execution_class_for_log "${display_command}" "${log}")"
-    rch_summary="$(rch_summary_line "${log}")"
-    rch_summary_json="$(json_string_or_null "${rch_summary}")"
-    fail_step "${step}" "$(jq -cn \
-      --arg command_line "${display_command}" \
-      --arg log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
-      --arg log_hash "sha256:${hash}" \
-      --arg fallback_decision "${fallback_decision}" \
-      --arg worker_execution_class "${worker_execution_class}" \
-      --argjson duration_seconds "${duration}" \
-      --argjson rch_summary "${rch_summary_json}" \
-      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,retry_count:0,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"}')"
-  fi
+  : > "${log}"
+  local attempt=1
+  while true; do
+    local attempt_log="${LOG_PREFIX}.${step}.attempt${attempt}.log"
+    if "$@" >"${attempt_log}" 2>&1; then
+      append_attempt_log "${log}" "${attempt}" "${attempt_log}"
+      local retry_count=$((attempt - 1))
+      local ended duration hash passed_tests passed_tests_json benchmark_group_details
+      ended="$(date -u +%s)"
+      duration=$((ended - started))
+      hash="$(sha256_file "${log}")"
+      passed_tests="$(extract_passed_tests "${log}")"
+      passed_tests_json="$(json_string_or_null "${passed_tests}")"
+      fallback_decision="$(fallback_decision_for_log "${display_command}" "${log}")"
+      worker_execution_class="$(worker_execution_class_for_log "${display_command}" "${log}")"
+      rch_summary="$(rch_summary_line "${log}")"
+      rch_summary_json="$(json_string_or_null "${rch_summary}")"
+      benchmark_group_details="$(benchmark_group_details_for_step "${step}" "${log}")"
+      require_remote_rch_success \
+        "${step}" \
+        "${display_command}" \
+        "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
+        "${hash}" \
+        "${duration}" \
+        "${fallback_decision}" \
+        "${worker_execution_class}" \
+        "${rch_summary_json}"
+      assert_stable_revision "stable_revision_after_${step}"
+      assert_clean_tree "clean_tree_after_${step}"
+      append_json "${step}" "pass" "$(jq -cn \
+        --arg command_line "${display_command}" \
+        --arg log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
+        --arg log_hash "sha256:${hash}" \
+        --arg fallback_decision "${fallback_decision}" \
+        --arg worker_execution_class "${worker_execution_class}" \
+        --argjson duration_seconds "${duration}" \
+        --argjson passed_tests "${passed_tests_json}" \
+        --argjson rch_summary "${rch_summary_json}" \
+        --argjson benchmark_group_details "${benchmark_group_details}" \
+        --argjson retry_count "${retry_count}" \
+        '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,passed_tests:$passed_tests,retry_count:$retry_count,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"} + $benchmark_group_details')"
+      return 0
+    else
+      append_attempt_log "${log}" "${attempt}" "${attempt_log}"
+      local ended duration hash
+      ended="$(date -u +%s)"
+      duration=$((ended - started))
+      hash="$(sha256_file "${log}")"
+      fallback_decision="$(fallback_decision_for_log "${display_command}" "${log}")"
+      worker_execution_class="$(worker_execution_class_for_log "${display_command}" "${log}")"
+      rch_summary="$(rch_summary_line "${log}")"
+      rch_summary_json="$(json_string_or_null "${rch_summary}")"
+      if [ "${attempt}" -le "${RCH_STEP_RETRIES}" ] &&
+        retryable_rch_transport_failure \
+          "${display_command}" \
+          "${log}" \
+          "${fallback_decision}" \
+          "${worker_execution_class}"; then
+        sleep "${RCH_STEP_RETRY_SLEEP_SECONDS}"
+        attempt=$((attempt + 1))
+        continue
+      fi
+      local retry_count=$((attempt - 1))
+      fail_step "${step}" "$(jq -cn \
+        --arg command_line "${display_command}" \
+        --arg log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
+        --arg log_hash "sha256:${hash}" \
+        --arg fallback_decision "${fallback_decision}" \
+        --arg worker_execution_class "${worker_execution_class}" \
+        --argjson duration_seconds "${duration}" \
+        --argjson rch_summary "${rch_summary_json}" \
+        --argjson retry_count "${retry_count}" \
+        '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,retry_count:$retry_count,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"}')"
+    fi
+  done
 }
 
 run_rch_cargo() {

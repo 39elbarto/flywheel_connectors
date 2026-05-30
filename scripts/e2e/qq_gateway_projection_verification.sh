@@ -333,6 +333,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "missing_route_binding_drop",
           "missing_message_identity_drop",
           "missing_reply_target_drop",
+          "malformed_message_no_sequence_mutation",
           "channel_policy_denied",
           "channel_policy_allowed",
           "c2c_policy_denied",
@@ -406,6 +407,16 @@ if [[ "${overall_status}" == "passed" ]]; then
           any(.[]; .step == "missing_route_binding_drop" and .details.reason_code == "group_sender_missing" and .details.policy.reason_code == "group_sender_missing")
           and any(.[]; .step == "missing_message_identity_drop" and .details.reason_code == "message_id_missing" and .details.policy.reason_code == "message_id_missing")
           and any(.[]; .step == "missing_reply_target_drop" and .details.reason_code == "reply_target_missing" and .details.policy.reason_code == "reply_target_missing")
+          and any(.[];
+            .step == "malformed_message_no_sequence_mutation"
+            and .details.error_mentions_bounds == true
+            and .details.recovery.accepted == true
+            and .details.recovery.reason_code == "accepted"
+            and .details.recovery.runtime.last_sequence == 4
+            and .details.recovery.runtime.stale_sequence_events == 0
+            and .details.recovery.runtime.accepted_events == 1
+            and (.details.recovery.normalized.message_id_hash | type) == "string"
+          )
         ),
         channel_shape_ok: (
           any(.[]; .step == "channel_policy_denied" and .details.accepted == false and .details.reason_code == "channel_not_allowed")

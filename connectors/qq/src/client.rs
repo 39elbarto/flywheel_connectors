@@ -531,17 +531,21 @@ impl QqGatewayRuntime {
             return Ok(control_projection);
         }
 
-        if let Some(stale_projection) = self.record_dispatch_sequence(event.s, event_id.clone()) {
+        if let Some(stale_projection) =
+            self.stale_dispatch_sequence_projection(event.s, event_id.clone())
+        {
             return Ok(stale_projection);
         }
 
         let normalized = match normalize_message_event(event) {
             Ok(normalized) => normalized,
             Err(QqError::InvalidInput(message)) if message.contains("not a normalizable") => {
+                self.advance_dispatch_sequence(event.s);
                 return Ok(self.dropped_projection(event.s, event_id, "not_normalizable"));
             }
             Err(error) => return Err(error),
         };
+        self.advance_dispatch_sequence(event.s);
         self.remember_event_id(event_id.as_deref());
 
         let policy = evaluate_inbound_policy(&normalized, &self.config.policy);
@@ -627,14 +631,32 @@ impl QqGatewayRuntime {
         sequence: Option<u64>,
         event_id: Option<String>,
     ) -> Option<QqGatewayEventProjection> {
+        if let Some(stale_projection) = self.stale_dispatch_sequence_projection(sequence, event_id)
+        {
+            return Some(stale_projection);
+        }
+        self.advance_dispatch_sequence(sequence);
+        None
+    }
+
+    fn stale_dispatch_sequence_projection(
+        &mut self,
+        sequence: Option<u64>,
+        event_id: Option<String>,
+    ) -> Option<QqGatewayEventProjection> {
         let sequence = sequence?;
         let current = self.session.sequence();
         if current != 0 && sequence <= current {
             self.stale_sequence_events = self.stale_sequence_events.saturating_add(1);
             return Some(self.dropped_projection(Some(sequence), event_id, "stale_sequence"));
         }
-        self.session.set_sequence(sequence);
         None
+    }
+
+    fn advance_dispatch_sequence(&mut self, sequence: Option<u64>) {
+        if let Some(sequence) = sequence {
+            self.session.set_sequence(sequence);
+        }
     }
 
     fn remember_event_id(&mut self, id: Option<&str>) {
@@ -4614,6 +4636,76 @@ mod tests {
         assert_eq!(heartbeat.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
         assert_eq!(heartbeat.runtime.heartbeat_sent_count, 1);
         assert_eq!(heartbeat.runtime.heartbeat_ack_count, 1);
+    }
+
+    #[test]
+    fn gateway_runtime_rejects_malformed_message_without_advancing_sequence() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            ..QqGatewayRuntimeConfig::default()
+        });
+        runtime.config.policy.group_require_mention = false;
+
+        let accepted = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-before-malformed",
+                    "content": "valid before malformed",
+                    "group_openid": "group-sequence",
+                    "group_member_openid": "member-sequence"
+                })),
+                id: Some("evt-before-malformed".into()),
+            })
+            .unwrap();
+        assert!(accepted.accepted);
+        assert_eq!(accepted.runtime.last_sequence, 1);
+
+        let malformed = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(50),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-malformed-oversized",
+                    "content": "x".repeat(QQ_GATEWAY_TEXT_MAX_CHARS + 1),
+                    "group_openid": "group-sequence",
+                    "group_member_openid": "member-sequence"
+                })),
+                id: Some("evt-malformed-oversized".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(malformed, QqError::InvalidInput(ref message) if message.contains("content exceeds parser bounds")),
+            "unexpected malformed message error: {malformed:?}"
+        );
+        let after_malformed = runtime.snapshot();
+        assert_eq!(after_malformed.last_sequence, 1);
+        assert_eq!(after_malformed.accepted_events, 1);
+        assert_eq!(after_malformed.queue_depth, 1);
+        assert_eq!(after_malformed.stale_sequence_events, 0);
+
+        let recovered = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-after-malformed",
+                    "content": "valid after malformed",
+                    "group_openid": "group-sequence",
+                    "group_member_openid": "member-sequence"
+                })),
+                id: Some("evt-after-malformed".into()),
+            })
+            .unwrap();
+        assert!(recovered.accepted);
+        assert_eq!(recovered.reason_code, "accepted");
+        assert_eq!(recovered.runtime.last_sequence, 2);
+        assert_eq!(recovered.runtime.accepted_events, 2);
+        assert_eq!(recovered.runtime.stale_sequence_events, 0);
     }
 
     #[test]

@@ -686,6 +686,63 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &missing_reply_target,
     );
 
+    let malformed_sequence_error = try_invoke_projection(
+        &binding_connector,
+        &signing_key,
+        &binding_instance_id,
+        "qq-gateway-malformed-sequence",
+        json!({
+            "op": 0,
+            "s": 50,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-malformed-sequence",
+            "d": {
+                "id": "msg-malformed-sequence",
+                "content": "x".repeat(8193),
+                "group_openid": "group-binding",
+                "group_member_openid": "member-1"
+            }
+        }),
+    )
+    .await
+    .expect_err("oversized malformed message should reject");
+    assert!(
+        malformed_sequence_error.contains("content exceeds parser bounds"),
+        "{malformed_sequence_error}"
+    );
+    let sequence_recovery = invoke_projection(
+        &binding_connector,
+        &signing_key,
+        &binding_instance_id,
+        "qq-gateway-sequence-recovery",
+        json!({
+            "op": 0,
+            "s": 4,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-sequence-recovery",
+            "d": {
+                "id": "msg-sequence-recovery",
+                "content": "valid sequence recovery after malformed dispatch",
+                "group_openid": "group-binding",
+                "group_member_openid": "member-1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(sequence_recovery["accepted"], true);
+    assert_eq!(sequence_recovery["reason_code"], "accepted");
+    assert_eq!(sequence_recovery["runtime"]["last_sequence"], 4);
+    assert_eq!(sequence_recovery["runtime"]["stale_sequence_events"], 0);
+    log_step(
+        &mut logs,
+        "malformed_message_no_sequence_mutation",
+        "ok",
+        &json!({
+            "error_mentions_bounds": true,
+            "recovery": redacted_projection(&sequence_recovery),
+        }),
+    );
+
     let channel_policy_instance_id = InstanceId::new();
     let mut channel_policy_connector = QqConnector::new();
     channel_policy_connector

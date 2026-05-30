@@ -7428,9 +7428,8 @@ while :; do sleep 1; done
             }
         );
         assert_eq!(transport.sent.len(), 1);
-        let sent_text = match &transport.sent[0] {
-            WebSocketMessage::Text(text) => text,
-            _ => panic!("Expected text message"),
+        let WebSocketMessage::Text(sent_text) = &transport.sent[0] else {
+            panic!("Expected text message");
         };
         let sent_json: serde_json::Value = serde_json::from_str(sent_text).unwrap();
         let expected_json = serde_json::json!({

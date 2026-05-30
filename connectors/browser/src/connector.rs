@@ -3461,8 +3461,7 @@ mod tests {
             .compute_interface_hash()
             .expect("interface hash computes");
 
-        let expected_hash =
-            "blake3-256:fcp.interface.v2:3a47308a4d0ff45ad64dcc688000bc79edb1bc2cee800160be681c069debd83a";
+        let expected_hash = "blake3-256:fcp.interface.v2:3a47308a4d0ff45ad64dcc688000bc79edb1bc2cee800160be681c069debd83a";
         assert_eq!(computed.to_string(), expected_hash);
     }
 

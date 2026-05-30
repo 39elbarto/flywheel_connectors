@@ -218,7 +218,6 @@ fn response_for_request(request: &ObservedGitHubRequest) -> HttpFixtureResponse 
 
 fn write_http_response(stream: &mut TcpStream, response: HttpFixtureResponse) {
     let reason = match response.status {
-        200 => "OK",
         201 => "Created",
         202 => "Accepted",
         500 => "Internal Server Error",

@@ -89,7 +89,7 @@ fn push_if(names: &mut Vec<&'static str>, enabled: bool, name: &'static str) {
     }
 }
 
-const fn detect_without_logging() -> HwFeatureSet {
+fn detect_without_logging() -> HwFeatureSet {
     let mut features = HwFeatureSet::all_false();
     detect_x86(&mut features);
     detect_aarch64(&mut features);

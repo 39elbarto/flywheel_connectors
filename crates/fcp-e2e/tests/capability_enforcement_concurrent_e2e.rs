@@ -16,7 +16,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};

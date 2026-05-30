@@ -127,12 +127,14 @@ fn capability_golden_signature_single_byte_tamper_is_rejected() {
             total_mutations += 1;
 
             let verdict = try_verify_token(&tampered, &v.expected_public_key);
-            assert!(!verdict.is_ok(), 
+            assert!(
+                verdict.is_err(),
                 "vector '{}': flipping signature byte at offset {} did \
                  NOT invalidate verification — Ed25519 is supposed to \
                  reject any single-byte mutation",
-                v.description, sig_byte
-            )
+                v.description,
+                sig_byte
+            );
         }
     }
 
@@ -182,12 +184,14 @@ fn capability_golden_payload_byte_tamper_is_rejected() {
             total_mutations += 1;
 
             let verdict = try_verify_token(&tampered, &v.expected_public_key);
-            assert!(!verdict.is_ok(), 
+            assert!(
+                verdict.is_err(),
                 "vector '{}': flipping payload byte at offset {} did NOT \
                  invalidate verification — the signature must cover the \
                  entire COSE_Sign1 tbs_data, including every payload byte",
-                v.description, offset
-            )
+                v.description,
+                offset
+            );
         }
     }
 

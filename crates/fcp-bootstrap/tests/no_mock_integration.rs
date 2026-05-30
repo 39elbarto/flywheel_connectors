@@ -1145,8 +1145,10 @@ fn match_certificate_key_pairs_across_module_boundary() {
         can_sign: true,
         can_derive: false,
     };
-    let pairs =
-        fcp_bootstrap::hardware_token::match_certificate_key_pairs(std::slice::from_ref(&cert), std::slice::from_ref(&key));
+    let pairs = fcp_bootstrap::hardware_token::match_certificate_key_pairs(
+        std::slice::from_ref(&cert),
+        std::slice::from_ref(&key),
+    );
     assert_eq!(pairs.len(), 1);
     assert_eq!(pairs[0].certificate.label, "agent-cert");
     assert_eq!(pairs[0].key.key_type, TokenKeyType::Ed25519);
@@ -1206,7 +1208,10 @@ fn certificate_selection_refusal_display_messages_are_distinct() {
         },
         CertificateSelectionRefusal::AmbiguousSelection { count: 5 },
     ];
-    let messages: Vec<_> = refusals.iter().map(std::string::ToString::to_string).collect();
+    let messages: Vec<_> = refusals
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     // Each refusal variant should produce a unique message.
     for (i, a) in messages.iter().enumerate() {
         for (j, b) in messages.iter().enumerate() {

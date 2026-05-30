@@ -2181,7 +2181,8 @@ mod tests {
                 .unwrap()
                 .as_array()
                 .unwrap()
-                .len(), 100
+                .len(),
+            100
         );
     }
 

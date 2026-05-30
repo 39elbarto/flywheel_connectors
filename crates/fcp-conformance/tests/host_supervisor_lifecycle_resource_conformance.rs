@@ -493,13 +493,13 @@ fn active_count_tracks_multiple_concurrent_guards() {
 #[test]
 fn is_drained_requires_both_draining_and_zero_active() {
     let t = ConnectionTracker::new();
-    let _g = t.try_acquire().expect("acquire");
+    let guard = t.try_acquire().expect("acquire");
     assert!(!t.is_drained(), "not draining: not drained");
     t.start_drain();
     assert!(
         !t.is_drained(),
         "draining + active>0: not yet drained — MUST wait for active to clear"
     );
-    drop(_g);
+    drop(guard);
     assert!(t.is_drained(), "draining + active=0: MUST be drained");
 }

@@ -169,7 +169,10 @@ impl LinearClient {
             "teamId": team_id,
         });
         if let Some(desc) = description {
-            variables.as_object_mut().unwrap().insert("description".to_string(), serde_json::Value::String(desc.into()));
+            variables.as_object_mut().unwrap().insert(
+                "description".to_string(),
+                serde_json::Value::String(desc.into()),
+            );
         }
 
         let query = r"

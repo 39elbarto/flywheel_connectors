@@ -175,8 +175,7 @@ fn zone_key_manifest_v4_migrated_to_v4_promotes_v3_wraps() {
     )
     .expect("HPKE wrap must succeed");
 
-    let v3_manifest =
-        make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3, bob_v3]);
+    let v3_manifest = make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3, bob_v3]);
 
     // br-z8bsg: migrated_to_v4 returns UnsignedV4Manifest (typestate
     // enforcement). Inspection is via .as_payload(); a real publisher

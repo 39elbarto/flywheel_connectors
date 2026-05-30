@@ -1784,16 +1784,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rch_remote_proof_fixture_corpus_covers_required_states() {
-        let mut non_cargo = rch_evidence(
-            RchRemoteProofExitKind::NonProof,
-            Some(RchRemoteProofBlockerReason::NonCargoNonProof),
-            Some("[RCH] remote worker-7 (git status passed)"),
-        );
-        non_cargo.command = vec!["git".to_owned(), "status".to_owned()];
+    type RchFixture = (
+        &'static str,
+        RchRemoteProofEvidence,
+        RchRemoteProofClassification,
+    );
 
-        let cases = [
+    fn remote_command_fixtures() -> [RchFixture; 5] {
+        [
             (
                 "remote pass",
                 rch_evidence(
@@ -1830,6 +1828,20 @@ mod tests {
                 ),
                 RchRemoteProofClassification::RefusedLocalFallback,
             ),
+            (
+                "ansi colored remote pass",
+                rch_evidence(
+                    RchRemoteProofExitKind::RemotePassed,
+                    None,
+                    Some("\u{1b}[32m[RCH] remote worker-7 (cargo test passed)\u{1b}[0m"),
+                ),
+                RchRemoteProofClassification::AcceptedRemoteProof,
+            ),
+        ]
+    }
+
+    fn infra_blocked_fixtures() -> [RchFixture; 4] {
+        [
             (
                 "active project exclusion",
                 rch_evidence(
@@ -1874,22 +1886,28 @@ mod tests {
                     blocker: RchRemoteProofBlockerReason::WorkerPressure,
                 },
             ),
-            (
-                "ansi colored remote pass",
-                rch_evidence(
-                    RchRemoteProofExitKind::RemotePassed,
-                    None,
-                    Some("\u{1b}[32m[RCH] remote worker-7 (cargo test passed)\u{1b}[0m"),
-                ),
-                RchRemoteProofClassification::AcceptedRemoteProof,
-            ),
-            (
-                "non compilation command",
-                non_cargo,
-                RchRemoteProofClassification::NotProof {
-                    blocker: RchRemoteProofBlockerReason::NonCargoNonProof,
-                },
-            ),
+        ]
+    }
+
+    fn non_compilation_fixture() -> RchFixture {
+        let mut non_cargo = rch_evidence(
+            RchRemoteProofExitKind::NonProof,
+            Some(RchRemoteProofBlockerReason::NonCargoNonProof),
+            Some("[RCH] remote worker-7 (git status passed)"),
+        );
+        non_cargo.command = vec!["git".to_owned(), "status".to_owned()];
+
+        (
+            "non compilation command",
+            non_cargo,
+            RchRemoteProofClassification::NotProof {
+                blocker: RchRemoteProofBlockerReason::NonCargoNonProof,
+            },
+        )
+    }
+
+    fn failed_closed_fixtures() -> [RchFixture; 4] {
+        [
             (
                 "missing rch summary",
                 rch_evidence(RchRemoteProofExitKind::RemotePassed, None, None),
@@ -1930,9 +1948,17 @@ mod tests {
                     blocker: RchRemoteProofBlockerReason::Unknown,
                 },
             ),
-        ];
+        ]
+    }
 
-        for (label, evidence, expected) in cases {
+    #[test]
+    fn rch_remote_proof_fixture_corpus_covers_required_states() {
+        for (label, evidence, expected) in remote_command_fixtures()
+            .into_iter()
+            .chain(infra_blocked_fixtures())
+            .chain(std::iter::once(non_compilation_fixture()))
+            .chain(failed_closed_fixtures())
+        {
             assert_rch_fixture(label, &evidence, expected);
         }
     }

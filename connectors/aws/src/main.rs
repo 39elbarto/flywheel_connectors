@@ -150,7 +150,10 @@ async fn handle_message(connector: &mut AwsConnector, message: &str) -> serde_js
         Ok(value) => {
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "result": value });
             if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
+                response
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("id".to_string(), id);
             }
             response
         }
@@ -158,7 +161,10 @@ async fn handle_message(connector: &mut AwsConnector, message: &str) -> serde_js
             let err_response = e.to_response();
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "error": err_response });
             if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
+                response
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("id".to_string(), id);
             }
             response
         }

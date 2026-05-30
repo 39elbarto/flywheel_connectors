@@ -854,12 +854,14 @@ async fn error_scholar_200_empty_body_succeeds() {
         .await;
 
     let c = setup_connector(&server.uri(), &server.uri()).await;
-    
-    let result = c.handle_invoke(json!({
-        "operation_id": "arxiv.search_semantic",
-        "input": {"query": "test"}
-    })).await;
-    
+
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "arxiv.search_semantic",
+            "input": {"query": "test"}
+        }))
+        .await;
+
     println!("RESULT IS: {result:?}");
 
     assert!(result.is_ok());

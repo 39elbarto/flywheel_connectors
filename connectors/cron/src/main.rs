@@ -159,7 +159,10 @@ async fn handle_message(connector: &mut CronConnector, message: &str) -> serde_j
                 "result": value
             });
             if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
+                response
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("id".to_string(), id);
             }
             response
         }
@@ -170,7 +173,10 @@ async fn handle_message(connector: &mut CronConnector, message: &str) -> serde_j
                 "error": err_response
             });
             if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
+                response
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("id".to_string(), id);
             }
             response
         }

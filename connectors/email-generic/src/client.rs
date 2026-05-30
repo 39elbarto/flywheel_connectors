@@ -240,7 +240,10 @@ impl EmailGenericClient {
                     parts.next()?;
                     parts.next().map(std::string::ToString::to_string)
                 } else {
-                    trimmed.rsplit(' ').next().map(std::string::ToString::to_string)
+                    trimmed
+                        .rsplit(' ')
+                        .next()
+                        .map(std::string::ToString::to_string)
                 }
             })
             .collect()

@@ -1653,7 +1653,12 @@ mod tests {
                 OperationId::from_static(OP_S3_LIST_BUCKETS),
                 ZoneId::work(),
                 json!({}),
-                signed_token(&signing_key, CAP_S3_READ, OP_S3_LIST_BUCKETS, c.base.instance_id.as_str()),
+                signed_token(
+                    &signing_key,
+                    CAP_S3_READ,
+                    OP_S3_LIST_BUCKETS,
+                    c.base.instance_id.as_str(),
+                ),
             ))
             .await
         })

@@ -611,9 +611,8 @@ impl LinuxSandbox {
         // File modification syscalls (if writable paths exist)
         if !policy.writable_paths.is_empty() {
             allowed.extend([
-                TRUNCATE, FTRUNCATE, RENAMEAT, MKDIRAT, UNLINKAT,
-                SYMLINKAT, FCHMOD, FCHMODAT, FCHOWN, FCHOWNAT, UMASK, CHDIR,
-                FCHDIR,
+                TRUNCATE, FTRUNCATE, RENAMEAT, MKDIRAT, UNLINKAT, SYMLINKAT, FCHMOD, FCHMODAT,
+                FCHOWN, FCHOWNAT, UMASK, CHDIR, FCHDIR,
             ]);
         }
 

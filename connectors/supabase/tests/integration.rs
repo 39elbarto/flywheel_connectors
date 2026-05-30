@@ -73,7 +73,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .try_constraints_cbor(&cbor).expect("valid constraints")
+        .try_constraints_cbor(&cbor)
+        .expect("valid constraints")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)

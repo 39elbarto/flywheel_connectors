@@ -856,7 +856,7 @@ const fn expected_input_schema_gap_connectors() -> Vec<String> {
     Vec::new()
 }
 
-fn expected_output_schema_gap_connectors() -> Vec<String> {
+const fn expected_output_schema_gap_connectors() -> Vec<String> {
     expected_input_schema_gap_connectors()
 }
 

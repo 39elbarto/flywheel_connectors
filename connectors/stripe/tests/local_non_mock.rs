@@ -69,7 +69,7 @@ impl LoopbackStripeFixture {
                     .lock()
                     .expect("record Stripe loopback request")
                     .push(request);
-                write_http_response(&mut stream, response);
+                write_http_response(&mut stream, &response);
             }
         });
 
@@ -193,9 +193,8 @@ fn response_for_request(request: &ObservedStripeRequest) -> HttpFixtureResponse 
     }
 }
 
-fn write_http_response(stream: &mut TcpStream, response: HttpFixtureResponse) {
+fn write_http_response(stream: &mut TcpStream, response: &HttpFixtureResponse) {
     let reason = match response.status {
-        200 => "OK",
         500 => "Internal Server Error",
         _ => "OK",
     };

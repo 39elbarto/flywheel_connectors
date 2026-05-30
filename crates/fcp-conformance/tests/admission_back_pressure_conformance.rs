@@ -51,6 +51,14 @@ fn restrictive_policy() -> AdmissionPolicy {
     }
 }
 
+fn authenticated_permissive_policy() -> AdmissionPolicy {
+    AdmissionPolicy {
+        per_peer: PeerBudget::permissive(),
+        require_authenticated_requests: true,
+        ..AdmissionPolicy::default()
+    }
+}
+
 #[test]
 fn within_budget_admission_succeeds() {
     let mut controller = AdmissionController::new(permissive_policy());
@@ -136,10 +144,7 @@ fn authentication_required_short_circuits_before_budget_checks() {
     // is_authenticated=false, the admission MUST short-circuit with
     // AuthenticationRequired regardless of how small or oversized
     // the resource request is. This pins the cheap-reject ordering.
-    let mut policy = AdmissionPolicy::default();
-    policy.require_authenticated_requests = true;
-    policy.per_peer = PeerBudget::permissive();
-    let mut controller = AdmissionController::new(policy);
+    let mut controller = AdmissionController::new(authenticated_permissive_policy());
     let peer = NodeId::new("node-unauth");
 
     // Even a tiny request must be rejected.
@@ -165,10 +170,7 @@ fn authentication_required_short_circuits_before_budget_checks() {
 
 #[test]
 fn authentication_required_passes_through_when_peer_is_authenticated() {
-    let mut policy = AdmissionPolicy::default();
-    policy.require_authenticated_requests = true;
-    policy.per_peer = PeerBudget::permissive();
-    let mut controller = AdmissionController::new(policy);
+    let mut controller = AdmissionController::new(authenticated_permissive_policy());
     let peer = NodeId::new("node-authed");
 
     controller

@@ -16,10 +16,11 @@ impl EmailAuthSelection {
         match self {
             Self::Raw { password } => Ok(EmailMaterializedAuth::RawPassword(password.clone())),
             Self::CredentialId { credential_id } => {
-                let id = CredentialId::parse(credential_id).map_err(|_| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "credential_id must be a valid UUID".into(),
-                })?;
+                let id =
+                    CredentialId::parse(credential_id).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?;
                 Ok(EmailMaterializedAuth::CredentialId(id))
             }
         }

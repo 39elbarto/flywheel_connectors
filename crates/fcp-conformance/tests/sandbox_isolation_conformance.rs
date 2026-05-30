@@ -470,21 +470,21 @@ fn wasi_deterministic_hostcalls_reset_per_store() {
     assert_eq!(wall_a.seconds, wall_b.seconds);
     assert_eq!(wall_a.nanoseconds, wall_b.nanoseconds);
 
-    let mono_a_1 = {
+    let first_runtime_tick = {
         let mut clocks = store_a.data_mut().clocks();
         monotonic_clock::Host::now(&mut clocks).unwrap()
     };
-    let mono_a_2 = {
+    let second_runtime_tick = {
         let mut clocks = store_a.data_mut().clocks();
         monotonic_clock::Host::now(&mut clocks).unwrap()
     };
-    let mono_b_1 = {
+    let isolated_runtime_tick = {
         let mut clocks = store_b.data_mut().clocks();
         monotonic_clock::Host::now(&mut clocks).unwrap()
     };
-    assert_eq!(mono_a_1, 0);
-    assert_eq!(mono_a_2, 1_000_000);
-    assert_eq!(mono_b_1, 0);
+    assert_eq!(first_runtime_tick, 0);
+    assert_eq!(second_runtime_tick, 1_000_000);
+    assert_eq!(isolated_runtime_tick, 0);
 
     let random_a = random::Host::get_random_bytes(store_a.data_mut().random(), 16).unwrap();
     let random_b = random::Host::get_random_bytes(store_b.data_mut().random(), 16).unwrap();

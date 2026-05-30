@@ -14,9 +14,11 @@
 //! `verify()` on tampered / negative-path cases. Their happy-path encode
 //! bytes were never asserted to round-trip end-to-end.
 
-#![allow(clippy::too_many_lines, clippy::cast_precision_loss, clippy::format_push_string)]
-
-use std::any::type_name;
+#![allow(
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::format_push_string
+)]
 
 use fcp_conformance::{
     CanonicalPayloadGoldenVector, CapabilityTokenGoldenVector, FcpcGoldenVector, FcpsGoldenVector,

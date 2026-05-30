@@ -81,13 +81,11 @@ fn parse_ledger() -> Vec<LedgerRow> {
         if let Some(rest) = trimmed.strip_prefix("### ") {
             // Flush previous row if any.
             if let Some(claim) = current_claim.take() {
-                rows.push(row_from_fields(claim, &current_fields));
+                rows.push(row_from_fields(&claim, &current_fields));
                 current_fields.clear();
             }
             // Header is "### N. <claim title>".
-            let after_number = rest
-                .split_once('.')
-                .map_or(rest, |(_, rest)| rest.trim());
+            let after_number = rest.split_once('.').map_or(rest, |(_, rest)| rest.trim());
             current_claim = Some(after_number.to_string());
         } else if trimmed.starts_with("- ") {
             if let Some((key, value)) = trimmed.trim_start_matches("- ").split_once(':') {
@@ -99,7 +97,7 @@ fn parse_ledger() -> Vec<LedgerRow> {
         }
     }
     if let Some(claim) = current_claim {
-        rows.push(row_from_fields(claim, &current_fields));
+        rows.push(row_from_fields(&claim, &current_fields));
     }
 
     assert!(
@@ -109,7 +107,7 @@ fn parse_ledger() -> Vec<LedgerRow> {
     rows
 }
 
-fn row_from_fields(claim: String, fields: &BTreeMap<String, String>) -> LedgerRow {
+fn row_from_fields(claim: &str, fields: &BTreeMap<String, String>) -> LedgerRow {
     let get = |k: &str| {
         fields
             .get(k)
@@ -293,7 +291,7 @@ fn test_ledger_supersedes_quarterly_artifacts() {
             );
             if newest
                 .as_ref()
-                .map_or(true, |(existing_key, _)| key.as_str() > existing_key.as_str())
+                .is_none_or(|(existing_key, _)| key.as_str() > existing_key.as_str())
             {
                 newest = Some((key, entry.path()));
             }

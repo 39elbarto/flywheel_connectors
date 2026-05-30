@@ -23,7 +23,8 @@ fn e2e_token_bucket_overflow_concurrent_claim_and_reset() {
         assert!(fcp_async_core::runtime::block_on_sync(limiter.try_acquire_n(8)).expect("runtime"));
         assert!(
             fcp_async_core::runtime::block_on_sync(limiter.acquire(Duration::from_millis(1)))
-                .expect("runtime").is_err()
+                .expect("runtime")
+                .is_err()
         );
     }
 

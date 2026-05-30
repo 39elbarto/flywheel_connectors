@@ -83,23 +83,23 @@ fn ws_message_pong_constructor_produces_pong_variant() {
 fn predicates_distinguish_data_from_control_frames() {
     let text = WsMessage::text("hi");
     let binary = WsMessage::binary(Bytes::from_static(b"x"));
-    let ping = WsMessage::ping(Bytes::from_static(b""));
-    let pong = WsMessage::pong(Bytes::from_static(b""));
+    let heartbeat_request = WsMessage::ping(Bytes::from_static(b""));
+    let heartbeat_reply = WsMessage::pong(Bytes::from_static(b""));
     let close = WsMessage::Close(Some(WsCloseFrame::normal()));
 
     // is_text only for Text.
     assert!(text.is_text());
     assert!(!binary.is_text());
-    assert!(!ping.is_text());
-    assert!(!pong.is_text());
+    assert!(!heartbeat_request.is_text());
+    assert!(!heartbeat_reply.is_text());
     assert!(!close.is_text());
 
     // is_binary only for Binary.
     assert!(!text.is_binary());
     assert!(binary.is_binary());
-    assert!(!ping.is_binary());
+    assert!(!heartbeat_request.is_binary());
     assert!(
-        !pong.is_binary(),
+        !heartbeat_reply.is_binary(),
         "Pong with bytes MUST NOT be 'binary' — control frames are NOT data frames"
     );
     assert!(!close.is_binary());
@@ -107,8 +107,8 @@ fn predicates_distinguish_data_from_control_frames() {
     // is_close only for Close.
     assert!(!text.is_close());
     assert!(!binary.is_close());
-    assert!(!ping.is_close());
-    assert!(!pong.is_close());
+    assert!(!heartbeat_request.is_close());
+    assert!(!heartbeat_reply.is_close());
     assert!(close.is_close());
 }
 

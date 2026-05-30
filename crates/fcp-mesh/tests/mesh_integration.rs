@@ -233,8 +233,8 @@ mod meshnode {
     };
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
-        ObjectAdmissionPolicy, ObjectSymbolMeta, QuarantineStore,
-        QuarantinedObject, StoredSymbol, SymbolMeta, SymbolStore, SymbolStoreError,
+        ObjectAdmissionPolicy, ObjectSymbolMeta, QuarantineStore, QuarantinedObject, StoredSymbol,
+        SymbolMeta, SymbolStore, SymbolStoreError,
     };
     use fcp_telemetry::trace_capture::{
         CapturedTrace, RedactionPolicy, TraceCaptureConfig, TraceEvent, TraceExportFormat,
@@ -5543,8 +5543,8 @@ mod real_component_integration {
     use fcp_raptorq::ObjectTransmissionInformation;
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
-        ObjectAdmissionPolicy, ObjectSymbolMeta, QuarantineStore,
-        StoredSymbol, SymbolMeta, SymbolStore,
+        ObjectAdmissionPolicy, ObjectSymbolMeta, QuarantineStore, StoredSymbol, SymbolMeta,
+        SymbolStore,
     };
     use semver::Version;
 

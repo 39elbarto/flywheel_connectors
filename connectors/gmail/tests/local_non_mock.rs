@@ -78,7 +78,7 @@ impl LoopbackGmailFixture {
                     .lock()
                     .expect("record Gmail loopback request")
                     .push(request);
-                write_http_response(&mut stream, response);
+                write_http_response(&mut stream, &response);
             }
         });
 
@@ -216,7 +216,7 @@ fn gmail_message_response(message_id: &str, thread_id: &str) -> Value {
     })
 }
 
-fn write_http_response(stream: &mut TcpStream, response: HttpFixtureResponse) {
+fn write_http_response(stream: &mut TcpStream, response: &HttpFixtureResponse) {
     let reason = match response.status {
         200 => "OK",
         500 => "Internal Server Error",

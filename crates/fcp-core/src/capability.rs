@@ -3604,7 +3604,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, expires)
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .expect("Failed to sign token");
 
@@ -3639,7 +3640,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3670,7 +3672,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3701,7 +3704,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3736,7 +3740,8 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
                 "notion://page/123".to_string(),
-            ])).expect("valid constraints")
+            ]))
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3771,7 +3776,8 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
                 "notion://page/*".to_string(),
-            ])).expect("valid constraints")
+            ]))
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3803,7 +3809,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3831,7 +3838,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3860,7 +3868,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3890,7 +3899,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3926,7 +3936,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3962,7 +3973,8 @@ mod tests {
                 now - Duration::hours(2),
                 now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1),
             )
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3993,7 +4005,8 @@ mod tests {
                 now - Duration::hours(1),
                 now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS - 1),
             )
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -4025,7 +4038,8 @@ mod tests {
                 now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS - 1),
                 now + Duration::hours(1),
             )
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -4057,7 +4071,8 @@ mod tests {
                 now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1),
                 now + Duration::hours(1),
             )
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -4094,7 +4109,8 @@ mod tests {
             .not_before(now)
             .expiration(now + Duration::hours(1))
             .operations(&["op.test"])
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             // Set INSTANCE_ID as an Integer instead of Text — pre-fix this
             // would let any verifier accept the token regardless of its
             // configured instance_id.
@@ -4139,7 +4155,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .target_instance(instance_id.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -4176,7 +4193,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .target_instance(token_instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -4210,7 +4228,8 @@ mod tests {
             .not_before(now)
             .expiration(now + Duration::hours(1))
             .operations(&["op.test"])
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .custom(
                 fcp_crypto::cose::fcp2_claims::INSTANCE_ID,
                 ciborium::Value::Integer(0_i64.into()),
@@ -4247,7 +4266,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -4283,7 +4303,8 @@ mod tests {
             .operations(&["op.test"]) // legacy-only shape
             .issued_at(now)
             .expiration(now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints");
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints");
         let cose_token = fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).unwrap();
         let token = CapabilityToken::from_raw(cose_token);
 
@@ -4320,7 +4341,8 @@ mod tests {
             .zone_id("z:work")
             .issued_at(now)
             .expiration(now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .custom(fcp2_claims::GRANTS, grants)
             .custom(
                 fcp2_claims::SCHEMA_VERSION,
@@ -4367,7 +4389,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .target_instance(instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -4483,7 +4506,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose);
@@ -4514,7 +4538,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose);
@@ -4555,7 +4580,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .target_instance(instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -6797,7 +6823,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6884,7 +6911,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6915,7 +6943,8 @@ mod tests {
             .operations(&["op.read"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6943,7 +6972,8 @@ mod tests {
             .operations(&["op.raw"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6974,7 +7004,8 @@ mod tests {
             .operations(&["op.down"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7005,7 +7036,8 @@ mod tests {
             .operations(&["op.ref"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7042,7 +7074,8 @@ mod tests {
             .operations(&["op.clone"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7078,7 +7111,8 @@ mod tests {
             .operations(&["op.raw"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7103,7 +7137,8 @@ mod tests {
             .operations(&["op.consume"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7136,7 +7171,8 @@ mod tests {
             .operations(&["op.noncon"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7170,7 +7206,8 @@ mod tests {
             .operations(&["op.serde"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7208,7 +7245,8 @@ mod tests {
             .operations(&["op.expired"])
             .issuer("node:primary")
             .validity(now - Duration::hours(2), now - Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7236,7 +7274,8 @@ mod tests {
             .operations(&["op.zone"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7265,7 +7304,8 @@ mod tests {
             .operations(&["op.sig"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 

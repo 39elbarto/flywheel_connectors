@@ -683,7 +683,7 @@ esac
                 args: vec!["FCP_FAKE_NONZERO".into()],
             })
             .expect_err("nonzero fake should fail");
-            
+
         assert!(
             matches!(&nonzero, AppleNotesError::Process(message) if message.contains("bounded stderr redacted"))
         );

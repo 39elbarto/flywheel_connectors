@@ -189,7 +189,8 @@ fn capability_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .operations(&[OP_STORAGE_UPLOAD])
         .issuer("node:local-non-mock")
         .validity(now, now + ChronoDuration::hours(1))
-        .try_constraints_cbor(&cbor).expect("valid constraints")
+        .try_constraints_cbor(&cbor)
+        .expect("valid constraints")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)

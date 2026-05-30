@@ -99,7 +99,7 @@ impl LoopbackTelegramFixture {
                     .lock()
                     .expect("record Telegram loopback request")
                     .push(request);
-                write_http_response(&mut stream, response);
+                write_http_response(&mut stream, &response);
             }
         });
 
@@ -149,6 +149,7 @@ fn bump_count(counts: &Arc<Mutex<HashMap<String, usize>>>, key: &str) -> usize {
     let count = counts.entry(key.to_string()).or_insert(0);
     let previous = *count;
     *count = count.saturating_add(1);
+    drop(counts);
     previous
 }
 
@@ -164,7 +165,7 @@ fn response_for_request(
                 body: json!({
                     "ok": true,
                     "result": {
-                        "id": 123456789,
+                        "id": 123_456_789,
                         "is_bot": true,
                         "first_name": "Loopback Bot",
                         "username": "loopback_bot"
@@ -188,7 +189,7 @@ fn response_for_request(
                     "result": {
                         "message_id": 7001,
                         "chat": { "id": CHAT_ID, "type": "private", "first_name": "Loopback" },
-                        "date": 1700000080,
+                        "date": 1_700_000_080,
                         "text": "Local acceptance message"
                     }
                 }),
@@ -203,7 +204,7 @@ fn response_for_request(
                     "result": {
                         "message_id": 7002,
                         "chat": { "id": CHAT_ID, "type": "private", "first_name": "Loopback" },
-                        "date": 1700000090,
+                        "date": 1_700_000_090,
                         "photo": [{
                             "file_id": "local-photo-id",
                             "file_unique_id": "local-photo-unique",
@@ -294,7 +295,7 @@ fn http_request_complete(buffer: &[u8]) -> bool {
     buffer.len() >= header_end + 4 + content_length
 }
 
-fn write_http_response(stream: &mut TcpStream, response: HttpFixtureResponse) {
+fn write_http_response(stream: &mut TcpStream, response: &HttpFixtureResponse) {
     let reason = match response.status {
         200 => "OK",
         404 => "Not Found",

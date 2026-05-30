@@ -1313,13 +1313,13 @@ fn attachment_policy_denial(
     }
 
     for attachment in attachments {
-        if let Some(raw_url) = attachment
-            .get("url")
-            .and_then(Value::as_str)
-            .and_then(nonblank_trimmed)
-            && !attachment_url_is_fanout_safe(raw_url)
-        {
-            return Some("attachment_url_not_allowed");
+        if let Some(raw_url) = attachment.get("url").and_then(Value::as_str) {
+            let Some(raw_url) = nonblank_trimmed(raw_url) else {
+                return Some("attachment_url_not_allowed");
+            };
+            if !attachment_url_is_fanout_safe(raw_url) {
+                return Some("attachment_url_not_allowed");
+            }
         }
     }
 
@@ -4326,6 +4326,24 @@ mod tests {
         assert_eq!(credentialed_url.reason_code, "attachment_url_not_allowed");
         assert_eq!(credentialed_url.runtime.accepted_events, 0);
         assert_eq!(credentialed_url.runtime.queue_depth, 0);
+
+        let blank_url = runtime
+            .project_event(group_attachment_gateway_event(
+                3,
+                "msg-attachment-blank-url",
+                "evt-attachment-blank-url",
+                "bot see blank url",
+                json!({
+                    "url": "   ",
+                    "content_type": "image/png",
+                    "size": 512
+                }),
+            ))
+            .unwrap();
+        assert!(!blank_url.accepted);
+        assert_eq!(blank_url.reason_code, "attachment_url_not_allowed");
+        assert_eq!(blank_url.runtime.accepted_events, 0);
+        assert_eq!(blank_url.runtime.queue_depth, 0);
     }
 
     #[test]

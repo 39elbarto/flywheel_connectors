@@ -356,6 +356,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "media_content_type_policy_drop",
           "media_content_type_malformed_drop",
           "media_url_policy_drop",
+          "media_blank_url_policy_drop",
           "media_content_type_policy_allowed",
           "reply_media_projection",
           "voice_asr_projection",
@@ -478,18 +479,21 @@ if [[ "${overall_status}" == "passed" ]]; then
           and any(.[]; .step == "text_substring_not_mention" and .details.accepted == false and .details.reason_code == "missing_group_mention" and .details.policy.mentioned_bot == false)
           and any(.[]; .step == "explicit_text_group_mention" and .details.accepted == true and .details.policy.reason_code == "group_allowed" and .details.policy.mentioned_bot == true)
         ),
-        malformed_control_shape_ok: any(.[];
-          .step == "malformed_control_envelope_denied"
-          and .details.project_denied == true
-          and .details.error_code_present == true
-          and .details.error_mentions_bounds == true
-          and .details.raw_event_logged == false
-        ) and any(.[];
-          .step == "malformed_data_id_envelope_denied"
-          and .details.project_denied == true
-          and .details.error_code_present == true
-          and .details.error_mentions_bounds == true
-          and .details.raw_event_logged == false
+        malformed_control_shape_ok: (
+          any(.[];
+            .step == "malformed_control_envelope_denied"
+            and .details.project_denied == true
+            and .details.error_code_present == true
+            and .details.error_mentions_bounds == true
+            and .details.raw_event_logged == false
+          )
+          and any(.[];
+            .step == "malformed_data_id_envelope_denied"
+            and .details.project_denied == true
+            and .details.error_code_present == true
+            and .details.error_mentions_bounds == true
+            and .details.raw_event_logged == false
+          )
         ),
         reply_shape_ok: any(.[];
           .step == "reply_media_projection"
@@ -533,6 +537,17 @@ if [[ "${overall_status}" == "passed" ]]; then
             and .details.normalized.has_attachments == true
             and (.details.normalized.attachment_url_hashes | type) == "array"
             and (.details.normalized.attachment_url_hashes | length) == 1
+            and .details.runtime.accepted_events == 0
+            and .details.runtime.queue_depth == 0
+          )
+          and any(.[];
+            .step == "media_blank_url_policy_drop"
+            and .details.accepted == false
+            and .details.reason_code == "attachment_url_not_allowed"
+            and .details.policy.reason_code == "attachment_url_not_allowed"
+            and .details.normalized.has_attachments == true
+            and (.details.normalized.attachment_url_hashes | type) == "array"
+            and (.details.normalized.attachment_url_hashes | length) == 0
             and .details.runtime.accepted_events == 0
             and .details.runtime.queue_depth == 0
           )
@@ -751,6 +766,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-unknown-size-media" \
     "evt-media-type-denied" \
     "evt-media-url-denied" \
+    "evt-media-blank-url-denied" \
     "evt-media-type-allowed" \
     "evt-malformed-data-id" \
     "evt-disabled" \
@@ -788,6 +804,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-unknown-size-media" \
     "msg-media-type-denied" \
     "msg-media-url-denied" \
+    "msg-media-blank-url-denied" \
     "msg-media-type-allowed" \
     "msg-disabled" \
     "msg-missing-binding" \
@@ -847,6 +864,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "missing size metadata" \
     "blocked media type" \
     "unsafe media url" \
+    "blank media url" \
     "allowed media type" \
     "after shutdown should deny" \
     "approve deployment from voice" \
@@ -860,6 +878,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "missing-size.pdf" \
     "disallowed.exe" \
     "credentialed.png" \
+    "blank-url.png" \
     "allowed.png"
   do
     if grep -aF -- "${forbidden}" "${EVIDENCE_JSONL}" >/dev/null; then

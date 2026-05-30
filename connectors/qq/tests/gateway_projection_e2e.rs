@@ -1622,6 +1622,51 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(media_url_denied["runtime"]["queue_depth"], 0);
     log_projection_step(&mut logs, "media_url_policy_drop", "ok", &media_url_denied);
 
+    let media_blank_url_denied = invoke_projection(
+        &media_type_connector,
+        &signing_key,
+        &media_type_instance_id,
+        "qq-gateway-media-blank-url-denied",
+        json!({
+            "op": 0,
+            "s": 4,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-media-blank-url-denied",
+            "d": {
+                "id": "msg-media-blank-url-denied",
+                "content": "bot-openid blank media url",
+                "group_openid": "group-media-type",
+                "group_member_openid": "member-media-type",
+                "attachments": [
+                    {
+                        "url": "   ",
+                        "filename": "blank-url.png",
+                        "content_type": "image/png",
+                        "size": 512
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(media_blank_url_denied["accepted"], false);
+    assert_eq!(
+        media_blank_url_denied["reason_code"],
+        "attachment_url_not_allowed"
+    );
+    assert_eq!(
+        media_blank_url_denied["policy"]["reason_code"],
+        "attachment_url_not_allowed"
+    );
+    assert_eq!(media_blank_url_denied["runtime"]["accepted_events"], 0);
+    assert_eq!(media_blank_url_denied["runtime"]["queue_depth"], 0);
+    log_projection_step(
+        &mut logs,
+        "media_blank_url_policy_drop",
+        "ok",
+        &media_blank_url_denied,
+    );
+
     let media_type_allowed = invoke_projection(
         &media_type_connector,
         &signing_key,
@@ -1629,7 +1674,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-media-type-allowed",
         json!({
             "op": 0,
-            "s": 4,
+            "s": 5,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-media-type-allowed",
             "d": {
@@ -2818,6 +2863,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_content_type_missing"));
     assert!(log_contents.contains("attachment_url_not_allowed"));
     assert!(log_contents.contains("media_url_policy_drop"));
+    assert!(log_contents.contains("media_blank_url_policy_drop"));
     assert!(log_contents.contains("media_content_type_malformed_drop"));
     assert!(log_contents.contains("media_content_type_policy_allowed"));
     assert!(log_contents.contains("queue_full_policy_denied"));

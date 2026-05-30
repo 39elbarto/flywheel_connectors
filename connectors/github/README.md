@@ -1,6 +1,6 @@
 # GitHub Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: PROVEN
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/github_connector_verification.sh`
@@ -42,11 +42,9 @@ Important runtime truths the contract preserves:
 - Package and binary name are `fcp-github`.
 - Runtime `BaseConnector` ID is `github`.
 - Manifest connector ID is `fcp.github`.
-- Configuration requires exactly one auth source: direct `token` or `credential_id`.
-- Direct-token mode sends `Authorization: Bearer <token>`.
+- Configuration requires a host credential reference through `credential_id`; raw `token` fields are rejected as leaked secret material.
 - `credential_id` mode sends `X-FCP-Credential-ID` and expects host egress policy to inject real secret material.
 - Default base URL is `https://api.github.com`.
-- Direct-token base URLs are pinned to exact host `api.github.com`; localhost, `127.0.0.1`, and `::1` are accepted only in test/debug builds.
 - `credential_id` mode accepts HTTPS custom base URLs for egress-proxy routing, plus loopback hosts for tests.
 - All base URLs reject userinfo, query strings, and fragments.
 - Runtime request timeout is 30 seconds.
@@ -60,7 +58,7 @@ Important runtime truths the contract preserves:
 - `invoke` requires `operation`, `input`, and `capability_token`; it validates input, computes resource URIs, and verifies a bound capability token before provider execution.
 - `simulate` validates operation inventory, input shape, configured state, handshaken state, resource URI construction, and bound capability token before returning an allowed result.
 - `github.process_webhook` never calls GitHub. It accepts only host-forwarded structured payloads with `signature_validated = true`, requires repository context, and deduplicates the latest 1024 delivery IDs in process memory.
-- `health()` is local state only; `self_check()` calls `GET /user` when direct credentials are configured and degrades for `credential_id`.
+- `health()` is local state only; `self_check()` degrades for `credential_id` because real connectivity depends on the egress proxy.
 - `handle_shutdown()` shuts down the client runtime, records local shutdown state, and clears base configured/handshaken flags.
 
 ## Drift Visible In This Checkout
@@ -83,7 +81,7 @@ A follow-up parity bead should reconcile search/rate-limit capability mapping, a
 
 The current GitHub README slice documents the existing runtime surface:
 
-- direct bearer-token and host credential-reference configuration
+- host credential-reference configuration with fail-closed raw-secret rejection
 - REST host policy, GitHub API version header, timeout, retry, and rate-limit behavior
 - issue, pull request, repository, repository content, search, Actions workflow dispatch, and forwarded webhook operations
 - bound capability-token verification during both `invoke` and `simulate`
@@ -92,7 +90,7 @@ The current GitHub README slice documents the existing runtime surface:
 
 ## Auth And Scope Boundary
 
-- Authentication mechanisms: GitHub bearer token or host credential reference.
+- Authentication mechanism: host credential reference through `credential_id`.
 - Home zone: `z:work`.
 - Allowed source zones: `z:owner`, `z:private`, and `z:work`.
 - Allowed target zone: `z:work`.
@@ -113,7 +111,6 @@ The current GitHub README slice documents the existing runtime surface:
 - TLS and SNI are required by the manifest for provider operations.
 - Manifest network policy denies localhost, private ranges, tailnet ranges, and IP literals for live provider operations.
 - `github.process_webhook` declares `none.invalid` and `port 0` in the manifest because it performs no provider egress.
-- Direct-token runtime host policy pins production requests to `api.github.com`.
 - Credential-reference runtime host policy allows custom HTTPS base URLs for egress-proxy routing.
 - Localhost overrides are test/debug-only.
 - Runtime request timeout: `30 seconds`.
@@ -196,7 +193,6 @@ These are excluded on purpose:
 - local configuration, client, shutdown, and request metric state
 - auth mode without secret disclosure
 - base URL class and credential-injection warning state
-- provider-backed self-check through `GET /user` when direct token auth is configured
 - degraded self-check for `credential_id` mode because real connectivity depends on the egress proxy
 - operation metadata with capability, risk, safety tier, idempotency, schemas, and hints
 - bound capability-token verification during `invoke`
@@ -245,7 +241,7 @@ scripts/e2e/github_connector_verification.sh
 **Prerequisites**:
 
 - Use a GitHub test organization or repository for live mutation proof.
-- Prefer `credential_id` mode when host policy should own token material.
+- Configure the connector with `credential_id` only; raw token fields are treated as leaked secret material.
 - Use loopback WireMock fixtures for routine proof.
 - Give live tokens only the scopes needed for the operation family under test.
 
@@ -262,8 +258,7 @@ scripts/e2e/github_connector_verification.sh
 
 **Common remediation**:
 
-- If configuration fails, provide exactly one of `token` or `credential_id`.
-- If token-mode configuration rejects `base_url`, use exact `https://api.github.com` for live proof or loopback in test/debug builds.
+- If configuration fails, provide a valid `credential_id` and remove any raw token material from config.
 - If credential-reference self-check degrades, materialize host credentials through the egress proxy before invoking provider operations.
 - If provider returns 403 with no rate-limit budget remaining, treat it as rate-limited and honor retry guidance.
 - If `github.process_webhook` fails, verify `signature_validated = true`, repository context, and a fresh delivery ID before inspecting payload shape.

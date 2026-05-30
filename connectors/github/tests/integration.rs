@@ -35,35 +35,6 @@ use fcp_github::connector::GitHubConnector;
 
 const TEST_CREDENTIAL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
-    let cap = match op {
-        "github.create_issue" | "github.create_pull_request" => "github.write",
-        "github.merge_pull_request" | "github.trigger_workflow" => "github.admin",
-        "github.process_webhook" => "github.process_webhook",
-        _ => "github.read",
-    };
-    let now = Utc::now();
-    // C3.4: tokens MUST include constraints (default-deny)
-    let constraints = CapabilityConstraints {
-        resource_allow: vec!["*".into()],
-        ..Default::default()
-    };
-    let mut cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-    let cose = CapabilityTokenBuilder::new()
-        .capability_id(cap)
-        .zone_id("z:work")
-        .principal("user:test")
-        .operations(&[op])
-        .issuer("node:test")
-        .validity(now, now + Duration::hours(1))
-        .try_constraints_cbor(&cbor)
-        .expect("test constraints CBOR should be valid")
-        .sign(signing_key)
-        .unwrap();
-    fcp_core::CapabilityToken::from_raw(cose)
-}
-
 fn generate_valid_bound_token(
     signing_key: &Ed25519SigningKey,
     connector: &GitHubConnector,
@@ -197,7 +168,7 @@ async fn create_issue_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.create_issue"]).await;
-    let token = generate_valid_token(&signing_key, "github.create_issue");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.create_issue");
 
     let result = connector
         .handle_invoke(json!({
@@ -238,7 +209,7 @@ async fn get_issue_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.get_issue"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_issue");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_issue");
 
     let result = connector
         .handle_invoke(json!({
@@ -276,7 +247,7 @@ async fn search_issues_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.search_issues"]).await;
-    let token = generate_valid_token(&signing_key, "github.search_issues");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.search_issues");
 
     let result = connector
         .handle_invoke(json!({
@@ -312,7 +283,7 @@ async fn create_pull_request_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.create_pull_request"]).await;
-    let token = generate_valid_token(&signing_key, "github.create_pull_request");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.create_pull_request");
 
     let result = connector
         .handle_invoke(json!({
@@ -350,7 +321,7 @@ async fn get_pull_request_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.get_pull_request"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_pull_request");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_pull_request");
 
     let result = connector
         .handle_invoke(json!({
@@ -388,7 +359,7 @@ async fn merge_pull_request_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.merge_pull_request"]).await;
-    let token = generate_valid_token(&signing_key, "github.merge_pull_request");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.merge_pull_request");
 
     let result = connector
         .handle_invoke(json!({
@@ -491,7 +462,7 @@ async fn search_repos_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.search_repos"]).await;
-    let token = generate_valid_token(&signing_key, "github.search_repos");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.search_repos");
 
     let result = connector
         .handle_invoke(json!({
@@ -534,7 +505,7 @@ async fn list_workflows_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.list_workflows"]).await;
-    let token = generate_valid_token(&signing_key, "github.list_workflows");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.list_workflows");
 
     let result = connector
         .handle_invoke(json!({
@@ -566,7 +537,7 @@ async fn trigger_workflow_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.trigger_workflow"]).await;
-    let token = generate_valid_token(&signing_key, "github.trigger_workflow");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.trigger_workflow");
 
     let result = connector
         .handle_invoke(json!({
@@ -613,7 +584,7 @@ async fn get_file_content_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.get_file_content"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_file_content");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_file_content");
 
     let result = connector
         .handle_invoke(json!({
@@ -662,7 +633,7 @@ async fn search_code_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.search_code"]).await;
-    let token = generate_valid_token(&signing_key, "github.search_code");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.search_code");
 
     let result = connector
         .handle_invoke(json!({
@@ -1003,7 +974,7 @@ async fn capability_no_handshake_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "github.get_repo");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_repo");
 
     let err = connector
         .handle_invoke(json!({
@@ -1055,7 +1026,7 @@ async fn capability_wrong_operation_fails() {
     let signing_key =
         setup_handshake(&mut connector, &["github.get_repo", "github.create_issue"]).await;
 
-    let wrong_token = generate_valid_token(&signing_key, "github.create_issue");
+    let wrong_token = generate_valid_bound_token(&signing_key, &connector, "github.create_issue");
 
     let err = connector
         .handle_invoke(json!({
@@ -1086,7 +1057,7 @@ async fn capability_unknown_operation_fails() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "github.nonexistent");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.nonexistent");
 
     let err = connector
         .handle_invoke(json!({
@@ -1224,7 +1195,7 @@ async fn validation_get_issue_missing_owner() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.get_issue"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_issue");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_issue");
 
     let err = connector
         .handle_invoke(json!({
@@ -1253,7 +1224,7 @@ async fn validation_get_issue_missing_repo() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.get_issue"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_issue");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_issue");
 
     let err = connector
         .handle_invoke(json!({
@@ -1282,7 +1253,7 @@ async fn validation_get_issue_missing_number() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.get_issue"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_issue");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_issue");
 
     let err = connector
         .handle_invoke(json!({
@@ -1311,7 +1282,7 @@ async fn validation_create_issue_missing_title() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.create_issue"]).await;
-    let token = generate_valid_token(&signing_key, "github.create_issue");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.create_issue");
 
     let err = connector
         .handle_invoke(json!({
@@ -1340,7 +1311,7 @@ async fn validation_create_pr_missing_head() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.create_pull_request"]).await;
-    let token = generate_valid_token(&signing_key, "github.create_pull_request");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.create_pull_request");
 
     let err = connector
         .handle_invoke(json!({
@@ -1374,7 +1345,7 @@ async fn validation_search_issues_missing_query() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.search_issues"]).await;
-    let token = generate_valid_token(&signing_key, "github.search_issues");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.search_issues");
 
     let err = connector
         .handle_invoke(json!({
@@ -1884,7 +1855,7 @@ async fn simulate_returns_allowed() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.read"]).await;
 
-    let token = generate_valid_token(&signing_key, "github.get_repo");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_repo");
 
     let result = connector
         .handle_simulate(json!({
@@ -2014,7 +1985,7 @@ async fn shutdown_then_reinvoke() {
     assert_eq!(health_result["status"], "shutdown");
 
     // Invoke fails at the connector lifecycle gate instead of leaking a cancelled HTTP request.
-    let token = generate_valid_token(&signing_key, "github.get_repo");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_repo");
     let err = connector
         .handle_invoke(json!({
             "operation": "github.get_repo",
@@ -2041,7 +2012,7 @@ async fn validation_create_pr_missing_base() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.create_pull_request"]).await;
-    let token = generate_valid_token(&signing_key, "github.create_pull_request");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.create_pull_request");
 
     let err = connector
         .handle_invoke(json!({
@@ -2076,7 +2047,7 @@ async fn validation_trigger_workflow_missing_ref() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.trigger_workflow"]).await;
-    let token = generate_valid_token(&signing_key, "github.trigger_workflow");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.trigger_workflow");
 
     let err = connector
         .handle_invoke(json!({
@@ -2110,7 +2081,7 @@ async fn validation_get_file_content_missing_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.get_file_content"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_file_content");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_file_content");
 
     let err = connector
         .handle_invoke(json!({
@@ -2143,7 +2114,7 @@ async fn validation_merge_pr_missing_pull_number() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.merge_pull_request"]).await;
-    let token = generate_valid_token(&signing_key, "github.merge_pull_request");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.merge_pull_request");
 
     let err = connector
         .handle_invoke(json!({
@@ -2176,7 +2147,7 @@ async fn validation_search_repos_missing_query() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.search_repos"]).await;
-    let token = generate_valid_token(&signing_key, "github.search_repos");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.search_repos");
 
     let err = connector
         .handle_invoke(json!({
@@ -2206,7 +2177,7 @@ async fn validation_search_code_missing_query() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.search_code"]).await;
-    let token = generate_valid_token(&signing_key, "github.search_code");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.search_code");
 
     let err = connector
         .handle_invoke(json!({

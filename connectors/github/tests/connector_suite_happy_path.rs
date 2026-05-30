@@ -18,6 +18,7 @@ use wiremock::{
 const CONNECTOR_ID: &str = "github";
 const OP_GET_REPO: &str = "github.get_repo";
 const CAP_READ: &str = "github.read";
+const TEST_CREDENTIAL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 const OWNER: &str = "octocat";
 const REPO: &str = "hello-world";
 
@@ -32,6 +33,10 @@ impl GitHubAdapter {
             connector: GitHubConnector::new(),
             id: ConnectorId::from_static(CONNECTOR_ID),
         }
+    }
+
+    fn instance_id(&self) -> &InstanceId {
+        self.connector.instance_id()
     }
 }
 
@@ -162,7 +167,7 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec![format!("github://{OWNER}/{REPO}")],
@@ -179,6 +184,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .issuer("node:test")
         .token_id(b"github-connector-suite")
         .validity(now, now + Duration::hours(1))
+        .target_instance(instance_id.as_str())
         .try_constraints_cbor(&cbor)
         .expect("valid constraints cbor")
         .sign(signing_key)
@@ -186,7 +192,11 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     CapabilityToken::from_raw(raw)
 }
 
-fn get_repo_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> InvokeRequest {
+fn get_repo_invoke(
+    signing_key: &Ed25519SigningKey,
+    id: &'static str,
+    instance_id: &InstanceId,
+) -> InvokeRequest {
     InvokeRequest {
         r#type: "invoke".to_string(),
         id: RequestId::new(id),
@@ -197,7 +207,7 @@ fn get_repo_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> InvokeR
             "owner": OWNER,
             "repo": REPO
         }),
-        capability_token: build_token(signing_key),
+        capability_token: build_token(signing_key, instance_id),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -215,7 +225,7 @@ async fn connector_suite_happy_path_gets_repo() {
 
     Mock::given(method("GET"))
         .and(path(format!("/repos/{OWNER}/{REPO}")))
-        .and(header("authorization", "Bearer ghp_test_github"))
+        .and(header("X-FCP-Credential-ID", TEST_CREDENTIAL_ID))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": 1_296_269,
             "name": REPO,
@@ -243,12 +253,17 @@ async fn connector_suite_happy_path_gets_repo() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let invoke = get_repo_invoke(&signing_key, "github-connector-suite");
+    let mut connector = GitHubAdapter::new();
+    let invoke = get_repo_invoke(
+        &signing_key,
+        "github-connector-suite",
+        connector.instance_id(),
+    );
 
     let suite = ConnectorSuite {
         test_name: "github_get_repo_happy_path".to_string(),
         config: json!({
-            "token": "ghp_test_github",
+            "credential_id": TEST_CREDENTIAL_ID,
             "base_url": server.uri(),
         }),
         handshake: handshake_request(signing_key.verifying_key().to_bytes()),
@@ -256,7 +271,6 @@ async fn connector_suite_happy_path_gets_repo() {
         invoke_expectations: InvokeExpectations::default(),
     };
 
-    let mut connector = GitHubAdapter::new();
     let mut runner = E2eRunner::new("fcp-github");
     let report = runner
         .run_connector_suite(&mut connector, suite)
@@ -280,7 +294,7 @@ async fn connector_suite_error_path_reports_not_found_repo() {
 
     Mock::given(method("GET"))
         .and(path(format!("/repos/{OWNER}/{REPO}")))
-        .and(header("authorization", "Bearer ghp_test_github"))
+        .and(header("X-FCP-Credential-ID", TEST_CREDENTIAL_ID))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({
             "message": "Not Found",
             "documentation_url": "https://docs.github.com/rest/repos/repos#get-a-repository"
@@ -290,12 +304,17 @@ async fn connector_suite_error_path_reports_not_found_repo() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let invoke = get_repo_invoke(&signing_key, "github-connector-suite-not-found");
+    let mut connector = GitHubAdapter::new();
+    let invoke = get_repo_invoke(
+        &signing_key,
+        "github-connector-suite-not-found",
+        connector.instance_id(),
+    );
 
     let suite = ConnectorSuite {
         test_name: "github_get_repo_not_found".to_string(),
         config: json!({
-            "token": "ghp_test_github",
+            "credential_id": TEST_CREDENTIAL_ID,
             "base_url": server.uri(),
         }),
         handshake: handshake_request(signing_key.verifying_key().to_bytes()),
@@ -307,7 +326,6 @@ async fn connector_suite_error_path_reports_not_found_repo() {
         },
     };
 
-    let mut connector = GitHubAdapter::new();
     let mut runner = E2eRunner::new("fcp-github");
     let report = runner
         .run_connector_suite(&mut connector, suite)

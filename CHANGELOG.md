@@ -4,13 +4,50 @@ All notable changes to the **Flywheel Connector Protocol (FCP)** repository are 
 
 This project has no tagged releases or GitHub Releases. Development follows a continuous integration model on `main`, with logical milestones organized by date and capability landing. Commit links point to the canonical repository at `https://github.com/Dicklesworthstone/flywheel_connectors`.
 
+Scope window: full visible repository history represented by this checked-in changelog, with the current update covering the recent 2026-05-17 → 2026-05-19 `main` history plus the in-progress protocol hardening patch currently present in the working tree.
+
 ---
 
-## [Unreleased] — as of 2026-05-16
+## Version Timeline
 
-**Current state:** 176 production connector crates (plus one adversarial conformance test crate, `connectors/_adversarial/`), 41 platform crates under `crates/`, ~5,800 commits on `main`, 60,000+ tests.
+| Period | Artifact Type | Status | Live Reference |
+|--------|---------------|--------|----------------|
+| [Unreleased] — as of 2026-05-19 | Continuous `main` history | No git tags or GitHub Releases found by `git for-each-ref refs/tags` / `gh release list`; dates below are logical milestones | [`main`](https://github.com/Dicklesworthstone/flywheel_connectors/tree/main) |
+| 2026-05-17 — 2026-05-19 | Logical milestone | Proof-gate evidence tightening, connector-bound token fixes, parser hardening | [`main`](https://github.com/Dicklesworthstone/flywheel_connectors/tree/main) |
+| 2026-05-06 — 2026-05-16 | Logical milestone | Mesh authority, credential pooling, browser CDP parity, audit OTLP | [`main`](https://github.com/Dicklesworthstone/flywheel_connectors/tree/main) |
+| 2026-04-21 — 2026-05-05 | Logical milestone | Post-quantum crypto, typestate ratchet, multi-agent swarm session | [`main`](https://github.com/Dicklesworthstone/flywheel_connectors/tree/main) |
+| 2026-03-22 — 2026-04-20 | Logical milestones | FCP3 migration, Gemini audit, bootstrap closeout, mesh authority | [`main`](https://github.com/Dicklesworthstone/flywheel_connectors/tree/main) |
 
-The window 2026-03-22 → 2026-05-16 added ~3,800 non-merge commits across post-quantum cryptography, host-first → mesh-native truth resolution, a workspace-wide typestate ratchet, multi-host HRW lease coordination, real-CDP browser parity, voice-call multi-provider parity, credential pooling, a new shared `fcp-provider-auth` crate, OTLP audit parity, HLC + HierVV anti-entropy, manifest-operations conformance, and connector test-directory ratchets. Thirteen new workspace crates landed in this window: `fcp-auth-schema`, `fcp-bench`, `fcp-chaos`, `fcp-crypto-pq`, `fcp-crypto-hw`, `fcp-evidence`, `fcp-kernel`, `fcp-openai-compat`, `fcp-policy`, `fcp-prelude`, `fcp-provider-auth`, `fcp-voice-call`, and the `br-tools` maintenance helper.
+---
+
+## [Unreleased] — as of 2026-05-19
+
+**Current state:** 177 production connector crates (plus one adversarial conformance test crate, `connectors/_adversarial/`), 42 platform crates under `crates/`, ~6,300 commits on `main`, 60,000+ tests.
+
+The window 2026-03-22 → 2026-05-16 added ~3,800 non-merge commits across post-quantum cryptography, host-first → mesh-native truth resolution, a workspace-wide typestate ratchet, multi-host HRW lease coordination, real-CDP browser parity, voice-call multi-provider parity, credential pooling, a new shared `fcp-provider-auth` crate, OTLP audit parity, HLC + HierVV anti-entropy, manifest-operations conformance, and connector test-directory ratchets. Thirteen new workspace crates landed in this window: `fcp-auth-schema`, `fcp-bench`, `fcp-chaos`, `fcp-crypto-pq`, `fcp-crypto-hw`, `fcp-evidence`, `fcp-kernel`, `fcp-openai-compat`, `fcp-policy`, `fcp-prelude`, `fcp-provider-auth`, `fcp-voice-call`, and the `br-tools` maintenance helper. The 2026-05-17 → 2026-05-19 continuation added proof-gate evidence hardening, `fwc` truth-source metadata, connector-bound capability-token fixes, and another protocol/CBOR/RaptorQ parser-hardening sweep.
+
+---
+
+## 2026-05-17 — 2026-05-19 — Proof-Gate Evidence Tightening, Connector-Bound Tokens, and Parser Hardening
+
+### Proof-Gate Evidence and Truth-Source Metadata
+The recent workstream is mostly hardening infrastructure rather than adding new connector surfaces. Prewarm and PQ proof-gauntlet evidence now rejects private paths, traversal-shaped run IDs, sensitive status labels, bare production-boundary prefixes, and unredacted verifier metadata. `fwc` command surfaces gained truth-source metadata for status, doctor, show, context, schema, search, and related catalog paths so later agents can distinguish live evidence, history evidence, and generated summaries.
+- Delivered capability: redaction-safe proof evidence and explicit command-truth provenance across the `fwc` operator surface.
+- Closed workstreams: `k3zfl.8` (prewarm evidence), `kyopb.1.3.1.1.6.2` (PQ/formal proof gauntlet), `hr0rr.2.5` (truth-source metadata), `angoc.6.3.1` / `angoc.16.2` proof-gate refinements
+- Representative commits: [`7859653bb`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/7859653bb), [`5ed85231f`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/5ed85231f), [`e695d314d`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/e695d314d), [`547323c25`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/547323c25), [`af6142b4b`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/af6142b4b)
+
+### QQ Gateway Liveness and Connector Boundary Tightening
+QQ gateway supervision picked up heartbeat interval enforcement, bounded peer queues, heartbeat acknowledgement liveness, attachment URL policy, pending-shutdown drop proof, reconnect backoff caps, and terminal-state reset coverage. In parallel, connector runtime tests and manifests tightened connector-bound capability tokens and clarified empty-response coercion semantics across AWS, Airtable, iMessage, Apple Notes, Brave Search, Amplitude, Arxiv, Browser CDP payload comparison, and compliance fixtures.
+- Delivered capability: stronger runtime liveness guarantees for QQ plus connector-instance binding at capability-token verification boundaries.
+- Closed workstreams: `6n7.12.3` (QQ gateway), connector-bound token migration slices
+- Representative commits: [`ca58ae15b`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/ca58ae15b), [`317bcbcb8`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/317bcbcb8), [`3df666117`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/3df666117), [`748c39ff8`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/748c39ff8), [`d77f288f0`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d77f288f0)
+
+### Canonical CBOR, RaptorQ OTI, and Session-Handshake Hardening
+The parser-hardening line continues across `fcp-cbor`, `fcp-raptorq`, `fcp-auth-schema`, and `fcp-protocol`. Canonical CBOR serialization now enforces byte limits through the top-level `LimitedVecWriter`, including existing schema-prefix bytes, not just map-key scratch buffers. RaptorQ decode now validates the OTI shape before buffering work, including zero symbol size, non-single-block layouts, sub-block count, and alignment. The current working tree adds the matching `fcp-protocol` handshake bound: mesh-session CBOR decode now uses the shared canonical recursion limit and maps over-depth input to `DepthExceeded`; the FCPS hybrid wrong-key test now expects the actual envelope-level signature failure instead of a token-only `kid` mismatch.
+- Delivered capability: fail-closed parser/resource bounds for canonical CBOR, RaptorQ transmission information, and mesh-session handshake payloads.
+- Closed workstreams: `br-2h9au` / `br-w1098` (CBOR map-key budget), `br-v27h7` (canonical serializer streaming), `br-yu0l5` (RaptorQ post-K retry coalescing), `br-7p8rd` (symbol-request hard cap)
+- Representative commits: [`4de7572d9`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/4de7572d9), [`09bac5f1b`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/09bac5f1b), [`e6dea6ac3`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/e6dea6ac3), [`d207e5996`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d207e5996), [`92c02f649`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/92c02f649)
+- Pending working-tree patch: `crates/fcp-protocol/src/session.rs` and `crates/fcp-protocol/src/fcps.rs` (no commit link yet)
 
 ---
 

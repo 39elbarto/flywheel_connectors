@@ -84,6 +84,18 @@ fn sanitize_object_key<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
             "{field} contains path traversal characters"
         )));
     }
+    // Reject URL-structure delimiters. `sign_request` parses the assembled URL
+    // with `url::Url`, which treats `?`/`#` as the start of the query/fragment.
+    // A key like `reports/Q?x.pdf` would be silently truncated to `reports/Q`,
+    // so the request (and, for `s3_delete_object`, the deletion) would target a
+    // DIFFERENT object than the caller named. Fail closed rather than act on the
+    // wrong key. (`&` is intentionally allowed: with no `?` it is an ordinary
+    // path byte and the SigV4 canonicalizer percent-encodes it consistently.)
+    if value.contains('?') || value.contains('#') {
+        return Err(AwsError::InvalidInput(format!(
+            "{field} contains URL control characters ('?' or '#')"
+        )));
+    }
     Ok(value)
 }
 
@@ -1220,6 +1232,13 @@ mod tests {
         assert!(sanitize_object_key("path/to/file.txt", "test").is_ok());
         assert!(sanitize_object_key("../etc/passwd", "test").is_err());
         assert!(sanitize_object_key("path\\to\\file", "test").is_err());
+        // `?`/`#` would be split off as query/fragment by the URL parser in
+        // `sign_request`, retargeting the operation at the wrong S3 object.
+        assert!(sanitize_object_key("reports/Q?x.pdf", "test").is_err());
+        assert!(sanitize_object_key("reports/Q#x.pdf", "test").is_err());
+        // `&` stays valid: without a `?` it is an ordinary path byte and the
+        // SigV4 canonical URI encodes it the same way AWS does.
+        assert!(sanitize_object_key("reports/Q&A.pdf", "test").is_ok());
     }
 
     #[test]

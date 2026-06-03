@@ -2,7 +2,10 @@
 //!
 //! Implements the normative session handshake defined in `FCP_Specification_V3.md`
 //! §9.7.1 (Handshake and Session Establishment) and §9.7.2 (Mesh Session Authentication).
-use fcp_cbor::{SerializationError, to_canonical_cbor};
+use fcp_cbor::{
+    MAX_CANONICALIZATION_DEPTH, MAX_DESERIALIZATION_RECURSION_LIMIT, SerializationError,
+    to_canonical_cbor,
+};
 use fcp_crypto::{
     CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, HkdfSha256,
     X25519PublicKey, X25519SharedSecret,
@@ -469,8 +472,11 @@ fn decode_canonical_cbor<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Resul
     }
 
     let mut cursor = Cursor::new(bytes);
-    let value: T =
-        ciborium::from_reader(&mut cursor).map_err(SerializationError::CborDeserialize)?;
+    let value: T = ciborium::de::from_reader_with_recursion_limit(
+        &mut cursor,
+        MAX_DESERIALIZATION_RECURSION_LIMIT,
+    )
+    .map_err(map_handshake_cbor_deserialize_error)?;
     #[allow(clippy::cast_possible_truncation)] // cursor position always <= bytes.len()
     if cursor.position() as usize != bytes.len() {
         return Err(SessionError::Cbor(SerializationError::TrailingBytes));
@@ -482,6 +488,18 @@ fn decode_canonical_cbor<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Resul
     }
 
     Ok(value)
+}
+
+fn map_handshake_cbor_deserialize_error(
+    err: ciborium::de::Error<std::io::Error>,
+) -> SerializationError {
+    match err {
+        ciborium::de::Error::RecursionLimitExceeded => SerializationError::DepthExceeded {
+            depth: MAX_DESERIALIZATION_RECURSION_LIMIT + 1,
+            max: MAX_CANONICALIZATION_DEPTH,
+        },
+        other => SerializationError::CborDeserialize(other),
+    }
 }
 
 /// Decode a canonical CBOR-encoded `MeshSessionHello`.
@@ -2785,6 +2803,36 @@ mod tests {
             let err = decode_hello_cbor(&oversized).expect_err("oversized");
             assert!(matches!(err, SessionError::Cbor(_)));
         });
+    }
+
+    #[test]
+    fn decode_canonical_cbor_uses_canonical_depth_limit() {
+        let context =
+            LogContext::new("handshake", "decode_canonical_cbor").with_reason("depth_limit");
+        run_logged_test(
+            "decode_canonical_cbor_uses_canonical_depth_limit",
+            2,
+            &context,
+            || {
+                let mut at_limit = vec![0x81; MAX_CANONICALIZATION_DEPTH];
+                at_limit.push(0x00);
+                decode_canonical_cbor::<ciborium::Value>(&at_limit)
+                    .expect("canonical depth limit must decode");
+
+                let mut over_limit = vec![0x81; MAX_CANONICALIZATION_DEPTH + 1];
+                over_limit.push(0x00);
+                let err = decode_canonical_cbor::<ciborium::Value>(&over_limit)
+                    .expect_err("over-depth handshake CBOR must fail before canonical re-encode");
+
+                assert!(
+                    matches!(
+                        err,
+                        SessionError::Cbor(SerializationError::DepthExceeded { .. })
+                    ),
+                    "expected depth-exceeded CBOR error, got {err:?}"
+                );
+            },
+        );
     }
 
     // ── decode_ack_cbor tests ───────────────────────────────────────

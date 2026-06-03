@@ -1662,7 +1662,7 @@ mod tests {
             2000,
         )
         .expect_err("wrong classical key should fail");
-        assert!(matches!(err, CryptoError::KeyIdMismatch { .. }));
+        assert!(matches!(err, CryptoError::SignatureVerificationFailed));
     }
 
     #[test]

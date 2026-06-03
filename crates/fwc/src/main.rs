@@ -285,11 +285,11 @@ mod zone_scope;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1557,6 +1557,10 @@ struct OpsArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1603,6 +1607,10 @@ struct ExampleArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1707,6 +1715,30 @@ struct DoctorArgs {
     #[arg(long, value_enum)]
     require_source: Option<RequiredTruthSource>,
 
+    /// Signed audit-chain head artifact for `fwc doctor audit`.
+    #[arg(long = "audit-head", value_name = "PATH")]
+    audit_head: Option<PathBuf>,
+
+    /// Audit event records artifact for `fwc doctor audit`.
+    #[arg(long = "audit-events", value_name = "PATH")]
+    audit_events: Option<PathBuf>,
+
+    /// Minimum quorum signer count expected by `fwc doctor audit`.
+    #[arg(long = "audit-min-quorum-signers", default_value_t = 2)]
+    audit_min_quorum_signers: u64,
+
+    /// Maximum quorum checkpoint age considered fresh by `fwc doctor audit`.
+    #[arg(long = "audit-max-age-seconds", default_value_t = 60)]
+    audit_max_age_seconds: u64,
+
+    /// Maximum HLC physical drift allowed by `fwc doctor audit`.
+    #[arg(long = "audit-max-hlc-drift-ms", default_value_t = 60_000)]
+    audit_max_hlc_drift_ms: u64,
+
+    /// Override current Unix time for deterministic `fwc doctor audit` verification.
+    #[arg(long = "audit-now-unix-secs")]
+    audit_now_unix_secs: Option<u64>,
+
     #[command(subcommand)]
     command: Option<DoctorCommand>,
 }
@@ -1733,10 +1765,14 @@ struct DoctorSelfTestArgs {
 #[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 enum DoctorLocalCheck {
+    /// Verify audit-chain status artifacts and operator readiness thresholds.
+    Audit,
     /// Verify the Lean formal-proof gate and local proof artifacts.
     Lean,
     /// Verify migration dirty-tracking, pre-copy, and post-copy local thresholds.
     Migration,
+    /// Verify reality-check cadence artifacts and README drift hygiene.
+    RealityCadence,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
@@ -3194,7 +3230,7 @@ fn execute_passthrough_command(prepared: &PreparedCli) -> Result<Option<Executio
         Commands::Audit(args) => match &args.command {
             audit_chain::AuditCommands::Matrix(_) | audit_chain::AuditCommands::Gaps(_) => Ok(None),
             _ => {
-                audit_chain::run(args.clone())?;
+                audit_chain::run_with_host(args.clone(), prepared.cli.host.as_deref())?;
                 Ok(Some(ExecutionOutcome {
                     text: String::new(),
                     exit_code: ExitCode::SUCCESS,
@@ -7135,11 +7171,9 @@ fn ops_dispatch_host(args: &OpsArgs, host: &str) -> Result<DispatchOutcome> {
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "ops",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("ops", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
     let introspection = client.introspect(connector.summary.id.as_str())?;
@@ -7181,6 +7215,7 @@ fn ops_dispatch_host(args: &OpsArgs, host: &str) -> Result<DispatchOutcome> {
         catalog::DiscoveryDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -7347,11 +7382,9 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "examples",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("examples", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
     let introspection = client.introspect(connector.summary.id.as_str())?;
@@ -7361,12 +7394,14 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
         let operation = match resolve_host_tool(&introspection.tools, operation_selector) {
             Ok(operation) => operation,
             Err(error) => {
-                return Ok(host_operation_resolution_dispatch(
+                let mut outcome = host_operation_resolution_dispatch(
                     "examples",
                     &connector.slug,
                     operation_selector,
                     &error,
-                ));
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
             }
         };
 
@@ -7409,6 +7444,7 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
             catalog::TemplateDataSource::LiveHostIntrospection,
         );
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -7465,6 +7501,7 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
         catalog::TemplateDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -7864,6 +7901,12 @@ fn proof_dispatch(args: &proof_cmd::ProofArgs) -> Result<DispatchOutcome> {
 
 #[allow(clippy::too_many_lines)]
 fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutcome> {
+    if let Some(outcome) =
+        enforce_audit_required_truth_source("matrix", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
+    }
+
     let connectors_root = match audit_connectors_root() {
         Ok(root) => root,
         Err(error) => {
@@ -7880,28 +7923,30 @@ fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutco
 
     if let Some(name) = args.connector.as_deref() {
         let Some(entry) = matrix.connectors.get(name) else {
+            let mut payload = json!({
+                "status": "error",
+                "command": "audit",
+                "subcommand": "matrix",
+                "error": {
+                    "type": "connector-not-found",
+                    "message": format!("Connector `{name}` was not found in the audit matrix built from workspace manifests."),
+                    "recoverable": true,
+                },
+                "filters": {
+                    "connector": name,
+                },
+                "details": {
+                    "connectors_root": connectors_root_display,
+                    "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
+                },
+                "next_actions": [
+                    "Run `fwc audit matrix` to inspect the full compliance matrix first.".to_owned(),
+                    "Use a connector directory name such as `github` or `slack`.".to_owned(),
+                ],
+            });
+            inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
             return Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "error",
-                    "command": "audit",
-                    "subcommand": "matrix",
-                    "error": {
-                        "type": "connector-not-found",
-                        "message": format!("Connector `{name}` was not found in the audit matrix built from workspace manifests."),
-                        "recoverable": true,
-                    },
-                    "filters": {
-                        "connector": name,
-                    },
-                    "details": {
-                        "connectors_root": connectors_root_display,
-                        "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
-                    },
-                    "next_actions": [
-                        "Run `fwc audit matrix` to inspect the full compliance matrix first.".to_owned(),
-                        "Use a connector directory name such as `github` or `slack`.".to_owned(),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Validation,
             });
         };
@@ -7927,6 +7972,7 @@ fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutco
         });
         payload["toon"] = json!(format_connector_audit_toon(entry));
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -7956,6 +8002,7 @@ fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutco
     });
     payload["toon"] = json!(format_audit_matrix_toon(&matrix));
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -7964,6 +8011,12 @@ fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutco
 
 #[allow(clippy::too_many_lines)]
 fn audit_gaps_dispatch(args: &audit_chain::GapsArgs) -> Result<DispatchOutcome> {
+    if let Some(outcome) =
+        enforce_audit_required_truth_source("gaps", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
+    }
+
     let connectors_root = match audit_connectors_root() {
         Ok(root) => root,
         Err(error) => {
@@ -7980,29 +8033,31 @@ fn audit_gaps_dispatch(args: &audit_chain::GapsArgs) -> Result<DispatchOutcome> 
     if let Some(name) = args.connector.as_deref()
         && !matrix.connectors.contains_key(name)
     {
+        let mut payload = json!({
+            "status": "error",
+            "command": "audit",
+            "subcommand": "gaps",
+            "error": {
+                "type": "connector-not-found",
+                "message": format!("Connector `{name}` was not found in the audit gap report built from workspace manifests."),
+                "recoverable": true,
+            },
+            "filters": {
+                "connector": name,
+                "blocking_only": args.blocking_only,
+            },
+            "details": {
+                "connectors_root": connectors_root_display,
+                "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
+            },
+            "next_actions": [
+                "Run `fwc audit matrix` to inspect the full connector inventory first.".to_owned(),
+                "Use a connector directory name such as `github` or `slack`.".to_owned(),
+            ],
+        });
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "error",
-                "command": "audit",
-                "subcommand": "gaps",
-                "error": {
-                    "type": "connector-not-found",
-                    "message": format!("Connector `{name}` was not found in the audit gap report built from workspace manifests."),
-                    "recoverable": true,
-                },
-                "filters": {
-                    "connector": name,
-                    "blocking_only": args.blocking_only,
-                },
-                "details": {
-                    "connectors_root": connectors_root_display,
-                    "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
-                },
-                "next_actions": [
-                    "Run `fwc audit matrix` to inspect the full connector inventory first.".to_owned(),
-                    "Use a connector directory name such as `github` or `slack`.".to_owned(),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::Validation,
         });
     }
@@ -8067,6 +8122,7 @@ fn audit_gaps_dispatch(args: &audit_chain::GapsArgs) -> Result<DispatchOutcome> 
     });
     payload["toon"] = json!(format_audit_gaps_toon(&gap_reports, args.blocking_only));
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -8087,29 +8143,67 @@ fn audit_connectors_root() -> Result<PathBuf> {
     );
 }
 
+fn enforce_audit_required_truth_source(
+    subcommand: &'static str,
+    requirement: Option<RequiredTruthSource>,
+    actual: KnowledgeState,
+) -> Option<DispatchOutcome> {
+    requirement.and_then(|required| {
+        required.validate(actual).err().map(|error| {
+            let actual_source = error.actual.operator_truth_source();
+            let required_label = error.required.label();
+            DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "audit",
+                    "subcommand": subcommand,
+                    "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+                    "_truth_source": actual_source,
+                    "error": {
+                        "type": "truth-source-unavailable",
+                        "required": required_label,
+                        "actual": actual_source,
+                        "message": format!(
+                            "`fwc audit {subcommand}` resolved from `{actual_source}` truth, which does not satisfy `--require-source {required_label}`."
+                        ),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        "Retry after the required live truth source is reachable.".to_owned(),
+                        format!("Relax the requirement if `{actual_source}` truth is acceptable for this workflow."),
+                    ],
+                }),
+                exit_code: CliExitCode::Transport,
+            }
+        })
+    })
+}
+
 fn audit_connectors_root_error_dispatch(
     subcommand: &str,
     connector: Option<&str>,
     error: &anyhow::Error,
 ) -> DispatchOutcome {
+    let mut payload = json!({
+        "status": "error",
+        "command": "audit",
+        "subcommand": subcommand,
+        "error": {
+            "type": "connectors-root-not-found",
+            "message": error.to_string(),
+            "recoverable": true,
+        },
+        "filters": {
+            "connector": connector,
+        },
+        "next_actions": [
+            "Run `fwc audit matrix` from a repository that contains a top-level `connectors/` directory.".to_owned(),
+            "If you are inside a nested workspace, `cd` into the Flywheel connectors repo root first.".to_owned(),
+        ],
+    });
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     DispatchOutcome {
-        payload: json!({
-            "status": "error",
-            "command": "audit",
-            "subcommand": subcommand,
-            "error": {
-                "type": "connectors-root-not-found",
-                "message": error.to_string(),
-                "recoverable": true,
-            },
-            "filters": {
-                "connector": connector,
-            },
-            "next_actions": [
-                "Run `fwc audit matrix` from a repository that contains a top-level `connectors/` directory.".to_owned(),
-                "If you are inside a nested workspace, `cd` into the Flywheel connectors repo root first.".to_owned(),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Validation,
     }
 }
@@ -12295,24 +12389,46 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("ops"));
+            let mut outcome = conflicting_catalog_mode_dispatch("ops");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) =
+            enforce_required_truth_source("ops", args.require_source, KnowledgeState::HostBacked)
+        {
+            return Ok(outcome);
+        }
         return ops_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("ops", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "ops",
             json!({
                 "connector": &args.connector,
                 "filters": {
                     "risk_at_most": args.risk_at_most,
                 },
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 format!("fwc ops {} --host <endpoint>", args.connector),
                 format!("fwc ops {} --offline", args.connector),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("ops", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     // Try the exact-slug fast path first, but fall back to the full catalog so
@@ -12328,11 +12444,9 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "ops",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("ops", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     };
     let slug = connector.slug.clone();
@@ -12370,6 +12484,7 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -12624,16 +12739,32 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("examples"));
+            let mut outcome = conflicting_catalog_mode_dispatch("examples");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) = enforce_required_truth_source(
+            "examples",
+            args.require_source,
+            KnowledgeState::HostBacked,
+        ) {
+            return Ok(outcome);
+        }
         return examples_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("examples", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "examples",
             json!({
                 "connector": &args.connector,
                 "operation": args.operation,
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 format!(
@@ -12642,7 +12773,15 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
                 ),
                 format!("fwc examples {} <operation> --offline", args.connector),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("examples", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     // Try the exact-slug fast path first, but fall back to the full catalog so
@@ -12658,11 +12797,9 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "examples",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("examples", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     };
 
@@ -12670,12 +12807,14 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
         let operation = match connector.resolve_operation(operation_selector) {
             Ok(operation) => operation,
             Err(error) => {
-                return Ok(operation_resolution_dispatch(
+                let mut outcome = operation_resolution_dispatch(
                     "examples",
                     connector,
                     operation_selector,
                     &error,
-                ));
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+                return Ok(outcome);
             }
         };
 
@@ -12712,6 +12851,7 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             catalog::TemplateDataSource::WorkspaceManifest,
         );
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -12765,6 +12905,7 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
         catalog::TemplateDataSource::WorkspaceManifest,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -12772,8 +12913,13 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
 }
 
 fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
-    let uses_local_doctor_source =
-        args.check.is_some() || args.probe.is_some() || args.command.is_some();
+    let uses_local_doctor_source = matches!(
+        args.check,
+        Some(
+            DoctorLocalCheck::Lean | DoctorLocalCheck::Migration | DoctorLocalCheck::RealityCadence
+        )
+    ) || args.probe.is_some()
+        || args.command.is_some();
     if uses_local_doctor_source {
         if let Some(outcome) =
             enforce_required_truth_source("doctor", args.require_source, KnowledgeState::Offline)
@@ -12782,12 +12928,20 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         }
     }
 
+    if matches!(args.check, Some(DoctorLocalCheck::Audit)) {
+        return doctor_audit_dispatch(args, explicit_host);
+    }
+
     if matches!(args.check, Some(DoctorLocalCheck::Lean)) {
         return doctor_lean_dispatch();
     }
 
     if matches!(args.check, Some(DoctorLocalCheck::Migration)) {
         return doctor_migration_probe_dispatch();
+    }
+
+    if matches!(args.check, Some(DoctorLocalCheck::RealityCadence)) {
+        return doctor_reality_cadence_dispatch();
     }
 
     if matches!(args.probe, Some(DoctorProbe::Hlc)) {
@@ -13053,6 +13207,280 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
     })
 }
 
+const AUDIT_DOCTOR_SCHEMA_VERSION: &str = "fcp.fwc.doctor.audit.v1";
+
+#[derive(Debug, Serialize)]
+struct AuditDoctorReport {
+    schema_version: &'static str,
+    healthy: bool,
+    coverage_scope: &'static str,
+    chain_status: Value,
+    checks: Vec<AuditDoctorCheck>,
+    deferred_checks: Vec<AuditDoctorDeferredCheck>,
+    warnings: Vec<String>,
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditDoctorCheck {
+    id: &'static str,
+    status: &'static str,
+    observed: Value,
+    target: Value,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditDoctorDeferredCheck {
+    id: &'static str,
+    reason: &'static str,
+    command: &'static str,
+}
+
+fn doctor_audit_dispatch(
+    args: &DoctorArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let (report, truth_source) = doctor_audit_report(args, explicit_host)?;
+    if let Some(outcome) =
+        enforce_required_truth_source("doctor", args.require_source, truth_source)
+    {
+        return Ok(outcome);
+    }
+
+    let status = if report.healthy { "ok" } else { "degraded" };
+    let exit_code = if report.healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+    let source = if matches!(truth_source, KnowledgeState::HostBacked) {
+        "host-audit-chain-status"
+    } else {
+        "local-audit-artifact"
+    };
+    let message = if report.healthy && matches!(truth_source, KnowledgeState::HostBacked) {
+        "Live audit-chain status meets the operator doctor thresholds."
+    } else if report.healthy {
+        "Audit-chain status artifact meets the operator doctor thresholds."
+    } else if matches!(truth_source, KnowledgeState::HostBacked) {
+        "Live audit-chain status is missing, stale, or below operator doctor thresholds."
+    } else {
+        "Audit-chain status artifact is missing, stale, or below operator doctor thresholds."
+    };
+    let availability = if matches!(truth_source, KnowledgeState::HostBacked) {
+        CommandAvailability::LiveRuntime
+    } else {
+        CommandAvailability::OfflineArtifact
+    };
+    let next_actions = vec![
+        report
+            .commands
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "fwc audit chain status --json".to_owned()),
+        "Run fwc telemetry otlp-readiness when validating the deferred OTLP collector portion of Phase M."
+            .to_owned(),
+        "Refresh quorum-signed audit-chain head artifacts when freshness or signer thresholds fail."
+            .to_owned(),
+    ];
+    let envelope = CommandEnvelope::new(availability, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "check": "audit",
+        "source": source,
+        "message": message,
+        "healthy": report.healthy,
+        "coverage_scope": report.coverage_scope,
+        "report": &report,
+        "next_actions": next_actions,
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, truth_source);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn doctor_audit_report(
+    args: &DoctorArgs,
+    explicit_host: Option<&str>,
+) -> Result<(AuditDoctorReport, KnowledgeState)> {
+    let now_unix_secs = args
+        .audit_now_unix_secs
+        .unwrap_or_else(|| u64::try_from(Utc::now().timestamp()).unwrap_or_default());
+    let chain_args = audit_chain::ChainStatusArgs {
+        head: args.audit_head.clone(),
+        events: args.audit_events.clone(),
+        zone: args.zone.clone(),
+        max_age_seconds: args.audit_max_age_seconds,
+        now_unix_secs: Some(now_unix_secs),
+        json: true,
+        require_source: None,
+    };
+    let (chain_status, truth_source) = audit_chain::build_chain_status_report_resolving_host(
+        &chain_args,
+        now_unix_secs,
+        explicit_host,
+    )?;
+    let chain_status_payload = serde_json::to_value(&chain_status)
+        .context("failed to serialize audit chain status report for doctor")?;
+    let schema_ok = chain_status.schema_version() == audit_chain::AUDIT_CHAIN_STATUS_SCHEMA_VERSION;
+    let freshness_ok = chain_status.status().is_healthy();
+    let checkpoint_ok = chain_status.quorum_signed_checkpoints() >= 1;
+    let signers_ok = chain_status.quorum_signers() >= args.audit_min_quorum_signers;
+    let hlc_drift_ok = chain_status
+        .hlc_physical_drift_ms()
+        .is_some_and(|drift| drift <= args.audit_max_hlc_drift_ms);
+
+    let checks = vec![
+        audit_doctor_check(
+            "audit_chain_status_schema",
+            schema_ok,
+            json!({"schema_version": chain_status.schema_version()}),
+            json!({"schema_version": audit_chain::AUDIT_CHAIN_STATUS_SCHEMA_VERSION}),
+            "audit chain status uses the expected schema".to_owned(),
+        ),
+        audit_doctor_check(
+            "audit_chain_freshness",
+            freshness_ok,
+            json!({"status": chain_status.status().to_string()}),
+            json!({"status": "fresh", "max_age_seconds": args.audit_max_age_seconds}),
+            "audit chain head is fresh enough for operator diagnosis".to_owned(),
+        ),
+        audit_doctor_check(
+            "quorum_signed_checkpoint",
+            checkpoint_ok,
+            json!({"quorum_signed_checkpoints": chain_status.quorum_signed_checkpoints()}),
+            json!({"quorum_signed_checkpoints_min": 1}),
+            "at least one quorum-signed checkpoint is present".to_owned(),
+        ),
+        audit_doctor_check(
+            "quorum_signers",
+            signers_ok,
+            json!({"quorum_signers": chain_status.quorum_signers()}),
+            json!({"quorum_signers_min": args.audit_min_quorum_signers}),
+            "quorum signer count meets the configured zone threshold".to_owned(),
+        ),
+        audit_doctor_check(
+            "hlc_physical_drift",
+            hlc_drift_ok,
+            json!({"hlc_physical_drift_ms": chain_status.hlc_physical_drift_ms()}),
+            json!({"hlc_physical_drift_ms_max": args.audit_max_hlc_drift_ms}),
+            "audit-chain HLC physical drift is within the operator threshold".to_owned(),
+        ),
+    ];
+    let healthy = checks.iter().all(|check| check.status == "pass");
+    let commands = vec![
+        audit_doctor_chain_status_command(args, explicit_host, truth_source),
+        "fwc telemetry otlp-readiness --json".to_owned(),
+        "fwc audit explain --bundle <bundle.json> --json".to_owned(),
+    ];
+    let coverage_scope = if matches!(truth_source, KnowledgeState::HostBacked) {
+        "live-host-audit-chain-status"
+    } else {
+        "audit-chain-status-artifact"
+    };
+
+    Ok((
+        AuditDoctorReport {
+            schema_version: AUDIT_DOCTOR_SCHEMA_VERSION,
+            healthy,
+            coverage_scope,
+            chain_status: chain_status_payload,
+            warnings: chain_status.warnings().to_vec(),
+            checks,
+            deferred_checks: audit_doctor_deferred_checks(truth_source),
+            commands,
+        },
+        truth_source,
+    ))
+}
+
+fn audit_doctor_check(
+    id: &'static str,
+    pass: bool,
+    observed: Value,
+    target: Value,
+    message: String,
+) -> AuditDoctorCheck {
+    AuditDoctorCheck {
+        id,
+        status: if pass { "pass" } else { "fail" },
+        observed,
+        target,
+        message,
+    }
+}
+
+fn audit_doctor_chain_status_command(
+    args: &DoctorArgs,
+    explicit_host: Option<&str>,
+    truth_source: KnowledgeState,
+) -> String {
+    if matches!(truth_source, KnowledgeState::HostBacked) {
+        let mut command = String::from("fwc");
+        if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+            command.push_str(" --host ");
+            command.push_str(host);
+        }
+        command.push_str(" audit chain status");
+        if let Some(zone) = args
+            .zone
+            .as_deref()
+            .map(str::trim)
+            .filter(|zone| !zone.is_empty())
+        {
+            command.push_str(" --zone ");
+            command.push_str(zone);
+        }
+        command.push_str(" --max-age-seconds ");
+        command.push_str(&args.audit_max_age_seconds.to_string());
+        command.push_str(" --require-source any-live --json");
+        return command;
+    }
+
+    let head = args
+        .audit_head
+        .as_ref()
+        .map_or("<head.json>".to_owned(), |path| path.display().to_string());
+    let events = args
+        .audit_events
+        .as_ref()
+        .map_or("<events.json>".to_owned(), |path| {
+            path.display().to_string()
+        });
+    format!("fwc audit chain status --head {head} --events {events} --json")
+}
+
+fn audit_doctor_deferred_checks(truth_source: KnowledgeState) -> Vec<AuditDoctorDeferredCheck> {
+    let artifact_only = !matches!(truth_source, KnowledgeState::HostBacked);
+    vec![
+        AuditDoctorDeferredCheck {
+            id: "otlp_collector",
+            reason: if artifact_only {
+                "validated by the telemetry readiness command, not by artifact-only doctor input"
+            } else {
+                "validated by the telemetry readiness command, not by the audit-chain status endpoint"
+            },
+            command: "fwc telemetry otlp-readiness --json",
+        },
+        AuditDoctorDeferredCheck {
+            id: "reservoir_compactor",
+            reason: if artifact_only {
+                "requires compactor runtime metadata that is not present in audit-chain status artifacts"
+            } else {
+                "requires compactor runtime metadata that is not exposed by host audit-chain status yet"
+            },
+            command: "fwc audit chain status --json",
+        },
+        AuditDoctorDeferredCheck {
+            id: "cep_nfa_runtime",
+            reason: "requires live CEP runtime telemetry and anomaly-pattern state",
+            command: "fwc audit explain --bundle <bundle.json> --json",
+        },
+    ]
+}
+
 fn doctor_lean_dispatch() -> Result<DispatchOutcome> {
     let root = readiness::workspace_root();
     let report = doctor::lean_doctor_report(&root, true, true);
@@ -13078,6 +13506,331 @@ fn doctor_lean_dispatch() -> Result<DispatchOutcome> {
     });
     inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome { payload, exit_code })
+}
+
+const REALITY_CADENCE_SCHEMA_VERSION: &str = "fcp.fwc.doctor.reality_cadence.v1";
+
+#[derive(Debug, Serialize)]
+struct RealityCadenceDoctorReport {
+    schema_version: &'static str,
+    healthy: bool,
+    date: String,
+    month: String,
+    quarter: String,
+    current_month_reality_check: CadenceArtifactCheck,
+    current_quarter_claims_vs_reality: CadenceArtifactCheck,
+    readme_drift: ReadmeDriftDoctorReport,
+    drift_ignore: DriftIgnoreDoctorReport,
+    missing_artifacts: Vec<String>,
+    drift_count: u64,
+    commands: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct CadenceArtifactCheck {
+    expected: String,
+    present: bool,
+    matched_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadmeDriftDoctorReport {
+    script: String,
+    status: &'static str,
+    exit_code: Option<i32>,
+    drift_count: u64,
+    paths_checked: u64,
+    paths_missing: u64,
+    paths_ignored: u64,
+    symbols_checked: u64,
+    symbols_missing: u64,
+    symbols_ignored: u64,
+    stderr_preview: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DriftIgnoreDoctorReport {
+    path: String,
+    present: bool,
+    entry_count: usize,
+    invalid_entries: Vec<DriftIgnoreInvalidEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct DriftIgnoreInvalidEntry {
+    line: usize,
+    reason: String,
+}
+
+fn doctor_reality_cadence_dispatch() -> Result<DispatchOutcome> {
+    let root = readiness::workspace_root();
+    let report = doctor_reality_cadence_report(&root, Utc::now().date_naive())?;
+    let status = if report.healthy { "ok" } else { "degraded" };
+    let exit_code = if report.healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+    let message = if report.healthy {
+        "Reality-check cadence artifacts and README drift hygiene are healthy."
+    } else {
+        "Reality-check cadence has missing artifacts or README drift findings."
+    };
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "check": "reality-cadence",
+        "source": "local-workspace",
+        "message": message,
+        "workspace_root": root.display().to_string(),
+        "healthy": report.healthy,
+        "missing_artifacts": &report.missing_artifacts,
+        "drift_count": report.drift_count,
+        "report": &report,
+        "next_actions": [
+            "Run /reality-check-for-project and persist docs/reality/<YYYY-MM>-reality-check.md when the monthly artifact is missing.",
+            "Publish docs/quarterly/<YYYY-QN>-claims-vs-reality.md when the quarterly artifact is missing.",
+            "Run bash scripts/ci/readme_drift_check.sh and fix or justify any README drift entries.",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn doctor_reality_cadence_report(
+    root: &Path,
+    today: NaiveDate,
+) -> Result<RealityCadenceDoctorReport> {
+    let month = format!("{:04}-{:02}", today.year(), today.month());
+    let quarter = calendar_quarter_key(today);
+    let monthly = current_month_reality_check(root, &month);
+    let quarterly = current_quarter_claims_vs_reality_check(root, &quarter);
+    let readme_drift = run_readme_drift_check(root);
+    let drift_ignore = check_readme_drift_ignore(root);
+
+    let mut missing_artifacts = Vec::new();
+    if !monthly.present {
+        missing_artifacts.push(monthly.expected.clone());
+    }
+    if !quarterly.present {
+        missing_artifacts.push(quarterly.expected.clone());
+    }
+    if !root.join(&readme_drift.script).is_file() {
+        missing_artifacts.push("scripts/ci/readme_drift_check.sh".to_owned());
+    }
+    missing_artifacts.extend(drift_ignore.invalid_entries.iter().map(|entry| {
+        format!(
+            "docs/.readme-drift-ignore:{} ({})",
+            entry.line, entry.reason
+        )
+    }));
+
+    let healthy = monthly.present
+        && quarterly.present
+        && readme_drift.status == "pass"
+        && readme_drift.drift_count == 0
+        && drift_ignore.invalid_entries.is_empty();
+
+    Ok(RealityCadenceDoctorReport {
+        schema_version: REALITY_CADENCE_SCHEMA_VERSION,
+        healthy,
+        date: today.to_string(),
+        month,
+        quarter,
+        current_month_reality_check: monthly,
+        current_quarter_claims_vs_reality: quarterly,
+        drift_count: readme_drift.drift_count,
+        readme_drift,
+        drift_ignore,
+        missing_artifacts,
+        commands: vec![
+            "fwc doctor reality-cadence --json",
+            "bash scripts/ci/readme_drift_check.sh",
+            "br ready --json",
+        ],
+    })
+}
+
+fn current_month_reality_check(root: &Path, month: &str) -> CadenceArtifactCheck {
+    let reality_dir = root.join("docs/reality");
+    let prefix = format!("{month}-");
+    let matched_path = std::fs::read_dir(&reality_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+        });
+
+    CadenceArtifactCheck {
+        expected: format!("docs/reality/{month}-*.md"),
+        present: matched_path.is_some(),
+        matched_path: matched_path.map(|path| relative_display(root, &path)),
+    }
+}
+
+fn current_quarter_claims_vs_reality_check(root: &Path, quarter: &str) -> CadenceArtifactCheck {
+    let expected = format!("docs/quarterly/{quarter}-claims-vs-reality.md");
+    let path = root.join(&expected);
+    CadenceArtifactCheck {
+        expected,
+        present: path.is_file(),
+        matched_path: path.is_file().then(|| relative_display(root, &path)),
+    }
+}
+
+fn calendar_quarter_key(date: NaiveDate) -> String {
+    let quarter = ((date.month() - 1) / 3) + 1;
+    format!("{}-Q{quarter}", date.year())
+}
+
+fn run_readme_drift_check(root: &Path) -> ReadmeDriftDoctorReport {
+    let script = root.join("scripts/ci/readme_drift_check.sh");
+    if !script.is_file() {
+        return ReadmeDriftDoctorReport {
+            script: relative_display(root, &script),
+            status: "error",
+            exit_code: None,
+            drift_count: 0,
+            paths_checked: 0,
+            paths_missing: 0,
+            paths_ignored: 0,
+            symbols_checked: 0,
+            symbols_missing: 0,
+            symbols_ignored: 0,
+            stderr_preview: "drift script is missing".to_owned(),
+        };
+    }
+
+    let output = Command::new("bash").arg(&script).current_dir(root).output();
+    let Ok(output) = output else {
+        return ReadmeDriftDoctorReport {
+            script: relative_display(root, &script),
+            status: "error",
+            exit_code: None,
+            drift_count: 0,
+            paths_checked: 0,
+            paths_missing: 0,
+            paths_ignored: 0,
+            symbols_checked: 0,
+            symbols_missing: 0,
+            symbols_ignored: 0,
+            stderr_preview: "failed to execute drift script".to_owned(),
+        };
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let log = stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok());
+    let metric = |name: &str| -> u64 {
+        log.as_ref()
+            .and_then(|value| value.get(name))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    let paths_missing = metric("paths_missing");
+    let symbols_missing = metric("symbols_missing");
+    let drift_count = paths_missing + symbols_missing;
+    let status = if log.is_some() && output.status.success() && drift_count == 0 {
+        "pass"
+    } else {
+        "fail"
+    };
+
+    ReadmeDriftDoctorReport {
+        script: relative_display(root, &script),
+        status,
+        exit_code: output.status.code(),
+        drift_count,
+        paths_checked: metric("paths_checked"),
+        paths_missing,
+        paths_ignored: metric("paths_ignored"),
+        symbols_checked: metric("symbols_checked"),
+        symbols_missing,
+        symbols_ignored: metric("symbols_ignored"),
+        stderr_preview: preview_for_doctor(&stderr),
+    }
+}
+
+fn check_readme_drift_ignore(root: &Path) -> DriftIgnoreDoctorReport {
+    let path = root.join("docs/.readme-drift-ignore");
+    if !path.exists() {
+        return DriftIgnoreDoctorReport {
+            path: relative_display(root, &path),
+            present: false,
+            entry_count: 0,
+            invalid_entries: Vec::new(),
+        };
+    }
+
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut entry_count = 0;
+    let mut invalid_entries = Vec::new();
+    for (line_index, line) in raw.lines().enumerate() {
+        let line_no = line_index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, " -- ");
+        let selector = parts.next().unwrap_or_default().trim();
+        let justification = parts.next().unwrap_or_default().trim();
+        let has_supported_kind = selector.starts_with("path ") || selector.starts_with("symbol ");
+        if !has_supported_kind {
+            invalid_entries.push(DriftIgnoreInvalidEntry {
+                line: line_no,
+                reason: "entry must start with `path ` or `symbol `".to_owned(),
+            });
+        } else if justification.is_empty() {
+            invalid_entries.push(DriftIgnoreInvalidEntry {
+                line: line_no,
+                reason: "entry must include a non-empty justification after ` -- `".to_owned(),
+            });
+        } else {
+            entry_count += 1;
+        }
+    }
+
+    DriftIgnoreDoctorReport {
+        path: relative_display(root, &path),
+        present: true,
+        entry_count,
+        invalid_entries,
+    }
+}
+
+fn relative_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn preview_for_doctor(text: &str) -> String {
+    const MAX_PREVIEW_BYTES: usize = 512;
+    let compact = text.lines().take(8).collect::<Vec<_>>().join("\n");
+    if compact.len() <= MAX_PREVIEW_BYTES {
+        compact
+    } else {
+        let split_at = compact
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= MAX_PREVIEW_BYTES)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &compact[..split_at])
+    }
 }
 
 const HLC_PROBE_SKEW_WARN_MS: u64 = 2_000;
@@ -29829,13 +30582,14 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use crate::supply_chain_cmd::{SignArgs, SupplyChainArgs, SupplyChainCommand};
+    use crate::truth::RequiredTruthSource;
 
     use super::{ExportToolsArgs, export_tools};
     use std::collections::BTreeMap as StdBTreeMap;
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29846,14 +30600,14 @@ mod tests {
         MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
         PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, TRUTH_SOURCE_SCHEMA_VERSION,
         catalog, doctor_hlc_probe_warnings, doctor_iblt_probe_warnings,
-        doctor_migration_probe_warnings, execute, host_discovered_connector,
-        host_discovered_operation, host_mcp_tool_definitions, host_tool_summary_entry,
-        host_tool_when_to_use, live_pipeline_operation_metadata, mcp_tool_invoke_args,
-        normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
+        doctor_migration_probe_warnings, doctor_reality_cadence_report, execute,
+        host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
+        host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
+        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
         resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
         try_host_mcp_tool_definitions, try_host_tool_operation_info, validate_registry_binary_name,
     };
-    use chrono::{Duration as ChronoDuration, Utc};
+    use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
     use clap::{CommandFactory, Parser};
     use fcp_crypto::Ed25519SigningKey;
     use fcp_host::{
@@ -33695,6 +34449,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_discovery_provenance(
             &payload,
             "live_host_introspection",
@@ -33778,6 +34534,11 @@ deny_ptrace = true
 
         assert_eq!(examples_exit, CliExitCode::Success.into());
         assert_eq!(examples_payload["source"], "host-admin-api");
+        assert_eq!(
+            examples_payload["schema_version"],
+            TRUTH_SOURCE_SCHEMA_VERSION
+        );
+        assert_eq!(examples_payload["_truth_source"], "host");
         assert_discovery_provenance(
             &examples_payload,
             "live_host_introspection",
@@ -34751,6 +35512,256 @@ deny_ptrace = true
         };
         assert!(matches!(args.check, Some(DoctorLocalCheck::Migration)));
         assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_reality_cadence_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "reality-cadence"])
+            .expect("doctor reality-cadence should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.check, Some(DoctorLocalCheck::RealityCadence)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_audit_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "audit"])
+            .expect("doctor audit should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.check, Some(DoctorLocalCheck::Audit)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn execute_doctor_audit_flags_missing_chain_status() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor", "audit"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "degraded");
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["check"], "audit");
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(
+            payload["report"]["schema_version"],
+            "fcp.fwc.doctor.audit.v1"
+        );
+        assert_eq!(payload["report"]["healthy"], false);
+        assert_eq!(
+            payload["report"]["coverage_scope"],
+            "audit-chain-status-artifact"
+        );
+        assert_eq!(payload["report"]["chain_status"]["status"], "missing");
+        assert_eq!(
+            payload["report"]["chain_status"]["schema_version"],
+            "fcp.fwc.audit_chain_status.v1"
+        );
+        assert!(
+            payload["report"]["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["id"] == "audit_chain_freshness" && check["status"] == "fail")
+        );
+        assert_eq!(
+            payload["report"]["deferred_checks"]
+                .as_array()
+                .expect("deferred checks array")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn execute_doctor_audit_accepts_fresh_quorum_artifacts() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let head_path = tempdir.path().join("head.json");
+        let events_path = tempdir.path().join("events.json");
+        write_audit_json(
+            &head_path,
+            &json!({
+                "zone_id": "z:work",
+                "head_entry": "entry-work-head",
+                "head_seq": 42,
+                "coverage": 0.95,
+                "epoch_id": "epoch-7",
+                "signature_count": 2,
+                "signatures": [
+                    {"issuer_kid": "kid-a", "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                    {"issuer_kid": "kid-b", "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+                ]
+            }),
+        );
+        write_audit_json(
+            &events_path,
+            &json!([
+                {
+                    "id": "entry-work-head",
+                    "event_type": "audit.checkpoint",
+                    "severity": "info",
+                    "actor": "node-a",
+                    "zone_id": "z:work",
+                    "seq": 42,
+                    "occurred_at": 1_700_000_000_u64,
+                    "hlc": {
+                        "physical_ms": 1_700_000_000_123_u64,
+                        "logical": 0,
+                        "node_id": "node-a"
+                    }
+                }
+            ]),
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "doctor",
+            "audit",
+            "--audit-head",
+            head_path.to_str().expect("head path UTF-8"),
+            "--audit-events",
+            events_path.to_str().expect("events path UTF-8"),
+            "--audit-now-unix-secs",
+            "1700000030",
+            "--audit-max-age-seconds",
+            "60",
+            "--audit-min-quorum-signers",
+            "2",
+            "--audit-max-hlc-drift-ms",
+            "60000",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["healthy"], true);
+        assert_eq!(payload["report"]["healthy"], true);
+        assert_eq!(payload["report"]["chain_status"]["status"], "fresh");
+        assert_eq!(payload["report"]["chain_status"]["quorum_signers"], 2);
+        assert_eq!(
+            payload["report"]["chain_status"]["hlc_physical_drift_ms"],
+            29_877
+        );
+        assert!(
+            payload["report"]["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|check| check["status"] == "pass")
+        );
+        assert_eq!(
+            payload["report"]["commands"][0],
+            format!(
+                "fwc audit chain status --head {} --events {} --json",
+                head_path.display(),
+                events_path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn doctor_reality_cadence_report_accepts_current_artifacts() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        write_reality_cadence_artifact(root, "docs/reality/2026-05-12-reality-check.md");
+        write_reality_cadence_artifact(root, "docs/quarterly/2026-Q2-claims-vs-reality.md");
+        write_readme_drift_script(
+            root,
+            "printf '%s\\n' '{\"paths_checked\":4,\"paths_missing\":0,\"paths_ignored\":0,\"symbols_checked\":2,\"symbols_missing\":0,\"symbols_ignored\":0}'",
+        );
+
+        let report = doctor_reality_cadence_report(root, date(2026, 5, 28)).expect("report");
+
+        assert!(report.healthy);
+        assert_eq!(report.month, "2026-05");
+        assert_eq!(report.quarter, "2026-Q2");
+        assert!(report.missing_artifacts.is_empty());
+        assert_eq!(report.drift_count, 0);
+        assert_eq!(report.readme_drift.status, "pass");
+        assert_eq!(report.readme_drift.paths_checked, 4);
+        assert_eq!(report.readme_drift.symbols_checked, 2);
+        assert!(report.current_month_reality_check.present);
+        assert!(report.current_quarter_claims_vs_reality.present);
+        assert!(!report.drift_ignore.present);
+    }
+
+    #[test]
+    fn doctor_reality_cadence_report_flags_missing_docs_drift_and_bad_ignore() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        write_readme_drift_script(
+            root,
+            "printf '%s\\n' '{\"paths_checked\":4,\"paths_missing\":1,\"paths_ignored\":0,\"symbols_checked\":2,\"symbols_missing\":2,\"symbols_ignored\":0}'\nexit 1",
+        );
+        write_reality_cadence_artifact(root, "docs/.readme-drift-ignore");
+        fs::write(
+            root.join("docs/.readme-drift-ignore"),
+            "crates/fwc/src/main.rs -- missing kind\npath README.md\n",
+        )
+        .expect("write ignore fixture");
+
+        let report = doctor_reality_cadence_report(root, date(2026, 7, 1)).expect("report");
+
+        assert!(!report.healthy);
+        assert_eq!(report.month, "2026-07");
+        assert_eq!(report.quarter, "2026-Q3");
+        assert_eq!(report.drift_count, 3);
+        assert_eq!(report.readme_drift.status, "fail");
+        assert_eq!(report.readme_drift.paths_missing, 1);
+        assert_eq!(report.readme_drift.symbols_missing, 2);
+        assert_eq!(report.drift_ignore.invalid_entries.len(), 2);
+        assert!(
+            report
+                .missing_artifacts
+                .contains(&"docs/reality/2026-07-*.md".to_owned())
+        );
+        assert!(
+            report
+                .missing_artifacts
+                .contains(&"docs/quarterly/2026-Q3-claims-vs-reality.md".to_owned())
+        );
+        assert!(
+            report
+                .missing_artifacts
+                .iter()
+                .any(|artifact| artifact.starts_with("docs/.readme-drift-ignore:"))
+        );
+    }
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("test date is valid")
+    }
+
+    fn write_reality_cadence_artifact(root: &Path, relative: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create artifact parent");
+        }
+        fs::write(path, "# fixture\n").expect("write cadence fixture");
+    }
+
+    fn write_readme_drift_script(root: &Path, body: &str) {
+        let path = root.join("scripts/ci/readme_drift_check.sh");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create script parent");
+        }
+        fs::write(
+            path,
+            format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"),
+        )
+        .expect("write drift script fixture");
+    }
+
+    fn write_audit_json(path: &Path, value: &Value) {
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(value).expect("audit fixture serializes"),
+        )
+        .expect("write audit fixture");
     }
 
     #[test]
@@ -38354,6 +39365,8 @@ deny_ptrace = true
             "matrix".to_owned(),
             "github".to_owned(),
             "--json".to_owned(),
+            "--require-source".to_owned(),
+            "any-live".to_owned(),
         ])
         .expect("audit matrix command should parse");
 
@@ -38362,6 +39375,10 @@ deny_ptrace = true
                 super::audit_chain::AuditCommands::Matrix(matrix_args) => {
                     assert_eq!(matrix_args.connector.as_deref(), Some("github"));
                     assert!(matrix_args.json);
+                    assert_eq!(
+                        matrix_args.require_source,
+                        Some(RequiredTruthSource::AnyLive)
+                    );
                 }
                 command => panic!("expected audit matrix command, got {command:?}"),
             },
@@ -38462,6 +39479,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "audit");
         assert_eq!(payload["subcommand"], "matrix");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["source"], "workspace-manifests");
         assert_eq!(payload["mode"], "offline-artifact");
         assert!(
@@ -38489,7 +39508,30 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "audit");
         assert_eq!(payload["subcommand"], "matrix");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    #[test]
+    fn execute_audit_matrix_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "audit",
+            "matrix",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "audit");
+        assert_eq!(payload["subcommand"], "matrix");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]
@@ -38500,6 +39542,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "audit");
         assert_eq!(payload["subcommand"], "gaps");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["filters"]["blocking_only"], true);
         assert!(payload["gaps"].as_array().is_some());
         assert!(
@@ -38514,6 +39558,27 @@ deny_ptrace = true
                 .as_str()
                 .is_some_and(|toon| !toon.trim().is_empty())
         );
+    }
+
+    #[test]
+    fn execute_audit_gaps_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "audit",
+            "gaps",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "audit");
+        assert_eq!(payload["subcommand"], "gaps");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]
@@ -38753,6 +39818,8 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["connector"]["slug"], "github");
         assert!(
@@ -38769,6 +39836,69 @@ deny_ptrace = true
                 .iter()
                 .any(|operation| { operation["canonical_id"] == "github.get_issue" })
         );
+    }
+
+    #[test]
+    fn execute_ops_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "ops",
+            "github",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_ops_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "ops",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_ops_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "ops",
+            "github",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]
@@ -38905,6 +40035,8 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["selector"], "issues.create");
@@ -38932,6 +40064,72 @@ deny_ptrace = true
         assert_eq!(payload["command"], "examples");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
+    }
+
+    #[test]
+    fn execute_examples_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "examples",
+            "github",
+            "issues.create",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_examples_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "examples",
+            "github",
+            "issues.create",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_examples_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "examples",
+            "github",
+            "issues.create",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]

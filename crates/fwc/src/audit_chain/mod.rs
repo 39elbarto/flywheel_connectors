@@ -24,7 +24,7 @@
 
 pub mod types;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{TimeZone, Utc};
 use clap::{ArgAction, Args, Subcommand};
 use fcp_audit::AuditEntry;
@@ -33,6 +33,7 @@ use fcp_cbor::to_canonical_cbor;
 use fcp_crypto::{Ed25519VerifyingKey, KeyId, ed25519::PUBLIC_KEY_SIZE};
 use fcp_kernel::{AuditEvent, AuditHead, ObjectId, ZoneId};
 use hex::encode as hex_encode;
+use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -40,12 +41,13 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use url::Url;
 
 use crate::capability_replay::parse_since_seconds;
 use crate::truth::{KnowledgeState, RequiredTruthSource, TRUTH_SOURCE_SCHEMA_VERSION};
 use types::{AuditEventOutput, AuditFilter, AuditTailError};
 
-const AUDIT_CHAIN_STATUS_SCHEMA_VERSION: &str = "fcp.fwc.audit_chain_status.v1";
+pub(crate) const AUDIT_CHAIN_STATUS_SCHEMA_VERSION: &str = "fcp.fwc.audit_chain_status.v1";
 const AUDIT_VERIFY_SCHEMA_VERSION: &str = "fcp.fwc.audit_verify.v1";
 
 /// Arguments for the `fcp audit` command.
@@ -107,6 +109,10 @@ pub struct ChainStatusArgs {
     /// Audit event records input (JSONL or JSON array) used to compute freshness. Use "-" for stdin.
     #[arg(long)]
     pub events: Option<PathBuf>,
+
+    /// Zone to query when resolving live host-backed audit-chain status.
+    #[arg(long)]
+    pub zone: Option<String>,
 
     /// Maximum quorum checkpoint age considered fresh.
     #[arg(long, default_value_t = 60)]
@@ -251,6 +257,10 @@ pub struct MatrixArgs {
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Require audit matrix output to come from at least this truth source.
+    #[arg(long, value_enum)]
+    pub require_source: Option<RequiredTruthSource>,
 }
 
 /// Arguments for the `fwc audit gaps` command.
@@ -266,6 +276,10 @@ pub struct GapsArgs {
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Require audit gap output to come from at least this truth source.
+    #[arg(long, value_enum)]
+    pub require_source: Option<RequiredTruthSource>,
 }
 
 /// Run the audit command.
@@ -274,8 +288,17 @@ pub struct GapsArgs {
 ///
 /// Returns an error if the audit operation fails.
 pub fn run(args: AuditArgs) -> Result<()> {
+    run_with_host(args, None)
+}
+
+/// Run the audit command with an optional host endpoint supplied by the root CLI.
+///
+/// # Errors
+///
+/// Returns an error if the audit operation fails.
+pub fn run_with_host(args: AuditArgs, explicit_host: Option<&str>) -> Result<()> {
     match args.command {
-        AuditCommands::Chain(chain_args) => run_chain(&chain_args),
+        AuditCommands::Chain(chain_args) => run_chain(&chain_args, explicit_host),
         AuditCommands::Tail(tail_args) => run_tail(&tail_args),
         AuditCommands::Verify(verify_args) => run_verify(&verify_args),
         AuditCommands::Explain(explain_args) => run_explain(&explain_args),
@@ -285,9 +308,9 @@ pub fn run(args: AuditArgs) -> Result<()> {
     }
 }
 
-fn run_chain(args: &ChainArgs) -> Result<()> {
+fn run_chain(args: &ChainArgs, explicit_host: Option<&str>) -> Result<()> {
     match &args.command {
-        ChainCommands::Status(status_args) => run_chain_status(status_args),
+        ChainCommands::Status(status_args) => run_chain_status(status_args, explicit_host),
     }
 }
 
@@ -519,7 +542,7 @@ fn run_timeline(args: &TimelineArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct AuditChainStatusSource {
     kind: String,
     live: bool,
@@ -530,7 +553,7 @@ struct AuditChainStatusSource {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct AuditChainStatusReport {
+pub(crate) struct AuditChainStatusReport {
     schema_version: &'static str,
     command: &'static str,
     subcommand: &'static str,
@@ -563,25 +586,304 @@ struct AuditChainStatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     hlc_physical_drift_ms: Option<u64>,
     max_age_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_quorum_checkpoint_snapshot: Option<Value>,
     warnings: Vec<String>,
 }
 
-fn run_chain_status(args: &ChainStatusArgs) -> Result<()> {
-    enforce_audit_required_truth_source(
-        "audit chain status",
-        args.require_source,
-        KnowledgeState::Offline,
-        args.json,
-    );
+impl AuditChainStatusReport {
+    pub(crate) const fn schema_version(&self) -> &'static str {
+        self.schema_version
+    }
 
+    pub(crate) const fn status(&self) -> fcp_audit::FreshnessLevel {
+        self.status
+    }
+
+    pub(crate) const fn quorum_signed_checkpoints(&self) -> u64 {
+        self.quorum_signed_checkpoints
+    }
+
+    pub(crate) const fn quorum_signers(&self) -> u64 {
+        self.quorum_signers
+    }
+
+    pub(crate) const fn hlc_physical_drift_ms(&self) -> Option<u64> {
+        self.hlc_physical_drift_ms
+    }
+
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HostAuditChainStatusResponse {
+    status: fcp_audit::FreshnessLevel,
+    telemetry_state: String,
+    source: AuditChainStatusSource,
+    zone_id: String,
+    head_seq: Option<u64>,
+    head_entry: Option<String>,
+    last_quorum_height: Option<u64>,
+    quorum_signed_checkpoints: u64,
+    quorum_signers: u64,
+    #[serde(default)]
+    quorum_signer_ids: Vec<String>,
+    producer_signature_count: Option<u32>,
+    signature_count_consistent: Option<bool>,
+    coverage: Option<f64>,
+    quorum_freshness_secs: Option<u64>,
+    quorum_rotation_epoch: Option<String>,
+    next_rotation_eta_secs: Option<u64>,
+    hlc_physical_drift_ms: Option<u64>,
+    max_age_seconds: u64,
+    live_quorum_checkpoint_snapshot: Option<Value>,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
+impl HostAuditChainStatusResponse {
+    fn into_report(self) -> AuditChainStatusReport {
+        let mut warnings = self.warnings;
+        if self.telemetry_state != "live-host" {
+            warnings.push(format!(
+                "host returned unexpected audit-chain telemetry_state `{}`",
+                self.telemetry_state
+            ));
+        }
+        if !self.source.live {
+            warnings.push("host audit-chain status source was not marked live".to_string());
+        }
+
+        AuditChainStatusReport {
+            schema_version: AUDIT_CHAIN_STATUS_SCHEMA_VERSION,
+            command: "audit",
+            subcommand: "chain status",
+            status: self.status,
+            telemetry_state: "live-host",
+            source: AuditChainStatusSource {
+                kind: self.source.kind,
+                live: true,
+                head_path: None,
+                events_path: None,
+            },
+            zone_id: Some(self.zone_id),
+            head_seq: self.head_seq,
+            head_entry: self.head_entry,
+            last_quorum_height: self.last_quorum_height,
+            quorum_signed_checkpoints: self.quorum_signed_checkpoints,
+            quorum_signers: self.quorum_signers,
+            quorum_signer_ids: self.quorum_signer_ids,
+            producer_signature_count: self.producer_signature_count,
+            signature_count_consistent: self.signature_count_consistent,
+            coverage: self.coverage,
+            quorum_freshness_secs: self.quorum_freshness_secs,
+            quorum_rotation_epoch: self.quorum_rotation_epoch,
+            next_rotation_eta_secs: self.next_rotation_eta_secs,
+            hlc_physical_drift_ms: self.hlc_physical_drift_ms,
+            max_age_seconds: self.max_age_seconds,
+            live_quorum_checkpoint_snapshot: self.live_quorum_checkpoint_snapshot,
+            warnings,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AuditHostClient {
+    client: BlockingClient,
+    base_url: String,
+}
+
+impl AuditHostClient {
+    fn new(endpoint: &str) -> Result<Self> {
+        let endpoint = normalize_audit_host_endpoint(endpoint)?;
+
+        #[cfg(unix)]
+        {
+            if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+                let socket_path = endpoint.strip_prefix("unix://").unwrap_or(&endpoint);
+                let client = BlockingClientBuilder::new()
+                    .unix_socket(socket_path)
+                    .build()
+                    .with_context(|| {
+                        format!(
+                            "failed to build Unix-socket client for host endpoint `{socket_path}`"
+                        )
+                    })?;
+                return Ok(Self {
+                    client,
+                    base_url: "http://localhost".to_owned(),
+                });
+            }
+        }
+
+        let client = BlockingClientBuilder::new()
+            .build()
+            .context("failed to build HTTP host client")?;
+        Ok(Self {
+            client,
+            base_url: endpoint,
+        })
+    }
+
+    fn chain_status(
+        &self,
+        zone: Option<&str>,
+        max_age_seconds: u64,
+        now_unix_secs: u64,
+    ) -> Result<HostAuditChainStatusResponse> {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(zone) = zone.map(str::trim).filter(|zone| !zone.is_empty()) {
+            query.append_pair("zone", zone);
+        }
+        query.append_pair("max_age_seconds", &max_age_seconds.to_string());
+        query.append_pair("now_unix_secs", &now_unix_secs.to_string());
+        let path = format!("/rpc/admin/audit/chain/status?{}", query.finish());
+        let response = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .send()
+            .with_context(|| format!("GET {path} from host admin API failed"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .with_context(|| format!("GET {path} returned an unreadable response body"))?;
+        if !status.is_success() {
+            bail!("GET {path} returned {status}: {body}");
+        }
+        serde_json::from_str(&body)
+            .with_context(|| format!("GET {path} returned invalid audit chain status JSON"))
+    }
+}
+
+fn normalize_audit_host_endpoint(endpoint: &str) -> Result<String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        bail!("host endpoint cannot be empty");
+    }
+    if endpoint.contains("://")
+        && !(endpoint.starts_with("http://")
+            || endpoint.starts_with("https://")
+            || endpoint.starts_with("tcp://")
+            || endpoint.starts_with("unix://"))
+    {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+
+    #[cfg(unix)]
+    if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+        let socket_path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+        if socket_path.trim().is_empty() {
+            bail!("Unix host endpoint must include a socket path");
+        }
+        return Ok(endpoint.to_owned());
+    }
+
+    let normalized = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_owned()
+    } else {
+        let stripped = endpoint.strip_prefix("tcp://").unwrap_or(endpoint);
+        format!("http://{stripped}")
+    };
+
+    let url =
+        Url::parse(&normalized).with_context(|| format!("invalid host endpoint `{endpoint}`"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+    if url.host_str().is_none() {
+        bail!("host endpoint must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("host endpoint must not include username or password components");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("host endpoint must not include query or fragment components");
+    }
+
+    Ok(normalized.trim_end_matches('/').to_owned())
+}
+
+fn resolve_audit_chain_status_host(explicit_host: Option<&str>) -> Option<String> {
+    explicit_host
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            ["FWC_HOST", "FCP_HOST_ENDPOINT", "FCP_HOST_BIND"]
+                .into_iter()
+                .find_map(|env_name| {
+                    std::env::var(env_name)
+                        .ok()
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty())
+                })
+        })
+}
+
+fn run_chain_status(args: &ChainStatusArgs, explicit_host: Option<&str>) -> Result<()> {
     let now_unix_secs = args
         .now_unix_secs
         .unwrap_or_else(|| u64::try_from(Utc::now().timestamp()).unwrap_or_default());
-    let report = build_chain_status_report(args, now_unix_secs)?;
-    output_chain_status_report(&report, args.json)
+    let host = resolve_audit_chain_status_host(explicit_host);
+    let (report, truth_source) =
+        build_chain_status_report_with_source(args, now_unix_secs, host.as_deref())?;
+    enforce_audit_required_truth_source(
+        "audit chain status",
+        args.require_source,
+        truth_source,
+        args.json,
+    );
+
+    output_chain_status_report(&report, truth_source, args.json)
 }
 
-fn build_chain_status_report(
+pub(crate) fn build_chain_status_report(
+    args: &ChainStatusArgs,
+    now_unix_secs: u64,
+) -> Result<AuditChainStatusReport> {
+    build_artifact_chain_status_report(args, now_unix_secs)
+}
+
+pub(crate) fn build_chain_status_report_resolving_host(
+    args: &ChainStatusArgs,
+    now_unix_secs: u64,
+    explicit_host: Option<&str>,
+) -> Result<(AuditChainStatusReport, KnowledgeState)> {
+    let host = resolve_audit_chain_status_host(explicit_host);
+    build_chain_status_report_with_source(args, now_unix_secs, host.as_deref())
+}
+
+fn build_chain_status_report_with_source(
+    args: &ChainStatusArgs,
+    now_unix_secs: u64,
+    host: Option<&str>,
+) -> Result<(AuditChainStatusReport, KnowledgeState)> {
+    if args.head.is_none()
+        && let Some(host) = host
+    {
+        match AuditHostClient::new(host).and_then(|client| {
+            client.chain_status(args.zone.as_deref(), args.max_age_seconds, now_unix_secs)
+        }) {
+            Ok(response) => return Ok((response.into_report(), KnowledgeState::HostBacked)),
+            Err(error) => {
+                let mut report = missing_chain_status_report(args);
+                report.warnings.push(format!(
+                    "host admin API audit-chain status query failed: {error}"
+                ));
+                return Ok((report, KnowledgeState::Offline));
+            }
+        }
+    }
+
+    Ok((
+        build_artifact_chain_status_report(args, now_unix_secs)?,
+        KnowledgeState::Offline,
+    ))
+}
+
+fn build_artifact_chain_status_report(
     args: &ChainStatusArgs,
     now_unix_secs: u64,
 ) -> Result<AuditChainStatusReport> {
@@ -676,6 +978,7 @@ fn build_chain_status_report(
         next_rotation_eta_secs: None,
         hlc_physical_drift_ms,
         max_age_seconds: args.max_age_seconds,
+        live_quorum_checkpoint_snapshot: None,
         warnings,
     })
 }
@@ -711,6 +1014,7 @@ fn missing_chain_status_report(args: &ChainStatusArgs) -> AuditChainStatusReport
         next_rotation_eta_secs: None,
         hlc_physical_drift_ms: None,
         max_age_seconds: args.max_age_seconds,
+        live_quorum_checkpoint_snapshot: None,
         warnings: vec![
             "no signed audit chain head artifact or live telemetry was supplied".to_string(),
         ],
@@ -750,9 +1054,14 @@ const fn classify_chain_status_freshness(
     }
 }
 
-fn output_chain_status_report(report: &AuditChainStatusReport, json: bool) -> Result<()> {
+fn output_chain_status_report(
+    report: &AuditChainStatusReport,
+    truth_source: KnowledgeState,
+    json: bool,
+) -> Result<()> {
     if json {
-        let payload = audit_truth_source_payload(report, AUDIT_CHAIN_STATUS_SCHEMA_VERSION)?;
+        let payload =
+            audit_truth_source_payload(report, AUDIT_CHAIN_STATUS_SCHEMA_VERSION, truth_source)?;
         println!(
             "{}",
             serde_json::to_string_pretty(&payload)
@@ -782,20 +1091,25 @@ fn output_chain_status_report(report: &AuditChainStatusReport, json: bool) -> Re
 fn audit_truth_source_payload<T: Serialize>(
     report: &T,
     schema_version: &'static str,
+    truth_source: KnowledgeState,
 ) -> Result<Value> {
     let mut payload = serde_json::to_value(report).context("failed to serialize audit report")?;
-    inject_audit_truth_source_metadata(&mut payload, schema_version);
+    inject_audit_truth_source_metadata(&mut payload, schema_version, truth_source);
     Ok(payload)
 }
 
-fn inject_audit_truth_source_metadata(payload: &mut Value, schema_version: &'static str) {
+fn inject_audit_truth_source_metadata(
+    payload: &mut Value,
+    schema_version: &'static str,
+    truth_source: KnowledgeState,
+) {
     if let Some(object) = payload.as_object_mut() {
         object
             .entry("schema_version".to_owned())
             .or_insert_with(|| Value::String(schema_version.to_owned()));
         object.insert(
             "_truth_source".to_owned(),
-            Value::String(KnowledgeState::Offline.operator_truth_source().to_owned()),
+            Value::String(truth_source.operator_truth_source().to_owned()),
         );
     }
 }
@@ -1795,7 +2109,11 @@ fn verify_chain(
 
 fn output_verify_report(report: &AuditVerifyReport, json: bool) -> Result<()> {
     if json {
-        let payload = audit_truth_source_payload(report, AUDIT_VERIFY_SCHEMA_VERSION)?;
+        let payload = audit_truth_source_payload(
+            report,
+            AUDIT_VERIFY_SCHEMA_VERSION,
+            KnowledgeState::Offline,
+        )?;
         let payload =
             serde_json::to_string_pretty(&payload).context("failed to serialize verify report")?;
         println!("{payload}");
@@ -3550,6 +3868,7 @@ mod tests {
         let args = MatrixArgs {
             connector: Some("github".to_owned()),
             json: true,
+            require_source: None,
         };
         assert_eq!(args.connector.as_deref(), Some("github"));
         assert!(args.json);
@@ -3560,6 +3879,7 @@ mod tests {
         let args = MatrixArgs {
             connector: None,
             json: false,
+            require_source: None,
         };
         assert!(args.connector.is_none());
         assert!(!args.json);
@@ -3571,6 +3891,7 @@ mod tests {
             connector: None,
             blocking_only: true,
             json: false,
+            require_source: None,
         };
         assert!(args.blocking_only);
     }
@@ -3581,6 +3902,7 @@ mod tests {
             connector: Some("slack".to_owned()),
             blocking_only: false,
             json: true,
+            require_source: None,
         };
         assert_eq!(args.connector.as_deref(), Some("slack"));
         assert!(args.json);

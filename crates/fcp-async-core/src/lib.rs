@@ -725,7 +725,10 @@ pub mod channel {
             pub fn send(&self, value: T) -> Result<usize, SendError<T>> {
                 let cx = compatibility_cx();
                 self.inner.send(&cx, value).map_err(|err| match err {
-                    asupersync::channel::broadcast::SendError::Closed(value) => SendError(value),
+                    asupersync::channel::broadcast::SendError::Closed(value)
+                    | asupersync::channel::broadcast::SendError::Cancelled(value) => {
+                        SendError(value)
+                    }
                 })
             }
 
@@ -1456,6 +1459,7 @@ pub mod channel {
 
             pub fn send_modify<F>(&self, f: F)
             where
+                T: Clone,
                 F: FnOnce(&mut T),
             {
                 let _ = self.inner.send_modify(f);

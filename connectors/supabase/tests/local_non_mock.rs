@@ -174,7 +174,7 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn capability_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn capability_token(signing_key: &Ed25519SigningKey, instance_id: &str) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -188,6 +188,7 @@ fn capability_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .principal("user:local-non-mock")
         .operations(&[OP_STORAGE_UPLOAD])
         .issuer("node:local-non-mock")
+        .target_instance(instance_id)
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("valid constraints")
@@ -234,7 +235,7 @@ async fn loopback_storage_upload_uses_production_client_request() {
                 "content_type": "text/plain",
                 "upsert": true
             }),
-            capability_token: capability_token(&signing_key),
+            capability_token: capability_token(&signing_key, connector.instance_id()),
             holder_proof: None,
             context: None,
             idempotency_key: None,

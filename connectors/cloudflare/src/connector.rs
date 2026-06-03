@@ -1704,6 +1704,7 @@ mod tests {
 
     fn signed_capability_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         op: &'static str,
     ) -> CapabilityToken {
         let constraints = CapabilityConstraints {
@@ -1719,6 +1720,7 @@ mod tests {
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
@@ -2030,7 +2032,7 @@ mod tests {
             c.invoke(invoke_req(
                 OP_DNS_LIST,
                 json!({}),
-                signed_capability_token(&signing_key, OP_DNS_LIST),
+                signed_capability_token(&signing_key, c.instance_id().as_str(), OP_DNS_LIST),
             ))
             .await
         })
@@ -2082,7 +2084,7 @@ mod tests {
                     "content": "1.2.3.4",
                     "ttl": -1
                 }),
-                signed_capability_token(&signing_key, OP_DNS_CREATE),
+                signed_capability_token(&signing_key, c.instance_id().as_str(), OP_DNS_CREATE),
             ))
             .await
         })
@@ -2114,7 +2116,7 @@ mod tests {
                     "content": "1.2.3.4",
                     "proxied": "true"
                 }),
-                signed_capability_token(&signing_key, OP_DNS_UPDATE),
+                signed_capability_token(&signing_key, c.instance_id().as_str(), OP_DNS_UPDATE),
             ))
             .await
         })

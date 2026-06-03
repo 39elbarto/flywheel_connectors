@@ -214,6 +214,12 @@ impl TwitterConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -1831,6 +1837,7 @@ mod tests {
 
     fn signed_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         capability: &'static str,
         operation: &'static str,
     ) -> CapabilityToken {
@@ -1847,6 +1854,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
             .unwrap()
@@ -2128,7 +2136,7 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twitter.user.get",
                 json!({ "user_id": "123" }),
-                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+                signed_token(&signing_key, connector.instance_id(), "twitter.read.public", "twitter.user.get"),
             ))
             .await
             .unwrap();
@@ -2155,7 +2163,7 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twitter.tweet.create",
                 json!({ "text": "hello" }),
-                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+                signed_token(&signing_key, connector.instance_id(), "twitter.read.public", "twitter.user.get"),
             ))
             .await
             .unwrap();
@@ -2183,7 +2191,7 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twitter.user.get",
                 json!({}),
-                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+                signed_token(&signing_key, connector.instance_id(), "twitter.read.public", "twitter.user.get"),
             ))
             .await
             .unwrap();

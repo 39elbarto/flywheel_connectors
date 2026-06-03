@@ -50,7 +50,11 @@ fn capability_for_operation(op: &str) -> &str {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> fcp_core::CapabilityToken {
     let cap = capability_for_operation(op);
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -66,6 +70,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .unwrap()
@@ -154,7 +159,7 @@ async fn user_me_happy_path() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.user.me"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.user.me");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.user.me");
 
     let result = connector
         .handle_invoke(json!({
@@ -188,7 +193,7 @@ async fn user_get_happy_path() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.user.get"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.user.get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.user.get");
 
     let result = connector
         .handle_invoke(json!({
@@ -223,7 +228,7 @@ async fn tweet_get_happy_path() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.tweet.get"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.get");
 
     let result = connector
         .handle_invoke(json!({
@@ -271,7 +276,7 @@ async fn tweet_search_happy_path() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.search"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.search");
 
     let result = connector
         .handle_invoke(json!({
@@ -306,7 +311,7 @@ async fn tweet_create_happy_path() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.create"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.create");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.create");
 
     let result = connector
         .handle_invoke(json!({
@@ -346,7 +351,7 @@ async fn user_timeline_happy_path() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.user.timeline"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.user.timeline");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.user.timeline");
 
     let result = connector
         .handle_invoke(json!({
@@ -393,7 +398,7 @@ async fn trends_place_happy_path() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.trends.place"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.trends.place");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.trends.place");
 
     let result = connector
         .handle_invoke(json!({
@@ -434,7 +439,7 @@ async fn unauthorized_maps_to_fcp_error() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.user.get"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.user.get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.user.get");
 
     let result = connector
         .handle_invoke(json!({
@@ -483,7 +488,7 @@ async fn rate_limited_maps_to_fcp_error() {
         .expect("configure should succeed");
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.search"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.search");
 
     let result = connector
         .handle_invoke(json!({
@@ -506,7 +511,7 @@ async fn invoke_without_configure_fails() {
     let connector = TwitterConnector::new();
 
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "twitter.user.me");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.user.me");
 
     let result = connector
         .handle_invoke(json!({
@@ -529,7 +534,7 @@ async fn invoke_with_wrong_capability_denied() {
     // Handshake grants twitter.tweet.search but we invoke twitter.user.me
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.search"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.search");
 
     let result = connector
         .handle_invoke(json!({
@@ -550,7 +555,7 @@ async fn invoke_unknown_operation_denied() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.nonexistent");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.nonexistent");
 
     let result = connector
         .handle_invoke(json!({
@@ -672,7 +677,7 @@ async fn user_get_missing_user_id_fails() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.user.get"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.user.get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.user.get");
 
     let result = connector
         .handle_invoke(json!({
@@ -700,7 +705,7 @@ async fn tweet_search_missing_query_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.search"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.search");
 
     let result = connector
         .handle_invoke(json!({
@@ -728,7 +733,7 @@ async fn trends_place_missing_woeid_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.trends.place"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.trends.place");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.trends.place");
 
     let result = connector
         .handle_invoke(json!({
@@ -772,7 +777,7 @@ async fn tweet_get_many_happy_path() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.get_many"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.get_many");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.get_many");
 
     let result = connector
         .handle_invoke(json!({
@@ -798,7 +803,7 @@ async fn tweet_get_many_missing_tweet_ids_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.get_many"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.get_many");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.get_many");
 
     let result = connector
         .handle_invoke(json!({
@@ -826,7 +831,7 @@ async fn tweet_get_many_empty_ids_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.get_many"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.get_many");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.get_many");
 
     let result = connector
         .handle_invoke(json!({
@@ -866,7 +871,7 @@ async fn user_mentions_uses_authenticated_user_by_default() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.user.mentions"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.user.mentions");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.user.mentions");
 
     let result = connector
         .handle_invoke(json!({
@@ -961,7 +966,7 @@ async fn tweet_retweet_happy_path() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.retweet"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.retweet");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.retweet");
 
     let result = connector
         .handle_invoke(json!({
@@ -992,7 +997,7 @@ async fn tweet_unretweet_happy_path() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.unretweet"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.unretweet");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.unretweet");
 
     let result = connector
         .handle_invoke(json!({
@@ -1022,7 +1027,7 @@ async fn tweet_like_happy_path() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.tweet.like"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.like");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.like");
 
     let result = connector
         .handle_invoke(json!({
@@ -1053,7 +1058,7 @@ async fn tweet_unlike_happy_path() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.unlike"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.unlike");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.unlike");
 
     let result = connector
         .handle_invoke(json!({
@@ -1086,7 +1091,7 @@ async fn dm_send_to_existing_conversation() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.dm.send"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.dm.send");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.dm.send");
 
     let result = connector
         .handle_invoke(json!({
@@ -1109,7 +1114,7 @@ async fn dm_send_missing_target_fails() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.dm.send"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.dm.send");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.dm.send");
 
     let result = connector
         .handle_invoke(json!({
@@ -1152,7 +1157,7 @@ async fn dm_events_happy_path() {
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.dm.events"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.dm.events");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.dm.events");
 
     let result = connector
         .handle_invoke(json!({
@@ -1177,7 +1182,7 @@ async fn retweet_missing_tweet_id_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &mock_server, &["twitter.tweet.retweet"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.tweet.retweet");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "twitter.tweet.retweet");
 
     let result = connector
         .handle_invoke(json!({

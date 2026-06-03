@@ -153,7 +153,6 @@ fn bump_count_in_map(counts: &mut HashMap<String, usize>, key: &str) -> usize {
     let count = counts.entry(key.to_string()).or_insert(0);
     let previous = *count;
     *count = count.saturating_add(1);
-    drop(counts);
     previous
 }
 
@@ -471,8 +470,10 @@ async fn loopback_acceptance_exercises_send_media_and_file_paths() {
             && request.body.get("text").and_then(Value::as_str) == Some("Local acceptance message")
     }));
     assert!(observations.iter().any(|request| {
+        // Telegram's sendPhoto API names the media field `photo`
+        // (SendMediaRequest serializes media_field: "photo").
         request.endpoint() == "sendPhoto"
-            && request.body.get("media").and_then(Value::as_str) == Some("local-photo-id")
+            && request.body.get("photo").and_then(Value::as_str) == Some("local-photo-id")
     }));
 
     let artifact = json!({

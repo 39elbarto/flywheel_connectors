@@ -49,7 +49,11 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &'static str,
+) -> CapabilityToken {
     let capability = match op {
         OP_MEETINGS_LIST => "zoom.meetings.read",
         OP_MEETINGS_DELETE => "zoom.meetings.write",
@@ -69,6 +73,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints should serialize into capability token")
@@ -261,7 +266,7 @@ async fn invoke_meetings_list_preserves_pagination_evidence() {
                 "page_size": 2,
                 "next_page_token": "next-1"
             }),
-            generate_valid_token(&signing_key, OP_MEETINGS_LIST),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_MEETINGS_LIST),
         ))
         .await
         .unwrap();
@@ -292,7 +297,7 @@ async fn invoke_dangerous_meetings_delete_preserves_artifact_evidence() {
         .invoke(invoke_req(
             OP_MEETINGS_DELETE,
             json!({ "meeting_id": "987654321" }),
-            generate_valid_token(&signing_key, OP_MEETINGS_DELETE),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_MEETINGS_DELETE),
         ))
         .await
         .unwrap();

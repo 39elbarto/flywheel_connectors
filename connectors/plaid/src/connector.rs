@@ -240,6 +240,12 @@ impl PlaidConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -1426,7 +1432,11 @@ mod tests {
         stream.flush().unwrap();
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &str,
+        op: &str,
+    ) -> CapabilityToken {
         let cap = match op {
             "plaid.link_token_create" | "plaid.token_exchange" => "plaid.link",
             "plaid.accounts_get" | "plaid.accounts_balance_get" => "plaid.accounts.read",
@@ -1451,6 +1461,7 @@ mod tests {
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .unwrap()
@@ -1656,7 +1667,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "plaid.accounts_get");
+        let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.accounts_get");
         let result = connector
             .handle_invoke(json!({
                 "operation": "plaid.accounts_get",
@@ -1688,7 +1699,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "plaid.transactions_get");
+        let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.transactions_get");
         let result = connector
             .handle_invoke(json!({
                 "operation": "plaid.transactions_get",

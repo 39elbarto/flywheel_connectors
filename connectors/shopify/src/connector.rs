@@ -360,6 +360,12 @@ impl ShopifyConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     fn manifest_hash() -> String {
         let mut h = Sha256::new();
         h.update(MANIFEST_TOML.as_bytes());
@@ -1614,6 +1620,7 @@ mod tests {
 
     fn signed_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         capability: &'static str,
         operation: &'static str,
     ) -> CapabilityToken {
@@ -1630,6 +1637,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
             .unwrap()
@@ -1924,12 +1932,9 @@ mod tests {
             let signing_key = Ed25519SigningKey::generate();
             c.configure(tc()).await.unwrap();
             c.handshake(handshake_req_for(&signing_key)).await.unwrap();
-            c.simulate(simulate_req(
-                OP_PRODUCTS_LIST,
-                json!({}),
-                signed_token(&signing_key, CAP_PRODUCTS_READ, OP_PRODUCTS_LIST),
-            ))
-            .await
+            let token = signed_token(&signing_key, c.instance_id(), CAP_PRODUCTS_READ, OP_PRODUCTS_LIST);
+            c.simulate(simulate_req(OP_PRODUCTS_LIST, json!({}), token))
+                .await
         })
         .unwrap()
         .unwrap();
@@ -1978,12 +1983,9 @@ mod tests {
             let signing_key = Ed25519SigningKey::generate();
             c.configure(tc()).await.unwrap();
             c.handshake(handshake_req_for(&signing_key)).await.unwrap();
-            c.simulate(simulate_req(
-                OP_PRODUCTS_GET,
-                json!({}),
-                signed_token(&signing_key, CAP_PRODUCTS_READ, OP_PRODUCTS_GET),
-            ))
-            .await
+            let token = signed_token(&signing_key, c.instance_id(), CAP_PRODUCTS_READ, OP_PRODUCTS_GET);
+            c.simulate(simulate_req(OP_PRODUCTS_GET, json!({}), token))
+                .await
         })
         .unwrap()
         .unwrap();
@@ -2002,10 +2004,11 @@ mod tests {
             let signing_key = Ed25519SigningKey::generate();
             c.configure(tc()).await.unwrap();
             c.handshake(handshake_req_for(&signing_key)).await.unwrap();
+            let token = signed_token(&signing_key, c.instance_id(), CAP_PRODUCTS_READ, OP_PRODUCTS_LIST);
             c.simulate(simulate_req(
                 OP_PRODUCTS_CREATE,
                 json!({"title": "New product"}),
-                signed_token(&signing_key, CAP_PRODUCTS_READ, OP_PRODUCTS_LIST),
+                token,
             ))
             .await
         })

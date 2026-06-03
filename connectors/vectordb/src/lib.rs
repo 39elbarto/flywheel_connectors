@@ -94,6 +94,12 @@ impl VectorDbConnector {
         self.config.as_ref().map(|c| c.provider)
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_core::InstanceId {
+        &self.base.instance_id
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -1283,7 +1289,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_prelude::{
-        CapabilityId, CapabilityToken, HandshakeRequest, IdempotencyClass, InstanceId, ZoneId,
+        CapabilityConstraints, CapabilityId, CapabilityToken, HandshakeRequest, IdempotencyClass,
+        InstanceId, ZoneId,
     };
     use fcp_testkit::LogCapture;
     use std::time::Instant;
@@ -1415,15 +1422,26 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &str,
         operations: &[&str],
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
+        // C3.4: tokens MUST include constraints (default-deny)
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let token = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
             .principal("user:test")
             .operations(operations)
             .issuer("node:test")
+            .target_instance(instance_id.as_str())
             .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("valid constraints")
             .sign(signing_key)
             .expect("capability token sign");
         CapabilityToken::from_raw(token)
@@ -1796,6 +1814,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.read",
             &["vectordb.list_collections"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -1844,6 +1863,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.read",
             &["vectordb.list_collections"],
+            connector.instance_id(),
         );
         let response = connector
             .handle_invoke(json!({
@@ -1894,6 +1914,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -1941,6 +1962,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.delete",
             &["vectordb.delete_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2749,6 +2771,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.query_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2791,6 +2814,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.query_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2833,6 +2857,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.query_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2875,6 +2900,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2917,6 +2943,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2964,6 +2991,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.fetch_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3007,6 +3035,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.fetch_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3046,6 +3075,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.delete",
             &["vectordb.delete_vectors"],
+            connector.instance_id(),
         );
         // No ids, no filter, no delete_all
         let result = connector
@@ -3089,6 +3119,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.delete",
             &["vectordb.delete_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3129,6 +3160,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.update_vector_metadata"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3173,6 +3205,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3215,6 +3248,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3257,6 +3291,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3299,6 +3334,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3340,6 +3376,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.delete",
             &["vectordb.delete_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3425,6 +3462,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let long_id = "x".repeat(513);
         let result = connector
@@ -3471,6 +3509,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3516,6 +3555,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({

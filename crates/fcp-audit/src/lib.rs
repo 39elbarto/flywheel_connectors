@@ -29,12 +29,22 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+pub mod cep;
+pub mod compaction;
 pub mod conformal;
 pub mod explain;
 pub mod hlc;
 pub mod otlp_export;
 pub mod replay;
 
+pub use cep::{
+    AnomalyAlertError, CEP_ANOMALY_ALERT_SCHEMA_VERSION, EventPattern, EventPatternError,
+    EventPredicate, PatternMatch,
+};
+pub use compaction::{
+    ReservoirCompaction, ReservoirCompactionError, ReservoirCompactionReport, ReservoirCompactor,
+    compact_entries,
+};
 pub use conformal::{ConformalScore, ConformalScoreEstimator};
 pub use hlc::{HybridLogicalClock, HybridLogicalTimestamp};
 
@@ -96,6 +106,8 @@ pub mod event_types {
     pub const SECURITY_VIOLATION: &str = "security.violation";
     /// Audit chain fork detected (critical).
     pub const AUDIT_FORK_DETECTED: &str = "audit.fork_detected";
+    /// CEP pattern matched an anomaly over audit-chain entries.
+    pub const CEP_ANOMALY_ALERT: &str = "audit.cep_anomaly_alert";
 }
 
 // ============================================================================
@@ -128,7 +140,9 @@ impl Severity {
             | event_types::CAPABILITY_CONSTRAINT_DENIED
             | event_types::ELEVATION_GRANTED
             | event_types::DECLASSIFICATION_GRANTED => Self::Warning,
-            event_types::REVOCATION_ISSUED | event_types::SECURITY_VIOLATION => Self::Error,
+            event_types::REVOCATION_ISSUED
+            | event_types::SECURITY_VIOLATION
+            | event_types::CEP_ANOMALY_ALERT => Self::Error,
             event_types::AUDIT_FORK_DETECTED => Self::Critical,
             _ => Self::Info,
         }
@@ -2562,6 +2576,7 @@ mod tests {
         assert_eq!(event_types::REVOCATION_ISSUED, "revocation.issued");
         assert_eq!(event_types::SECURITY_VIOLATION, "security.violation");
         assert_eq!(event_types::AUDIT_FORK_DETECTED, "audit.fork_detected");
+        assert_eq!(event_types::CEP_ANOMALY_ALERT, "audit.cep_anomaly_alert");
     }
 
     #[test]
@@ -2576,6 +2591,7 @@ mod tests {
             event_types::REVOCATION_ISSUED,
             event_types::SECURITY_VIOLATION,
             event_types::AUDIT_FORK_DETECTED,
+            event_types::CEP_ANOMALY_ALERT,
         ];
         for t in types {
             assert!(t.contains('.'), "event type {t} should contain a dot");
@@ -2640,6 +2656,10 @@ mod tests {
         assert_eq!(
             Severity::for_event_type(event_types::AUDIT_FORK_DETECTED),
             Severity::Critical
+        );
+        assert_eq!(
+            Severity::for_event_type(event_types::CEP_ANOMALY_ALERT),
+            Severity::Error
         );
     }
 
@@ -5226,6 +5246,7 @@ mod tests {
             (event_types::REVOCATION_ISSUED, Severity::Error),
             (event_types::SECURITY_VIOLATION, Severity::Error),
             (event_types::AUDIT_FORK_DETECTED, Severity::Critical),
+            (event_types::CEP_ANOMALY_ALERT, Severity::Error),
         ];
         for (event_type, expected) in types_and_severities {
             let mut entry = genesis_entry();

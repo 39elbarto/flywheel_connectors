@@ -146,6 +146,10 @@ struct HttpFixtureResponse {
 
 fn bump_count(counts: &Arc<Mutex<HashMap<String, usize>>>, key: &str) -> usize {
     let mut counts = counts.lock().expect("update Telegram loopback count");
+    bump_count_in_map(&mut counts, key)
+}
+
+fn bump_count_in_map(counts: &mut HashMap<String, usize>, key: &str) -> usize {
     let count = counts.entry(key.to_string()).or_insert(0);
     let previous = *count;
     *count = count.saturating_add(1);

@@ -273,16 +273,19 @@ async fn local_non_mock_messages_list_and_send_use_loopback_boundary() {
         "/2010-04-01/Accounts/AClocal1234567890123456789012345678/Messages.json"
     );
     assert_auth_headers(&observations);
+    // Twilio's REST API only accepts form-encoded bodies, not JSON.
     assert!(
         observations[1]
             .header_value("content-type")
-            .is_some_and(|value| value.starts_with("application/json"))
+            .is_some_and(|value| value.starts_with("application/x-www-form-urlencoded"))
     );
 
-    let body: Value = serde_json::from_str(&observations[1].body).expect("request body JSON");
-    assert_eq!(body["To"], SENSITIVE_TO);
-    assert_eq!(body["From"], SENSITIVE_FROM);
-    assert_eq!(body["Body"], SENSITIVE_BODY);
+    // Fields are emitted in the connector's deterministic (sorted) order; the
+    // values are form-encoded and reach the loopback boundary intact.
+    assert_eq!(
+        observations[1].body,
+        "Body=Local%20acceptance%20message&From=%2B15559876543&To=%2B15551234567"
+    );
     assert_eq!(messages["messages"].as_array().map_or(0, Vec::len), 1);
     assert_eq!(sent["sid"], MESSAGE_SID);
 

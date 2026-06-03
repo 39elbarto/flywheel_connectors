@@ -1,7 +1,9 @@
 //! Twilio REST API client.
 //!
-//! Twilio uses Basic auth (account_sid:auth_token) and JSON POST bodies.
-//! Base URL: `https://api.twilio.com/2010-04-01/Accounts/{account_sid}`
+//! Twilio uses Basic auth (account_sid:auth_token) and
+//! `application/x-www-form-urlencoded` POST bodies (the REST API does not
+//! parse JSON request bodies). Base URL:
+//! `https://api.twilio.com/2010-04-01/Accounts/{account_sid}`
 
 use std::fmt::Write;
 use std::time::Duration;
@@ -136,8 +138,10 @@ impl TwilioClient {
 
     /// Create a new Twilio client with the specified auth mode.
     pub fn new_with_auth(auth: TwilioAuth) -> TwilioResult<Self> {
+        // No default Content-Type: GET requests carry no body, and write
+        // operations set `application/x-www-form-urlencoded` per request via
+        // `RequestBuilder::form` (Twilio's REST API does not parse JSON bodies).
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
 
         match &auth {
             TwilioAuth::Token {
@@ -256,7 +260,7 @@ impl TwilioClient {
         if let Some(cb) = status_callback {
             payload["StatusCallback"] = serde_json::Value::String(cb.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -324,7 +328,7 @@ impl TwilioClient {
         if let Some(r) = record {
             payload["Record"] = serde_json::Value::Bool(r);
         }
-        let data = self.post_json(&api_url, &payload).await?;
+        let data = self.post_form(&api_url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -339,7 +343,7 @@ impl TwilioClient {
     pub async fn hangup_call(&self, call_sid: &str) -> TwilioResult<TwilioCall> {
         let url = format!("{}/Calls/{call_sid}.json", self.base_url);
         let payload = serde_json::json!({ "Status": "completed" });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -565,7 +569,7 @@ impl TwilioClient {
         if let Some(cb) = status_callback {
             payload["StatusCallback"] = serde_json::Value::String(cb.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -595,7 +599,7 @@ impl TwilioClient {
         if let Some(cb) = status_callback {
             payload["StatusCallback"] = serde_json::Value::String(cb.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -679,7 +683,7 @@ impl TwilioClient {
         if let Some(name) = unique_name {
             payload["UniqueName"] = serde_json::Value::String(name.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -732,7 +736,7 @@ impl TwilioClient {
         if let Some(proxy) = messaging_proxy_address {
             payload["MessagingBinding.ProxyAddress"] = serde_json::Value::String(proxy.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -766,7 +770,7 @@ impl TwilioClient {
         if let Some(a) = author {
             payload["Author"] = serde_json::Value::String(a.to_string());
         }
-        self.post_json(&url, &payload).await
+        self.post_form(&url, &payload).await
     }
 
     /// List messages in a conversation.
@@ -808,7 +812,7 @@ impl TwilioClient {
             "To": to,
             "Channel": channel,
         });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -827,7 +831,7 @@ impl TwilioClient {
             "To": to,
             "Code": code,
         });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -844,7 +848,7 @@ impl TwilioClient {
         let payload = serde_json::json!({
             "Status": "canceled",
         });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -868,7 +872,7 @@ impl TwilioClient {
         if let Some(mp) = max_participants {
             payload["MaxParticipants"] = serde_json::Value::Number(mp.into());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -903,7 +907,7 @@ impl TwilioClient {
         let payload = serde_json::json!({
             "Status": "completed",
         });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -1012,12 +1016,29 @@ impl TwilioClient {
         .await
     }
 
-    async fn post_json(
+    /// POST a Twilio write operation.
+    ///
+    /// The `body` is built by callers as a `serde_json::Value` map using
+    /// Twilio's PascalCase field names, but Twilio's REST API only accepts
+    /// `application/x-www-form-urlencoded` request bodies — so the map is
+    /// flattened into form pairs here. Array-valued fields (e.g. `MediaUrl`)
+    /// are emitted as repeated keys, matching Twilio's convention.
+    async fn post_form(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> TwilioResult<serde_json::Value> {
-        self.execute(|| self.http.post(url).json(body)).await
+        let encoded = encode_form_body(&json_to_form_pairs(body));
+        self.execute(|| {
+            self.http
+                .post(url)
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(encoded.clone())
+        })
+        .await
     }
 
     async fn delete(&self, url: &str) -> TwilioResult<()> {
@@ -1133,6 +1154,65 @@ fn ensure_whatsapp_prefix(number: &str) -> String {
     } else {
         format!("whatsapp:{number}")
     }
+}
+
+/// Flatten a `serde_json::Value` map into `application/x-www-form-urlencoded`
+/// key/value pairs for a Twilio POST body.
+///
+/// Twilio request payloads are always shallow maps of PascalCase field names to
+/// scalar values (Twilio uses dotted keys such as `MessagingBinding.Address`
+/// rather than nested objects, and passes structured data like
+/// `ContentVariables` as a pre-serialized JSON string). Scalars render to their
+/// natural string form; array values (e.g. `MediaUrl`) become repeated keys.
+/// Null values are omitted.
+fn json_to_form_pairs(body: &serde_json::Value) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let Some(map) = body.as_object() else {
+        return pairs;
+    };
+    for (key, value) in map {
+        match value {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(s) => pairs.push((key.clone(), s.clone())),
+            serde_json::Value::Bool(b) => pairs.push((key.clone(), b.to_string())),
+            serde_json::Value::Number(n) => pairs.push((key.clone(), n.to_string())),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    let rendered = match item {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    pairs.push((key.clone(), rendered));
+                }
+            }
+            // Nested objects do not occur in Twilio payloads; fall back to the
+            // compact JSON encoding rather than dropping the field silently.
+            other @ serde_json::Value::Object(_) => {
+                pairs.push((key.clone(), other.to_string()));
+            }
+        }
+    }
+    pairs
+}
+
+/// Serialize form pairs into an `application/x-www-form-urlencoded` body.
+///
+/// Values are percent-encoded with the same `NON_ALPHANUMERIC` set used for
+/// query strings elsewhere in this client (spaces become `%20`, which Twilio
+/// urldecodes identically to `+`). Keys are Twilio's fixed PascalCase /
+/// dotted field names (e.g. `MessagingBinding.Address`) and are emitted
+/// verbatim so the server sees the documented parameter names.
+fn encode_form_body(pairs: &[(String, String)]) -> String {
+    let mut body = String::new();
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        if i > 0 {
+            body.push('&');
+        }
+        let encoded =
+            percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC);
+        let _ = write!(body, "{key}={encoded}");
+    }
+    body
 }
 
 #[cfg(test)]
@@ -2051,6 +2131,57 @@ mod tests {
         // The base URL should contain the default API base + account SID
         let expected_url = format!("{DEFAULT_API_BASE}/ACurl123");
         assert!(debug.contains(&expected_url), "debug: {debug}");
+    }
+
+    // ── Form-encoding of POST bodies ────────────────────────────────────
+
+    #[test]
+    fn json_to_form_pairs_flattens_scalars() {
+        let body = serde_json::json!({
+            "To": "+15551234567",
+            "Timeout": 30,
+            "Record": true,
+        });
+        let pairs = json_to_form_pairs(&body);
+        assert!(pairs.contains(&("To".to_string(), "+15551234567".to_string())));
+        assert!(pairs.contains(&("Timeout".to_string(), "30".to_string())));
+        assert!(pairs.contains(&("Record".to_string(), "true".to_string())));
+    }
+
+    #[test]
+    fn json_to_form_pairs_emits_repeated_keys_for_arrays() {
+        let body = serde_json::json!({
+            "Body": "hi",
+            "MediaUrl": ["https://a.example/1.png", "https://a.example/2.png"],
+        });
+        let pairs = json_to_form_pairs(&body);
+        let media: Vec<&String> = pairs
+            .iter()
+            .filter(|(k, _)| k == "MediaUrl")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(media.len(), 2, "each MediaUrl should be a separate pair");
+        assert_eq!(media[0], "https://a.example/1.png");
+        assert_eq!(media[1], "https://a.example/2.png");
+    }
+
+    #[test]
+    fn json_to_form_pairs_omits_null_and_handles_empty() {
+        let body = serde_json::json!({ "A": serde_json::Value::Null, "B": "keep" });
+        let pairs = json_to_form_pairs(&body);
+        assert_eq!(pairs, vec![("B".to_string(), "keep".to_string())]);
+        assert!(json_to_form_pairs(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn encode_form_body_percent_encodes_values() {
+        let body = encode_form_body(&[
+            ("To".to_string(), "+15551234567".to_string()),
+            ("Body".to_string(), "hi there".to_string()),
+        ]);
+        // `+` and space must be percent-encoded so they survive form decoding.
+        assert_eq!(body, "To=%2B15551234567&Body=hi%20there");
+        assert_eq!(encode_form_body(&[]), "");
     }
 
     // ── Default API base constant ───────────────────────────────────────

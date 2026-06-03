@@ -220,7 +220,7 @@ impl StripeClient {
             body["name"] = serde_json::Value::String(n.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -251,7 +251,7 @@ impl StripeClient {
             body["name"] = serde_json::Value::String(n.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -319,7 +319,7 @@ impl StripeClient {
             body["customer"] = serde_json::Value::String(c.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -346,7 +346,7 @@ impl StripeClient {
             body["payment_method"] = serde_json::Value::String(pm.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -365,7 +365,7 @@ impl StripeClient {
             body["amount_to_capture"] = serde_json::Value::Number(amount.into());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -384,7 +384,7 @@ impl StripeClient {
             body["cancellation_reason"] = serde_json::Value::String(reason.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -414,7 +414,7 @@ impl StripeClient {
             body["amount"] = serde_json::Value::Number(a.into());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -444,7 +444,7 @@ impl StripeClient {
             "items": [{ "price": price }],
         });
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -561,22 +561,31 @@ impl StripeClient {
         self.execute(|| self.apply_auth(self.http.get(url))).await
     }
 
-    async fn post_json(
+    async fn post_form(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> StripeResult<serde_json::Value> {
-        self.post_json_with_idempotency(url, body, None).await
+        self.post_form_with_idempotency(url, body, None).await
     }
 
-    async fn post_json_with_idempotency(
+    async fn post_form_with_idempotency(
         &self,
         url: &str,
         body: &serde_json::Value,
         idempotency_key: Option<&str>,
     ) -> StripeResult<serde_json::Value> {
+        // Stripe's REST API only accepts `application/x-www-form-urlencoded`
+        // request bodies (with bracket notation for nested fields); it does not
+        // parse JSON. Encode the body here rather than sending `.json()`.
+        let encoded = stripe_form_encode(body);
         self.execute(|| {
-            let mut req = self.apply_auth(self.http.post(url).json(body));
+            let mut req = self.apply_auth(
+                self.http
+                    .post(url)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(encoded.clone()),
+            );
             if let Some(key) = idempotency_key {
                 req = req.header("Idempotency-Key", key);
             }
@@ -707,6 +716,55 @@ impl StripeClient {
         })
         .await
     }
+}
+
+/// Serialize a Stripe request body into an `application/x-www-form-urlencoded`
+/// string using Stripe's bracket notation for nested objects and arrays.
+///
+/// Stripe's REST API does not accept JSON request bodies; structured parameters
+/// are expressed with bracketed keys, e.g. a subscription's
+/// `items: [{ "price": "price_123" }]` becomes `items[0][price]=price_123`.
+/// Scalars render to their natural string form; `null` values are omitted.
+fn stripe_form_encode(body: &serde_json::Value) -> String {
+    let mut pairs: Vec<String> = Vec::new();
+    encode_form_field("", body, &mut pairs);
+    pairs.join("&")
+}
+
+/// Recursively flatten one JSON value into `key=value` form pairs under `prefix`.
+fn encode_form_field(prefix: &str, value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Null => {}
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let nested = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}[{key}]")
+                };
+                encode_form_field(&nested, child, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let nested = format!("{prefix}[{index}]");
+                encode_form_field(&nested, child, out);
+            }
+        }
+        serde_json::Value::String(s) => out.push(stripe_form_pair(prefix, s)),
+        serde_json::Value::Bool(b) => out.push(stripe_form_pair(prefix, &b.to_string())),
+        serde_json::Value::Number(n) => out.push(stripe_form_pair(prefix, &n.to_string())),
+    }
+}
+
+/// Percent-encode a single `key=value` form pair. Keys (which may contain
+/// bracket characters) and values are both encoded with the same set used for
+/// query values, so reserved separators (`&`, `=`, `+`, space, `%`) cannot
+/// break the body framing; Stripe urldecodes the bracketed keys server-side.
+fn stripe_form_pair(key: &str, value: &str) -> String {
+    let key = utf8_percent_encode(key, STRIPE_QUERY_SET);
+    let value = utf8_percent_encode(value, STRIPE_QUERY_SET);
+    format!("{key}={value}")
 }
 
 #[cfg(test)]
@@ -1514,5 +1572,44 @@ mod tests {
             .unwrap();
         assert_eq!(result.data.len(), 0);
         server.finish();
+    }
+
+    #[test]
+    fn stripe_form_encode_flat_scalars() {
+        let body = serde_json::json!({
+            "amount": 2000,
+            "currency": "usd",
+            "customer": "cus_123",
+        });
+        // serde_json maps are sorted, so order is deterministic.
+        assert_eq!(
+            stripe_form_encode(&body),
+            "amount=2000&currency=usd&customer=cus_123"
+        );
+    }
+
+    #[test]
+    fn stripe_form_encode_nested_array_of_objects() {
+        // The subscription create payload: items is an array of objects.
+        let body = serde_json::json!({
+            "customer": "cus_123",
+            "items": [{ "price": "price_123" }],
+        });
+        assert_eq!(
+            stripe_form_encode(&body),
+            "customer=cus_123&items%5B0%5D%5Bprice%5D=price_123"
+        );
+    }
+
+    #[test]
+    fn stripe_form_encode_omits_null_and_encodes_reserved() {
+        let body = serde_json::json!({
+            "keep": "a b&c",
+            "drop": serde_json::Value::Null,
+        });
+        // null is omitted; space and `&` in the value are percent-encoded so
+        // they cannot break body framing.
+        assert_eq!(stripe_form_encode(&body), "keep=a%20b%26c");
+        assert_eq!(stripe_form_encode(&serde_json::json!({})), "");
     }
 }

@@ -16,9 +16,12 @@ name = "br_tools"
 path = "src/lib.rs"
 
 [dependencies]
+blake3.workspace = true
 chrono.workspace = true
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

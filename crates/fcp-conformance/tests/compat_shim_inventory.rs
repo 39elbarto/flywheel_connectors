@@ -2,13 +2,14 @@
 //!
 //! The bridge plan guessed that `fcp_core::compat::{policy,evidence}` were the
 //! remaining shims. The current checkout has no such modules or callers. The
-//! active scorecard shim is the SDK migration helper instead.
+//! SDK scorecard shims have graduated to first-class SDK modules instead.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const INVENTORY_DOC: &str = "docs/cleanup/shim_inventory.md";
 const FCP_CORE_LIB_RS: &str = include_str!("../../fcp-core/src/lib.rs");
+const FCP_SDK_ERROR_MAPPING_RS: &str = include_str!("../../fcp-sdk/src/error_mapping.rs");
 const FCP_SDK_MIGRATION_RS: &str = include_str!("../../fcp-sdk/src/migration.rs");
 const FCP_SDK_RUNTIME_RS: &str = include_str!("../../fcp-sdk/src/runtime.rs");
 const SCORECARD_MD: &str = include_str!("../../../docs/FCP3_Transition_Scorecard.md");
@@ -51,7 +52,7 @@ fn summary_value(doc: &str, name: &str) -> usize {
 fn row_value<'a>(doc: &'a str, row_id: &str, name: &str) -> &'a str {
     let row = doc
         .lines()
-        .find(|line| line.contains("compat-shim-row:") && line.contains(row_id))
+        .find(|line| line.contains("shim-row:") && line.contains(row_id))
         .unwrap_or_else(|| panic!("machine-readable row `{row_id}` is present"));
     field(row, name).unwrap_or_else(|| panic!("field `{name}` is present on `{row_id}`"))
 }
@@ -130,7 +131,7 @@ fn suspected_core_compat_policy_and_evidence_shims_are_absent() {
 }
 
 #[test]
-fn scorecard_tracks_runtime_graduation_and_remaining_error_mapping_shim() {
+fn scorecard_tracks_runtime_and_error_mapping_graduation() {
     assert!(
         !FCP_SDK_MIGRATION_RS.contains("pub struct ConnectorRuntime"),
         "ConnectorRuntime must not be defined in fcp-sdk/src/migration.rs after \
@@ -141,24 +142,27 @@ fn scorecard_tracks_runtime_graduation_and_remaining_error_mapping_shim() {
         "ConnectorRuntime must live in the first-class fcp-sdk runtime module"
     );
     assert!(
-        FCP_SDK_MIGRATION_RS.contains("pub trait ConnectorErrorMapping"),
-        "ConnectorErrorMapping remains the active SDK migration helper until \
-         its own deletion/migration bead removes it"
+        !FCP_SDK_MIGRATION_RS.contains("pub trait ConnectorErrorMapping"),
+        "ConnectorErrorMapping must not be defined in fcp-sdk/src/migration.rs \
+         after flywheel_connectors-angoc.3.7"
     );
     assert!(
-        SCORECARD_MD.contains("| ConnectorErrorMapping | fcp-sdk/src/migration.rs |")
+        FCP_SDK_ERROR_MAPPING_RS.contains("pub trait ConnectorErrorMapping"),
+        "ConnectorErrorMapping must live in the first-class fcp-sdk error_mapping module"
+    );
+    assert!(
+        SCORECARD_MD.contains("| ConnectorErrorMapping | fcp-sdk/src/error_mapping.rs |")
             && SCORECARD_MD.contains("| ConnectorRuntime | fcp-sdk/src/runtime.rs |"),
-        "the FCP3 scorecard must identify the remaining active shim and the \
-         migrated ConnectorRuntime location"
+        "the FCP3 scorecard must identify the migrated SDK shim locations"
     );
 
     let doc = inventory_doc();
-    assert_eq!(summary_value(&doc, "scorecard_active_shims"), 1);
+    assert_eq!(summary_value(&doc, "scorecard_active_shims"), 0);
+    assert_eq!(summary_value(&doc, "scorecard_migrating_shims"), 0);
     assert!(
         doc.contains("scorecard-shim-row: id=FCP-SDK-CONNECTOR-RUNTIME")
             && doc.contains("scorecard-shim-row: id=FCP-SDK-CONNECTOR-ERROR-MAPPING"),
-        "the inventory doc must carry machine-readable rows for runtime and \
-         the remaining active error-mapping shim"
+        "the inventory doc must carry machine-readable rows for the migrated SDK shims"
     );
     assert_eq!(
         row_value(&doc, "FCP-SDK-CONNECTOR-RUNTIME", "status"),
@@ -166,6 +170,10 @@ fn scorecard_tracks_runtime_graduation_and_remaining_error_mapping_shim() {
     );
     assert_eq!(
         row_value(&doc, "FCP-SDK-CONNECTOR-ERROR-MAPPING", "status"),
-        "active"
+        "migrated"
+    );
+    assert_eq!(
+        row_value(&doc, "FCP-SDK-CONNECTOR-ERROR-MAPPING", "legacy_reexport"),
+        "removed"
     );
 }

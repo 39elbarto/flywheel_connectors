@@ -41,6 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout toon_rust path dependency
+        shell: bash
+        run: git clone --depth 1 --filter=blob:none https://github.com/Dicklesworthstone/toon_rust.git ../toon_rust
+
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy

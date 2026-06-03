@@ -37,8 +37,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 
 use fcp_audit::{
-    AuditEntry, AuditEntryIdFields, AuditError, HybridLogicalClock, HybridLogicalTimestamp,
-    Severity, audit_entry_hlc_from_occurred_at, compute_audit_entry_id,
+    AuditEntry, AuditEntryIdFields, AuditError, FreshnessLevel, HybridLogicalClock,
+    HybridLogicalTimestamp, Severity, audit_entry_hlc_from_occurred_at, compute_audit_entry_id,
     otlp_export::{AuditOtlpExporterStatus, FireAndForgetExporter},
 };
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,9 @@ pub const CAS_RETRY_BUDGET: usize = 64;
 /// semantics while guaranteeing progress before the defensive retry
 /// budget trips.
 pub const SERIALIZED_COMMIT_FALLBACK_ATTEMPTS: usize = 8;
+
+/// Stable schema for host-backed invoke audit-chain status snapshots.
+pub const INVOKE_AUDIT_CHAIN_STATUS_SCHEMA_VERSION: &str = "fcp.host.invoke_audit_chain_status.v1";
 
 /// Event type strings for invoke-chain audit entries.
 pub mod event_types {
@@ -363,6 +366,81 @@ impl InvokeAuditChainMetrics {
     pub const fn committed_entries(self) -> usize {
         self.optimistic_commits + self.serialized_fallbacks
     }
+}
+
+/// Live source descriptor for host-backed invoke audit-chain status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvokeAuditChainStatusSource {
+    /// Source kind used by operator JSON.
+    pub kind: String,
+    /// Whether this source was queried live.
+    pub live: bool,
+}
+
+/// Live quorum-checkpoint availability attached to host-backed status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveQuorumCheckpointSnapshot {
+    /// Whether quorum checkpoint data is available.
+    pub available: bool,
+    /// Machine-readable reason when checkpoint data is unavailable.
+    pub reason_code: String,
+    /// Human-readable redaction-safe detail.
+    pub detail: String,
+}
+
+/// Redaction-safe status snapshot for the host invoke audit chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvokeAuditChainStatusSnapshot {
+    /// Stable schema identifier.
+    pub schema_version: String,
+    /// Freshness classification for the current snapshot.
+    pub status: FreshnessLevel,
+    /// Operator-facing telemetry state.
+    pub telemetry_state: String,
+    /// Live source descriptor.
+    pub source: InvokeAuditChainStatusSource,
+    /// Zone whose chain was queried.
+    pub zone_id: String,
+    /// Current head sequence for the zone, if any entries exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_seq: Option<u64>,
+    /// Current head entry id for the zone, if any entries exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_entry: Option<String>,
+    /// Number of committed audit entries for this zone.
+    pub audit_entries: u64,
+    /// Last observed audit event time, if any entries exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_observed_at: Option<u64>,
+    /// Quorum-signed checkpoint count. Zero until checkpoint signing is wired.
+    pub quorum_signed_checkpoints: u64,
+    /// Number of quorum signers present in the live checkpoint snapshot.
+    pub quorum_signers: u64,
+    /// Quorum signer ids present in the live checkpoint snapshot.
+    pub quorum_signer_ids: Vec<String>,
+    /// Last quorum checkpoint height, if a signed checkpoint exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_quorum_height: Option<u64>,
+    /// Freshness of the latest quorum checkpoint in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quorum_freshness_secs: Option<u64>,
+    /// Current quorum rotation epoch, if checkpoint telemetry provides it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quorum_rotation_epoch: Option<String>,
+    /// Seconds until the next rotation, if checkpoint telemetry provides it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_rotation_eta_secs: Option<u64>,
+    /// Drift between wall clock and the latest entry HLC physical component.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hlc_physical_drift_ms: Option<u64>,
+    /// Maximum age used by the caller for freshness classification.
+    pub max_age_seconds: u64,
+    /// Explicit checkpoint availability so callers do not infer quorum.
+    pub live_quorum_checkpoint_snapshot: LiveQuorumCheckpointSnapshot,
+    /// Append-path counters for the queried zone.
+    pub append_metrics: InvokeAuditChainMetrics,
+    /// Redaction-safe warnings explaining degraded or missing states.
+    pub warnings: Vec<String>,
 }
 
 /// Per-host hash-linked invoke audit chain.
@@ -740,6 +818,91 @@ impl InvokeAuditChain {
             .expect("InvokeAuditChain zone mutex poisoned")
             .metrics
     }
+
+    /// Build a redaction-safe live status snapshot for one zone.
+    ///
+    /// The current invoke audit chain is live host telemetry, but it is not a
+    /// quorum-signed checkpoint stream yet. This method therefore reports
+    /// committed entries and HLC drift without fabricating quorum signers.
+    #[must_use]
+    pub fn status_for_zone(
+        &self,
+        zone_id: &str,
+        now_unix_secs: u64,
+        max_age_seconds: u64,
+    ) -> InvokeAuditChainStatusSnapshot {
+        let entries = self.entries_for_zone(zone_id);
+        let append_metrics = self.metrics_for_zone(zone_id);
+        let tip_entry = entries.last();
+        let mut warnings = Vec::new();
+
+        if tip_entry.is_none() {
+            warnings.push(format!(
+                "live host invoke audit chain has no entries for zone `{zone_id}`"
+            ));
+        } else {
+            warnings.push(
+                "live host invoke audit chain is available, but quorum-signed checkpoint telemetry is not wired yet"
+                    .to_owned(),
+            );
+        }
+        if append_metrics.clock_anomalies > 0 {
+            warnings.push(format!(
+                "{} clock anomaly event(s) were recorded in this zone",
+                append_metrics.clock_anomalies
+            ));
+        }
+        if let Some(entry) = tip_entry
+            && entry.occurred_at > now_unix_secs
+        {
+            warnings.push(format!(
+                "head entry timestamp {} is in the future relative to now {}",
+                entry.occurred_at, now_unix_secs
+            ));
+        }
+
+        let hlc_physical_drift_ms = tip_entry.map(|entry| {
+            now_unix_secs
+                .saturating_mul(1_000)
+                .abs_diff(entry.hlc.physical_ms)
+        });
+
+        InvokeAuditChainStatusSnapshot {
+            schema_version: INVOKE_AUDIT_CHAIN_STATUS_SCHEMA_VERSION.to_owned(),
+            status: if tip_entry.is_some() {
+                FreshnessLevel::Degraded
+            } else {
+                FreshnessLevel::Missing
+            },
+            telemetry_state: "live-host".to_owned(),
+            source: InvokeAuditChainStatusSource {
+                kind: "host-invoke-audit-chain".to_owned(),
+                live: true,
+            },
+            zone_id: zone_id.to_owned(),
+            head_seq: tip_entry.map(|entry| entry.seq),
+            head_entry: tip_entry.map(|entry| entry.id.clone()),
+            audit_entries: u64::try_from(entries.len()).unwrap_or(u64::MAX),
+            last_observed_at: tip_entry.map(|entry| entry.occurred_at),
+            quorum_signed_checkpoints: 0,
+            quorum_signers: 0,
+            quorum_signer_ids: Vec::new(),
+            last_quorum_height: None,
+            quorum_freshness_secs: None,
+            quorum_rotation_epoch: None,
+            next_rotation_eta_secs: None,
+            hlc_physical_drift_ms,
+            max_age_seconds,
+            live_quorum_checkpoint_snapshot: LiveQuorumCheckpointSnapshot {
+                available: false,
+                reason_code: "quorum-checkpoint-telemetry-unwired".to_owned(),
+                detail: "host invoke-chain entries are live, but quorum checkpoint signing is not exposed yet"
+                    .to_owned(),
+            },
+            append_metrics,
+            warnings,
+        }
+    }
 }
 
 fn monotonic_occurred_at(requested: u64, previous: Option<u64>) -> u64 {
@@ -808,6 +971,60 @@ mod tests {
         assert_eq!(
             entry.hlc.physical_ms,
             entry.occurred_at.saturating_mul(1_000)
+        );
+    }
+
+    #[test]
+    fn invoke_audit_chain_status_reports_live_missing_without_entries() {
+        let chain = InvokeAuditChain::new();
+        let status = chain.status_for_zone("z:work", 1_700_000_030, 60);
+
+        assert_eq!(
+            status.schema_version,
+            INVOKE_AUDIT_CHAIN_STATUS_SCHEMA_VERSION
+        );
+        assert_eq!(status.status, FreshnessLevel::Missing);
+        assert_eq!(status.telemetry_state, "live-host");
+        assert_eq!(status.source.kind, "host-invoke-audit-chain");
+        assert!(status.source.live);
+        assert_eq!(status.zone_id, "z:work");
+        assert_eq!(status.audit_entries, 0);
+        assert_eq!(status.quorum_signed_checkpoints, 0);
+        assert_eq!(status.quorum_signers, 0);
+        assert!(!status.live_quorum_checkpoint_snapshot.available);
+        assert!(
+            status
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no entries"))
+        );
+    }
+
+    #[test]
+    fn invoke_audit_chain_status_reports_live_entries_without_fabricating_quorum() {
+        let chain = InvokeAuditChain::new();
+        let entry = chain
+            .append(&ctx("z:work", "op-1"), InvokePhase::PreflightAllow)
+            .unwrap();
+
+        let status = chain.status_for_zone("z:work", 1_700_000_030, 60);
+
+        assert_eq!(status.status, FreshnessLevel::Degraded);
+        assert_eq!(status.head_seq, Some(entry.seq));
+        assert_eq!(status.head_entry.as_deref(), Some(entry.id.as_str()));
+        assert_eq!(status.audit_entries, 1);
+        assert_eq!(status.last_observed_at, Some(entry.occurred_at));
+        assert_eq!(status.quorum_signed_checkpoints, 0);
+        assert_eq!(status.quorum_signers, 0);
+        assert!(status.quorum_signer_ids.is_empty());
+        assert!(status.last_quorum_height.is_none());
+        assert_eq!(status.hlc_physical_drift_ms, Some(30_000));
+        assert_eq!(status.append_metrics.entries, 1);
+        assert!(
+            status
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("quorum-signed checkpoint telemetry"))
         );
     }
 

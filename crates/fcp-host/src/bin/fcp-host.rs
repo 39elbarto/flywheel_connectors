@@ -6867,6 +6867,10 @@ async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
             get(journal_connector_handler),
         )
         .route("/rpc/admin/logs", post(log_query_handler))
+        .route(
+            "/rpc/admin/audit/chain/status",
+            get(audit_chain_status_handler),
+        )
         .route("/rpc/admin/receipts", post(receipt_query_handler))
         .route(
             "/rpc/admin/simulate-receipts",
@@ -13587,6 +13591,47 @@ async fn journal_connector_handler(
 }
 
 // ── Log, event, and receipt handlers ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct AuditChainStatusQuery {
+    zone: Option<String>,
+    max_age_seconds: Option<u64>,
+    now_unix_secs: Option<u64>,
+}
+
+fn audit_chain_status_query_zone(query: &AuditChainStatusQuery) -> String {
+    query
+        .zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| ZoneId::work().to_string())
+}
+
+async fn audit_chain_status_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AuditChainStatusQuery>,
+) -> Json<fcp_host::InvokeAuditChainStatusSnapshot> {
+    let zone_id = audit_chain_status_query_zone(&query);
+    let max_age_seconds = query.max_age_seconds.unwrap_or(60);
+    let now_unix_secs = query
+        .now_unix_secs
+        .unwrap_or_else(|| u64::try_from(Utc::now().timestamp()).unwrap_or_default());
+
+    tracing::debug!(
+        event = "audit_chain_status_request",
+        zone_id = %zone_id,
+        max_age_seconds,
+        "processing live audit chain status query"
+    );
+
+    Json(
+        state
+            .invoke_audit
+            .status_for_zone(&zone_id, now_unix_secs, max_age_seconds),
+    )
+}
 
 async fn log_query_handler(
     State(state): State<Arc<AppState>>,

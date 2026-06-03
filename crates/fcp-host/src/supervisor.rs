@@ -715,6 +715,686 @@ pub struct PrewarmCheckoutEvidence {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Connector Snapshot/Resume Policy
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Stable JSONL schema for connector sandbox snapshot/resume spike evidence.
+pub const SNAPSHOT_RESUME_SCHEMA_VERSION: &str = "sandbox-snapshot-resume/v1";
+/// Owning bead for snapshot/resume spike evidence.
+pub const SNAPSHOT_RESUME_BEAD: &str = "flywheel_connectors-k3zfl.12";
+
+/// Snapshot/resume startup strategy requested for a connector.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotResumeStrategy {
+    /// Do not use persisted sandbox snapshots.
+    #[default]
+    Disabled,
+    /// Restore a WASI/runtime snapshot after rechecking host-side bindings.
+    WasmtimeSnapshot,
+    /// Reuse copy-on-write pages from a fork/zygote parent.
+    CowFork,
+}
+
+/// Explicit snapshot/resume configuration for connector startup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorSnapshotResumeConfig {
+    /// Which snapshot strategy to use.
+    pub strategy: SnapshotResumeStrategy,
+    /// Maximum age for a candidate snapshot before on-demand fallback.
+    pub max_age: Duration,
+    /// Maximum wait while checking out a snapshot.
+    pub checkout_timeout: Duration,
+}
+
+impl Default for ConnectorSnapshotResumeConfig {
+    fn default() -> Self {
+        Self {
+            strategy: SnapshotResumeStrategy::Disabled,
+            max_age: Duration::ZERO,
+            checkout_timeout: Duration::ZERO,
+        }
+    }
+}
+
+impl ConnectorSnapshotResumeConfig {
+    /// Build a WASI/runtime snapshot configuration.
+    #[must_use]
+    pub const fn wasmtime_snapshot(max_age: Duration, checkout_timeout: Duration) -> Self {
+        Self {
+            strategy: SnapshotResumeStrategy::WasmtimeSnapshot,
+            max_age,
+            checkout_timeout,
+        }
+    }
+
+    /// Build a copy-on-write fork configuration.
+    #[must_use]
+    pub const fn cow_fork(max_age: Duration, checkout_timeout: Duration) -> Self {
+        Self {
+            strategy: SnapshotResumeStrategy::CowFork,
+            max_age,
+            checkout_timeout,
+        }
+    }
+
+    /// Validate the snapshot configuration before it can influence startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SnapshotResumeConfigError`] when the requested strategy would
+    /// be unsafe or internally inconsistent.
+    pub const fn validate(&self) -> Result<(), SnapshotResumeConfigError> {
+        match self.strategy {
+            SnapshotResumeStrategy::Disabled => Ok(()),
+            SnapshotResumeStrategy::CowFork => {
+                Err(SnapshotResumeConfigError::CowForkRequiresSecurityProof)
+            }
+            SnapshotResumeStrategy::WasmtimeSnapshot => {
+                if self.max_age.is_zero() {
+                    return Err(SnapshotResumeConfigError::MaxAgeZero);
+                }
+                if self.checkout_timeout.is_zero() {
+                    return Err(SnapshotResumeConfigError::CheckoutTimeoutZero);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Decide whether a snapshot can be resumed for an invocation.
+    #[allow(clippy::too_many_lines)]
+    #[must_use]
+    pub fn decide_resume(&self, observation: &SnapshotResumeObservation) -> SnapshotResumeDecision {
+        if let Err(error) = self.validate() {
+            return match error {
+                SnapshotResumeConfigError::CowForkRequiresSecurityProof => {
+                    SnapshotResumeDecision::RejectUnsafe {
+                        reason: SnapshotUnsafeReason::CowForkWithoutSecurityProof,
+                    }
+                }
+                SnapshotResumeConfigError::MaxAgeZero
+                | SnapshotResumeConfigError::CheckoutTimeoutZero => {
+                    SnapshotResumeDecision::FallbackOnDemand {
+                        reason: SnapshotFallbackReason::InvalidConfig,
+                    }
+                }
+            };
+        }
+
+        if self.strategy == SnapshotResumeStrategy::Disabled {
+            return SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::NotConfigured,
+            };
+        }
+
+        if observation.platform == SnapshotPlatformState::Unsupported {
+            return SnapshotResumeDecision::SkipUnsupported {
+                reason: SnapshotSkipReason::PlatformUnsupported,
+            };
+        }
+
+        match observation.snapshot_state {
+            SnapshotResumeState::Disabled => {
+                return SnapshotResumeDecision::FallbackOnDemand {
+                    reason: SnapshotFallbackReason::NotConfigured,
+                };
+            }
+            SnapshotResumeState::EmptySnapshotStore => {
+                return SnapshotResumeDecision::FallbackOnDemand {
+                    reason: SnapshotFallbackReason::EmptySnapshotStore,
+                };
+            }
+            SnapshotResumeState::WarmCandidate | SnapshotResumeState::Restored => {}
+            SnapshotResumeState::StaleManifest => {
+                return SnapshotResumeDecision::FallbackOnDemand {
+                    reason: SnapshotFallbackReason::StaleManifest,
+                };
+            }
+            SnapshotResumeState::RevokedCapability => {
+                return SnapshotResumeDecision::RejectUnsafe {
+                    reason: SnapshotUnsafeReason::RevokedCapability,
+                };
+            }
+            SnapshotResumeState::CrashBeforeCheckout => {
+                return SnapshotResumeDecision::FallbackOnDemand {
+                    reason: SnapshotFallbackReason::CrashBeforeCheckout,
+                };
+            }
+            SnapshotResumeState::ConcurrentStartup => {
+                return SnapshotResumeDecision::FallbackOnDemand {
+                    reason: SnapshotFallbackReason::ConcurrentStartup,
+                };
+            }
+            SnapshotResumeState::UnsupportedPlatform => {
+                return SnapshotResumeDecision::SkipUnsupported {
+                    reason: SnapshotSkipReason::PlatformUnsupported,
+                };
+            }
+            SnapshotResumeState::Rejected => {
+                return SnapshotResumeDecision::RejectUnsafe {
+                    reason: SnapshotUnsafeReason::SnapshotMarkedRejected,
+                };
+            }
+        }
+
+        match observation.manifest {
+            PrewarmManifestState::Current => {}
+            PrewarmManifestState::Missing => {
+                return SnapshotResumeDecision::FallbackOnDemand {
+                    reason: SnapshotFallbackReason::MissingManifestHash,
+                };
+            }
+            PrewarmManifestState::Stale => {
+                return SnapshotResumeDecision::FallbackOnDemand {
+                    reason: SnapshotFallbackReason::StaleManifest,
+                };
+            }
+        }
+
+        if observation.zone_binding == PrewarmZoneBinding::Missing {
+            return SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::MissingZoneBinding,
+            };
+        }
+
+        match observation.capability {
+            SnapshotCapabilityState::Bound => {}
+            SnapshotCapabilityState::Missing => {
+                return SnapshotResumeDecision::FallbackOnDemand {
+                    reason: SnapshotFallbackReason::MissingCapabilityBinding,
+                };
+            }
+            SnapshotCapabilityState::Revoked => {
+                return SnapshotResumeDecision::RejectUnsafe {
+                    reason: SnapshotUnsafeReason::RevokedCapability,
+                };
+            }
+        }
+
+        if observation.sandbox == PrewarmSandboxState::LimitsUnavailable {
+            return SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::SandboxLimitsUnavailable,
+            };
+        }
+
+        if observation.credential == PrewarmCredentialState::MaterialLoaded {
+            return SnapshotResumeDecision::RejectUnsafe {
+                reason: SnapshotUnsafeReason::CredentialMaterialLoaded,
+            };
+        }
+
+        if observation.snapshot_age > self.max_age {
+            return SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::SnapshotTooOld,
+            };
+        }
+
+        if let Some(exit) = &observation.previous_exit
+            && !exit.is_clean()
+        {
+            return SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::CrashBeforeCheckout,
+            };
+        }
+
+        if observation.proof == SnapshotSecurityProofState::Absent {
+            return SnapshotResumeDecision::RejectUnsafe {
+                reason: SnapshotUnsafeReason::SnapshotResumeProofUnavailable,
+            };
+        }
+
+        SnapshotResumeDecision::AdmitSnapshot {
+            snapshot_state: SnapshotResumeState::Restored,
+        }
+    }
+}
+
+/// Why a snapshot/resume configuration is invalid.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotResumeConfigError {
+    /// Copy-on-write fork reuse lacks the required security proof.
+    CowForkRequiresSecurityProof,
+    /// Snapshot candidates need a bounded lifetime.
+    MaxAgeZero,
+    /// Snapshot checkout needs a bounded wait.
+    CheckoutTimeoutZero,
+}
+
+impl std::fmt::Display for SnapshotResumeConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CowForkRequiresSecurityProof => {
+                f.write_str("copy-on-write snapshot resume requires a security proof")
+            }
+            Self::MaxAgeZero => f.write_str("snapshot max_age must be greater than zero"),
+            Self::CheckoutTimeoutZero => {
+                f.write_str("snapshot checkout_timeout must be greater than zero")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SnapshotResumeConfigError {}
+
+/// Snapshot store or checkout state recorded in snapshot/resume evidence.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotResumeState {
+    /// Snapshot/resume is disabled.
+    Disabled,
+    /// Snapshot store had no eligible candidate.
+    EmptySnapshotStore,
+    /// Snapshot store had a warm candidate.
+    WarmCandidate,
+    /// Snapshot candidate was restored after all safety gates passed.
+    Restored,
+    /// Snapshot manifest hash did not match the current connector manifest.
+    StaleManifest,
+    /// Snapshot capability binding was revoked.
+    RevokedCapability,
+    /// Snapshot checkout observed a prior crash marker.
+    CrashBeforeCheckout,
+    /// Concurrent swarm startup contended for the same snapshot.
+    ConcurrentStartup,
+    /// Platform cannot support the configured snapshot mode.
+    UnsupportedPlatform,
+    /// Snapshot metadata was explicitly rejected.
+    Rejected,
+}
+
+/// Capability binding state observed for a snapshot candidate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotCapabilityState {
+    /// Snapshot has a current capability binding proof.
+    Bound,
+    /// Snapshot lacks a usable capability binding proof.
+    Missing,
+    /// Snapshot capability binding has been revoked.
+    Revoked,
+}
+
+/// Runtime/platform support state observed for snapshot checkout.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotPlatformState {
+    /// Platform/runtime reports snapshot support.
+    Supported,
+    /// Platform/runtime does not support snapshot restore.
+    Unsupported,
+}
+
+/// Security proof state for a snapshot candidate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotSecurityProofState {
+    /// The host has not verified a snapshot/resume security proof.
+    Absent,
+    /// The host verified manifest, zone, capability, sandbox, and credential gates.
+    Present,
+}
+
+/// Credential mode recorded in snapshot/resume evidence.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotCredentialMode {
+    /// Credential access remains deferred until after host admission.
+    Deferred,
+    /// Credential material was observed and is represented only as redacted state.
+    RedactedMaterialPresent,
+}
+
+/// Live observation used to decide whether a snapshot is safe to resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotResumeObservation {
+    /// Snapshot store or checkout state.
+    pub snapshot_state: SnapshotResumeState,
+    /// Manifest freshness for the candidate snapshot.
+    pub manifest: PrewarmManifestState,
+    /// Zone binding state for the candidate snapshot.
+    pub zone_binding: PrewarmZoneBinding,
+    /// Capability binding state for the candidate snapshot.
+    pub capability: SnapshotCapabilityState,
+    /// Sandbox limit state for the candidate snapshot.
+    pub sandbox: PrewarmSandboxState,
+    /// Credential loading state for the candidate snapshot.
+    pub credential: PrewarmCredentialState,
+    /// Runtime/platform support state.
+    pub platform: SnapshotPlatformState,
+    /// Snapshot/resume security proof state.
+    pub proof: SnapshotSecurityProofState,
+    /// Age of the candidate snapshot.
+    pub snapshot_age: Duration,
+    /// Dirty copy-on-write pages reported by the runtime, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cow_dirty_pages: Option<u64>,
+    /// Exit observed before checkout, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_exit: Option<ProcessExit>,
+}
+
+/// Decision produced for a snapshot/resume checkout attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum SnapshotResumeDecision {
+    /// Admit and restore the snapshot.
+    AdmitSnapshot {
+        /// Snapshot state to record in structured evidence.
+        snapshot_state: SnapshotResumeState,
+    },
+    /// Fall back to conservative on-demand startup.
+    FallbackOnDemand {
+        /// Why snapshot/resume was not used.
+        reason: SnapshotFallbackReason,
+    },
+    /// Reject the snapshot because it would violate a security invariant.
+    RejectUnsafe {
+        /// Why the snapshot is unsafe.
+        reason: SnapshotUnsafeReason,
+    },
+    /// Skip the scenario because the current platform cannot provide support.
+    SkipUnsupported {
+        /// Why the scenario was skipped.
+        reason: SnapshotSkipReason,
+    },
+}
+
+impl SnapshotResumeDecision {
+    /// Whether this decision admits a snapshot restore.
+    #[must_use]
+    pub const fn admits_resume(&self) -> bool {
+        matches!(self, Self::AdmitSnapshot { .. })
+    }
+
+    /// Coarse action label for JSONL evidence.
+    #[must_use]
+    pub const fn action_label(&self) -> &'static str {
+        match self {
+            Self::AdmitSnapshot { .. } => "admit_snapshot",
+            Self::FallbackOnDemand { .. } => "fallback_on_demand",
+            Self::RejectUnsafe { .. } => "reject_unsafe",
+            Self::SkipUnsupported { .. } => "skip_unsupported",
+        }
+    }
+
+    /// Conservative fallback reason label, when any.
+    #[must_use]
+    pub const fn fallback_reason_label(&self) -> Option<&'static str> {
+        match self {
+            Self::FallbackOnDemand { reason } => Some(reason.as_str()),
+            Self::AdmitSnapshot { .. }
+            | Self::RejectUnsafe { .. }
+            | Self::SkipUnsupported { .. } => None,
+        }
+    }
+
+    /// Unsafe rejection reason label, when any.
+    #[must_use]
+    pub const fn rejection_reason_label(&self) -> Option<&'static str> {
+        match self {
+            Self::RejectUnsafe { reason } => Some(reason.as_str()),
+            Self::AdmitSnapshot { .. }
+            | Self::FallbackOnDemand { .. }
+            | Self::SkipUnsupported { .. } => None,
+        }
+    }
+
+    /// Unsupported-platform skip reason label, when any.
+    #[must_use]
+    pub const fn skip_reason_label(&self) -> Option<&'static str> {
+        match self {
+            Self::SkipUnsupported { reason } => Some(reason.as_str()),
+            Self::AdmitSnapshot { .. }
+            | Self::FallbackOnDemand { .. }
+            | Self::RejectUnsafe { .. } => None,
+        }
+    }
+}
+
+/// Conservative fallback reason for an on-demand connector startup.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotFallbackReason {
+    /// Snapshot/resume is disabled.
+    NotConfigured,
+    /// Configuration is invalid.
+    InvalidConfig,
+    /// No snapshot candidate is available.
+    EmptySnapshotStore,
+    /// The snapshot did not capture a manifest hash.
+    MissingManifestHash,
+    /// The snapshot manifest hash does not match the current manifest.
+    StaleManifest,
+    /// The snapshot is not bound to the target zone.
+    MissingZoneBinding,
+    /// The snapshot lacks a current capability binding.
+    MissingCapabilityBinding,
+    /// Sandbox limits are unavailable or unverified.
+    SandboxLimitsUnavailable,
+    /// The snapshot exceeded the configured maximum age.
+    SnapshotTooOld,
+    /// The snapshot crashed before checkout.
+    CrashBeforeCheckout,
+    /// Concurrent startup contention required on-demand activation.
+    ConcurrentStartup,
+}
+
+impl SnapshotFallbackReason {
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::InvalidConfig => "invalid_config",
+            Self::EmptySnapshotStore => "empty_snapshot_store",
+            Self::MissingManifestHash => "missing_manifest_hash",
+            Self::StaleManifest => "stale_manifest",
+            Self::MissingZoneBinding => "missing_zone_binding",
+            Self::MissingCapabilityBinding => "missing_capability_binding",
+            Self::SandboxLimitsUnavailable => "sandbox_limits_unavailable",
+            Self::SnapshotTooOld => "snapshot_too_old",
+            Self::CrashBeforeCheckout => "crash_before_checkout",
+            Self::ConcurrentStartup => "concurrent_startup",
+        }
+    }
+}
+
+/// Unsafe snapshot rejection reason.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotUnsafeReason {
+    /// Copy-on-write fork reuse was requested without a security proof.
+    CowForkWithoutSecurityProof,
+    /// Snapshot restore was requested without a complete security proof.
+    SnapshotResumeProofUnavailable,
+    /// Snapshot metadata marked the entry as rejected before checkout.
+    SnapshotMarkedRejected,
+    /// The snapshot already loaded credential material.
+    CredentialMaterialLoaded,
+    /// The snapshot capability binding has been revoked.
+    RevokedCapability,
+}
+
+impl SnapshotUnsafeReason {
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CowForkWithoutSecurityProof => "cow_fork_without_security_proof",
+            Self::SnapshotResumeProofUnavailable => "snapshot_resume_proof_unavailable",
+            Self::SnapshotMarkedRejected => "snapshot_marked_rejected",
+            Self::CredentialMaterialLoaded => "credential_material_loaded",
+            Self::RevokedCapability => "revoked_capability",
+        }
+    }
+}
+
+/// Unsupported-platform snapshot skip reason.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotSkipReason {
+    /// Runtime/platform cannot support snapshot restore.
+    PlatformUnsupported,
+}
+
+impl SnapshotSkipReason {
+    #[must_use]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PlatformUnsupported => "platform_unsupported",
+        }
+    }
+}
+
+/// Input object for [`SnapshotResumeEvidence::new`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotResumeEvidenceInput {
+    /// Stable scenario identifier.
+    pub scenario_id: String,
+    /// Connector identifier.
+    pub connector_id: String,
+    /// Manifest hash associated with the snapshot candidate.
+    pub manifest_hash: Option<String>,
+    /// Zone requested by checkout.
+    pub zone: String,
+    /// Snapshot state recorded for the checkout.
+    pub snapshot_state: SnapshotResumeState,
+    /// Dirty copy-on-write pages, when reported by the runtime.
+    pub cow_dirty_pages: Option<u64>,
+    /// Activation latency in milliseconds, when measured.
+    pub activation_latency_ms: Option<u64>,
+    /// Resident set size observed for the connector sandbox, when measured.
+    pub memory_rss_bytes: Option<u64>,
+    /// Sandbox profile requested by the connector fixture.
+    pub sandbox_profile: String,
+    /// Credential handling mode, redacted to a coarse class.
+    pub credential_mode: SnapshotCredentialMode,
+    /// Cleanup result recorded for the snapshot or fallback path.
+    pub cleanup_result: String,
+    /// Final snapshot/resume decision.
+    pub decision: SnapshotResumeDecision,
+}
+
+/// Structured snapshot/resume evidence suitable for JSONL proof logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotResumeEvidence {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Bead that owns this evidence contract.
+    pub bead_id: String,
+    /// Stable scenario identifier.
+    pub scenario_id: String,
+    /// Connector identifier.
+    pub connector_id: String,
+    /// Host boundary that made the resume decision.
+    pub host_boundary: String,
+    /// Manifest hash associated with the snapshot candidate.
+    pub manifest_hash: Option<String>,
+    /// Zone requested by checkout.
+    pub zone: String,
+    /// Snapshot state recorded for the checkout.
+    pub snapshot_state: SnapshotResumeState,
+    /// Coarse checkout decision label for JSONL logs.
+    pub admission_decision: String,
+    /// Whether the decision admits a snapshot restore.
+    pub resume_checkout: bool,
+    /// Dirty copy-on-write pages, when reported by the runtime.
+    pub cow_dirty_pages: Option<u64>,
+    /// Activation latency in milliseconds, when measured.
+    pub activation_latency_ms: Option<u64>,
+    /// Resident set size observed for the connector sandbox, when measured.
+    pub memory_rss_bytes: Option<u64>,
+    /// Sandbox profile requested by the connector fixture.
+    pub sandbox_profile: String,
+    /// Credential handling mode, redacted to a coarse class.
+    pub credential_mode: SnapshotCredentialMode,
+    /// Conservative fallback reason, when any.
+    pub fallback_reason: Option<String>,
+    /// Unsafe rejection reason, when any.
+    pub rejection_reason: Option<String>,
+    /// Unsupported-platform skip reason, when any.
+    pub skip_reason: Option<String>,
+    /// Cleanup result recorded for the snapshot or fallback path.
+    pub cleanup_result: String,
+    /// Operator-facing guidance for the decision.
+    pub operator_guidance: String,
+    /// Final snapshot/resume decision.
+    pub decision: SnapshotResumeDecision,
+}
+
+impl SnapshotResumeEvidence {
+    /// Build redaction-safe snapshot/resume evidence.
+    #[must_use]
+    pub fn new(input: SnapshotResumeEvidenceInput) -> Self {
+        Self {
+            schema_version: SNAPSHOT_RESUME_SCHEMA_VERSION.to_string(),
+            bead_id: SNAPSHOT_RESUME_BEAD.to_string(),
+            scenario_id: input.scenario_id,
+            connector_id: input.connector_id,
+            host_boundary: "fcp-host::supervisor::ConnectorSnapshotResumeConfig::decide_resume"
+                .to_string(),
+            manifest_hash: input.manifest_hash,
+            zone: input.zone,
+            snapshot_state: input.snapshot_state,
+            admission_decision: input.decision.action_label().to_string(),
+            resume_checkout: input.decision.admits_resume(),
+            cow_dirty_pages: input.cow_dirty_pages,
+            activation_latency_ms: input.activation_latency_ms,
+            memory_rss_bytes: input.memory_rss_bytes,
+            sandbox_profile: input.sandbox_profile,
+            credential_mode: input.credential_mode,
+            fallback_reason: input.decision.fallback_reason_label().map(str::to_string),
+            rejection_reason: input.decision.rejection_reason_label().map(str::to_string),
+            skip_reason: input.decision.skip_reason_label().map(str::to_string),
+            cleanup_result: redact_snapshot_evidence_text(&input.cleanup_result),
+            operator_guidance: snapshot_operator_guidance(&input.decision),
+            decision: input.decision,
+        }
+    }
+
+    /// Serialize this proof record as one JSONL line.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if serde cannot encode the record.
+    pub fn to_jsonl_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+fn snapshot_operator_guidance(decision: &SnapshotResumeDecision) -> String {
+    match decision {
+        SnapshotResumeDecision::AdmitSnapshot { .. } => {
+            "snapshot restore admitted only after manifest, zone, capability, sandbox, and credential rebinding proofs passed".to_string()
+        }
+        SnapshotResumeDecision::FallbackOnDemand { reason } => format!(
+            "snapshot resume fell back to on-demand activation because {}; keep connector startup on the normal enforcement path",
+            reason.as_str()
+        ),
+        SnapshotResumeDecision::RejectUnsafe { reason } => format!(
+            "snapshot resume was rejected because {}; do not enable snapshot reuse until the missing proof is available",
+            reason.as_str()
+        ),
+        SnapshotResumeDecision::SkipUnsupported { reason } => format!(
+            "snapshot resume scenario skipped because {}; use on-demand activation on this platform",
+            reason.as_str()
+        ),
+    }
+}
+
+fn redact_snapshot_evidence_text(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    if ["token", "secret", "password", "bearer", "private_key"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        "[REDACTED]".to_string()
+    } else {
+        input.to_string()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Restart Event
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2116,6 +2796,272 @@ mod tests {
         assert_eq!(value["error_mapping"], "ok");
         assert_eq!(value["cleanup_result"], "verified");
         assert!(!value.to_string().contains("secret"));
+        Ok(())
+    }
+
+    // ── ConnectorSnapshotResumeConfig ──
+
+    fn safe_snapshot_observation() -> SnapshotResumeObservation {
+        SnapshotResumeObservation {
+            snapshot_state: SnapshotResumeState::WarmCandidate,
+            manifest: PrewarmManifestState::Current,
+            zone_binding: PrewarmZoneBinding::Bound,
+            capability: SnapshotCapabilityState::Bound,
+            sandbox: PrewarmSandboxState::LimitsActive,
+            credential: PrewarmCredentialState::Deferred,
+            platform: SnapshotPlatformState::Supported,
+            proof: SnapshotSecurityProofState::Present,
+            snapshot_age: Duration::from_secs(5),
+            cow_dirty_pages: None,
+            previous_exit: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_default_preserves_on_demand_startup() {
+        let config = ConnectorSnapshotResumeConfig::default();
+        assert_eq!(config.validate(), Ok(()));
+        assert_eq!(
+            config.decide_resume(&safe_snapshot_observation()),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::NotConfigured
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_cow_fork_without_security_proof() {
+        let config = ConnectorSnapshotResumeConfig::cow_fork(
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+        assert_eq!(
+            config.validate(),
+            Err(SnapshotResumeConfigError::CowForkRequiresSecurityProof)
+        );
+        assert_eq!(
+            config.decide_resume(&safe_snapshot_observation()),
+            SnapshotResumeDecision::RejectUnsafe {
+                reason: SnapshotUnsafeReason::CowForkWithoutSecurityProof
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_validates_bounds() {
+        assert_eq!(
+            ConnectorSnapshotResumeConfig::wasmtime_snapshot(
+                Duration::ZERO,
+                Duration::from_secs(1)
+            )
+            .validate(),
+            Err(SnapshotResumeConfigError::MaxAgeZero)
+        );
+        assert_eq!(
+            ConnectorSnapshotResumeConfig::wasmtime_snapshot(
+                Duration::from_secs(30),
+                Duration::ZERO
+            )
+            .validate(),
+            Err(SnapshotResumeConfigError::CheckoutTimeoutZero)
+        );
+    }
+
+    #[test]
+    fn snapshot_admits_only_after_all_rebinding_proofs_pass() {
+        let config = ConnectorSnapshotResumeConfig::wasmtime_snapshot(
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+        let decision = config.decide_resume(&safe_snapshot_observation());
+
+        assert_eq!(
+            decision,
+            SnapshotResumeDecision::AdmitSnapshot {
+                snapshot_state: SnapshotResumeState::Restored
+            }
+        );
+        assert!(decision.admits_resume());
+    }
+
+    #[test]
+    fn snapshot_falls_back_on_empty_store_manifest_zone_capability_and_sandbox_gaps() {
+        let config = ConnectorSnapshotResumeConfig::wasmtime_snapshot(
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let mut empty_store = safe_snapshot_observation();
+        empty_store.snapshot_state = SnapshotResumeState::EmptySnapshotStore;
+        assert_eq!(
+            config.decide_resume(&empty_store),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::EmptySnapshotStore
+            }
+        );
+
+        let mut stale_manifest = safe_snapshot_observation();
+        stale_manifest.manifest = PrewarmManifestState::Stale;
+        assert_eq!(
+            config.decide_resume(&stale_manifest),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::StaleManifest
+            }
+        );
+
+        let mut missing_zone = safe_snapshot_observation();
+        missing_zone.zone_binding = PrewarmZoneBinding::Missing;
+        assert_eq!(
+            config.decide_resume(&missing_zone),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::MissingZoneBinding
+            }
+        );
+
+        let mut missing_capability = safe_snapshot_observation();
+        missing_capability.capability = SnapshotCapabilityState::Missing;
+        assert_eq!(
+            config.decide_resume(&missing_capability),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::MissingCapabilityBinding
+            }
+        );
+
+        let mut sandbox_gap = safe_snapshot_observation();
+        sandbox_gap.sandbox = PrewarmSandboxState::LimitsUnavailable;
+        assert_eq!(
+            config.decide_resume(&sandbox_gap),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::SandboxLimitsUnavailable
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_revoked_capability_loaded_credentials_and_missing_resume_proof() {
+        let config = ConnectorSnapshotResumeConfig::wasmtime_snapshot(
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let mut revoked = safe_snapshot_observation();
+        revoked.capability = SnapshotCapabilityState::Revoked;
+        assert_eq!(
+            config.decide_resume(&revoked),
+            SnapshotResumeDecision::RejectUnsafe {
+                reason: SnapshotUnsafeReason::RevokedCapability
+            }
+        );
+
+        let mut loaded_credential = safe_snapshot_observation();
+        loaded_credential.credential = PrewarmCredentialState::MaterialLoaded;
+        assert_eq!(
+            config.decide_resume(&loaded_credential),
+            SnapshotResumeDecision::RejectUnsafe {
+                reason: SnapshotUnsafeReason::CredentialMaterialLoaded
+            }
+        );
+
+        let mut missing_proof = safe_snapshot_observation();
+        missing_proof.proof = SnapshotSecurityProofState::Absent;
+        assert_eq!(
+            config.decide_resume(&missing_proof),
+            SnapshotResumeDecision::RejectUnsafe {
+                reason: SnapshotUnsafeReason::SnapshotResumeProofUnavailable
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_skips_or_falls_back_for_platform_crash_age_and_concurrency() {
+        let config = ConnectorSnapshotResumeConfig::wasmtime_snapshot(
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let mut unsupported = safe_snapshot_observation();
+        unsupported.platform = SnapshotPlatformState::Unsupported;
+        assert_eq!(
+            config.decide_resume(&unsupported),
+            SnapshotResumeDecision::SkipUnsupported {
+                reason: SnapshotSkipReason::PlatformUnsupported
+            }
+        );
+
+        let mut crashed = safe_snapshot_observation();
+        crashed.previous_exit = Some(ProcessExit::with_code(1));
+        assert_eq!(
+            config.decide_resume(&crashed),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::CrashBeforeCheckout
+            }
+        );
+
+        let mut stale = safe_snapshot_observation();
+        stale.snapshot_age = Duration::from_secs(31);
+        assert_eq!(
+            config.decide_resume(&stale),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::SnapshotTooOld
+            }
+        );
+
+        let mut concurrent = safe_snapshot_observation();
+        concurrent.snapshot_state = SnapshotResumeState::ConcurrentStartup;
+        assert_eq!(
+            config.decide_resume(&concurrent),
+            SnapshotResumeDecision::FallbackOnDemand {
+                reason: SnapshotFallbackReason::ConcurrentStartup
+            }
+        );
+    }
+
+    #[test]
+    fn snapshot_resume_evidence_serializes_required_fail_closed_fields() -> serde_json::Result<()> {
+        let evidence = SnapshotResumeEvidence::new(SnapshotResumeEvidenceInput {
+            scenario_id: "warm_resume".to_string(),
+            connector_id: "fcp.github:utility:1.0.0".to_string(),
+            manifest_hash: Some("blake3:abc123".to_string()),
+            zone: "z:project:alpha".to_string(),
+            snapshot_state: SnapshotResumeState::WarmCandidate,
+            cow_dirty_pages: Some(0),
+            activation_latency_ms: Some(42),
+            memory_rss_bytes: Some(64 * 1024 * 1024),
+            sandbox_profile: "strict".to_string(),
+            credential_mode: SnapshotCredentialMode::Deferred,
+            cleanup_result: "secret token cleanup detail".to_string(),
+            decision: SnapshotResumeDecision::RejectUnsafe {
+                reason: SnapshotUnsafeReason::SnapshotResumeProofUnavailable,
+            },
+        });
+        let value = serde_json::to_value(&evidence)?;
+
+        assert_eq!(value["schema_version"], SNAPSHOT_RESUME_SCHEMA_VERSION);
+        assert_eq!(value["bead_id"], SNAPSHOT_RESUME_BEAD);
+        assert_eq!(
+            value["host_boundary"],
+            "fcp-host::supervisor::ConnectorSnapshotResumeConfig::decide_resume"
+        );
+        assert_eq!(value["snapshot_state"], "warm_candidate");
+        assert_eq!(value["admission_decision"], "reject_unsafe");
+        assert_eq!(value["resume_checkout"], false);
+        assert_eq!(value["cow_dirty_pages"], 0);
+        assert_eq!(value["activation_latency_ms"], 42);
+        assert_eq!(value["memory_rss_bytes"], 64 * 1024 * 1024);
+        assert_eq!(value["sandbox_profile"], "strict");
+        assert_eq!(value["credential_mode"], "deferred");
+        assert_eq!(
+            value["rejection_reason"],
+            "snapshot_resume_proof_unavailable"
+        );
+        assert_eq!(value["cleanup_result"], "[REDACTED]");
+        assert!(!value.to_string().contains("secret token"));
+        assert!(
+            value["operator_guidance"]
+                .as_str()
+                .unwrap()
+                .contains("rejected")
+        );
         Ok(())
     }
 

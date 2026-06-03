@@ -21,6 +21,7 @@ use fcp_prelude::ZoneId;
 use serde::{Deserialize, Serialize};
 
 const MAX_PER_MILLE: u32 = 1_000;
+const MAX_PER_MILLE_U16: u16 = 1_000;
 const DEFAULT_CONFORMAL_COVERAGE_PER_MILLE: u16 = 990;
 const DEFAULT_MIN_CONFORMAL_CALIBRATION_SAMPLES: usize = 3;
 
@@ -486,6 +487,98 @@ impl BackpressureTelemetry {
     }
 }
 
+/// Fairness pressure consumed by the host backpressure controller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureFairnessContext {
+    /// Connector class under pressure, such as `request_response_saas`.
+    pub connector_class: String,
+    /// Zone currently asking for admission.
+    pub zone_id: String,
+    /// Capability class currently asking for admission.
+    pub capability: String,
+    /// Saturation for this connector class.
+    pub connector_class_pressure_per_mille: u16,
+    /// Current zone share within the saturated connector class.
+    pub zone_share_per_mille: u16,
+    /// Current capability share within the saturated connector class.
+    pub capability_share_per_mille: u16,
+    /// Expected fair share for the active zone/capability cohort.
+    pub target_share_per_mille: u16,
+    /// Requests already admitted in the fairness window.
+    pub admitted_count: u64,
+    /// Requests already shed in the fairness window.
+    pub shed_count: u64,
+}
+
+impl BackpressureFairnessContext {
+    /// Build a fairness context, clamping per-mille values into the valid range.
+    #[must_use]
+    pub fn new(input: BackpressureFairnessContextInput) -> Self {
+        Self {
+            connector_class: input.connector_class,
+            zone_id: input.zone_id,
+            capability: input.capability,
+            connector_class_pressure_per_mille: clamp_per_mille_u16(
+                input.connector_class_pressure_per_mille,
+            ),
+            zone_share_per_mille: clamp_per_mille_u16(input.zone_share_per_mille),
+            capability_share_per_mille: clamp_per_mille_u16(input.capability_share_per_mille),
+            target_share_per_mille: clamp_per_mille_u16(input.target_share_per_mille),
+            admitted_count: input.admitted_count,
+            shed_count: input.shed_count,
+        }
+    }
+
+    /// Largest share overshoot above the configured fair target.
+    #[must_use]
+    pub fn imbalance_per_mille(&self) -> u16 {
+        self.zone_share_per_mille
+            .max(self.capability_share_per_mille)
+            .saturating_sub(self.target_share_per_mille)
+    }
+
+    /// Fraction of the current fairness window that has already been shed.
+    #[must_use]
+    pub fn shed_ratio_per_mille(&self) -> u16 {
+        let shed_count = usize::try_from(self.shed_count).unwrap_or(usize::MAX);
+        let total_count = usize::try_from(self.admitted_count.saturating_add(self.shed_count))
+            .unwrap_or(usize::MAX);
+        to_u16(ratio_per_mille(shed_count, total_count))
+    }
+
+    /// Pressure term used by the fairness loss model.
+    #[must_use]
+    pub fn pressure_per_mille(&self) -> u16 {
+        let saturation = self
+            .connector_class_pressure_per_mille
+            .saturating_sub(self.target_share_per_mille);
+        let starvation_credit = self.shed_ratio_per_mille() / 2;
+        self.imbalance_per_mille()
+            .max(saturation)
+            .saturating_sub(starvation_credit)
+    }
+
+    /// Operator-facing fairness score: 1000 means balanced, 0 means maximally unfair.
+    #[must_use]
+    pub fn fairness_score_per_mille(&self) -> u16 {
+        to_u16(MAX_PER_MILLE.saturating_sub(u32::from(self.pressure_per_mille())))
+    }
+}
+
+/// Input object for [`BackpressureFairnessContext::new`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackpressureFairnessContextInput {
+    pub connector_class: String,
+    pub zone_id: String,
+    pub capability: String,
+    pub connector_class_pressure_per_mille: u16,
+    pub zone_share_per_mille: u16,
+    pub capability_share_per_mille: u16,
+    pub target_share_per_mille: u16,
+    pub admitted_count: u64,
+    pub shed_count: u64,
+}
+
 /// Expected-loss term names used by the backpressure controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -617,6 +710,9 @@ pub struct BackpressureControllerInput {
     pub priority: RequestPriority,
     /// Telemetry snapshot.
     pub telemetry: BackpressureTelemetry,
+    /// Optional connector-class/zone/capability fairness pressure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fairness: Option<BackpressureFairnessContext>,
     /// Calibration envelope.
     pub calibration: BackpressureCalibration,
 }
@@ -634,8 +730,16 @@ impl BackpressureControllerInput {
             subject: subject.into(),
             priority,
             telemetry,
+            fairness: None,
             calibration,
         }
+    }
+
+    /// Attach fairness pressure to the controller input.
+    #[must_use]
+    pub fn with_fairness(mut self, fairness: BackpressureFairnessContext) -> Self {
+        self.fairness = Some(fairness);
+        self
     }
 }
 
@@ -717,6 +821,192 @@ impl BackpressureDecision {
             && replayed.action == self.action
             && replayed.selected_loss_score == self.selected_loss_score
             && replayed.fallback_trigger == self.fallback_trigger
+    }
+}
+
+/// Stable JSONL schema for k3zfl.13 fairness load-shedding proof records.
+pub const FAIRNESS_LOAD_SHEDDING_SCHEMA_VERSION: &str = "fairness-load-shedding/v1";
+/// Owning bead for fairness-aware load shedding proof evidence.
+pub const FAIRNESS_LOAD_SHEDDING_BEAD: &str = "flywheel_connectors-k3zfl.13";
+
+/// Latency percentile summary for fairness proof records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FairnessLatencyPercentiles {
+    pub p50_ms: u64,
+    pub p95_ms: u64,
+    pub p99_ms: u64,
+}
+
+/// Input object for [`FairnessLoadSheddingEvidenceRecord::new`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FairnessLoadSheddingEvidenceInput {
+    pub scenario_id: String,
+    pub decision: BackpressureDecision,
+    pub fairness: BackpressureFairnessContext,
+    pub queue_depth: u64,
+    pub latency_samples_ms: Vec<u64>,
+    pub audit_receipt_id: Option<String>,
+    pub cleanup_result: String,
+    pub skip_reason: Option<String>,
+}
+
+/// Redaction-safe JSONL record for fairness-aware load-shedding proofs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FairnessLoadSheddingEvidenceRecord {
+    pub record_type: String,
+    pub schema_version: String,
+    pub bead_id: String,
+    pub generated_at: DateTime<Utc>,
+    pub scenario_id: String,
+    pub connector_class: String,
+    pub zone: String,
+    pub capability: String,
+    pub queue_depth: u64,
+    pub admitted_count: u64,
+    pub shed_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denial_reason: Option<String>,
+    pub backpressure_action: String,
+    pub rejects_work: bool,
+    pub decision_replay_matches: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterfactual_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_trigger: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downstream_retry_after_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_amplification_per_mille: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_percentiles: Option<FairnessLatencyPercentiles>,
+    pub fairness_score: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_receipt_id: Option<String>,
+    pub cleanup_result: String,
+    pub operator_guidance: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+}
+
+impl FairnessLoadSheddingEvidenceRecord {
+    /// Build a proof record from a replayable backpressure decision.
+    #[must_use]
+    pub fn new(input: FairnessLoadSheddingEvidenceInput) -> Self {
+        let FairnessLoadSheddingEvidenceInput {
+            scenario_id,
+            decision,
+            fairness,
+            queue_depth,
+            latency_samples_ms,
+            audit_receipt_id,
+            cleanup_result,
+            skip_reason,
+        } = input;
+
+        let action = decision.action;
+        let rejects_work = decision.rejects_work();
+        let replay_matches = decision.replay_matches();
+        let telemetry = decision.replay.input.telemetry;
+        let counterfactual_action = decision
+            .counterfactual
+            .as_ref()
+            .map(|counterfactual| counterfactual.action.as_str().to_string());
+        let fallback_trigger = decision
+            .fallback_trigger
+            .map(backpressure_fallback_trigger_label)
+            .map(str::to_string);
+        let fairness_score = fairness.fairness_score_per_mille();
+        let denial_reason = if rejects_work {
+            Some(decision.fallback_reason.unwrap_or_else(|| {
+                format!(
+                    "{} selected by fairness-aware backpressure",
+                    action.as_str()
+                )
+            }))
+        } else {
+            None
+        };
+
+        Self {
+            record_type: "fairness_load_shedding".to_string(),
+            schema_version: FAIRNESS_LOAD_SHEDDING_SCHEMA_VERSION.to_string(),
+            bead_id: FAIRNESS_LOAD_SHEDDING_BEAD.to_string(),
+            generated_at: Utc::now(),
+            scenario_id: redact_evidence_text(&scenario_id),
+            connector_class: redact_evidence_text(&fairness.connector_class),
+            zone: redact_evidence_text(&fairness.zone_id),
+            capability: redact_evidence_text(&fairness.capability),
+            queue_depth,
+            admitted_count: fairness.admitted_count,
+            shed_count: fairness.shed_count,
+            denial_reason: denial_reason.as_deref().map(redact_evidence_text),
+            backpressure_action: action.as_str().to_string(),
+            rejects_work,
+            decision_replay_matches: replay_matches,
+            counterfactual_action,
+            fallback_trigger,
+            downstream_retry_after_ms: telemetry.downstream_retry_after_ms,
+            retry_amplification_per_mille: telemetry.retry_amplification_per_mille,
+            latency_percentiles: latency_percentiles_from_millis(&latency_samples_ms),
+            fairness_score,
+            audit_receipt_id: audit_receipt_id.as_deref().map(redact_evidence_text),
+            cleanup_result: redact_evidence_text(&cleanup_result),
+            operator_guidance: redact_evidence_text(&operator_guidance_for_fairness_decision(
+                action,
+                fairness_score,
+                rejects_work,
+                telemetry.downstream_retry_after_ms,
+                telemetry.retry_amplification_per_mille,
+            )),
+            skip_reason: skip_reason.as_deref().map(redact_evidence_text),
+        }
+    }
+
+    /// Build an explicit skip record when proof prerequisites are unavailable.
+    #[must_use]
+    pub fn structured_skip(
+        scenario_id: impl AsRef<str>,
+        connector_class: impl AsRef<str>,
+        zone: impl AsRef<str>,
+        capability: impl AsRef<str>,
+        skip_reason: impl AsRef<str>,
+    ) -> Self {
+        Self {
+            record_type: "fairness_load_shedding".to_string(),
+            schema_version: FAIRNESS_LOAD_SHEDDING_SCHEMA_VERSION.to_string(),
+            bead_id: FAIRNESS_LOAD_SHEDDING_BEAD.to_string(),
+            generated_at: Utc::now(),
+            scenario_id: redact_evidence_text(scenario_id.as_ref()),
+            connector_class: redact_evidence_text(connector_class.as_ref()),
+            zone: redact_evidence_text(zone.as_ref()),
+            capability: redact_evidence_text(capability.as_ref()),
+            queue_depth: 0,
+            admitted_count: 0,
+            shed_count: 0,
+            denial_reason: None,
+            backpressure_action: "not_attempted".to_string(),
+            rejects_work: false,
+            decision_replay_matches: false,
+            counterfactual_action: None,
+            fallback_trigger: None,
+            downstream_retry_after_ms: None,
+            retry_amplification_per_mille: None,
+            latency_percentiles: None,
+            fairness_score: 0,
+            audit_receipt_id: None,
+            cleanup_result: "not_applicable".to_string(),
+            operator_guidance: "inspect skip_reason and run host-backed fairness evidence when prerequisites are available".to_string(),
+            skip_reason: Some(redact_evidence_text(skip_reason.as_ref())),
+        }
+    }
+
+    /// Serialize this proof record as one JSONL line.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if serde cannot encode the record.
+    pub fn to_jsonl_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
     }
 }
 
@@ -891,7 +1181,7 @@ impl BackpressureController {
             ),
             BackpressureLossTerm::new(
                 BackpressureLossTermKind::FairnessViolation,
-                fairness_violation_loss(input.priority, action),
+                fairness_violation_loss(input.priority, action, input.fairness.as_ref()),
                 self.config.weights.fairness_violation,
             ),
             BackpressureLossTerm::new(
@@ -1314,15 +1604,38 @@ impl ResilienceLayer {
         priority: RequestPriority,
         operation: &str,
     ) -> BackpressureDecision {
+        self.backpressure_decision_inner(connector_id, priority, operation, None)
+    }
+
+    /// Evaluate current host backpressure with explicit fairness pressure.
+    #[must_use]
+    pub fn backpressure_decision_with_fairness(
+        &self,
+        connector_id: &ConnectorId,
+        priority: RequestPriority,
+        operation: &str,
+        fairness: BackpressureFairnessContext,
+    ) -> BackpressureDecision {
+        self.backpressure_decision_inner(connector_id, priority, operation, Some(fairness))
+    }
+
+    fn backpressure_decision_inner(
+        &self,
+        connector_id: &ConnectorId,
+        priority: RequestPriority,
+        operation: &str,
+        fairness: Option<BackpressureFairnessContext>,
+    ) -> BackpressureDecision {
         let state = self.connector_state(connector_id);
         let queue_pressure = state.bulkhead.pressure_per_mille();
         let effective_load = self.load_shedder.effective_load_per_mille(queue_pressure);
         self.backpressure_controller
-            .decide(BackpressureControllerInput::new(
+            .decide(backpressure_controller_input(
                 format!("{connector_id}:{operation}"),
                 priority,
-                BackpressureTelemetry::from_resilience_pressure(effective_load, queue_pressure),
-                BackpressureCalibration::valid(),
+                effective_load,
+                queue_pressure,
+                fairness,
             ))
     }
 
@@ -1343,10 +1656,54 @@ impl ResilienceLayer {
         F: Future<Output = Result<T, E>>,
         E: std::fmt::Debug,
     {
+        self.execute_inner(connector_id, priority, operation, None, future)
+            .await
+    }
+
+    /// Execute a connector operation with explicit fairness pressure.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ResilienceError`] when the operation is shed, rejected, or
+    /// when the wrapped operation itself fails.
+    pub async fn execute_with_fairness<F, T, E>(
+        &self,
+        connector_id: &ConnectorId,
+        priority: RequestPriority,
+        operation: &str,
+        fairness: BackpressureFairnessContext,
+        future: F,
+    ) -> Result<T, ResilienceError<E>>
+    where
+        F: Future<Output = Result<T, E>>,
+        E: std::fmt::Debug,
+    {
+        self.execute_inner(connector_id, priority, operation, Some(fairness), future)
+            .await
+    }
+
+    async fn execute_inner<F, T, E>(
+        &self,
+        connector_id: &ConnectorId,
+        priority: RequestPriority,
+        operation: &str,
+        fairness: Option<BackpressureFairnessContext>,
+        future: F,
+    ) -> Result<T, ResilienceError<E>>
+    where
+        F: Future<Output = Result<T, E>>,
+        E: std::fmt::Debug,
+    {
         let state = self.connector_state(connector_id);
         let effective_load = self.record_request(&state);
-        let backpressure_delay =
-            self.check_load_shed(&state, connector_id, priority, operation, effective_load)?;
+        let backpressure_delay = self.check_load_shed(
+            &state,
+            connector_id,
+            priority,
+            operation,
+            effective_load,
+            fairness,
+        )?;
         let probe_reservation = self.check_routing(connector_id, operation)?;
         if let Err(error) = Self::check_circuit(&state, connector_id, operation) {
             self.health_router
@@ -1395,17 +1752,16 @@ impl ResilienceLayer {
         priority: RequestPriority,
         operation: &str,
         effective_load: u32,
+        fairness: Option<BackpressureFairnessContext>,
     ) -> Result<Option<Duration>, ResilienceError<E>> {
         let decision = self
             .backpressure_controller
-            .decide(BackpressureControllerInput::new(
+            .decide(backpressure_controller_input(
                 format!("{connector_id}:{operation}"),
                 priority,
-                BackpressureTelemetry::from_resilience_pressure(
-                    effective_load,
-                    state.bulkhead.pressure_per_mille(),
-                ),
-                BackpressureCalibration::valid(),
+                effective_load,
+                state.bulkhead.pressure_per_mille(),
+                fairness,
             ));
         let should_shed = if decision.action == BackpressureAction::FallbackStaticPolicy {
             self.load_shedder.should_shed(priority, effective_load)
@@ -2532,6 +2888,113 @@ fn preferred_prediction_order(
         .then_with(|| left.path_id.cmp(&right.path_id))
 }
 
+fn backpressure_controller_input(
+    subject: String,
+    priority: RequestPriority,
+    effective_load_per_mille: u32,
+    queue_pressure_per_mille: u32,
+    fairness: Option<BackpressureFairnessContext>,
+) -> BackpressureControllerInput {
+    let input = BackpressureControllerInput::new(
+        subject,
+        priority,
+        BackpressureTelemetry::from_resilience_pressure(
+            effective_load_per_mille,
+            queue_pressure_per_mille,
+        ),
+        BackpressureCalibration::valid(),
+    );
+    match fairness {
+        Some(fairness) => input.with_fairness(fairness),
+        None => input,
+    }
+}
+
+fn latency_percentiles_from_millis(samples: &[u64]) -> Option<FairnessLatencyPercentiles> {
+    let mut sorted = samples.to_vec();
+    if sorted.is_empty() {
+        return None;
+    }
+    sorted.sort_unstable();
+    Some(FairnessLatencyPercentiles {
+        p50_ms: nearest_rank_u64(&sorted, 500)?,
+        p95_ms: nearest_rank_u64(&sorted, 950)?,
+        p99_ms: nearest_rank_u64(&sorted, 990)?,
+    })
+}
+
+fn nearest_rank_u64(sorted: &[u64], per_mille: usize) -> Option<u64> {
+    let len = sorted.len();
+    if len == 0 {
+        return None;
+    }
+    let rank = len.saturating_mul(per_mille).saturating_add(999) / 1_000;
+    sorted.get(rank.saturating_sub(1).min(len - 1)).copied()
+}
+
+fn redact_evidence_text(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    if [
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "bearer",
+        "private_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        "[REDACTED]".to_string()
+    } else {
+        input.to_string()
+    }
+}
+
+const fn backpressure_fallback_trigger_label(trigger: BackpressureFallbackTrigger) -> &'static str {
+    match trigger {
+        BackpressureFallbackTrigger::CoverageDrift => "coverage_drift",
+        BackpressureFallbackTrigger::MissingTelemetry => "missing_telemetry",
+        BackpressureFallbackTrigger::ReplayMismatch => "replay_mismatch",
+        BackpressureFallbackTrigger::ArtifactVerificationFailed => "artifact_verification_failed",
+    }
+}
+
+fn operator_guidance_for_fairness_decision(
+    action: BackpressureAction,
+    fairness_score: u16,
+    rejects_work: bool,
+    downstream_retry_after_ms: Option<u64>,
+    retry_amplification_per_mille: Option<u16>,
+) -> String {
+    if rejects_work {
+        return format!(
+            "rejected overrepresented low-value work with fairness_score={fairness_score}; reduce offered load, split saturated connector classes, or retry after pressure falls"
+        );
+    }
+
+    if downstream_retry_after_ms.unwrap_or(0) > 0
+        || retry_amplification_per_mille.unwrap_or(0) >= 850
+    {
+        return "downstream throttling is active; preserve capability enforcement and prefer delayed retry over admission bursts".to_string();
+    }
+
+    match action {
+        BackpressureAction::Admit | BackpressureAction::AdmitWithWarning => {
+            "traffic admitted under current fairness envelope; continue monitoring fairness_score and queue_depth".to_string()
+        }
+        BackpressureAction::Delay => {
+            "traffic delayed to protect tail latency and fairness; keep retries bounded and preserve priority ordering".to_string()
+        }
+        BackpressureAction::FallbackStaticPolicy => {
+            "adaptive fairness controller fell back to static policy; inspect fallback_trigger before increasing load".to_string()
+        }
+        BackpressureAction::Shed | BackpressureAction::CancelLowPriority => {
+            "rejected work under fairness pressure; preserve fail-closed policy and avoid retry amplification".to_string()
+        }
+    }
+}
+
 fn fallback_evaluation(weights: &BackpressureLossWeights) -> BackpressureActionEvaluation {
     let terms = vec![
         BackpressureLossTerm::new(
@@ -2729,8 +3192,12 @@ fn memory_exhaustion_loss(
     }
 }
 
-fn fairness_violation_loss(priority: RequestPriority, action: BackpressureAction) -> u32 {
-    match action {
+fn fairness_violation_loss(
+    priority: RequestPriority,
+    action: BackpressureAction,
+    fairness: Option<&BackpressureFairnessContext>,
+) -> u32 {
+    let base = match action {
         BackpressureAction::Admit | BackpressureAction::AdmitWithWarning => 0,
         BackpressureAction::Delay => 80,
         BackpressureAction::Shed => {
@@ -2748,6 +3215,33 @@ fn fairness_violation_loss(priority: RequestPriority, action: BackpressureAction
             }
         }
         BackpressureAction::FallbackStaticPolicy => 120,
+    };
+
+    let Some(fairness) = fairness else {
+        return base;
+    };
+
+    let pressure = u32::from(fairness.pressure_per_mille());
+    match action {
+        BackpressureAction::Admit => base.saturating_add(pressure),
+        BackpressureAction::AdmitWithWarning | BackpressureAction::FallbackStaticPolicy => {
+            base.saturating_add(pressure / 2)
+        }
+        BackpressureAction::Delay => base.saturating_add(pressure / 3),
+        BackpressureAction::Shed => {
+            if priority == RequestPriority::Low {
+                base.saturating_sub(pressure / 10)
+            } else {
+                base.saturating_add(pressure)
+            }
+        }
+        BackpressureAction::CancelLowPriority => {
+            if priority == RequestPriority::Low {
+                base.saturating_sub(pressure / 8)
+            } else {
+                base.saturating_add(pressure.saturating_mul(2))
+            }
+        }
     }
 }
 
@@ -2815,6 +3309,14 @@ fn to_u16(value: u32) -> u16 {
     u16::try_from(value.min(u32::from(u16::MAX))).unwrap_or(u16::MAX)
 }
 
+const fn clamp_per_mille_u16(value: u16) -> u16 {
+    if value > MAX_PER_MILLE_U16 {
+        MAX_PER_MILLE_U16
+    } else {
+        value
+    }
+}
+
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -2846,6 +3348,25 @@ mod tests {
                 fcp_testkit::evidence_helpers::SwarmDecisionAction::Fallback
             }
         }
+    }
+
+    fn fairness_context(
+        connector_class_pressure_per_mille: u16,
+        zone_share_per_mille: u16,
+        admitted_count: u64,
+        shed_count: u64,
+    ) -> BackpressureFairnessContext {
+        BackpressureFairnessContext::new(BackpressureFairnessContextInput {
+            connector_class: "request_response_saas".to_string(),
+            zone_id: "z:work".to_string(),
+            capability: "saas.write".to_string(),
+            connector_class_pressure_per_mille,
+            zone_share_per_mille,
+            capability_share_per_mille: zone_share_per_mille,
+            target_share_per_mille: 500,
+            admitted_count,
+            shed_count,
+        })
     }
 
     #[fcp_async_core::runtime::test]
@@ -3503,6 +4024,161 @@ mod tests {
         }
 
         assert!(controller_loss < static_policy_loss);
+    }
+
+    #[test]
+    fn fairness_context_scores_overrepresented_saturated_class() {
+        let saturated = fairness_context(980, 860, 80, 20);
+        let protected = fairness_context(980, 860, 20, 80);
+
+        assert_eq!(saturated.imbalance_per_mille(), 360);
+        assert!(saturated.pressure_per_mille() > protected.pressure_per_mille());
+        assert!(saturated.fairness_score_per_mille() < protected.fairness_score_per_mille());
+        assert_eq!(protected.shed_ratio_per_mille(), 800);
+    }
+
+    #[test]
+    fn backpressure_controller_sheds_low_priority_overrepresented_class() {
+        let controller = BackpressureController::default();
+        let decision = controller.decide(
+            BackpressureControllerInput::new(
+                "fcp.host:request-response-saas:v1/write",
+                RequestPriority::Low,
+                BackpressureTelemetry {
+                    queue_pressure_per_mille: Some(920),
+                    cpu_pressure_per_mille: Some(800),
+                    useful_work_per_mille: Some(100),
+                    ..BackpressureTelemetry::default()
+                },
+                BackpressureCalibration::valid(),
+            )
+            .with_fairness(fairness_context(980, 860, 80, 20)),
+        );
+
+        assert_eq!(decision.action, BackpressureAction::Shed);
+        assert!(decision.rejects_work());
+        assert!(decision.replay_matches());
+        let fairness_term = decision
+            .loss_terms
+            .iter()
+            .find(|term| term.kind == BackpressureLossTermKind::FairnessViolation)
+            .expect("fairness term retained");
+        assert!(
+            fairness_term.value <= 5,
+            "fairness-aware low-priority shedding should keep the fairness loss near zero"
+        );
+    }
+
+    #[test]
+    fn backpressure_controller_preserves_critical_under_fairness_pressure() {
+        let controller = BackpressureController::default();
+        let decision = controller.decide(
+            BackpressureControllerInput::new(
+                "fcp.host:request-response-saas:v1/emergency",
+                RequestPriority::Critical,
+                BackpressureTelemetry {
+                    queue_pressure_per_mille: Some(980),
+                    cpu_pressure_per_mille: Some(980),
+                    useful_work_per_mille: Some(1_000),
+                    ..BackpressureTelemetry::default()
+                },
+                BackpressureCalibration::valid(),
+            )
+            .with_fairness(fairness_context(990, 900, 20, 0)),
+        );
+
+        assert!(
+            !decision.rejects_work(),
+            "critical traffic may warn or delay, but fairness pressure must not shed it"
+        );
+        assert_ne!(decision.action, BackpressureAction::Shed);
+        assert_ne!(decision.action, BackpressureAction::CancelLowPriority);
+        assert!(decision.replay_matches());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn execute_with_fairness_sheds_before_operation_body_runs() {
+        let layer = ResilienceLayer::default();
+        let connector_id = test_connector_id();
+        layer.set_base_load_per_mille(920);
+        let ran = Arc::new(AtomicU32::new(0));
+        let ran_clone = Arc::clone(&ran);
+
+        let result = layer
+            .execute_with_fairness(
+                &connector_id,
+                RequestPriority::Low,
+                "write",
+                fairness_context(980, 860, 80, 20),
+                async move {
+                    ran_clone.fetch_add(1, Ordering::Relaxed);
+                    Ok::<(), &str>(())
+                },
+            )
+            .await;
+
+        assert!(matches!(result, Err(ResilienceError::LoadShed { .. })));
+        assert_eq!(ran.load(Ordering::Relaxed), 0);
+        assert_eq!(layer.metrics(&connector_id).load_shed, 1);
+    }
+
+    #[test]
+    fn fairness_load_shedding_evidence_record_is_jsonl_and_redacted() {
+        let fairness = BackpressureFairnessContext::new(BackpressureFairnessContextInput {
+            connector_class: "request_response_saas".to_string(),
+            zone_id: "z:work".to_string(),
+            capability: "secret-capability-token".to_string(),
+            connector_class_pressure_per_mille: 980,
+            zone_share_per_mille: 860,
+            capability_share_per_mille: 840,
+            target_share_per_mille: 500,
+            admitted_count: 80,
+            shed_count: 20,
+        });
+        let decision = BackpressureController::default().decide(
+            BackpressureControllerInput::new(
+                "fcp.host:request-response-saas:v1/write",
+                RequestPriority::Low,
+                BackpressureTelemetry {
+                    queue_pressure_per_mille: Some(920),
+                    cpu_pressure_per_mille: Some(800),
+                    useful_work_per_mille: Some(100),
+                    ..BackpressureTelemetry::default()
+                },
+                BackpressureCalibration::valid(),
+            )
+            .with_fairness(fairness.clone()),
+        );
+
+        let record = FairnessLoadSheddingEvidenceRecord::new(FairnessLoadSheddingEvidenceInput {
+            scenario_id: "single_connector_saturation".to_string(),
+            decision,
+            fairness,
+            queue_depth: 31,
+            latency_samples_ms: vec![8, 13, 21, 34, 55],
+            audit_receipt_id: Some("audit-receipt-k3zfl-13".to_string()),
+            cleanup_result: "no_remote_state_created".to_string(),
+            skip_reason: None,
+        });
+        let line = record.to_jsonl_line().expect("record serializes");
+
+        assert!(line.contains("\"record_type\":\"fairness_load_shedding\""));
+        assert!(line.contains("\"backpressure_action\":\"shed\""));
+        assert!(line.contains("\"queue_depth\":31"));
+        assert!(line.contains("\"fairness_score\""));
+        assert!(line.contains("\"operator_guidance\""));
+        assert!(line.contains("\"capability\":\"[REDACTED]\""));
+        assert!(!line.contains("secret-capability-token"));
+        assert!(record.decision_replay_matches);
+        assert!(record.rejects_work);
+        assert_eq!(
+            record.latency_percentiles,
+            Some(FairnessLatencyPercentiles {
+                p50_ms: 21,
+                p95_ms: 55,
+                p99_ms: 55,
+            })
+        );
     }
 
     #[fcp_async_core::runtime::test]

@@ -43,7 +43,8 @@ use crate::device::{DeviceProfile, FitnessContext};
 
 pub mod bandit;
 pub use bandit::{
-    BetaPosterior, DeviceCostInput, DeviceCostModel, DeviceCostWeights, ThompsonChoice,
+    BetaPosterior, ComputeMigrationCostInput, ComputeMigrationCostWeights, CostBreakdown,
+    CostExplanation, DeviceCostInput, DeviceCostModel, DeviceCostWeights, ThompsonChoice,
     ThompsonScheduler,
 };
 
@@ -578,6 +579,8 @@ pub struct PlannerInput {
     pub singleton_lease_holder: Option<String>,
     /// Optional explicit resource-pool state for CPU/memory admission.
     pub resource_pools: Vec<ResourcePoolStatus>,
+    /// Optional live cost observations for computation-migration placement.
+    pub compute_migration_costs: Vec<ComputeMigrationCostInput>,
 }
 
 impl PlannerInput {
@@ -589,6 +592,7 @@ impl PlannerInput {
             current_time,
             singleton_lease_holder: None,
             resource_pools: Vec::new(),
+            compute_migration_costs: Vec::new(),
         }
     }
 
@@ -603,6 +607,13 @@ impl PlannerInput {
     #[must_use]
     pub fn with_resource_pools(mut self, pools: Vec<ResourcePoolStatus>) -> Self {
         self.resource_pools = pools;
+        self
+    }
+
+    /// Attach live computation-migration cost observations.
+    #[must_use]
+    pub fn with_compute_migration_costs(mut self, costs: Vec<ComputeMigrationCostInput>) -> Self {
+        self.compute_migration_costs = costs;
         self
     }
 }
@@ -1044,6 +1055,8 @@ impl ZoneSloTelemetryFeed {
 pub struct ExecutionPlanner {
     /// Optional tie-breaker seed for deterministic ordering.
     _tiebreaker_seed: Option<u64>,
+    /// Cost model used when computation-migration observations are supplied.
+    cost_model: DeviceCostModel,
 }
 
 impl ExecutionPlanner {
@@ -1052,7 +1065,21 @@ impl ExecutionPlanner {
     pub const fn new() -> Self {
         Self {
             _tiebreaker_seed: None,
+            cost_model: DeviceCostModel::new(DeviceCostWeights::new(0.4, 0.2, 0.3, 0.1)),
         }
+    }
+
+    /// Return a copy configured with an explicit device-cost model.
+    #[must_use]
+    pub const fn with_cost_model(mut self, cost_model: DeviceCostModel) -> Self {
+        self.cost_model = cost_model;
+        self
+    }
+
+    /// Return the planner's device-cost model.
+    #[must_use]
+    pub const fn cost_model(&self) -> DeviceCostModel {
+        self.cost_model
     }
 
     /// Plan execution by ranking available nodes.
@@ -1069,8 +1096,13 @@ impl ExecutionPlanner {
             .map(|node| self.score_node(node, input, context, resource_pool_lookup.as_ref()))
             .collect();
 
-        // Sort by score descending, then by node_id for determinism
-        candidates.sort();
+        let cost_explanation = self.compute_migration_cost_explanation(&candidates, input);
+        if let Some(explanation) = cost_explanation.as_ref() {
+            Self::sort_by_compute_migration_cost(&mut candidates, explanation);
+        } else {
+            // Sort by score descending, then by node_id for determinism.
+            candidates.sort();
+        }
 
         // Filter to eligible only and limit count
         let mut result: Vec<CandidateNode> = candidates
@@ -1078,6 +1110,10 @@ impl ExecutionPlanner {
             .filter(|c| c.eligible)
             .take(MAX_CANDIDATES)
             .collect();
+
+        if let Some(explanation) = cost_explanation.as_ref() {
+            Self::add_compute_migration_reasons(&mut result, explanation);
+        }
 
         // Add ranking reasons
         for (rank, candidate) in result.iter_mut().enumerate() {
@@ -1092,6 +1128,78 @@ impl ExecutionPlanner {
         }
 
         result
+    }
+
+    fn compute_migration_cost_explanation(
+        &self,
+        candidates: &[CandidateNode],
+        input: &PlannerInput,
+    ) -> Option<CostExplanation> {
+        if input.compute_migration_costs.is_empty() || !compute_migration_cost_model_enabled() {
+            return None;
+        }
+
+        let eligible_nodes: HashSet<&str> = candidates
+            .iter()
+            .filter(|candidate| candidate.eligible)
+            .map(|candidate| candidate.node_id.as_str())
+            .collect();
+        let costs: Vec<ComputeMigrationCostInput> = input
+            .compute_migration_costs
+            .iter()
+            .filter(|cost| eligible_nodes.contains(cost.node_id.as_str()))
+            .cloned()
+            .collect();
+
+        self.cost_model.pick_optimal_device(&costs)
+    }
+
+    fn sort_by_compute_migration_cost(
+        candidates: &mut [CandidateNode],
+        explanation: &CostExplanation,
+    ) {
+        let cost_rank_by_node: HashMap<&str, usize> = explanation
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(rank, cost)| (cost.node_id.as_str(), rank))
+            .collect();
+
+        candidates.sort_by(|left, right| {
+            if !(left.eligible && right.eligible) {
+                return left.cmp(right);
+            }
+
+            match (
+                cost_rank_by_node.get(left.node_id.as_str()),
+                cost_rank_by_node.get(right.node_id.as_str()),
+            ) {
+                (Some(left_rank), Some(right_rank)) => left_rank.cmp(right_rank),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => left.cmp(right),
+            }
+        });
+    }
+
+    fn add_compute_migration_reasons(
+        candidates: &mut [CandidateNode],
+        explanation: &CostExplanation,
+    ) {
+        for candidate in candidates {
+            if let Some((rank, cost)) = explanation
+                .candidates
+                .iter()
+                .enumerate()
+                .find(|(_, cost)| cost.node_id == candidate.node_id)
+            {
+                let rank = rank + 1;
+                let total_cost = cost.total_cost;
+                candidate.add_reason(DecisionReason::Custom(format!(
+                    "compute_migration_cost rank={rank} total_cost={total_cost:.6}"
+                )));
+            }
+        }
     }
 
     /// Score a single node.
@@ -1992,6 +2100,9 @@ pub struct PlacementDecisionEvidence {
     /// Aggregated resource-pool admission diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_pool_summary: Option<ResourcePoolDecisionSummary>,
+    /// Explainable computation-migration cost ranking, when live cost observations shaped placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_migration_cost: Option<CostExplanation>,
 }
 
 /// A node's score in a placement decision (for evidence).
@@ -2106,6 +2217,7 @@ impl ExecutionPlanner {
             nodes_excluded: u32::try_from(plan.nodes_excluded).unwrap_or(u32::MAX),
             resource_pool_decisions: Vec::new(),
             resource_pool_summary: None,
+            compute_migration_cost: None,
         }
     }
 
@@ -2126,8 +2238,24 @@ impl ExecutionPlanner {
                 Some(ResourcePoolDecisionSummary::from_decisions(&decisions));
         }
         evidence.resource_pool_decisions = decisions;
+        evidence.compute_migration_cost = self.compute_migration_cost_explanation(
+            &plan
+                .selected
+                .iter()
+                .chain(plan.alternatives.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            input,
+        );
         evidence
     }
+}
+
+fn compute_migration_cost_model_enabled() -> bool {
+    std::env::var("FCP_COMPUTE_MIGRATION_COST_MODEL").map_or(true, |value| {
+        let value = value.trim();
+        !(value == "0" || value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("off"))
+    })
 }
 
 // ============================================================================
@@ -2192,9 +2320,97 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn migration_cost(
+        suffix: &str,
+        latency_ms_p50: f64,
+        network_lat_ms: f64,
+        mem_pressure: f64,
+        cpu_load: f64,
+        energy_w: f64,
+        derp_hop_count: u8,
+    ) -> ComputeMigrationCostInput {
+        ComputeMigrationCostInput::new(
+            test_node_id(suffix),
+            latency_ms_p50,
+            network_lat_ms,
+            mem_pressure,
+            cpu_load,
+            energy_w,
+            derp_hop_count,
+        )
+    }
+
     fn with_zones(mut node: NodeInfo, zones: Vec<ZoneId>) -> NodeInfo {
         node.zones = zones;
         node
+    }
+
+    #[test]
+    fn planner_uses_compute_migration_costs_when_supplied() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("a-expensive", 4096, true, "1.0.0", vec![]),
+            make_node_info("z-cheap", 4096, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000).with_compute_migration_costs(vec![
+            migration_cost("a-expensive", 900.0, 300.0, 0.8, 0.8, 90.0, 4),
+            migration_cost("z-cheap", 20.0, 2.0, 0.1, 0.1, 10.0, 0),
+        ]);
+        let context = PlannerContext::new(test_connector_id());
+
+        let candidates = planner.plan(&input, &context);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].node_id.as_str(), "node-z-cheap");
+        assert!(candidates[0].decision_reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                DecisionReason::Custom(message)
+                    if message.contains("compute_migration_cost rank=1")
+            )
+        }));
+
+        let plan = planner.plan_with_policy(&input, &context, &PlacementPolicy::default());
+        let evidence = planner.evidence_from_plan_with_resource_pools(
+            &plan,
+            &input,
+            &context,
+            &test_connector_id(),
+            None,
+        );
+        let cost_evidence = evidence
+            .compute_migration_cost
+            .as_ref()
+            .expect("cost evidence should be emitted");
+        assert_eq!(cost_evidence.winner.as_str(), "node-z-cheap");
+        assert_eq!(cost_evidence.candidates.len(), 2);
+    }
+
+    #[test]
+    fn compute_migration_costs_do_not_bypass_hard_constraints() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("a-expensive", 4096, true, "1.0.0", vec![]),
+            make_node_info("z-cheap", 4096, false, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000).with_compute_migration_costs(vec![
+            migration_cost("a-expensive", 900.0, 300.0, 0.8, 0.8, 90.0, 4),
+            migration_cost("z-cheap", 20.0, 2.0, 0.1, 0.1, 10.0, 0),
+        ]);
+        let context = PlannerContext::new(test_connector_id());
+
+        let candidates = planner.plan(&input, &context);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].node_id.as_str(), "node-a-expensive");
+        assert!(candidates[0].decision_reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                DecisionReason::Custom(message)
+                    if message.contains("compute_migration_cost rank=1")
+            )
+        }));
     }
 
     #[test]

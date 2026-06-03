@@ -42,8 +42,32 @@ impl ObservedStripeRequest {
         self.headers.get("idempotency-key").map(String::as_str)
     }
 
-    fn body_json(&self) -> Value {
-        serde_json::from_slice(&self.body).expect("request body should be JSON")
+    fn content_type(&self) -> Option<&str> {
+        self.headers.get("content-type").map(String::as_str)
+    }
+
+    /// Decode the `application/x-www-form-urlencoded` request body Stripe's
+    /// REST API requires (the API does not parse JSON bodies).
+    fn body_form(&self) -> HashMap<String, String> {
+        let body = std::str::from_utf8(&self.body).expect("request body should be UTF-8");
+        body.split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (key, value) = pair
+                    .split_once('=')
+                    .expect("form pair should contain '='");
+                (
+                    percent_encoding::percent_decode_str(key)
+                        .decode_utf8()
+                        .expect("form key should be UTF-8")
+                        .into_owned(),
+                    percent_encoding::percent_decode_str(value)
+                        .decode_utf8()
+                        .expect("form value should be UTF-8")
+                        .into_owned(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -210,7 +234,11 @@ fn write_http_response(stream: &mut TcpStream, response: &HttpFixtureResponse) {
     .expect("write Stripe loopback response");
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> CapabilityToken {
     let capability = match op {
         "stripe.create_customer" | "stripe.update_customer" | "stripe.delete_customer" => {
             "stripe.write"
@@ -238,6 +266,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .principal("user:local-non-mock")
         .operations(&[op])
         .issuer("node:local-non-mock")
+        .target_instance(instance_id)
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("constraints CBOR should validate")
@@ -290,7 +319,7 @@ async fn loopback_acceptance_exercises_read_write_and_payment_paths() {
         .handle_invoke(json!({
             "operation": "stripe.get_balance",
             "input": {},
-            "capability_token": generate_valid_token(&signing_key, "stripe.get_balance")
+            "capability_token": generate_valid_token(&signing_key, connector.instance_id(), "stripe.get_balance")
         }))
         .await
         .expect("read balance through loopback fixture");
@@ -302,7 +331,7 @@ async fn loopback_acceptance_exercises_read_write_and_payment_paths() {
                 "email": "local-non-mock@example.invalid",
                 "name": "Local Acceptance"
             },
-            "capability_token": generate_valid_token(&signing_key, "stripe.create_customer")
+            "capability_token": generate_valid_token(&signing_key, connector.instance_id(), "stripe.create_customer")
         }))
         .await
         .expect("create customer through loopback fixture");
@@ -314,7 +343,7 @@ async fn loopback_acceptance_exercises_read_write_and_payment_paths() {
                 "payment_intent": PAYMENT_INTENT_ID,
                 "amount": 321
             },
-            "capability_token": generate_valid_token(&signing_key, "stripe.create_refund")
+            "capability_token": generate_valid_token(&signing_key, connector.instance_id(), "stripe.create_refund")
         }))
         .await
         .expect("create refund through loopback fixture");
@@ -333,7 +362,18 @@ async fn loopback_acceptance_exercises_read_write_and_payment_paths() {
             .all(ObservedStripeRequest::authorization_seen)
     );
 
-    let customer_body = observations[1].body_json();
+    // Stripe's REST API only accepts form-encoded request bodies.
+    for write in &observations[1..] {
+        assert!(
+            write
+                .content_type()
+                .is_some_and(|value| value.starts_with("application/x-www-form-urlencoded")),
+            "write request should be form-encoded, got {:?}",
+            write.content_type()
+        );
+    }
+
+    let customer_body = observations[1].body_form();
     assert_eq!(customer_body["email"], "local-non-mock@example.invalid");
     assert_eq!(customer_body["name"], "Local Acceptance");
     assert_eq!(
@@ -341,9 +381,9 @@ async fn loopback_acceptance_exercises_read_write_and_payment_paths() {
         Some("fcp2:stripe.create_customer:op-local-customer")
     );
 
-    let refund_body = observations[2].body_json();
+    let refund_body = observations[2].body_form();
     assert_eq!(refund_body["payment_intent"], PAYMENT_INTENT_ID);
-    assert_eq!(refund_body["amount"], 321);
+    assert_eq!(refund_body["amount"], "321");
     assert_eq!(
         observations[2].idempotency_key(),
         Some("fcp2:stripe.create_refund:op-local-refund")

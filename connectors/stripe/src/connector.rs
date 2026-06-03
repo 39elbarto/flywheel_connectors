@@ -293,6 +293,12 @@ impl StripeConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -2136,14 +2142,16 @@ mod tests {
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         cap: &str,
         operations: &[&str],
     ) -> CapabilityToken {
-        generate_valid_token_with_resources(signing_key, cap, operations, &["*"])
+        generate_valid_token_with_resources(signing_key, instance_id, cap, operations, &["*"])
     }
 
     fn generate_valid_token_with_resources(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         cap: &str,
         operations: &[&str],
         resource_allow: &[&str],
@@ -2165,6 +2173,7 @@ mod tests {
             .principal("user:test")
             .operations(operations)
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
@@ -2221,9 +2230,15 @@ mod tests {
     }
 
     fn assert_invalid_request_contains(error: FcpError, expected: &str) {
-        assert!(matches!(&error, FcpError::InvalidRequest { .. }));
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest containing {expected:?}, got: {error:?}"
+        );
         if let FcpError::InvalidRequest { message, .. } = error {
-            assert!(message.contains(expected));
+            assert!(
+                message.contains(expected),
+                "expected InvalidRequest message to contain {expected:?}, got: {message:?}"
+            );
         }
     }
 
@@ -2268,7 +2283,7 @@ mod tests {
             .unwrap();
 
         let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+            generate_valid_token(&signing_key, connector.instance_id(), "stripe.read", &["stripe.get_customer"]);
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.get_customer",
@@ -2285,7 +2300,7 @@ mod tests {
         let connector = configured_stripe_connector().await;
         let signing_key = Ed25519SigningKey::generate();
         let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+            generate_valid_token(&signing_key, connector.instance_id(), "stripe.read", &["stripe.get_customer"]);
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.get_customer",
@@ -2301,7 +2316,7 @@ mod tests {
         let connector = StripeConnector::new();
         let signing_key = Ed25519SigningKey::generate();
         let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+            generate_valid_token(&signing_key, connector.instance_id(), "stripe.read", &["stripe.get_customer"]);
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2324,7 +2339,7 @@ mod tests {
         let connector = configured_stripe_connector().await;
         let signing_key = Ed25519SigningKey::generate();
         let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+            generate_valid_token(&signing_key, connector.instance_id(), "stripe.read", &["stripe.get_customer"]);
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2346,7 +2361,7 @@ mod tests {
     async fn test_simulate_wrong_capability_denied() {
         let (connector, signing_key) = handshaken_stripe_connector().await;
         let capability =
-            generate_valid_token(&signing_key, "stripe.write", &["stripe.get_customer"]);
+            generate_valid_token(&signing_key, connector.instance_id(), "stripe.write", &["stripe.get_customer"]);
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2365,7 +2380,7 @@ mod tests {
     async fn test_simulate_known_operation_allowed() {
         let (connector, signing_key) = handshaken_stripe_connector().await;
         let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+            generate_valid_token(&signing_key, connector.instance_id(), "stripe.read", &["stripe.get_customer"]);
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2384,6 +2399,7 @@ mod tests {
         let (connector, signing_key) = handshaken_stripe_connector().await;
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.create_payment_intent"],
         );
@@ -2414,7 +2430,7 @@ mod tests {
     async fn test_simulate_unknown_operation_denied() {
         let (connector, signing_key) = handshaken_stripe_connector().await;
         let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+            generate_valid_token(&signing_key, connector.instance_id(), "stripe.read", &["stripe.get_customer"]);
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2463,6 +2479,7 @@ mod tests {
 
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.create_payment_intent"],
         );
@@ -2502,7 +2519,7 @@ mod tests {
             .unwrap();
 
         let capability =
-            generate_valid_token(&signing_key, "stripe.write", &["stripe.update_customer"]);
+            generate_valid_token(&signing_key, connector.instance_id(), "stripe.write", &["stripe.update_customer"]);
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.update_customer",
@@ -2555,6 +2572,7 @@ mod tests {
 
         let capability = generate_valid_token_with_resources(
             &signing_key,
+            connector.instance_id(),
             "stripe.read",
             &["stripe.get_customer"],
             &["stripe:customer:cus_allowed"],
@@ -2721,6 +2739,7 @@ mod tests {
         let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2773,6 +2792,7 @@ mod tests {
         let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2820,6 +2840,7 @@ mod tests {
         let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2839,6 +2860,7 @@ mod tests {
 
         let replay_capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2893,6 +2915,7 @@ mod tests {
         let header = build_test_webhook_signature("whsec_test", payload, stale_timestamp);
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2940,6 +2963,7 @@ mod tests {
         let payload = r#"{"id":"evt_bad","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -3187,6 +3211,7 @@ mod tests {
 
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.confirm_payment_intent"],
         );
@@ -3227,6 +3252,7 @@ mod tests {
 
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.capture_payment_intent"],
         );
@@ -3267,6 +3293,7 @@ mod tests {
 
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.cancel_payment_intent"],
         );

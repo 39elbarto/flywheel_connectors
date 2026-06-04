@@ -24,7 +24,10 @@ fn markdown_trailing_escape_falls_back() {
     let result = Formatter::render_with_fallback(input, FormatMode::MarkdownV2);
 
     assert_eq!(result.parse_mode_used, None);
-    assert_eq!(result.rendered, "Hello");
+    // f65593a74: the MarkdownV2 fallback preserves the original user text —
+    // without a parse_mode Telegram renders it literally, so stripping the
+    // trailing backslash would silently alter the message.
+    assert_eq!(result.rendered, "Hello\\");
 }
 
 #[test]

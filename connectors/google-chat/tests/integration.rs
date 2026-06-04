@@ -286,6 +286,38 @@ fn simulate_request_json(
     .expect("serialize simulate request")
 }
 
+/// Build an `invoke` envelope carrying a capability token bound to the
+/// connector's own instance.
+///
+/// Since commit a3f60fcaf the connector verifies the capability token on every
+/// post-handshake `handle_invoke` (`verify_invoke_capability_if_handshaken`),
+/// and `verify_bound` rejects any token lacking a matching `target_instance`.
+/// The loopback happy-path/error tests therefore have to mint a real,
+/// instance-bound token per call rather than sending a bare `operation`/`input`
+/// envelope.
+fn invoke_json(
+    signing_key: &Ed25519SigningKey,
+    capability: &str,
+    operation: &str,
+    instance_id: &str,
+    input: Value,
+) -> Value {
+    let capability_token = serde_json::to_value(capability_token(
+        signing_key,
+        capability,
+        operation,
+        "z:work",
+        Some(instance_id),
+    ))
+    .expect("serialize capability token");
+
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("operation".into(), Value::String(operation.to_string()));
+    envelope.insert("input".into(), input);
+    envelope.insert("capability_token".into(), capability_token);
+    Value::Object(envelope)
+}
+
 fn unused_loopback_base_url() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused loopback port");
     let addr = listener.local_addr().expect("unused loopback address");
@@ -303,15 +335,15 @@ fn google_api_error(code: u16, message: &str) -> Value {
 }
 
 async fn configured_connector(
+    signing_key: &Ed25519SigningKey,
     base_url: &str,
     request_timeout_ms: Option<u64>,
     webhook: bool,
 ) -> ChatConnector {
-    let signing_key = Ed25519SigningKey::generate();
     let mut connector = ChatConnector::new();
     configure_and_handshake(
         &mut connector,
-        &signing_key,
+        signing_key,
         base_url,
         request_timeout_ms,
         webhook,
@@ -500,14 +532,18 @@ async fn loopback_workspace_rest_and_webhook_emit_redacted_jsonl() {
         true,
     )
     .await;
+    let instance_id = connector.instance_id().to_string();
     let mut logs = Vec::new();
 
     let start = Instant::now();
     let spaces = connector
-        .handle_invoke(json!({
-            "operation": LIST_SPACES_OP,
-            "input": {}
-        }))
+        .handle_invoke(invoke_json(
+            &signing_key,
+            READ_CAP,
+            LIST_SPACES_OP,
+            &instance_id,
+            json!({}),
+        ))
         .await
         .expect("list spaces through loopback");
     assert_eq!(spaces["spaces"][0]["name"], "spaces/AAAA");
@@ -526,13 +562,16 @@ async fn loopback_workspace_rest_and_webhook_emit_redacted_jsonl() {
 
     let start = Instant::now();
     let sent = connector
-        .handle_invoke(json!({
-            "operation": SEND_MESSAGE_OP,
-            "input": {
+        .handle_invoke(invoke_json(
+            &signing_key,
+            WRITE_CAP,
+            SEND_MESSAGE_OP,
+            &instance_id,
+            json!({
                 "space_name": "spaces/AAAA",
                 "text": "secret message body"
-            }
-        }))
+            }),
+        ))
         .await
         .expect("send message through loopback");
     assert_eq!(sent["message"]["name"], "spaces/AAAA/messages/msg-outbound");
@@ -551,15 +590,18 @@ async fn loopback_workspace_rest_and_webhook_emit_redacted_jsonl() {
 
     let start = Instant::now();
     let reply = connector
-        .handle_invoke(json!({
-            "operation": REPLY_MESSAGE_OP,
-            "input": {
+        .handle_invoke(invoke_json(
+            &signing_key,
+            WRITE_CAP,
+            REPLY_MESSAGE_OP,
+            &instance_id,
+            json!({
                 "space_name": "spaces/AAAA",
                 "text": "secret threaded reply",
                 "thread_key": "incident-secret-thread",
                 "message_reply_option": "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
-            }
-        }))
+            }),
+        ))
         .await
         .expect("reply message through loopback");
     assert_eq!(reply["message"]["name"], "spaces/AAAA/messages/msg-reply");
@@ -599,9 +641,12 @@ async fn loopback_workspace_rest_and_webhook_emit_redacted_jsonl() {
     });
     let start = Instant::now();
     let webhook = connector
-        .handle_invoke(json!({
-            "operation": INGEST_WEBHOOK_OP,
-            "input": {
+        .handle_invoke(invoke_json(
+            &signing_key,
+            WEBHOOK_CAP,
+            INGEST_WEBHOOK_OP,
+            &instance_id,
+            json!({
                 "method": "POST",
                 "headers": {
                     "authorization": format!("Bearer {FIXTURE_WEBHOOK_TOKEN}"),
@@ -613,8 +658,8 @@ async fn loopback_workspace_rest_and_webhook_emit_redacted_jsonl() {
                 "delivery_id": "delivery-secret",
                 "source_id": "source-secret",
                 "command_authorized": true
-            }
-        }))
+            }),
+        ))
         .await
         .expect("ingest webhook fixture");
     assert_eq!(webhook["accepted"], true);
@@ -640,6 +685,7 @@ async fn loopback_workspace_rest_and_webhook_emit_redacted_jsonl() {
 
 #[fcp_async_core::runtime::test]
 async fn loopback_errors_cover_auth_rate_provider_network_timeout_and_malformed_shapes() {
+    let signing_key = Ed25519SigningKey::generate();
     let mut logs = Vec::new();
 
     let unauthorized_server = MockServer::start().await;
@@ -651,14 +697,23 @@ async fn loopback_errors_cover_auth_rate_provider_network_timeout_and_malformed_
         .expect(1)
         .mount(&unauthorized_server)
         .await;
-    let mut connector =
-        configured_connector(&format!("{}/v1", unauthorized_server.uri()), None, false).await;
+    let mut connector = configured_connector(
+        &signing_key,
+        &format!("{}/v1", unauthorized_server.uri()),
+        None,
+        false,
+    )
+    .await;
+    let instance_id = connector.instance_id().to_string();
     let start = Instant::now();
     let unauthorized = connector
-        .handle_invoke(json!({
-            "operation": LIST_SPACES_OP,
-            "input": {}
-        }))
+        .handle_invoke(invoke_json(
+            &signing_key,
+            READ_CAP,
+            LIST_SPACES_OP,
+            &instance_id,
+            json!({}),
+        ))
         .await
         .expect_err("unauthorized loopback should fail");
     assert!(matches!(
@@ -687,13 +742,23 @@ async fn loopback_errors_cover_auth_rate_provider_network_timeout_and_malformed_
         .expect(1)
         .mount(&rate_server)
         .await;
-    connector = configured_connector(&format!("{}/v1", rate_server.uri()), None, false).await;
+    connector = configured_connector(
+        &signing_key,
+        &format!("{}/v1", rate_server.uri()),
+        None,
+        false,
+    )
+    .await;
+    let instance_id = connector.instance_id().to_string();
     let start = Instant::now();
     let limited = connector
-        .handle_invoke(json!({
-            "operation": LIST_SPACES_OP,
-            "input": {}
-        }))
+        .handle_invoke(invoke_json(
+            &signing_key,
+            READ_CAP,
+            LIST_SPACES_OP,
+            &instance_id,
+            json!({}),
+        ))
         .await
         .expect_err("rate limited loopback should fail");
     assert!(matches!(limited, FcpError::RateLimited { .. }));
@@ -719,13 +784,23 @@ async fn loopback_errors_cover_auth_rate_provider_network_timeout_and_malformed_
         .expect(1)
         .mount(&provider_server)
         .await;
-    connector = configured_connector(&format!("{}/v1", provider_server.uri()), None, false).await;
+    connector = configured_connector(
+        &signing_key,
+        &format!("{}/v1", provider_server.uri()),
+        None,
+        false,
+    )
+    .await;
+    let instance_id = connector.instance_id().to_string();
     let start = Instant::now();
     let provider = connector
-        .handle_invoke(json!({
-            "operation": LIST_SPACES_OP,
-            "input": {}
-        }))
+        .handle_invoke(invoke_json(
+            &signing_key,
+            READ_CAP,
+            LIST_SPACES_OP,
+            &instance_id,
+            json!({}),
+        ))
         .await
         .expect_err("provider loopback should fail");
     assert!(matches!(
@@ -751,12 +826,15 @@ async fn loopback_errors_cover_auth_rate_provider_network_timeout_and_malformed_
     ));
 
     let malformed_input = connector
-        .handle_invoke(json!({
-            "operation": SEND_MESSAGE_OP,
-            "input": {
+        .handle_invoke(invoke_json(
+            &signing_key,
+            WRITE_CAP,
+            SEND_MESSAGE_OP,
+            &instance_id,
+            json!({
                 "space_name": "spaces/AAAA"
-            }
-        }))
+            }),
+        ))
         .await
         .expect_err("missing text should fail before provider dispatch");
     assert!(matches!(
@@ -784,17 +862,22 @@ async fn loopback_errors_cover_auth_rate_provider_network_timeout_and_malformed_
         .mount(&malformed_response_server)
         .await;
     connector = configured_connector(
+        &signing_key,
         &format!("{}/v1", malformed_response_server.uri()),
         None,
         false,
     )
     .await;
+    let instance_id = connector.instance_id().to_string();
     let start = Instant::now();
     let malformed_response = connector
-        .handle_invoke(json!({
-            "operation": LIST_SPACES_OP,
-            "input": {}
-        }))
+        .handle_invoke(invoke_json(
+            &signing_key,
+            READ_CAP,
+            LIST_SPACES_OP,
+            &instance_id,
+            json!({}),
+        ))
         .await
         .expect_err("malformed provider JSON should fail");
     assert!(matches!(
@@ -818,13 +901,17 @@ async fn loopback_errors_cover_auth_rate_provider_network_timeout_and_malformed_
         None,
     ));
 
-    connector = configured_connector(&unused_loopback_base_url(), None, false).await;
+    connector = configured_connector(&signing_key, &unused_loopback_base_url(), None, false).await;
+    let instance_id = connector.instance_id().to_string();
     let start = Instant::now();
     let network = connector
-        .handle_invoke(json!({
-            "operation": LIST_SPACES_OP,
-            "input": {}
-        }))
+        .handle_invoke(invoke_json(
+            &signing_key,
+            READ_CAP,
+            LIST_SPACES_OP,
+            &instance_id,
+            json!({}),
+        ))
         .await
         .expect_err("closed loopback port should fail");
     assert!(matches!(
@@ -860,13 +947,23 @@ async fn loopback_errors_cover_auth_rate_provider_network_timeout_and_malformed_
         .expect(1)
         .mount(&timeout_server)
         .await;
-    connector = configured_connector(&format!("{}/v1", timeout_server.uri()), Some(1), false).await;
+    connector = configured_connector(
+        &signing_key,
+        &format!("{}/v1", timeout_server.uri()),
+        Some(1),
+        false,
+    )
+    .await;
+    let instance_id = connector.instance_id().to_string();
     let start = Instant::now();
     let timeout = connector
-        .handle_invoke(json!({
-            "operation": LIST_SPACES_OP,
-            "input": {}
-        }))
+        .handle_invoke(invoke_json(
+            &signing_key,
+            READ_CAP,
+            LIST_SPACES_OP,
+            &instance_id,
+            json!({}),
+        ))
         .await
         .expect_err("delayed loopback should hit request timeout");
     assert!(matches!(

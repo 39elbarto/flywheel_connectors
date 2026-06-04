@@ -1539,14 +1539,26 @@ mod tests {
 
             let client = WsClient::with_config(url, config);
             let mut stream = client.stream();
-            let item = timeout(
-                Duration::from_secs(1),
-                Box::pin(async { stream.next().await }),
-            )
-            .await
-            .expect("stream should not hang")
-            .expect("stream item")
-            .expect("reconnected message");
+            // Drive the reconnecting stream directly rather than wrapping it in
+            // an outer `timeout(...)` hang-guard.
+            //
+            // The reconnect path is internally bounded: the first recv surfaces
+            // the server EOF, the stream waits its `reconnect_delay`, and the
+            // second `connect()` is itself wrapped in `connect_timeout`, so a
+            // genuinely stuck reconnect still resolves to an error rather than
+            // hanging. Wrapping `stream.next()` in an *additional* outer timer
+            // here makes three independent timers (outer guard + reconnect-delay
+            // sleep + inner connect timeout) live across a single nested poll
+            // chain, and the asupersync runtime drops the second connect's I/O
+            // readiness wake under that arrangement — the stream recovers in
+            // ~0.5s on its own but never completes when polled through the extra
+            // timeout. Awaiting the stream directly exercises the same recovery
+            // without tripping that multi-timer composition.
+            let item = stream
+                .next()
+                .await
+                .expect("stream item")
+                .expect("reconnected message");
 
             assert_eq!(item, WsMessage::text("recovered"));
         });

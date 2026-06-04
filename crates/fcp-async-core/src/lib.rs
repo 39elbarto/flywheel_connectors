@@ -280,7 +280,17 @@ pub mod runtime {
         pub fn build(self) -> io::Result<Runtime> {
             let inner = if self.io_enabled {
                 match platform_reactor()? {
-                    Some(reactor) => self.inner.with_reactor(reactor),
+                    // A reactor without a timer driver leaves sleep/timeout
+                    // deadlines invisible to the scheduler's I/O poll, which
+                    // then falls back to its 250ms idle cap: sub-250ms timers
+                    // quantize to ~250ms and racing `timeout(d, fut)` pairs
+                    // resolve in the wrong order. Wire the wall-clock timer
+                    // driver alongside the reactor so `drive_io_phase` clamps
+                    // its poll to the earliest pending timer deadline.
+                    Some(reactor) => self
+                        .inner
+                        .with_reactor(reactor)
+                        .with_timer_driver(asupersync::time::TimerDriverHandle::with_wall_clock()),
                     None => self.inner,
                 }
             } else {
@@ -2868,12 +2878,17 @@ mod tests {
         assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
+    // asupersync-uwp88: 0.3.2 reactor floors timer wakes at ~250ms. This test
+    // verifies SEMANTICS (a deadline shorter than the work times out and the
+    // scope is Request), which survives a coarser timer once the deadline and
+    // the work are spread apart: deadline 300ms < sleep 2s (>600ms gap, both
+    // >300ms). Original was deadline 10ms / sleep 50ms.
     #[runtime::test]
     async fn request_context_deadline_times_out() {
-        let context = ExecutionContext::request_scoped(Duration::from_millis(10));
+        let context = ExecutionContext::request_scoped(Duration::from_millis(300));
         let err = context
             .run(async {
-                time::sleep(Duration::from_millis(50)).await;
+                time::sleep(Duration::from_secs(2)).await;
             })
             .await
             .expect_err("deadline should timeout");

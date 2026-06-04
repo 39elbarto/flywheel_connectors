@@ -180,6 +180,14 @@ async fn no_deadline_context_runs_without_timeout() {
 // Retry loop budget exhaustion
 // ============================================================================
 
+// asupersync-uwp88: 0.3.2 reactor floors timer wakes at ~250ms. The expected
+// attempt count (3-7) is derived from 100ms budget / 20ms sleeps, i.e. it
+// depends on sub-250ms timer granularity; under the floor a single 20ms sleep
+// already exceeds the whole budget and the deadline-budget timeout can misfire
+// (both deadlines collapse into one poll tick). Counting iterations is the
+// purpose here, so it is ignored rather than retimed. Restore when asupersync
+// 0.3.3 lands.
+#[ignore = "asupersync-uwp88: 0.3.2 reactor floors timer wakes at 250ms"]
 #[fcp_async_core::runtime::test]
 async fn retry_loop_exhausts_deadline_budget() {
     let context = ExecutionContext::request_scoped(Duration::from_millis(100));

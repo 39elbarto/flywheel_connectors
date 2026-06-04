@@ -874,6 +874,13 @@ async fn loopback_errors_cover_audio_auth_rate_provider_network_timeout_and_malf
         .expect_err("malformed provider JSON should fail");
     assert!(matches!(malformed, FcpError::Internal { .. }));
 
+    // An empty 2xx body is coerced to the canonical empty success shape
+    // (`Ok({})`) per the workspace-wide policy set in commit 506b45904
+    // ("align empty-success-body handling on coercion to {} instead of
+    // failing"), which intentionally stopped ~27 connector clients —
+    // whisper included — from raising a spurious "empty response body"
+    // error on a successful status. The transcription mapper then surfaces
+    // the absent fields as JSON null rather than failing closed.
     let empty_body = provider_connector
         .handle_invoke(json!({
             "operation_id": TRANSCRIBE_OP,
@@ -883,8 +890,8 @@ async fn loopback_errors_cover_audio_auth_rate_provider_network_timeout_and_malf
             }
         }))
         .await
-        .expect_err("empty provider success body should fail closed");
-    assert_external_error(&empty_body, Some(200), false);
+        .expect("empty provider success body is coerced to an empty success shape");
+    assert!(empty_body["text"].is_null());
 
     let network_connector = configured_connector(&unused_loopback_base_url(), None).await;
     let network = network_connector

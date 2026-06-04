@@ -995,13 +995,18 @@ mod tests {
         let handle = thread::spawn(move || {
             let (mut first, _) = listener.accept().expect("accept first SSE connect");
             let first_request = read_request_head(&mut first);
-            assert!(!first_request.contains("Last-Event-ID:"));
+            // Header-name matching is case-insensitive per RFC 7230: the
+            // underlying HTTP client emits header names lowercased on the wire
+            // (e.g. `last-event-id`), so compare against a normalized copy.
+            let first_request_lc = first_request.to_ascii_lowercase();
+            assert!(!first_request_lc.contains("last-event-id:"));
             write_sse_response(&mut first, "id: one\ndata: first\n\n");
 
             let (mut second, _) = listener.accept().expect("accept resumed SSE connect");
             let second_request = read_request_head(&mut second);
+            let second_request_lc = second_request.to_ascii_lowercase();
             assert!(
-                second_request.contains("Last-Event-ID: one\r\n"),
+                second_request_lc.contains("last-event-id: one\r\n"),
                 "second request did not resume with last event id: {second_request:?}",
             );
             write_sse_response(&mut second, "id: two\ndata: second\n\n");

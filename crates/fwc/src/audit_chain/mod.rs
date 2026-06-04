@@ -1085,6 +1085,7 @@ fn output_chain_status_report(
     for warning in &report.warnings {
         println!("warning: {warning}");
     }
+    print_audit_answer_source_footer(truth_source);
     Ok(())
 }
 
@@ -1111,6 +1112,12 @@ fn inject_audit_truth_source_metadata(
             "_truth_source".to_owned(),
             Value::String(truth_source.operator_truth_source().to_owned()),
         );
+    }
+}
+
+fn print_audit_answer_source_footer(truth_source: KnowledgeState) {
+    if truth_source != KnowledgeState::MeshBacked {
+        println!("(answer source: {})", truth_source.operator_truth_source());
     }
 }
 
@@ -2135,6 +2142,7 @@ fn output_verify_report(report: &AuditVerifyReport, json: bool) -> Result<()> {
 
     if report.issues.is_empty() {
         println!("Issues: none");
+        print_audit_answer_source_footer(KnowledgeState::Offline);
         return Ok(());
     }
 
@@ -2150,6 +2158,7 @@ fn output_verify_report(report: &AuditVerifyReport, json: bool) -> Result<()> {
         }
     }
 
+    print_audit_answer_source_footer(KnowledgeState::Offline);
     Ok(())
 }
 

@@ -31384,6 +31384,16 @@ max_state_replication_staleness_secs = 120
     }
 
     #[test]
+    fn execute_context_current_text_footer_reports_answer_source() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, output) = execute_text(&["fwc", "context", "current"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: node-local)\n"));
+    }
+
+    #[test]
     fn execute_context_current_require_any_live_fails_truth_source_unavailable() {
         let (_tempdir, _path, _guard) = temp_context_config();
 
@@ -35407,6 +35417,28 @@ deny_ptrace = true
         assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
         assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "missing-zone");
+    }
+
+    #[test]
+    fn execute_doctor_without_zone_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "doctor"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn execute_doctor_host_text_footer_reports_answer_source() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([("POST /doctor".to_owned(), mock_doctor_report_json())]),
+            1,
+        );
+        let (exit_code, output) =
+            execute_text(&["fwc", "--host", &host, "doctor", "--zone", "z:work"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: host)\n"));
     }
 
     #[test]
@@ -39622,6 +39654,14 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_search_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "search", "github issue", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
     fn execute_search_offline_require_any_live_fails_truth_source_unavailable() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
@@ -39778,6 +39818,14 @@ deny_ptrace = true
                 .as_array()
                 .is_some_and(|preview| !preview.is_empty())
         );
+    }
+
+    #[test]
+    fn execute_show_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "show", "github", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
     }
 
     #[test]
@@ -39987,6 +40035,15 @@ deny_ptrace = true
             payload["guidance"]["when_to_use"],
             "Create a new issue in a GitHub repository."
         );
+    }
+
+    #[test]
+    fn execute_schema_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) =
+            execute_text(&["fwc", "schema", "github", "issues.create", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
     }
 
     #[test]
@@ -44829,6 +44886,14 @@ depends_on = ["missing"]
     }
 
     #[test]
+    fn status_fleet_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "status"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
     fn status_offline_require_any_live_fails_truth_source_unavailable() {
         let (exit_code, payload) =
             execute_json(&["fwc", "--json", "status", "--require-source", "any-live"]);
@@ -44903,6 +44968,35 @@ depends_on = ["missing"]
         assert_eq!(payload["connectors"][0]["slug"], "github");
         assert_eq!(payload["host_health"]["status"], "healthy");
         assert_eq!(payload["registry_version"], 7);
+    }
+
+    #[test]
+    fn status_fleet_host_text_footer_reports_answer_source() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 2,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, output) = execute_text(&["fwc", "--host", &host, "status"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: host)\n"));
     }
 
     #[test]
@@ -47444,6 +47538,22 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(payload["error"]["type"], "truth-source-unavailable");
         assert_eq!(payload["error"]["required"], "any-live");
         assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn history_text_footer_reports_answer_source() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-footer-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, output) = execute_text(&["fwc", "history"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
     }
 
     #[test]

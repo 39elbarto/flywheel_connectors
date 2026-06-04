@@ -133,6 +133,23 @@ fn missing_status_is_fail_closed_and_parseable() {
 }
 
 #[test]
+fn chain_status_text_reports_offline_answer_source_footer() {
+    let output = run_fwc(&["audit", "chain", "status"]);
+
+    assert!(
+        output.status.success(),
+        "fwc failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.ends_with("(answer source: offline)\n"),
+        "stdout missing answer source footer:\n{stdout}"
+    );
+}
+
+#[test]
 fn host_backed_status_satisfies_any_live_without_fabricating_quorum() {
     let (host, server) = spawn_mock_audit_status_host(&json!({
         "schema_version": "fcp.host.invoke_audit_chain_status.v1",
@@ -484,6 +501,32 @@ fn audit_verify_json_reports_offline_truth_source() {
     assert_eq!(payload["status"], "warn");
     assert_eq!(payload["chain_len"], 0);
     assert_eq!(payload["issues"][0]["code"], "audit.chain.empty");
+}
+
+#[test]
+fn audit_verify_text_reports_offline_answer_source_footer() {
+    let tempdir = tempfile::tempdir().expect("tempdir creates");
+    let events_path = tempdir.path().join("events.jsonl");
+    std::fs::write(&events_path, "").expect("events writes");
+
+    let output = run_fwc(&[
+        "audit",
+        "verify",
+        "--events",
+        events_path.to_str().expect("events path UTF-8"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "fwc failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.ends_with("(answer source: offline)\n"),
+        "stdout missing answer source footer:\n{stdout}"
+    );
 }
 
 #[test]

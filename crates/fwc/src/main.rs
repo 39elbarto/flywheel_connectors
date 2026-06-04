@@ -960,6 +960,10 @@ struct MeshAvailabilityArgs {
     /// Optional zone to compare against offline manifest declarations.
     #[arg(long)]
     zone: Option<String>,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1059,6 +1063,10 @@ struct ConnectorStateExplainArgs {
     /// Override the connector state root used for local cache inspection.
     #[arg(long, value_name = "PATH")]
     state_root: Option<PathBuf>,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1083,6 +1091,10 @@ struct ConnectorLeaseStatusArgs {
     /// Optional zone override for the lease subject.
     #[arg(long)]
     zone: Option<String>,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -8397,16 +8409,27 @@ fn connector_state_explain_dispatch(
     explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
     if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+        if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+            "connector",
+            "state explain",
+            args.require_source,
+            KnowledgeState::HostBacked,
+        ) {
+            return Ok(outcome);
+        }
+
         let client = HostAdminClient::new(host)?;
         let (catalog, discovery) = client.catalog(None)?;
         let connector = match catalog.resolve_connector(&args.connector) {
             Ok(connector) => connector,
             Err(error) => {
-                return Ok(connector_resolution_dispatch(
+                let mut outcome = connector_resolution_dispatch(
                     "connector state explain",
                     &args.connector,
                     &error,
-                ));
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
             }
         };
         let mut payload =
@@ -8461,16 +8484,30 @@ fn connector_state_explain_dispatch(
         }
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "connector");
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
         });
     }
 
+    if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+        "connector",
+        "state explain",
+        args.require_source,
+        KnowledgeState::Offline,
+    ) {
+        return Ok(outcome);
+    }
+
     let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
-        Err(error) => return Ok(connector_state_resolution_dispatch(&args.connector, &error)),
+        Err(error) => {
+            let mut outcome = connector_state_resolution_dispatch(&args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
+        }
     };
     let request = connector_state::ConnectorStateExplainRequest {
         connector_selector: &args.connector,
@@ -8499,16 +8536,27 @@ fn connector_lease_status_dispatch(
     explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
     if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+        if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+            "connector",
+            "lease status",
+            args.require_source,
+            KnowledgeState::HostBacked,
+        ) {
+            return Ok(outcome);
+        }
+
         let client = HostAdminClient::new(host)?;
         let (catalog, discovery) = client.catalog(None)?;
         let connector = match catalog.resolve_connector(&args.connector) {
             Ok(connector) => connector,
             Err(error) => {
-                return Ok(connector_lease_resolution_dispatch(
+                let mut outcome = connector_lease_resolution_dispatch(
                     "connector lease status",
                     &args.connector,
                     &error,
-                ));
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
             }
         };
         let (zone, effective_target) =
@@ -8578,15 +8626,26 @@ fn connector_lease_status_dispatch(
         });
     }
 
+    if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+        "connector",
+        "lease status",
+        args.require_source,
+        KnowledgeState::Offline,
+    ) {
+        return Ok(outcome);
+    }
+
     let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_lease_resolution_dispatch(
+            let mut outcome = connector_lease_resolution_dispatch(
                 "connector lease status",
                 &args.connector,
                 &error,
-            ));
+            );
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     };
     let (path, config) = load_context_config()?;
@@ -10206,6 +10265,14 @@ fn mesh_availability_dispatch(
             explanation,
         );
         let truth_source = contract.resolution.operator_knowledge_state();
+        if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+            "mesh",
+            subcommand,
+            args.require_source,
+            truth_source,
+        ) {
+            return Ok(outcome);
+        }
         let mut payload = serde_json::to_value(contract)?;
         envelope.inject_into(&mut payload);
         inject_truth_source_metadata(&mut payload, truth_source);
@@ -10272,6 +10339,14 @@ fn mesh_availability_dispatch(
         explanation,
     );
     let truth_source = contract.resolution.operator_knowledge_state();
+    if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+        "mesh",
+        subcommand,
+        args.require_source,
+        truth_source,
+    ) {
+        return Ok(outcome);
+    }
     let mut payload = serde_json::to_value(contract)?;
     envelope.inject_into(&mut payload);
     inject_truth_source_metadata(&mut payload, truth_source);
@@ -24054,7 +24129,19 @@ fn truth_source_unavailable_dispatch(
     command: &str,
     error: TruthSourceUnavailable,
 ) -> DispatchOutcome {
+    truth_source_unavailable_dispatch_with_context(command, None, error)
+}
+
+fn truth_source_unavailable_dispatch_with_context(
+    command: &str,
+    subcommand: Option<&str>,
+    error: TruthSourceUnavailable,
+) -> DispatchOutcome {
     let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, command);
+    let display_command = subcommand.map_or_else(
+        || command.to_owned(),
+        |subcommand| format!("{command} {subcommand}"),
+    );
     let mut payload = json!({
         "status": "error",
         "command": command,
@@ -24076,6 +24163,14 @@ fn truth_source_unavailable_dispatch(
             format!("Relax the requirement if `{}` truth is acceptable for this workflow.", error.actual.operator_truth_source()),
         ],
     });
+    if let Some(subcommand) = subcommand {
+        payload["subcommand"] = Value::String(subcommand.to_owned());
+        payload["error"]["message"] = Value::String(format!(
+            "`fwc {display_command}` resolved from `{}` truth, which does not satisfy `--require-source {}`.",
+            error.actual.operator_truth_source(),
+            error.required.label(),
+        ));
+    }
     envelope.inject_into(&mut payload);
     DispatchOutcome {
         payload,
@@ -24091,6 +24186,19 @@ fn enforce_required_truth_source(
     requirement
         .and_then(|required| required.validate(actual).err())
         .map(|error| truth_source_unavailable_dispatch(command, error))
+}
+
+fn enforce_required_truth_source_with_subcommand(
+    command: &str,
+    subcommand: &str,
+    requirement: Option<RequiredTruthSource>,
+    actual: KnowledgeState,
+) -> Option<DispatchOutcome> {
+    requirement
+        .and_then(|required| required.validate(actual).err())
+        .map(|error| {
+            truth_source_unavailable_dispatch_with_context(command, Some(subcommand), error)
+        })
 }
 
 fn conflicting_catalog_mode_dispatch(command: &str) -> DispatchOutcome {
@@ -37872,6 +37980,8 @@ deny_ptrace = true
             "mesh".to_owned(),
             "availability".to_owned(),
             "github".to_owned(),
+            "--require-source".to_owned(),
+            "mesh-or-host".to_owned(),
         ])
         .expect("mesh availability command should parse");
 
@@ -37880,6 +37990,7 @@ deny_ptrace = true
                 super::MeshCommand::Availability(args) => {
                     assert_eq!(args.connector, "github");
                     assert!(args.zone.is_none());
+                    assert_eq!(args.require_source, Some(RequiredTruthSource::MeshOrHost));
                 }
                 command => panic!("expected mesh availability command, got {command:?}"),
             },
@@ -37896,6 +38007,8 @@ deny_ptrace = true
             "github".to_owned(),
             "--zone".to_owned(),
             "z:work".to_owned(),
+            "--require-source".to_owned(),
+            "any-live".to_owned(),
         ])
         .expect("mesh explain-availability command should parse");
 
@@ -37904,6 +38017,7 @@ deny_ptrace = true
                 super::MeshCommand::ExplainAvailability(args) => {
                     assert_eq!(args.connector, "github");
                     assert_eq!(args.zone.as_deref(), Some("z:work"));
+                    assert_eq!(args.require_source, Some(RequiredTruthSource::AnyLive));
                 }
                 command => panic!("expected mesh explain-availability command, got {command:?}"),
             },
@@ -37943,6 +38057,8 @@ deny_ptrace = true
             "github".to_owned(),
             "--zone".to_owned(),
             "z:work".to_owned(),
+            "--require-source".to_owned(),
+            "any-live".to_owned(),
         ])
         .expect("connector state explain command should parse");
 
@@ -37953,6 +38069,7 @@ deny_ptrace = true
                         assert_eq!(args.connector, "github");
                         assert_eq!(args.zone.as_deref(), Some("z:work"));
                         assert!(args.state_root.is_none());
+                        assert_eq!(args.require_source, Some(RequiredTruthSource::AnyLive));
                     }
                 },
                 command => panic!("expected connector state command, got {command:?}"),
@@ -37972,6 +38089,8 @@ deny_ptrace = true
             "github".to_owned(),
             "--zone".to_owned(),
             "z:work".to_owned(),
+            "--require-source".to_owned(),
+            "mesh-or-host".to_owned(),
         ])
         .expect("connector lease status command should parse");
 
@@ -37981,6 +38100,7 @@ deny_ptrace = true
                     super::ConnectorLeaseCommand::Status(args) => {
                         assert_eq!(args.connector, "github");
                         assert_eq!(args.zone.as_deref(), Some("z:work"));
+                        assert_eq!(args.require_source, Some(RequiredTruthSource::MeshOrHost));
                     }
                 },
                 command => panic!("expected connector lease command, got {command:?}"),
@@ -38036,6 +38156,7 @@ deny_ptrace = true
         assert_eq!(payload["command"], "connector");
         assert_eq!(payload["subcommand"], "state explain");
         assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
         assert_eq!(payload["canonical_storage"], "local");
@@ -38051,6 +38172,30 @@ deny_ptrace = true
         assert_eq!(payload["zone"]["requested"], "z:work");
         assert_eq!(payload["zone"]["supported_by_manifest"], true);
         assert_eq!(payload["zone"]["local_cache_marker_present"], false);
+    }
+
+    #[test]
+    fn execute_connector_state_explain_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "state explain");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]
@@ -38167,6 +38312,7 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "connector");
         assert_eq!(payload["subcommand"], "state explain");
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["host_payload_source"], "host-cache-markers");
         assert_eq!(
@@ -38204,6 +38350,35 @@ deny_ptrace = true
                 .is_some_and(|hash| hash.starts_with("sha256:"))
         );
         assert_eq!(payload["zone"]["requested"], "z:work");
+    }
+
+    #[test]
+    fn execute_connector_state_explain_host_require_mesh_fails_truth_source_unavailable() {
+        let (host, server) = spawn_mock_host(StdBTreeMap::new(), 0);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--require-source",
+            "mesh",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "state explain");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]
@@ -38370,6 +38545,30 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_connector_lease_status_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
     fn execute_connector_lease_status_offline_uses_connector_target_zone() {
         let (_tempdir, path, _guard) = temp_context_config();
         let mut config = super::default_context_config();
@@ -38494,6 +38693,35 @@ deny_ptrace = true
                 .as_str()
                 .is_some_and(|hash| hash.starts_with("sha256:"))
         );
+    }
+
+    #[test]
+    fn execute_connector_lease_status_host_require_mesh_fails_truth_source_unavailable() {
+        let (host, server) = spawn_mock_host(StdBTreeMap::new(), 0);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+            "--require-source",
+            "mesh",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]
@@ -38976,6 +39204,28 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_mesh_explain_availability_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "mesh",
+            "explain-availability",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "mesh");
+        assert_eq!(payload["subcommand"], "explain-availability");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
     fn execute_mesh_explain_availability_with_host_reads_live_status_and_artifact_metadata() {
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -39157,6 +39407,49 @@ deny_ptrace = true
         );
         assert_evidence_handle(&payload, "mesh-live-availability");
         assert_evidence_handle(&payload, "host-artifact-provenance");
+    }
+
+    #[test]
+    fn execute_mesh_explain_availability_node_local_require_any_live_fails() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    mock_connector_admin_status_with_artifact(
+                        "local_path",
+                        "/opt/fcp/cache/github-enterprise",
+                        Value::Null,
+                    ),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "mesh",
+            "explain-availability",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "mesh");
+        assert_eq!(payload["subcommand"], "explain-availability");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "node-local");
     }
 
     #[test]

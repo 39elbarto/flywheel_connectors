@@ -10,6 +10,7 @@
     "command",
     "subcommand",
     "schema_version",
+    "_truth_source",
     "source",
     "message",
     "connector",
@@ -33,6 +34,10 @@
     "command": { "const": "connector" },
     "subcommand": { "const": "state explain" },
     "schema_version": { "const": "1.0.0" },
+    "_truth_source": {
+      "type": "string",
+      "enum": ["mesh", "host", "node-local", "offline", "degraded", "fallback-derived", "simulated", "unavailable"]
+    },
     "source": { "const": "local-cache-markers" },
     "message": { "$ref": "#/$defs/non_empty_string" },
     "connector": { "$ref": "#/$defs/connector" },

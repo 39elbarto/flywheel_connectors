@@ -80,6 +80,7 @@ fn connector_state_explain_schema_validates_local_payload() {
         payload["schema_version"],
         CONNECTOR_STATE_EXPLAIN_SCHEMA_VERSION
     );
+    assert_eq!(payload["_truth_source"], "offline");
     assert_eq!(payload["command"], "connector");
     assert_eq!(payload["subcommand"], "state explain");
     assert_eq!(payload["canonical_storage"], "local");
@@ -113,6 +114,25 @@ fn connector_state_explain_schema_rejects_missing_schema_version() {
         .remove("schema_version");
 
     assert_invalid(&payload, "schema_version is required");
+}
+
+#[test]
+fn connector_state_explain_schema_rejects_missing_truth_source() {
+    let mut payload = github_explain_payload(Some("z:work"), None);
+    payload
+        .as_object_mut()
+        .expect("payload must be an object")
+        .remove("_truth_source");
+
+    assert_invalid(&payload, "_truth_source is required");
+}
+
+#[test]
+fn connector_state_explain_schema_rejects_unknown_truth_source() {
+    let mut payload = github_explain_payload(Some("z:work"), None);
+    payload["_truth_source"] = json!("probably-live");
+
+    assert_invalid(&payload, "_truth_source is a closed enum");
 }
 
 #[test]

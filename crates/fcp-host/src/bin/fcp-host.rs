@@ -12967,6 +12967,19 @@ async fn batch_invoke_handler(
                 continue;
             }
 
+            // stop_on_first_error tripped in an earlier chunk of this tier:
+            // short-circuit the remaining chunks instead of executing them
+            // (the tier-level check above only catches subsequent tiers).
+            if aborted {
+                for operation_id in chunk {
+                    results_map.insert(
+                        operation_id.clone(),
+                        skipped_batch_result(operation_id.clone(), None),
+                    );
+                }
+                continue;
+            }
+
             let mut ready = Vec::new();
             for operation_id in chunk {
                 let operation = operation_map

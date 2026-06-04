@@ -5069,6 +5069,74 @@ async fn fcp_host_binary_batch_route_skips_dependents_after_failure()
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_batch_route_stop_on_first_error_short_circuits_same_tier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.batch-stop-first:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Batch Stop First Echo",
+            &["test", "batch"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let unknown_connector_id = ConnectorId::from_static("fcp.test.missing:utility:1.0.0");
+    let (mut failing_request, _) =
+        build_invoke_request(unknown_connector_id, &capability_signing_key);
+    failing_request.input = json!({ "message": "missing" });
+    let (mut second_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    second_request.input = json!({ "message": "second" });
+    let (mut third_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    third_request.input = json!({ "message": "third" });
+
+    // All three operations are independent (one tier); max_parallelism = 1
+    // splits the tier into three sequential chunks. With stop_on_first_error
+    // the failure in the first chunk must short-circuit the REMAINING CHUNKS
+    // OF THE SAME TIER, not just subsequent tiers.
+    let response: BatchInvokeResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/batch"),
+        json!({
+            "operations": [
+                batch_operation_json("op1", failing_request, &[]),
+                batch_operation_json("op2", second_request, &[]),
+                batch_operation_json("op3", third_request, &[]),
+            ],
+            "options": {
+                "max_parallelism": 1,
+                "stop_on_first_error": true,
+                "timeout_ms": 30_000,
+            }
+        }),
+    )
+    .await?;
+
+    assert_eq!(response.status, BatchStatus::Aborted);
+    assert_eq!(response.completed, 0);
+    assert_eq!(response.failed, 1);
+    assert_eq!(response.skipped, 2);
+    assert_eq!(response.results.len(), 3);
+    assert_eq!(response.results[0].id, "op1");
+    assert_eq!(response.results[0].status, OperationResultStatus::Error);
+    assert_eq!(response.results[1].id, "op2");
+    assert_eq!(response.results[1].status, OperationResultStatus::Skipped);
+    assert_eq!(response.results[2].id, "op3");
+    assert_eq!(response.results[2].status, OperationResultStatus::Skipped);
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_cancel_route_cancels_in_flight_invoke()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.cancel-http:utility:1.0.0");

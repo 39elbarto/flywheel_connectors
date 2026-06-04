@@ -39912,6 +39912,14 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_ops_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "ops", "github", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
     fn execute_ops_offline_require_any_live_fails_truth_source_unavailable() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
@@ -40129,6 +40137,15 @@ deny_ptrace = true
                 .and_then(Value::as_str)
                 .is_some_and(|example| example.contains("\"title\": \"Bug report\""))
         }));
+    }
+
+    #[test]
+    fn execute_examples_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) =
+            execute_text(&["fwc", "examples", "github", "issues.create", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 > **Specification note:** [`FCP_Specification_V3.md`](FCP_Specification_V3.md) is the current architectural and conformance target. [`FCP_Specification_V2.md`](FCP_Specification_V2.md) is retained as historical / legacy-interoperability context. When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The workspace ships **41 platform crates** under `crates/`, **176 production connector crates** under `connectors/` (plus one adversarial conformance test crate, `connectors/_adversarial/`), and a single agent-first CLI (`fwc`) that classifies every answer by truth source and refuses to fabricate runtime state.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The workspace ships **42 platform crates** under `crates/`, **176 production connector crates** under `connectors/` (plus one adversarial conformance test crate, `connectors/_adversarial/`), and a single agent-first CLI (`fwc`) that classifies every answer by truth source and refuses to fabricate runtime state.
 
 ---
 
@@ -1088,7 +1088,7 @@ fwc export-tools --offline --format openai --risk-max medium --output tools.json
 
 ## Workspace Crate Reference
 
-41 platform crates under `crates/`. Bands shown below describe responsibility, not strict layering.
+42 platform crates under `crates/`. Bands shown below describe responsibility, not strict layering.
 
 ### Kernel / Execution Semantics
 

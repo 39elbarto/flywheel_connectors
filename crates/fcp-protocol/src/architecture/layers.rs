@@ -152,6 +152,7 @@ pub const LAYERS: &[(Layer, &[CrateRef])] = &[
         &[
             CrateRef::Named("fcp-bootstrap"),
             CrateRef::Named("fcp-google-discovery"),
+            CrateRef::Named("fcp-migrate"),
             CrateRef::Named("fcp-oauth"),
             CrateRef::Named("fcp-openai-compat"),
             CrateRef::Named("fcp-registry"),

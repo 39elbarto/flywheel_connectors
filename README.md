@@ -6,7 +6,7 @@
 
 > **Specification note:** [`FCP_Specification_V3.md`](FCP_Specification_V3.md) is the current architectural and conformance target. [`FCP_Specification_V2.md`](FCP_Specification_V2.md) is retained as historical / legacy-interoperability context. When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The workspace ships **42 platform crates** under `crates/`, **176 production connector crates** under `connectors/` (plus one adversarial conformance test crate, `connectors/_adversarial/`), and a single agent-first CLI (`fwc`) that classifies every answer by truth source and refuses to fabricate runtime state.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The workspace ships **42 platform crates** under `crates/`, **177 connector crates** under `connectors/` (176 production connectors plus one adversarial conformance test crate, `connectors/_adversarial/`), and a single agent-first CLI (`fwc`) that classifies every answer by truth source and refuses to fabricate runtime state.
 
 ---
 
@@ -822,7 +822,7 @@ Properties:
 
 ## Connectors
 
-The workspace ships 176 production connector crates plus one adversarial conformance test crate (`connectors/_adversarial/`). All 176 production crates ship a `manifest.toml`, tests, and `ConnectorErrorMapping`. A workspace conformance guard fails CI if a mature connector lacks a `tests/` directory.
+The workspace ships 177 connector crates — 176 production connectors plus one adversarial conformance test crate (`connectors/_adversarial/`). All 176 production crates ship a `manifest.toml`, tests, and `ConnectorErrorMapping`. The connector surface is broad but not perfectly uniform: 158 currently follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and 168 currently publish explicit `OperationInfo` structs. A workspace conformance guard fails CI if a mature connector lacks a `tests/` directory.
 
 ### Tier 1: Critical Infrastructure
 
@@ -1212,7 +1212,7 @@ The most impactful tuning the workspace ships today:
 | **Multi-device** | Mesh-native with fountain-coded distribution, HRW lease coordination | Single process | Client-server | Load balancer |
 | **Revocation** | First-class objects with O(1) freshness, exact-membership lookup, priority gossip | N/A | N/A | API key rotation |
 | **Agent UX** | TOON-first CLI with intent compilation | Python SDK | JSON-RPC | REST API |
-| **Connector count** | 176 production connector crates in the workspace | ~50 community tools | Varies by server | Custom per service |
+| **Connector count** | 177 connector crates in the workspace (176 production) | ~50 community tools | Varies by server | Custom per service |
 | **Supply chain** | Ed25519 signatures, in-toto / SLSA attestations, TUF + cosign | `pip install` | `npm install` | Docker images |
 | **Post-quantum** | X-Wing KEM hybrid HPKE + ML-DSA-65 signatures, `ZoneKeyManifest V4` | None | None | None |
 
@@ -1796,7 +1796,7 @@ Honest about what FCP does not do yet:
 - **Production deployment is still single-active-host** — the honest operating model is one active `fcp-host` with staged standby peers. Connector admin state remains node-local and automatic multi-node failover is not yet a production guarantee.
 - **Mesh-native cutover is incomplete** — gossip, IBLT, XOR filters, masked-IBLT anti-entropy, and the LiveTruthResolver are built and tested, but mesh-backed truth is not the default highest-confidence source in production yet.
 - **No GUI** — `fwc` is CLI-only. The `serve-mcp` command exposes connectors as MCP tools for AI agent consumption, but there is no web dashboard.
-- **Connector maturity varies** — all 176 production connector crates compile and pass tests, but depth of operation coverage ranges from comprehensive (GitHub, Gmail) to minimal. A few connectors are explicitly non-live (`tlon` ships as `status = "incubating"`; `zalouser` ships as `status = "quarantined"`; `huggingface` describes itself as incubating in its connector description but does not declare a `status` field).
+- **Connector maturity varies** — all 176 production connectors compile and pass tests, but depth of operation coverage ranges from comprehensive (GitHub, Gmail) to minimal. A few connectors are explicitly non-live (`tlon` ships as `status = "incubating"`; `zalouser` ships as `status = "quarantined"`; `huggingface` describes itself as incubating in its connector description but does not declare a `status` field).
 - **Windows sandbox is Tier 2** — `fcp-sandbox` implements seccomp + Landlock on Linux and basic WASI isolation; macOS uses seatbelt. Windows sandbox support is not yet hardened.
 - **No automatic connector updates** — `fwc install` and `fwc update` exist, but automatic background updates with rollback are not yet implemented.
 - **Multi-node connector-state replication is designed, not operational** — `ConnectorStateRoot` and externalized state objects are specified, but the production host stores state locally.
@@ -1823,7 +1823,7 @@ Honest about what FCP does not do yet:
 
 ## FAQ
 
-**Q: Why 176 separate connector crates instead of a plugin system?**
+**Q: Why 177 separate connector crates instead of a plugin system?**
 Each connector is a standalone binary with its own manifest, capabilities, and sandbox policy. This eliminates shared-memory vulnerabilities, enables per-connector resource limits, and makes supply-chain verification tractable — you sign one binary, not a runtime + plugin combination.
 
 **Q: Why RaptorQ instead of regular file transfer?**

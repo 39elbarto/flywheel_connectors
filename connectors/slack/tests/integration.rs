@@ -15,7 +15,6 @@
 
 #![allow(clippy::too_many_lines)]
 
-use asupersync::Cx;
 use asupersync::io::{AsyncRead, ReadBuf};
 use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
@@ -683,13 +682,13 @@ async fn accept_test_websocket(mut stream: TcpStream) -> TestServerWebSocket {
         .await
         .expect("read websocket handshake");
     WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket")
 }
 
 async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
+    ws.send(&fcp_async_core::compatibility_cx(), ServerWsMessage::text(value.to_string()))
         .await
         .expect(context);
 }
@@ -698,7 +697,7 @@ async fn recv_text_frame(
     ws: &mut TestServerWebSocket,
     context: &str,
 ) -> Result<Option<String>, String> {
-    match ws.recv(&Cx::for_testing()).await {
+    match ws.recv(&fcp_async_core::compatibility_cx()).await {
         Ok(Some(ServerWsMessage::Text(text))) => Ok(Some(text)),
         Ok(Some(other)) => Err(format!("expected text frame for {context}, got {other:?}")),
         Ok(None) => Ok(None),
@@ -707,7 +706,7 @@ async fn recv_text_frame(
 }
 
 async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws.close(&fcp_async_core::compatibility_cx(), CloseReason::normal()).await;
 }
 
 // ============================================================================
@@ -3705,7 +3704,7 @@ async fn socket_mode_subscribe_reuses_single_connection() {
             _ = stop_ws_rx.changed() => {},
             () = async {
                 loop {
-                    match ws_stream.recv(&Cx::for_testing()).await {
+                    match ws_stream.recv(&fcp_async_core::compatibility_cx()).await {
                         Ok(Some(ServerWsMessage::Close(_)) | None) | Err(_) => break,
                         _ => {}
                     }
@@ -3852,7 +3851,7 @@ async fn socket_mode_reconnects_after_websocket_close_and_shutdown_cleans_up() {
         let _ = second_ack_tx.send(ack_payload);
 
         loop {
-            match ws_stream.recv(&Cx::for_testing()).await {
+            match ws_stream.recv(&fcp_async_core::compatibility_cx()).await {
                 Ok(Some(ServerWsMessage::Close(_)) | None) | Err(_) => break,
                 _ => {}
             }

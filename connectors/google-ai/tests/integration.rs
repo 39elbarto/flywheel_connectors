@@ -20,7 +20,6 @@ use std::time::Duration as StdDuration;
 use asupersync::net::websocket::{CloseReason, Message, ServerWebSocket, WebSocketAcceptor};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{Duration, Utc};
-use fcp_async_core::Cx;
 use fcp_async_core::io::{AsyncRead, ReadBuf};
 use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_async_core::task;
@@ -156,7 +155,7 @@ async fn accept_live_websocket(mut stream: TcpStream) -> (String, TestLiveServer
         .expect("read websocket handshake");
     let request_text = String::from_utf8_lossy(&request).into_owned();
     let ws = WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket");
     (request_text, ws)
@@ -175,7 +174,7 @@ fn expect_live_text(message: Message, context: &str) -> String {
 
 async fn recv_live_json(ws: &mut TestLiveServerWebSocket, context: &str) -> serde_json::Value {
     let message = ws
-        .recv(&Cx::for_testing())
+        .recv(&fcp_async_core::compatibility_cx())
         .await
         .expect(context)
         .expect("live websocket message missing");
@@ -183,19 +182,19 @@ async fn recv_live_json(ws: &mut TestLiveServerWebSocket, context: &str) -> serd
 }
 
 async fn send_live_json(ws: &mut TestLiveServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&Cx::for_testing(), Message::text(value.to_string()))
+    ws.send(&fcp_async_core::compatibility_cx(), Message::text(value.to_string()))
         .await
         .expect(context);
 }
 
 async fn send_live_text(ws: &mut TestLiveServerWebSocket, value: &str, context: &str) {
-    ws.send(&Cx::for_testing(), Message::text(value.to_string()))
+    ws.send(&fcp_async_core::compatibility_cx(), Message::text(value.to_string()))
         .await
         .expect(context);
 }
 
 async fn close_live_websocket(ws: &mut TestLiveServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws.close(&fcp_async_core::compatibility_cx(), CloseReason::normal()).await;
 }
 
 fn assert_realtime_report_has_steps(report: &GoogleLiveRealtimeRunReport, expected: &[&str]) {

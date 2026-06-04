@@ -4,7 +4,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_async_core::Cx;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_ollama::client::{
     DEFAULT_BASE_URL, DEFAULT_EMBEDDING_MODEL, DEFAULT_MODEL, OllamaAuth, OllamaClient,
@@ -386,7 +385,7 @@ async fn auth_required_tailnet_policy_rate_limit_cancellation_and_shutdown_are_s
     assert!(!error.to_string().contains("should-not-leak"));
     assert!(!error.to_string().contains("private prompt"));
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let client = OllamaClient::new(
         OllamaProvider::new(format!("{}/v1", server.uri()), OllamaAuth::None),
@@ -583,7 +582,7 @@ async fn ollama_loopback_e2e_jsonl_matrix() {
         }),
     );
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let cancelled = OllamaClient::new(
         OllamaProvider::new(format!("{}/v1", server.uri()), OllamaAuth::None),

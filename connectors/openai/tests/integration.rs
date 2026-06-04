@@ -13,7 +13,6 @@
 
 #![allow(clippy::too_many_lines)]
 
-use asupersync::Cx;
 use asupersync::io::{AsyncRead, ReadBuf};
 use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
@@ -342,20 +341,20 @@ async fn accept_openai_test_websocket(mut stream: TcpStream) -> (TestServerWebSo
         .expect("read websocket handshake");
     let headers = String::from_utf8_lossy(&request).into_owned();
     let ws = WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket");
     (ws, headers)
 }
 
 async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
+    ws.send(&fcp_async_core::compatibility_cx(), ServerWsMessage::text(value.to_string()))
         .await
         .expect(context);
 }
 
 async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Option<String> {
-    match ws.recv(&Cx::for_testing()).await {
+    match ws.recv(&fcp_async_core::compatibility_cx()).await {
         Ok(Some(ServerWsMessage::Text(text))) => Some(text),
         Ok(Some(other)) => panic!("expected text frame for {context}, got {other:?}"),
         Ok(None) => None,
@@ -364,7 +363,7 @@ async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Option<
 }
 
 async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws.close(&fcp_async_core::compatibility_cx(), CloseReason::normal()).await;
 }
 
 /// Standard `OpenAI` chat completion success response.

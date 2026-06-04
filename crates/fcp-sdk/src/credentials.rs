@@ -242,21 +242,43 @@ mod tests {
         LeaseToken::new(raw).unwrap()
     }
 
+    fn current_test_cx() -> fcp_async_core::Cx {
+        fcp_async_core::Cx::current().expect("test runtime provides a current Cx")
+    }
+
     #[test]
     fn cx_extension_acquires_releases_and_reports_credential_lease() {
-        let cx = fcp_async_core::Cx::for_testing();
         let client = RecordingCredentialLeaseClient::default();
         let credential_id = credential_id();
 
-        let lease = fcp_async_core::runtime::block_on_sync(
-            cx.get_credential_lease_with(
-                &client,
-                CredentialLeaseRequest::new(credential_id)
-                    .with_provider("openai")
-                    .with_operation("chat.completions"),
-            ),
-        )
-        .unwrap()
+        let (lease, report) = fcp_async_core::runtime::block_on_sync(async {
+            let cx = current_test_cx();
+            let lease = cx
+                .get_credential_lease_with(
+                    &client,
+                    CredentialLeaseRequest::new(credential_id)
+                        .with_provider("openai")
+                        .with_operation("chat.completions"),
+                )
+                .await
+                .unwrap();
+
+            cx.release_credential_lease(&client, lease.release_request())
+                .await
+                .unwrap();
+
+            let report = CredentialErrorReport::new(
+                lease.credential_id,
+                lease.lease_token.clone(),
+                CredentialErrorKind::RateLimited,
+            )
+            .with_retry_after_seconds(15);
+            cx.report_credential_error(&client, report.clone())
+                .await
+                .unwrap();
+
+            (lease, report)
+        })
         .unwrap();
 
         assert_eq!(lease.credential_id, credential_id);
@@ -268,35 +290,20 @@ mod tests {
             drop(requests);
         }
 
-        fcp_async_core::runtime::block_on_sync(
-            cx.release_credential_lease(&client, lease.release_request()),
-        )
-        .unwrap()
-        .unwrap();
-
-        let report = CredentialErrorReport::new(
-            lease.credential_id,
-            lease.lease_token,
-            CredentialErrorKind::RateLimited,
-        )
-        .with_retry_after_seconds(15);
-        fcp_async_core::runtime::block_on_sync(cx.report_credential_error(&client, report.clone()))
-            .unwrap()
-            .unwrap();
-
         assert_eq!(client.releases.lock().unwrap().len(), 1);
         assert_eq!(client.reports.lock().unwrap().as_slice(), &[report]);
     }
 
     #[test]
     fn cx_extension_short_form_builds_default_request() {
-        let cx = fcp_async_core::Cx::for_testing();
         let client = RecordingCredentialLeaseClient::default();
 
-        let lease = fcp_async_core::runtime::block_on_sync(
-            cx.get_credential_lease(&client, credential_id()),
-        )
-        .unwrap()
+        let lease = fcp_async_core::runtime::block_on_sync(async {
+            let cx = current_test_cx();
+            cx.get_credential_lease(&client, credential_id())
+                .await
+                .unwrap()
+        })
         .unwrap();
 
         assert_eq!(lease.provider.as_deref(), Some("default"));

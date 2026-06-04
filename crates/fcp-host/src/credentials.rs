@@ -2004,8 +2004,12 @@ mod tests {
         fcp_async_core::runtime::block_on_sync(future).expect("test future should run")
     }
 
+    // asupersync 0.3.2 gates `Cx::for_testing` out of non-test builds
+    // (cap-mask bypass hardening). `compatibility_cx()` reads the ambient
+    // runtime context, so it must be evaluated *inside* the future that
+    // `run`/`block_on_sync` drives — never as an eagerly-evaluated argument.
     fn cx() -> fcp_async_core::Cx {
-        fcp_async_core::Cx::for_testing()
+        fcp_async_core::compatibility_cx()
     }
 
     fn entry(byte: u8, priority: u32, label: &str) -> PooledCredential {
@@ -2786,7 +2790,8 @@ mod tests {
         assert_eq!(profile.id, "codex-work");
 
         let mut request = AuthRequest::new();
-        run(profile.method.build_request_auth(&cx(), &mut request)).expect("request auth");
+        run(async { profile.method.build_request_auth(&cx(), &mut request).await })
+            .expect("request auth");
         assert_eq!(
             request.value_for("Authorization"),
             Some("Bearer fixture-openai-key")

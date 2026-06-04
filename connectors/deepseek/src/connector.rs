@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_async_core::Cx;
 use fcp_openai_compat::{ChatChunk, ChatMessage, OpenAiError, RateLimitPolicy};
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
@@ -341,7 +340,7 @@ impl DeepSeekConnector {
             message: "DeepSeek client not initialized".into(),
         })?;
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
-        let cx = Cx::for_testing();
+        let cx = fcp_async_core::compatibility_cx();
         match operation {
             OP_CHAT => {
                 let request = chat_request_from_value(input, &config.default_model)?;

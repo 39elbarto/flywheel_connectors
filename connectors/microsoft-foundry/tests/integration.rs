@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_async_core::Cx;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_microsoft_foundry::MicrosoftFoundryConnector;
 use fcp_microsoft_foundry::client::{
@@ -587,7 +586,7 @@ async fn responses_timeout_and_cancellation_are_bounded() {
     let request =
         responses_request_from_value(json!({"input": "hello"}), "prod-gpt4o").expect("request");
     let timeout_error = client
-        .responses_create(&Cx::for_testing(), request)
+        .responses_create(&fcp_async_core::compatibility_cx(), request)
         .await
         .expect_err("slow server should time out");
     assert!(matches!(
@@ -595,7 +594,7 @@ async fn responses_timeout_and_cancellation_are_bounded() {
         OpenAiError::Network(NetworkError::Http { .. })
     ));
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let client = MicrosoftFoundryClient::new(
         provider,

@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_async_core::Cx;
 use fcp_openai_compat::RateLimitPolicy;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
@@ -315,7 +314,10 @@ impl VoyageConnector {
             message: "Voyage client not initialized".into(),
         })?;
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
-        let cx = Cx::for_testing();
+        // asupersync 0.3.2 gates `Cx::for_testing` out of production builds
+        // (cap-mask bypass hardening); operations run under the connector
+        // runtime, so take the ambient context instead of fabricating one.
+        let cx = fcp_async_core::compatibility_cx();
         match operation {
             OP_EMBEDDINGS => {
                 let request =

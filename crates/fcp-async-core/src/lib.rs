@@ -104,20 +104,27 @@ pub struct NoopInstrumentation;
 
 impl Instrumentation for NoopInstrumentation {}
 
-/// Return the current `asupersync::Cx` or a testing fallback.
+/// Return the current `asupersync::Cx`.
 ///
 /// Downstream crates should call this instead of importing `asupersync::Cx`
-/// directly, keeping the raw runtime dependency encapsulated.
+/// directly, keeping the raw runtime dependency encapsulated. Callers must run
+/// under an active asupersync runtime context.
+///
+/// # Panics
+///
+/// Panics when called outside an active asupersync runtime context.
 #[must_use]
 pub fn compatibility_cx() -> asupersync::Cx {
-    asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing)
+    asupersync::Cx::current().expect(
+        "fcp_async_core::compatibility_cx called outside an active asupersync runtime context",
+    )
 }
 
 /// Runtime bridging helpers.
 pub mod runtime {
     use std::cell::RefCell;
     use std::io;
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
 
     #[cfg(test)]
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -221,6 +228,7 @@ pub mod runtime {
     pub struct Builder {
         inner: AsupersyncRuntimeBuilder,
         flavor: RuntimeFlavor,
+        io_enabled: bool,
     }
 
     impl Builder {
@@ -230,6 +238,7 @@ pub mod runtime {
             Self {
                 inner: AsupersyncRuntimeBuilder::current_thread(),
                 flavor: RuntimeFlavor::CurrentThread,
+                io_enabled: false,
             }
         }
 
@@ -239,12 +248,14 @@ pub mod runtime {
             Self {
                 inner: AsupersyncRuntimeBuilder::multi_thread(),
                 flavor: RuntimeFlavor::MultiThread,
+                io_enabled: false,
             }
         }
 
         /// Enable all runtime services.
         #[must_use]
-        pub const fn enable_all(self) -> Self {
+        pub const fn enable_all(mut self) -> Self {
+            self.io_enabled = true;
             self
         }
 
@@ -256,7 +267,8 @@ pub mod runtime {
 
         /// Enable I/O services.
         #[must_use]
-        pub const fn enable_io(self) -> Self {
+        pub const fn enable_io(mut self) -> Self {
+            self.io_enabled = true;
             self
         }
 
@@ -266,13 +278,67 @@ pub mod runtime {
         ///
         /// Returns I/O errors from runtime initialization.
         pub fn build(self) -> io::Result<Runtime> {
-            self.inner
+            let inner = if self.io_enabled {
+                match platform_reactor()? {
+                    Some(reactor) => self.inner.with_reactor(reactor),
+                    None => self.inner,
+                }
+            } else {
+                self.inner
+            };
+
+            inner
                 .build()
                 .map(|inner| Runtime {
                     inner,
                     flavor: self.flavor,
                 })
                 .map_err(|err| io::Error::other(err.to_string()))
+        }
+    }
+
+    fn platform_reactor() -> io::Result<Option<Arc<dyn asupersync::runtime::reactor::Reactor>>> {
+        // Exactly one of the mutually exclusive cfg blocks below compiles on
+        // any given platform, so each block is that platform's tail
+        // expression (no `return`, which clippy flags as needless).
+        #[cfg(target_os = "linux")]
+        {
+            asupersync::runtime::reactor::EpollReactor::new().map(|reactor| {
+                Some(Arc::new(reactor) as Arc<dyn asupersync::runtime::reactor::Reactor>)
+            })
+        }
+
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        {
+            asupersync::runtime::reactor::KqueueReactor::new().map(|reactor| {
+                Some(Arc::new(reactor) as Arc<dyn asupersync::runtime::reactor::Reactor>)
+            })
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            asupersync::runtime::reactor::IocpReactor::new().map(|reactor| {
+                Some(Arc::new(reactor) as Arc<dyn asupersync::runtime::reactor::Reactor>)
+            })
+        }
+
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly",
+            target_os = "windows"
+        )))]
+        {
+            Ok(None)
         }
     }
 
@@ -2673,10 +2739,36 @@ mod tests {
     #[test]
     fn block_on_sync_supports_io_driver() {
         let result = runtime::block_on_sync(async {
+            use super::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
             let listener = super::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind local listener");
-            drop(listener);
+            let addr = listener.local_addr().expect("local listener addr");
+            let server = task::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept client");
+                let mut buf = [0_u8; 4];
+                stream
+                    .read_exact(&mut buf)
+                    .await
+                    .expect("server read request");
+                assert_eq!(&buf, b"ping");
+                stream.write_all(b"pong").await.expect("server write reply");
+            });
+            let mut client = super::net::TcpStream::connect(addr)
+                .await
+                .expect("connect client");
+            client
+                .write_all(b"ping")
+                .await
+                .expect("client write request");
+            let mut reply = [0_u8; 4];
+            client
+                .read_exact(&mut reply)
+                .await
+                .expect("client read reply");
+            assert_eq!(&reply, b"pong");
+            server.await.expect("server task should join");
         });
         assert!(result.is_ok());
     }

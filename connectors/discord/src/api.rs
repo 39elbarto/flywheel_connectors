@@ -289,7 +289,10 @@ impl DiscordApiClient {
             body.to_vec()
         });
 
-        let cx = asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing);
+        // asupersync 0.3.2 gates `Cx::for_testing` out of production builds
+        // (cap-mask bypass hardening); the connector runs under the ambient
+        // runtime context, so take it instead of fabricating an all-caps Cx.
+        let cx = fcp_async_core::compatibility_cx();
         match ctx
             .run(self.client.request(&cx, method, url, headers, request_body))
             .await

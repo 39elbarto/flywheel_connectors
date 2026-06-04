@@ -217,7 +217,6 @@ async fn send_gateway_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync::Cx;
     use asupersync::io::{AsyncRead, ReadBuf};
     use asupersync::net::websocket::{
         CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
@@ -273,13 +272,13 @@ mod tests {
             .await
             .expect("read websocket handshake");
         WebSocketAcceptor::new()
-            .accept(&Cx::for_testing(), &request, stream)
+            .accept(&fcp_async_core::compatibility_cx(), &request, stream)
             .await
             .expect("accept websocket")
     }
 
     async fn recv_message(ws: &mut TestServerWebSocket, context: &str) -> ServerWsMessage {
-        ws.recv(&Cx::for_testing())
+        ws.recv(&fcp_async_core::compatibility_cx())
             .await
             .expect(context)
             .unwrap_or_else(|| panic!("{context} missing"))
@@ -290,11 +289,11 @@ mod tests {
     }
 
     async fn send_message(ws: &mut TestServerWebSocket, message: ServerWsMessage, context: &str) {
-        ws.send(&Cx::for_testing(), message).await.expect(context);
+        ws.send(&fcp_async_core::compatibility_cx(), message).await.expect(context);
     }
 
     async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-        let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+        let _ = ws.close(&fcp_async_core::compatibility_cx(), CloseReason::normal()).await;
     }
 
     fn parse_payload(msg: ServerWsMessage) -> GatewayPayload {

@@ -12,7 +12,6 @@
 
 #![allow(clippy::too_many_lines)]
 
-use asupersync::Cx;
 use asupersync::io::{AsyncRead, ReadBuf};
 use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
@@ -331,14 +330,14 @@ async fn accept_test_gateway_websocket(
         .await
         .expect("read gateway websocket handshake");
     WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept gateway websocket")
 }
 
 async fn recv_gateway_payload(ws: &mut TestGatewayWebSocket, context: &str) -> serde_json::Value {
     let message = ws
-        .recv(&Cx::for_testing())
+        .recv(&fcp_async_core::compatibility_cx())
         .await
         .expect(context)
         .unwrap_or_else(|| panic!("{context} missing"));
@@ -354,7 +353,7 @@ async fn send_gateway_json(
     context: &str,
 ) {
     ws.send(
-        &Cx::for_testing(),
+        &fcp_async_core::compatibility_cx(),
         ServerWsMessage::Text(serde_json::to_string(payload).expect("gateway payload serializes")),
     )
     .await
@@ -362,7 +361,7 @@ async fn send_gateway_json(
 }
 
 async fn close_test_gateway_websocket(ws: &mut TestGatewayWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws.close(&fcp_async_core::compatibility_cx(), CloseReason::normal()).await;
 }
 
 fn gateway_hello(interval_ms: u64) -> serde_json::Value {

@@ -7246,7 +7246,7 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_execute_cdp_command_checks_cancellation_before_send() {
-        let cx = Cx::for_testing();
+        let cx = fcp_async_core::compatibility_cx();
         cx.set_cancel_requested(true);
         let mut transport = ScriptedCdpTransport::default();
 

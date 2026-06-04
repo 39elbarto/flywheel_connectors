@@ -183,6 +183,12 @@ impl DriveConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     #[must_use]
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
@@ -953,6 +959,7 @@ mod tests {
 
     fn build_capability(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         operation: &'static str,
     ) -> CapabilityToken {
         let capability = match operation {
@@ -977,6 +984,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id)
             .audience("*")
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
@@ -988,10 +996,11 @@ mod tests {
 
     fn simulate_request(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         operation: &'static str,
         input: serde_json::Value,
     ) -> serde_json::Value {
-        let capability = build_capability(signing_key, operation);
+        let capability = build_capability(signing_key, instance_id, operation);
         serde_json::to_value(SimulateRequest::new(
             ConnectorId::from_static("google-drive"),
             OperationId::from_static(operation),
@@ -1206,6 +1215,7 @@ mod tests {
         let result = connector
             .handle_simulate(simulate_request(
                 &signing_key,
+                connector.instance_id(),
                 "drive.get_file",
                 json!({ "file_id": "file_123" }),
             ))
@@ -1225,7 +1235,12 @@ mod tests {
         let mut connector = DriveConnector::new();
         configure_and_handshake(&mut connector, &signing_key).await;
         let result = connector
-            .handle_simulate(simulate_request(&signing_key, "drive.get_file", json!({})))
+            .handle_simulate(simulate_request(
+                &signing_key,
+                connector.instance_id(),
+                "drive.get_file",
+                json!({}),
+            ))
             .await
             .unwrap();
         let response = parse_simulate_response(result);
@@ -1256,6 +1271,7 @@ mod tests {
         let result = connector
             .handle_simulate(simulate_request(
                 &signing_key,
+                connector.instance_id(),
                 "drive.get_file",
                 json!({ "file_id": "file_123" }),
             ))
@@ -1271,7 +1287,12 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         let connector = DriveConnector::new();
         let result = connector
-            .handle_simulate(simulate_request(&signing_key, "drive.nope", json!({})))
+            .handle_simulate(simulate_request(
+                &signing_key,
+                connector.instance_id(),
+                "drive.nope",
+                json!({}),
+            ))
             .await
             .unwrap();
         let response = parse_simulate_response(result);

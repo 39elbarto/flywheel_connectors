@@ -15,7 +15,7 @@ use wiremock::{
 const OP_LIST_COLLECTIONS: &str = "qdrant.list_collections";
 const CAP_COLLECTIONS_READ: &str = "qdrant.collections.read";
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -25,11 +25,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_COLLECTIONS_READ)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &str) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -44,6 +44,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .principal("user:test")
         .operations(&[OP_LIST_COLLECTIONS])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("valid constraints cbor")
@@ -74,7 +75,8 @@ async fn connector_suite_happy_path_lists_collections() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes());
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), instance_id.clone());
     let invoke = InvokeRequest {
         r#type: "invoke".into(),
         id: RequestId::new("qdrant-connector-suite"),
@@ -82,7 +84,7 @@ async fn connector_suite_happy_path_lists_collections() {
         operation: OperationId::from_static(OP_LIST_COLLECTIONS),
         zone_id: ZoneId::work(),
         input: json!({}),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, instance_id.as_str()),
         holder_proof: None,
         context: None,
         idempotency_key: None,

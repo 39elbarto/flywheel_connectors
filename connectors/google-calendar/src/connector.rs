@@ -318,6 +318,12 @@ impl GoogleCalendarConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     #[must_use]
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
@@ -1536,7 +1542,11 @@ mod tests {
         assert!(!host_is_calendar_googleapis("evil-googleapis.com"));
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &str,
+        op: &str,
+    ) -> CapabilityToken {
         let cap = match op {
             "gcal.list_calendars" | "gcal.get_event" | "gcal.list_events" => "gcal.read",
             "gcal.create_event" | "gcal.update_event" | "gcal.quick_add" => "gcal.write",
@@ -1557,6 +1567,7 @@ mod tests {
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .unwrap()
@@ -1620,7 +1631,8 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "gcal.list_calendars");
+        let token =
+            generate_valid_token(&signing_key, connector.instance_id(), "gcal.list_calendars");
 
         let result = connector
             .handle_invoke(json!({
@@ -1659,7 +1671,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "gcal.get_event");
+        let token = generate_valid_token(&signing_key, connector.instance_id(), "gcal.get_event");
 
         let result = connector
             .handle_invoke(json!({

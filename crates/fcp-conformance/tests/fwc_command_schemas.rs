@@ -106,6 +106,22 @@ const CASES: &[CommandSchemaCase] = &[
         success_schema_version: "fcp.fwc.audit_verify.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
+    CommandSchemaCase {
+        file: "mesh_explain_availability.schema.json",
+        command: "mesh",
+        subcommand: Some("explain-availability"),
+        command_required_on_success: true,
+        success_schema_version: "fcp.fwc.truth-source.v1",
+        error_schema_version: "fcp.fwc.truth-source.v1",
+    },
+    CommandSchemaCase {
+        file: "connector_lease_status.schema.json",
+        command: "connector",
+        subcommand: Some("lease status"),
+        command_required_on_success: true,
+        success_schema_version: "1.0.0",
+        error_schema_version: "fcp.fwc.truth-source.v1",
+    },
 ];
 
 fn schema_path(file: &str) -> PathBuf {

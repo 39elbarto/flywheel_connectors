@@ -6389,6 +6389,16 @@ impl LiveTruthResolution {
             reason: reason.into(),
         }
     }
+
+    fn operator_knowledge_state(&self) -> KnowledgeState {
+        match self.knowledge_state {
+            LiveTruthKnowledgeState::Offline => KnowledgeState::Offline,
+            LiveTruthKnowledgeState::NodeLocal => KnowledgeState::NodeLocal,
+            LiveTruthKnowledgeState::MeshBacked => KnowledgeState::MeshBacked,
+            LiveTruthKnowledgeState::Degraded => KnowledgeState::Degraded,
+            LiveTruthKnowledgeState::FallbackDerived => KnowledgeState::FallbackDerived,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -8561,6 +8571,7 @@ fn connector_lease_status_dispatch(
         }
         let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "connector");
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -8581,7 +8592,7 @@ fn connector_lease_status_dispatch(
     let (path, config) = load_context_config()?;
     let (context_name, context) = active_context_entry(&config)?;
     let zone = mesh_connector_lease_zone(args.zone.as_deref(), context, connector, &args.connector);
-    let payload = offline_connector_lease_status_payload(
+    let mut payload = offline_connector_lease_status_payload(
         &path,
         &context_name,
         context,
@@ -8589,6 +8600,7 @@ fn connector_lease_status_dispatch(
         &args.connector,
         &zone,
     )?;
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -10184,7 +10196,7 @@ fn mesh_availability_dispatch(
             "Artifact provenance shows where the installed runtime bundle came from and whether hash/signature checks passed.".to_owned(),
             "Per-zone mesh inventory is still unavailable on the live host API, so node/zone-specific placement cannot be proven on this route yet.".to_owned(),
         ]);
-        let mut payload = serde_json::to_value(build_mesh_live_operator_contract(
+        let contract = build_mesh_live_operator_contract(
             &subcommand,
             &host.endpoint,
             connector,
@@ -10192,8 +10204,11 @@ fn mesh_availability_dispatch(
             &status,
             message,
             explanation,
-        ))?;
+        );
+        let truth_source = contract.resolution.operator_knowledge_state();
+        let mut payload = serde_json::to_value(contract)?;
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, truth_source);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -10245,7 +10260,7 @@ fn mesh_availability_dispatch(
         "Workspace manifests can tell you what the connector declares, but not whether a live host has installed it or whether mesh placement currently satisfies offline SLOs.".to_owned(),
         "Use the same command with `--host <endpoint>` when you need authoritative host-backed runtime truth.".to_owned(),
     ]);
-    let mut payload = serde_json::to_value(build_mesh_offline_operator_contract(
+    let contract = build_mesh_offline_operator_contract(
         &subcommand,
         connector,
         &args.connector,
@@ -10255,8 +10270,11 @@ fn mesh_availability_dispatch(
         &mirror_path,
         message,
         explanation,
-    ))?;
+    );
+    let truth_source = contract.resolution.operator_knowledge_state();
+    let mut payload = serde_json::to_value(contract)?;
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, truth_source);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -38267,6 +38285,7 @@ deny_ptrace = true
         assert_eq!(payload["command"], "connector");
         assert_eq!(payload["subcommand"], "lease status");
         assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["source"], "offline-mesh-context");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["zone_id"], "z:work");
@@ -38387,6 +38406,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "connector");
         assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["host_payload_source"], "host-hrw-routing");
         assert_eq!(
@@ -38911,6 +38932,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "mesh");
         assert_eq!(payload["subcommand"], "explain-availability");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "mesh");
         assert_eq!(payload["source"], "host-admin-api");
         assert_discovery_provenance(&payload, "live_host_inventory", true, "live-inventory");
         assert_eq!(
@@ -38992,6 +39015,8 @@ deny_ptrace = true
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["source_selection"]["source_kind"], "local-path");
         assert_eq!(

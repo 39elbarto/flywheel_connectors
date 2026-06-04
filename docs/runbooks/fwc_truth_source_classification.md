@@ -30,6 +30,8 @@ payload-specific field closure for every command.
 | `history.schema.json` | `fwc history` | `fcp.fwc.truth-source.v1` | Requires `command: "history"`. |
 | `audit_chain_status.schema.json` | `fwc audit chain status` | `fcp.fwc.audit_chain_status.v1` | Requires `command: "audit"` and `subcommand: "chain status"` on the success path; `truth-source-unavailable` errors use the shared schema version. |
 | `audit_verify.schema.json` | `fwc audit verify` | `fcp.fwc.audit_verify.v1` | Success output is the serialized audit report plus `_truth_source`; `truth-source-unavailable` errors use the shared schema version and carry `command: "audit"` plus `subcommand: "verify"`. |
+| `mesh_explain_availability.schema.json` | `fwc mesh explain-availability` | `fcp.fwc.truth-source.v1` | Requires `command: "mesh"` and `subcommand: "explain-availability"`; live placement-policy answers report `_truth_source: "mesh"` and weaker artifact-only answers report the resolver's lower-confidence source. |
+| `connector_lease_status.schema.json` | `fwc connector lease status` | `1.0.0` | Requires `command: "connector"` and `subcommand: "lease status"`; live host lease evidence reports `_truth_source: "host"` while offline HRW ladder projections report `_truth_source: "offline"`. |
 
 The operator-facing `_truth_source` tags are:
 

@@ -47,7 +47,7 @@ Each row records:
 - status: LIMITED
 - code_path: `crates/fcp-core/src/zone_keys.rs`
 - test_path: `crates/fcp-host/src/bin/fcp-host.rs`
-- test_fn: `verify_live_request_v2kt4_empty_allowed_zones_with_enforce_flag_denies_all`
+- test_fn: `verify_live_request_empty_allowed_zones_requires_zone_envelope`
 - proof_path: `lean/FCP/Zone/Lattice.lean`
 - pending: "graduation to PROVEN tracked by flywheel_connectors-angoc.2 (Phase C)"
 
@@ -61,9 +61,9 @@ Each row records:
 - proof_path: `crates/fcp-core/tests/typestate_compile_fail.rs`
 - no_formal_model_reason: "typestate compile-fail tests + predicate matrix golden vectors"
 
-### 5. Tamper-Evident Audit
+### 5. Tamper-Evident Audit + HLC
 
-- claim: Tamper-Evident Audit
+- claim: Tamper-Evident Audit + HLC
 - status: PROVEN
 - code_path: `crates/fcp-core/src/audit.rs`
 - test_path: `crates/fcp-core/tests/audit_chain_golden_vectors.rs`
@@ -111,9 +111,9 @@ Each row records:
 - proof_path: (none — Lean proof body deferred)
 - pending: "Lean FROST DKG safety proof tracked by flywheel_connectors-angoc.9 Phase O.6"
 
-### 10. Threshold Secrets
+### 10. Threshold Secrets (Shamir)
 
-- claim: Threshold Secrets
+- claim: Threshold Secrets (Shamir)
 - status: PROVEN
 - code_path: `crates/fcp-core/src/secret.rs`
 - test_path: `crates/fcp-e2e/tests/threshold_secrets_e2e.rs`
@@ -181,10 +181,90 @@ Each row records:
 - proof_path: (none — operational reference proof)
 - no_formal_model_reason: "CRIU checkpoint handoff + byte-equivalent completion proven end-to-end"
 
+### 17. Capability Token Typestate
+
+- claim: Capability Token Typestate
+- status: PROVEN
+- code_path: `crates/fcp-core/src/capability.rs`
+- test_path: `crates/fcp-conformance/tests/capability_typestate_connector_boundary_dja9u.rs`
+- test_fn: `dja9u_no_new_connectors_use_legacy_verify_alias_at_invoke_boundary`
+- proof_path: `crates/fcp-core/tests/typestate_compile_fail.rs`
+- no_formal_model_reason: "forward-only ratchet + compile-fail tests enforce the typestate ladder"
+
+### 18. Post-Quantum Zone Keys
+
+- claim: Post-Quantum Zone Keys
+- status: PROVEN
+- code_path: `crates/fcp-core/src/zone_keys.rs`
+- test_path: `crates/fcp-e2e/tests/v3_v4_mixed_migration_e2e.rs`
+- test_fn: `v3_v4_mixed_migration_s1_full_ladder_decisions_match_phase_semantics`
+- proof_path: (none — KAT + mixed-migration E2E)
+- no_formal_model_reason: "X-Wing/ML-DSA-65 KATs + V3/V4 mixed-migration harness"
+
+### 19. Multi-Method Provider Auth
+
+- claim: Multi-Method Provider Auth
+- status: PROVEN
+- code_path: `crates/fcp-provider-auth/src/lib.rs`
+- test_path: `crates/fcp-provider-auth/src/lib.rs`
+- test_fn: `provider_helpers_build_device_code_profiles_and_validate_inputs`
+- proof_path: (none — unit-test matrix over auth methods)
+- no_formal_model_reason: "API key, SigV4, JWT refresh, device-code, PKCE, refresh-token, setup-token unit matrix"
+
+### 20. Credential Pooling
+
+- claim: Credential Pooling
+- status: PROVEN
+- code_path: `crates/fcp-host/src/credentials.rs`
+- test_path: `crates/fcp-e2e/tests/credential_pool_e2e.rs`
+- test_fn: `credential_pool_e2e_emits_redacted_round_robin_cooldown_and_exhaustion_evidence`
+- proof_path: (none — operational E2E)
+- no_formal_model_reason: "priority/strategy/cooldown/lease pooling verified by redaction-safe E2E"
+
+### 21. Multi-Host Singleton Writers (HRW)
+
+- claim: Multi-Host Singleton Writers (HRW)
+- status: PROVEN
+- code_path: `crates/fcp-core/src/lease.rs`
+- test_path: `crates/fcp-e2e/tests/multi_node_failover.rs`
+- test_fn: `deterministic_local_mesh_failover_smoke_covers_all_a4_chaos_modes`
+- proof_path: (none — operational failover replay harness)
+- no_formal_model_reason: "rendezvous-hashed lease holder + launch/flush/invoke fencing proven by failover replay"
+
+### 22. Browser Real-CDP Control Plane
+
+- claim: Browser Real-CDP Control Plane
+- status: PROVEN
+- code_path: `connectors/browser/src/connector.rs`
+- test_path: `connectors/browser/tests/real_browser_e2e.rs`
+- test_fn: `prerequisite_detection_accepts_env_binary_and_loopback_control_worker`
+- proof_path: (none — real-browser operation-matrix closeout)
+- no_formal_model_reason: "Rust-owned CDP control worker + direct-CDP routing exercised against real-browser harness"
+
+### 23. Voice-Call Multi-Provider Parity
+
+- claim: Voice-Call Multi-Provider Parity
+- status: PROVEN
+- code_path: `crates/fcp-voice-call/src/lib.rs`
+- test_path: `crates/fcp-voice-call/src/lib.rs`
+- test_fn: `replay_keys_are_provider_prefixed_and_isolated`
+- proof_path: (none — shared session/replay primitives + no-live-credential loopback)
+- no_formal_model_reason: "CallAuthToken/SessionStore/replay-cache shared across Twilio, Telnyx, Plivo"
+
+### 24. Manifest Operations Conformance
+
+- claim: Manifest Operations Conformance
+- status: PROVEN
+- code_path: `crates/fcp-conformance/tests/manifest_operations_conformance.rs`
+- test_path: `crates/fcp-conformance/tests/manifest_operations_conformance.rs`
+- test_fn: `raw_manifest_operation_harness_rejects_zero_operation_connectors`
+- proof_path: (none — manifest/source drift scanner)
+- no_formal_model_reason: "typed `[provides.operations.*]` coverage + runtime-const drift scanner"
+
 ## Coverage summary
 
-- Total README rows: 16
-- Rows with `code_path` + `test_path` + (`proof_path` OR `no_formal_model_reason`): 16
+- Total README rows: 24
+- Rows with `code_path` + `test_path` + (`proof_path` OR `no_formal_model_reason`): 24
 - Rows with formal-model proof artifact: 3 (Zone Isolation lean lattice, Capability Tokens typestate compile-fail, Symbol-First golden vectors); plus 2 pending (Threshold Owner Key, Mesh-Native cutover) tracked by named angoc beads
 - Rows still `LIMITED` or `STEADY-STATE TARGET`: 2 (Zone Isolation, Mesh-Native Architecture) — each has an explicit pending bead pointer
 

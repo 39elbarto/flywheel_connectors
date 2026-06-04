@@ -164,6 +164,18 @@ refresh-token redaction controls.
   to `fcp-sandbox/src/egress.rs` plus the E2E scenario.
 - README CPU-overhead proof wording updated to name the host-backed benchmark.
 
+## Ledger Supersession Delta
+
+This Q2 snapshot predates several README status-table rows. The authoritative,
+continuously-pinned source is now `docs/architecture/master_reachability.md`,
+which carries the full 24-row set (including the rows added after this report:
+Capability Token Typestate, Post-Quantum Zone Keys, Multi-Method Provider Auth,
+Credential Pooling, Multi-Host Singleton Writers (HRW), Browser Real-CDP Control
+Plane, Voice-Call Multi-Provider Parity, and Manifest Operations Conformance)
+plus the renamed `Tamper-Evident Audit + HLC` and `Threshold Secrets (Shamir)`
+labels. Treat any delta between this quarterly and the ledger as the ledger
+being current.
+
 ## Next Quarter Focus
 
 - Resolved 2026-05-05: `flywheel_connectors-01yaq` repaired instance-binding

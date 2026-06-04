@@ -580,6 +580,9 @@ async fn responses_timeout_and_cancellation_are_bounded() {
         cancel_error,
         OpenAiError::Network(NetworkError::Cancelled { .. })
     ));
+    // compatibility_cx() returns the shared ambient runtime context; clear the
+    // cancel flag so runtime teardown is not poisoned by the cancellation.
+    cx.set_cancel_requested(false);
 }
 
 #[fcp_async_core::runtime::test]

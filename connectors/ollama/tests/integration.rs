@@ -401,6 +401,10 @@ async fn auth_required_tailnet_policy_rate_limit_cancellation_and_shutdown_are_s
         .await
         .expect_err("cancelled context should fail before dispatch");
     assert!(cancelled.to_string().contains("cancelled"));
+    // compatibility_cx() returns the shared ambient runtime context, so clear
+    // the cancel flag before the rest of the test drives the runtime again
+    // (otherwise async Mutex locks observe the cancellation and panic).
+    cx.set_cancel_requested(false);
 
     connector
         .handle_shutdown(json!({}))
@@ -596,6 +600,8 @@ async fn ollama_loopback_e2e_jsonl_matrix() {
     )
     .await
     .expect_err("cancelled context should fail");
+    // Restore the shared ambient runtime context before further runtime use.
+    cx.set_cancel_requested(false);
     emit_jsonl(
         &git_revision,
         "cancellation",

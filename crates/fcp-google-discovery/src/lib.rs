@@ -1559,6 +1559,8 @@ mod tests {
             "gmail",
             "calendar",
             "gcal",
+            "meet",
+            "google-meet",
             "youtube",
             "bigquery",
             "drive",

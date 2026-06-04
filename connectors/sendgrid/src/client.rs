@@ -111,13 +111,10 @@ impl SendGridClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
+            // A 2xx with an empty body is a successful no-content response
+            // (e.g. POST/PUT/DELETE that returns no payload); coerce to `{}`
+            // rather than failing closed. See workspace commit 506b45904.
             if body.trim().is_empty() {
-                if status != StatusCode::NO_CONTENT && status != StatusCode::ACCEPTED {
-                    return Err(SendGridError::Api {
-                        status_code: status.as_u16(),
-                        message: "empty response body".into(),
-                    });
-                }
                 return Ok(serde_json::json!({}));
             }
             Ok(serde_json::from_str(&body)?)

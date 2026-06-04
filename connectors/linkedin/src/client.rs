@@ -348,27 +348,21 @@ mod tests {
     }
 
     #[test]
-    fn decode_success_body_rejects_empty_ok() {
-        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
-        assert!(matches!(
-            err,
-            LinkedInError::Api {
-                status_code: 200,
-                message
-            } if message == "empty response body"
-        ));
+    fn decode_success_body_coerces_empty_ok_to_empty_object() {
+        // Contract (commit 506b45904): a 2xx with an empty body is a successful
+        // no-content response and decodes to `{}` rather than failing closed.
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]
-    fn decode_success_body_rejects_whitespace_ok() {
-        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
-        assert!(matches!(
-            err,
-            LinkedInError::Api {
-                status_code: 200,
-                message
-            } if message == "empty response body"
-        ));
+    fn decode_success_body_coerces_whitespace_ok_to_empty_object() {
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "  \n\t").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:5d4adf3a13d983e2cd2787c3991f7ce1e62f74da8beb9b9362660a40604bbaac"
+interface_hash = "blake3-256:fcp.interface.v2:39a41f4eb2300f7c21febdb8f1043e1c997a1a55bef10c5d70b38734ac9fc44c"
 
 [connector]
 id = "fcp.square"
@@ -28,7 +28,15 @@ forbidden = ["z:public", "z:community"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = [
+    "square.catalog.read",
+    "square.customers.read",
+    "square.locations.read",
+    "square.orders.read",
+    "square.orders.write",
+    "square.payments.read",
+    "square.payments.write",
+]
 forbidden = ["system.exec", "network.listen", "system.privileged"]
 
 # Auth and scope model:

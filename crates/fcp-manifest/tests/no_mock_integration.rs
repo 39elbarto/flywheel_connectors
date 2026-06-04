@@ -512,9 +512,9 @@ fn network_spki_pins_parse() {
 
 #[test]
 fn duplicate_capability_across_lists_rejected() {
-    let toml = base_manifest().replace("optional = []", "").replace(
-        "required = [\"network.egress\"]",
-        "required = [\"network.egress\"]\noptional = [\"network.egress\"]",
+    let toml = base_manifest().replace(
+        "required = [\"network.egress\", \"test.op\"]",
+        "required = [\"network.egress\", \"test.op\"]\noptional = [\"network.egress\"]",
     );
     let err = parse_err(&toml);
     assert!(err.contains("duplicate capability"));
@@ -523,8 +523,8 @@ fn duplicate_capability_across_lists_rejected() {
 #[test]
 fn capability_in_required_and_forbidden_rejected() {
     let toml = base_manifest().replace(
-        "required = [\"network.egress\"]",
-        "required = [\"network.egress\", \"system.exec\"]",
+        "required = [\"network.egress\", \"test.op\"]",
+        "required = [\"network.egress\", \"test.op\", \"system.exec\"]",
     );
     let err = parse_err(&toml);
     assert!(err.contains("duplicate capability"));
@@ -653,8 +653,10 @@ fn operation_without_network_constraints_ok() {
 
 #[test]
 fn multiple_operations_parse() {
-    let toml = base_manifest()
-        + r#"
+    let toml = base_manifest().replace(
+        "required = [\"network.egress\", \"test.op\"]",
+        "required = [\"network.egress\", \"test.op\", \"test.second\"]",
+    ) + r#"
 [provides.operations.second_op]
 description = "Second operation"
 capability = "test.second"
@@ -864,6 +866,13 @@ require_transparency_log = true
 require_attestation_types = ["in-toto"]
 min_slsa_level = 3
 trusted_builders = ["github-actions"]
+
+[signatures]
+publisher_threshold = "1-of-1"
+transparency_log_entry = "objectid:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+[[signatures.publisher_signatures]]
+kid = "key1"
+sig = "base64:AQIDBA=="
 "#;
     let manifest = parse_valid(&toml);
     let policy = manifest.policy.as_ref().unwrap();
@@ -931,8 +940,8 @@ fn interface_hash_changes_with_operation_change() {
 fn interface_hash_changes_with_capability_change() {
     let toml1 = base_manifest();
     let toml2 = base_manifest().replace(
-        "required = [\"network.egress\"]",
-        "required = [\"network.egress\", \"network.dns\"]",
+        "required = [\"network.egress\", \"test.op\"]",
+        "required = [\"network.egress\", \"test.op\", \"network.dns\"]",
     );
 
     let m1 = ConnectorManifest::parse_str_unchecked(&toml1).unwrap();

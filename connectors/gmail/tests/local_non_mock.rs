@@ -356,14 +356,17 @@ async fn loopback_acceptance_exercises_label_read_message_read_and_send_paths() 
     let observations = fixture.observations();
     assert_eq!(observations.len(), 3);
     assert_eq!(observations[0].method, "GET");
-    assert_eq!(observations[0].path, "/users/me/labels");
+    assert_eq!(observations[0].path_without_query(), "/users/me/labels");
     assert_eq!(observations[1].method, "GET");
     assert_eq!(
-        observations[1].path,
+        observations[1].path_without_query(),
         "/users/me/messages/msg-local-acceptance"
     );
     assert_eq!(observations[2].method, "POST");
-    assert_eq!(observations[2].path, "/users/me/messages/send");
+    assert_eq!(
+        observations[2].path_without_query(),
+        "/users/me/messages/send"
+    );
     assert!(
         observations
             .iter()

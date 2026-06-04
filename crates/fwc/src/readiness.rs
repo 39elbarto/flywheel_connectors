@@ -2228,6 +2228,7 @@ fn normalize_manifest_for_discovery(raw: &str) -> Result<Option<toml::Value>> {
 fn parse_connector_status_label(value: &str) -> Option<ConnectorStatus> {
     match value.trim().to_ascii_lowercase().as_str() {
         "ready" => Some(ConnectorStatus::Ready),
+        "proven" => Some(ConnectorStatus::Proven),
         "stub" => Some(ConnectorStatus::Stub),
         "experimental" => Some(ConnectorStatus::Experimental),
         "deprecated" => Some(ConnectorStatus::Deprecated),

@@ -944,6 +944,8 @@ pub enum ConnectorStatus {
     /// Fully functional — all declared operations work.
     #[default]
     Ready,
+    /// Fully functional and backed by the connector graduation proof bundle.
+    Proven,
     /// Operations are declared but return "not implemented" errors.
     Stub,
     /// Connector is experimental/in development.
@@ -968,7 +970,7 @@ impl ConnectorStatus {
     /// Returns `true` if this status represents a live, production-ready connector.
     #[must_use]
     pub const fn is_live(&self) -> bool {
-        matches!(self, Self::Ready | Self::Experimental)
+        matches!(self, Self::Ready | Self::Proven | Self::Experimental)
     }
 
     /// Returns `true` if this connector should be hidden from default
@@ -985,7 +987,7 @@ impl ConnectorStatus {
     #[must_use]
     pub const fn non_live_rationale(&self) -> Option<&'static str> {
         match self {
-            Self::Ready | Self::Experimental => None,
+            Self::Ready | Self::Proven | Self::Experimental => None,
             Self::Stub => Some("Operations are declared but return not-implemented errors"),
             Self::Deprecated => Some("Connector is deprecated; prefer the listed alternative"),
             Self::Incubating => Some("Runtime path is incomplete or lacks production evidence"),
@@ -998,7 +1000,7 @@ impl ConnectorStatus {
     #[must_use]
     pub const fn graduation_guidance(&self) -> Option<&'static str> {
         match self {
-            Self::Ready | Self::Deprecated => None,
+            Self::Ready | Self::Proven | Self::Deprecated => None,
             Self::Experimental => Some("Stabilize API surface and complete production testing"),
             Self::Stub => Some("Implement all declared operations with real API integration"),
             Self::Incubating => Some(
@@ -1016,6 +1018,7 @@ impl std::fmt::Display for ConnectorStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => write!(f, "ready"),
+            Self::Proven => write!(f, "proven"),
             Self::Stub => write!(f, "stub"),
             Self::Experimental => write!(f, "experimental"),
             Self::Deprecated => write!(f, "deprecated"),
@@ -1044,6 +1047,7 @@ impl StatusConsistencyResult {
     ///
     /// The canonical mapping is:
     /// - `"ready"` / `"live"` → `ConnectorStatus::Ready`
+    /// - `"proven"` → `ConnectorStatus::Proven`
     /// - `"stub"` → `ConnectorStatus::Stub`
     /// - `"experimental"` → `ConnectorStatus::Experimental`
     /// - `"deprecated"` → `ConnectorStatus::Deprecated`
@@ -1054,6 +1058,7 @@ impl StatusConsistencyResult {
     pub fn check(manifest_status: ConnectorStatus, runtime_status: &str) -> Self {
         let runtime_canonical = match runtime_status {
             "ready" | "live" => Some(ConnectorStatus::Ready),
+            "proven" => Some(ConnectorStatus::Proven),
             "stub" => Some(ConnectorStatus::Stub),
             "experimental" => Some(ConnectorStatus::Experimental),
             "deprecated" => Some(ConnectorStatus::Deprecated),
@@ -1064,12 +1069,18 @@ impl StatusConsistencyResult {
         };
 
         match runtime_canonical {
-            Some(rt) if rt == manifest_status => Self {
-                consistent: true,
-                manifest_status,
-                runtime_status: runtime_status.to_string(),
-                mismatch_reason: None,
-            },
+            Some(rt)
+                if rt == manifest_status
+                    || (manifest_status == ConnectorStatus::Proven
+                        && rt == ConnectorStatus::Ready) =>
+            {
+                Self {
+                    consistent: true,
+                    manifest_status,
+                    runtime_status: runtime_status.to_string(),
+                    mismatch_reason: None,
+                }
+            }
             Some(rt) => Self {
                 consistent: false,
                 manifest_status,
@@ -10144,6 +10155,7 @@ schema_version = "2.1"
     #[test]
     fn connector_status_display_all_variants() {
         assert_eq!(ConnectorStatus::Ready.to_string(), "ready");
+        assert_eq!(ConnectorStatus::Proven.to_string(), "proven");
         assert_eq!(ConnectorStatus::Stub.to_string(), "stub");
         assert_eq!(ConnectorStatus::Experimental.to_string(), "experimental");
         assert_eq!(ConnectorStatus::Deprecated.to_string(), "deprecated");
@@ -10156,6 +10168,7 @@ schema_version = "2.1"
     fn connector_status_serde_roundtrip() {
         for status in &[
             ConnectorStatus::Ready,
+            ConnectorStatus::Proven,
             ConnectorStatus::Stub,
             ConnectorStatus::Experimental,
             ConnectorStatus::Deprecated,
@@ -10172,6 +10185,7 @@ schema_version = "2.1"
     #[test]
     fn connector_status_is_live() {
         assert!(ConnectorStatus::Ready.is_live());
+        assert!(ConnectorStatus::Proven.is_live());
         assert!(ConnectorStatus::Experimental.is_live());
         assert!(!ConnectorStatus::Stub.is_live());
         assert!(!ConnectorStatus::Deprecated.is_live());
@@ -10183,6 +10197,7 @@ schema_version = "2.1"
     #[test]
     fn connector_status_is_hidden_by_default() {
         assert!(!ConnectorStatus::Ready.is_hidden_by_default());
+        assert!(!ConnectorStatus::Proven.is_hidden_by_default());
         assert!(!ConnectorStatus::Experimental.is_hidden_by_default());
         assert!(!ConnectorStatus::Deprecated.is_hidden_by_default());
         assert!(ConnectorStatus::Stub.is_hidden_by_default());
@@ -10194,6 +10209,7 @@ schema_version = "2.1"
     #[test]
     fn connector_status_non_live_rationale() {
         assert!(ConnectorStatus::Ready.non_live_rationale().is_none());
+        assert!(ConnectorStatus::Proven.non_live_rationale().is_none());
         assert!(ConnectorStatus::Experimental.non_live_rationale().is_none());
         assert!(ConnectorStatus::Stub.non_live_rationale().is_some());
         assert!(ConnectorStatus::Deprecated.non_live_rationale().is_some());
@@ -10205,6 +10221,7 @@ schema_version = "2.1"
     #[test]
     fn connector_status_graduation_guidance() {
         assert!(ConnectorStatus::Ready.graduation_guidance().is_none());
+        assert!(ConnectorStatus::Proven.graduation_guidance().is_none());
         assert!(ConnectorStatus::Deprecated.graduation_guidance().is_none());
         assert!(ConnectorStatus::Incubating.graduation_guidance().is_some());
         assert!(ConnectorStatus::Quarantined.graduation_guidance().is_some());
@@ -10233,6 +10250,18 @@ schema_version = "2.1"
     fn status_consistency_check_live_maps_to_ready() {
         // "live" is a legacy alias for "ready"
         let result = StatusConsistencyResult::check(ConnectorStatus::Ready, "live");
+        assert!(result.consistent);
+    }
+
+    #[test]
+    fn status_consistency_check_proven_accepts_ready_runtime() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Proven, "ready");
+        assert!(result.consistent);
+    }
+
+    #[test]
+    fn status_consistency_check_proven_match() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Proven, "proven");
         assert!(result.consistent);
     }
 

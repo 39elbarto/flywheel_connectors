@@ -1,6 +1,6 @@
 # Gmail Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: PROVEN
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/gmail_connector_verification.sh`

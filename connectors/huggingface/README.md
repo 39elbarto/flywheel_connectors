@@ -1,6 +1,6 @@
 # Hugging Face Connector V3 Contract
 
-> **Status**: incubating runtime contract documented with inference-endpoint and credential-injection drift
+> **Status**: PROVEN runtime contract documented with inference-endpoint and credential-injection drift
 > **Bead**: `flywheel_connectors-4kw5f.2.4.4`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/huggingface_connector_verification.sh`

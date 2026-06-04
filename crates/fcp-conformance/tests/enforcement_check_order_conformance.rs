@@ -300,5 +300,5 @@ fn every_enforcement_check_id_appears_in_canonical_order_exactly_once() {
             "canonical_order MUST NOT contain duplicates; saw {check:?} twice"
         );
     }
-    assert_eq!(seen.len(), 11);
+    assert_eq!(seen.len(), EnforcementCheckOrder::COUNT);
 }

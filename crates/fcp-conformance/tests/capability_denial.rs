@@ -11,11 +11,13 @@
 
 #![allow(clippy::needless_pass_by_value)]
 
+use std::sync::Arc;
+
 use fcp_host::{
     EnforcementContext, EnforcementContextBuilder, EnforcementDecision, EnforcementPipeline,
-    PipelineOutcome,
+    MeshQuorumSignals, PipelineOutcome, classify_deployment_mode,
 };
-use fcp_prelude::ZoneId;
+use fcp_prelude::{SafetyTier, ZoneId};
 
 const CANONICAL_ZONES: &[fn() -> ZoneId] = &[
     ZoneId::private,
@@ -34,6 +36,13 @@ fn ctx(
     capability_claims: Vec<String>,
     required_capability: Option<&str>,
 ) -> EnforcementContext {
+    // DeploymentTier (check #5) fails CLOSED on a missing `safety_tier` /
+    // `deployment_classification` (br-298px). Supply an admissible pair —
+    // `SafetyTier::Safe` under a `MeshActive` classification — so the pipeline
+    // reaches `capability_verify` (and beyond) instead of short-circuiting at the
+    // tier gate. The denial under test, when it occurs, is still the capability
+    // check (asserted by `assert_cap_denied`).
+    let classification = Arc::new(classify_deployment_mode(MeshQuorumSignals::fully_active(3)));
     let mut builder = EnforcementContextBuilder::new()
         .request_id("req-cap-denial")
         .connector_id("slack:utility:1.0.0")
@@ -42,7 +51,9 @@ fn ctx(
         .principal("agent-alpha")
         .capability_claims(capability_claims)
         .timestamp_ms(1_700_000_000_000)
-        .holder_proof_required(false);
+        .holder_proof_required(false)
+        .safety_tier(SafetyTier::Safe)
+        .deployment_classification(classification);
     if let Some(cap) = required_capability {
         builder = builder.required_capability(cap);
     }

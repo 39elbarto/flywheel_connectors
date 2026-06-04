@@ -3,14 +3,14 @@ source: crates/fcp-audit/tests/golden_receipts.rs
 expression: "json!({ \"unsampled\": unsampled, \"sampled\": sampled, })"
 ---
 {
-  "unsampled": {
-    "trace_id": "0af7651916cd43dd8448eb211c80319c",
-    "span_id": "b7ad6b7169203331",
-    "flags": 0
-  },
   "sampled": {
-    "trace_id": "0af7651916cd43dd8448eb211c80319c",
+    "flags": 1,
     "span_id": "b7ad6b7169203331",
-    "flags": 1
+    "trace_id": "0af7651916cd43dd8448eb211c80319c"
+  },
+  "unsampled": {
+    "flags": 0,
+    "span_id": "b7ad6b7169203331",
+    "trace_id": "0af7651916cd43dd8448eb211c80319c"
   }
 }

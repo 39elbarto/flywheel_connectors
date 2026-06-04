@@ -748,7 +748,7 @@ async fn client_download_attachment_rejects_disallowed_host_without_leaking_quer
 
 #[fcp_async_core::runtime::test]
 async fn client_download_attachment_rejects_oversized_content_length() {
-    use fcp_async_core::io::AsyncWriteExt;
+    use fcp_async_core::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = fcp_async_core::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -756,6 +756,22 @@ async fn client_download_attachment_rejects_oversized_content_length() {
     let addr = listener.local_addr().unwrap();
     let server = fcp_async_core::task::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
+        // Read the full request head before responding: writing the response
+        // (and dropping the socket) while the client is still sending makes
+        // hyper fail the request itself with `UnexpectedMessage` instead of
+        // surfacing the oversized Content-Length to the client.
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
         socket
             .write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 104857601\r\n\r\n",

@@ -411,13 +411,19 @@ fn snapshot_trace_context_sampled_and_unsampled() {
     let sampled =
         TraceContext::new("0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331").with_flags(0x01);
 
-    insta::assert_json_snapshot!(
-        "trace_context_both_flags",
-        json!({
-            "unsampled": unsampled,
-            "sampled": sampled,
-        })
-    );
+    // `json!` map key order depends on serde_json's `preserve_order`
+    // feature, which flips with the build graph (feature unification pulls
+    // it in via dev-dep paths in some invocations but not others). Force a
+    // deterministic rendering so this snapshot is stable in both modes.
+    insta::with_settings!({sort_maps => true}, {
+        insta::assert_json_snapshot!(
+            "trace_context_both_flags",
+            json!({
+                "unsampled": unsampled,
+                "sampled": sampled,
+            })
+        );
+    });
 }
 
 #[test]
@@ -511,13 +517,18 @@ fn snapshot_verify_report_deeply_nested_with_chain_head() {
         ],
     };
 
-    insta::assert_json_snapshot!(
-        "verify_report_deeply_nested_with_chain_head",
-        json!({
-            "head": head,
-            "report": report,
-        })
-    );
+    // `json!` converts the nested structs to Map-backed Values, whose key
+    // order depends on serde_json's `preserve_order` feature (flips with
+    // the build graph). Force deterministic rendering for stability.
+    insta::with_settings!({sort_maps => true}, {
+        insta::assert_json_snapshot!(
+            "verify_report_deeply_nested_with_chain_head",
+            json!({
+                "head": head,
+                "report": report,
+            })
+        );
+    });
 }
 
 #[test]

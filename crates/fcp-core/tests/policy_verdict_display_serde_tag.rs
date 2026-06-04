@@ -3,12 +3,23 @@
 //! fcp-core does not expose a type literally named `PolicyVerdict`. The policy
 //! verdict surface with both stable Display text and serde tags is
 //! `DecisionReasonCode`, carried by `PolicyDecision`.
+//!
+//! Since a258d6976 ("align `DecisionReasonCode` serde tags with dotted
+//! Display form") the serde wire tag IS the dotted Display token. The
+//! pre-alignment
+//! `snake_case` tags are pinned only so we can assert they stay rejected on
+//! the wire.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::DecisionReasonCode;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// `(verdict, canonical dotted token, legacy snake_case tag)`.
+///
+/// The canonical token is simultaneously the Display form and the serde wire
+/// tag. The legacy tag column preserves the pre-a258d6976 wire form so the
+/// rejection test can prove old tags are not silently accepted.
 const POLICY_VERDICT_CASES: &[(DecisionReasonCode, &str, &str)] = &[
     (DecisionReasonCode::Allow, "allow", "allow"),
     (
@@ -186,18 +197,13 @@ const POLICY_VERDICT_CASES: &[(DecisionReasonCode, &str, &str)] = &[
 #[test]
 fn policy_verdict_matrix_is_unique_and_complete() {
     let mut variants = std::collections::HashSet::new();
-    let mut display_tokens = std::collections::HashSet::new();
-    let mut serde_tags = std::collections::HashSet::new();
+    let mut canonical_tokens = std::collections::HashSet::new();
 
-    for (verdict, display_token, serde_tag) in POLICY_VERDICT_CASES {
+    for (verdict, canonical_token, _) in POLICY_VERDICT_CASES {
         assert!(variants.insert(*verdict), "duplicate verdict {verdict:?}");
         assert!(
-            display_tokens.insert(*display_token),
-            "duplicate Display token {display_token}"
-        );
-        assert!(
-            serde_tags.insert(*serde_tag),
-            "duplicate serde tag {serde_tag}"
+            canonical_tokens.insert(*canonical_token),
+            "duplicate canonical token {canonical_token}"
         );
     }
 
@@ -210,21 +216,21 @@ fn policy_verdict_matrix_is_unique_and_complete() {
 
 #[test]
 fn policy_verdict_display_tokens_are_pinned() {
-    for (verdict, display_token, _) in POLICY_VERDICT_CASES {
-        assert_eq!(verdict.as_str(), *display_token);
-        assert_eq!(verdict.to_string(), *display_token);
-        assert_eq!(format!("{verdict}"), *display_token);
+    for (verdict, canonical_token, _) in POLICY_VERDICT_CASES {
+        assert_eq!(verdict.as_str(), *canonical_token);
+        assert_eq!(verdict.to_string(), *canonical_token);
+        assert_eq!(format!("{verdict}"), *canonical_token);
     }
 }
 
 #[test]
 fn policy_verdict_json_tags_are_pinned_and_roundtrip() -> TestResult {
-    for (verdict, _, serde_tag) in POLICY_VERDICT_CASES {
+    for (verdict, canonical_token, _) in POLICY_VERDICT_CASES {
         let json = serde_json::to_value(verdict)?;
-        assert_eq!(json, serde_json::json!(serde_tag));
+        assert_eq!(json, serde_json::json!(canonical_token));
 
         let json_text = serde_json::to_string(verdict)?;
-        assert_eq!(json_text, format!("\"{serde_tag}\""));
+        assert_eq!(json_text, format!("\"{canonical_token}\""));
 
         let decoded: DecisionReasonCode = serde_json::from_value(json)?;
         assert_eq!(decoded, *verdict);
@@ -235,12 +241,12 @@ fn policy_verdict_json_tags_are_pinned_and_roundtrip() -> TestResult {
 
 #[test]
 fn policy_verdict_cbor_tags_are_text_and_roundtrip() -> TestResult {
-    for (verdict, _, serde_tag) in POLICY_VERDICT_CASES {
+    for (verdict, canonical_token, _) in POLICY_VERDICT_CASES {
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(verdict, &mut bytes)?;
 
         let value: CborValue = ciborium::de::from_reader(bytes.as_slice())?;
-        assert_eq!(value, CborValue::Text((*serde_tag).to_string()));
+        assert_eq!(value, CborValue::Text((*canonical_token).to_string()));
 
         let decoded: DecisionReasonCode = ciborium::de::from_reader(bytes.as_slice())?;
         assert_eq!(decoded, *verdict);
@@ -250,21 +256,35 @@ fn policy_verdict_cbor_tags_are_text_and_roundtrip() -> TestResult {
 }
 
 #[test]
-fn policy_verdict_display_tokens_are_not_accepted_as_wire_tags_when_dotted() {
-    for (verdict, display_token, serde_tag) in POLICY_VERDICT_CASES {
-        if display_token == serde_tag {
+fn policy_verdict_display_and_serde_tags_are_aligned() -> TestResult {
+    // The a258d6976 contract: every verdict's serde wire tag equals its
+    // Display token, so receipts and wire payloads carry the same string
+    // operators read in logs.
+    for (verdict, canonical_token, _) in POLICY_VERDICT_CASES {
+        let wire_tag = serde_json::to_value(verdict)?;
+        assert_eq!(
+            wire_tag,
+            serde_json::json!(verdict.to_string()),
+            "Display token and serde wire tag must stay aligned for {verdict:?}"
+        );
+        assert_eq!(verdict.as_str(), *canonical_token);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn policy_verdict_rejects_legacy_snake_case_tags() {
+    for (verdict, canonical_token, legacy_tag) in POLICY_VERDICT_CASES {
+        if canonical_token == legacy_tag {
+            // `allow` never changed shape.
             continue;
         }
 
+        let legacy_json = format!("\"{legacy_tag}\"");
         assert!(
-            display_token.contains('.'),
-            "test sentinel assumes {verdict:?} has a dotted Display token"
-        );
-
-        let display_json = format!("\"{display_token}\"");
-        assert!(
-            serde_json::from_str::<DecisionReasonCode>(&display_json).is_err(),
-            "Display token {display_json} must not be accepted as serde wire tag"
+            serde_json::from_str::<DecisionReasonCode>(&legacy_json).is_err(),
+            "legacy snake_case tag {legacy_json} must not be accepted as a wire tag for {verdict:?}"
         );
     }
 }

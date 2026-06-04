@@ -378,22 +378,34 @@ fn rejects_pascal_case_variant_name() {
 }
 
 #[test]
-fn rejects_dotted_display_form_on_wire() {
-    // The Display form ("capability.insufficient") is NOT the wire
-    // form. Pin that the dotted form is rejected even though
-    // operators see it in audit logs — only the snake_case serde
-    // form decodes.
+fn rejects_legacy_snake_case_form_on_wire() {
+    // Since a258d6976 the dotted Display form IS the wire form; the
+    // pre-alignment snake_case tags are legacy and must be rejected so
+    // old payloads cannot silently decode to the wrong contract.
     for bad in [
-        r#""capability.insufficient""#,
-        r#""zone_policy.principal_denied""#,
-        r#""approval.expired""#,
-        r#""posture.requirement_not_met""#,
+        r#""capability_insufficient""#,
+        r#""zone_policy_principal_denied""#,
+        r#""approval_expired""#,
+        r#""posture_requirement_not_met""#,
     ] {
         let parsed = serde_json::from_str::<DecisionReasonCode>(bad);
         assert!(
             parsed.is_err(),
-            "{bad} MUST be rejected — dotted Display form is NOT the wire form"
+            "{bad} MUST be rejected — legacy snake_case form is no longer the wire form"
         );
+    }
+
+    // And the dotted form decodes.
+    for good in [
+        (r#""capability.insufficient""#, "capability.insufficient"),
+        (
+            r#""zone_policy.principal_denied""#,
+            "zone_policy.principal_denied",
+        ),
+    ] {
+        let parsed: DecisionReasonCode =
+            serde_json::from_str(good.0).expect("dotted wire form decodes");
+        assert_eq!(parsed.as_str(), good.1);
     }
 }
 

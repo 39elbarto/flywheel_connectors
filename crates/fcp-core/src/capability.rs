@@ -4410,7 +4410,7 @@ mod tests {
         let (token, pub_bytes, _instance, cap, op) = mk_token_with_instance();
         // Unbound verifier — verify_bound must refuse with a clear error.
         let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
-        let err = verifier.verify(token, &cap, &op, &[]).unwrap_err();
+        let err = verifier.verify_bound(token, &cap, &op, &[]).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -5947,9 +5947,18 @@ mod tests {
     }
 
     #[test]
-    fn zone_id_with_hyphens_and_underscores() {
-        let z: ZoneId = "z:my-custom_zone".parse().unwrap();
-        assert_eq!(z.as_str(), "z:my-custom_zone");
+    fn zone_id_with_hyphens_allowed_underscores_rejected() {
+        // Hyphens are valid zone-id characters; underscores were removed
+        // from the charset (4728b8918) so zone ids stay representable as
+        // Tailscale ACL tags, which forbid `_`.
+        let z: ZoneId = "z:my-custom-zone".parse().unwrap();
+        assert_eq!(z.as_str(), "z:my-custom-zone");
+
+        let err = "z:my-custom_zone".parse::<ZoneId>().unwrap_err();
+        assert!(
+            matches!(err, ZoneIdError::InvalidChar { ch: '_', .. }),
+            "underscore should be rejected, got {err:?}"
+        );
     }
 
     #[test]
@@ -6965,12 +6974,14 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.raw")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.raw"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&test_constraints_cbor())
             .expect("valid constraints")
@@ -6981,7 +6992,7 @@ mod tests {
         let unverified = CapabilityToken::from_raw(cose_token);
         let _raw_unverified = unverified.raw().to_cbor().unwrap();
 
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.raw").unwrap();
         let cap = CapabilityId::new("cap.raw").unwrap();
 
@@ -7067,12 +7078,14 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.clone")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.clone"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&test_constraints_cbor())
             .expect("valid constraints")
@@ -7080,7 +7093,7 @@ mod tests {
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.clone").unwrap();
         let cap = CapabilityId::new("cap.clone").unwrap();
 
@@ -7130,12 +7143,14 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.consume")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.consume"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&test_constraints_cbor())
             .expect("valid constraints")
@@ -7143,7 +7158,7 @@ mod tests {
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.consume").unwrap();
         let cap = CapabilityId::new("cap.consume").unwrap();
 
@@ -7164,12 +7179,14 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.noncon")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.noncon"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&test_constraints_cbor())
             .expect("valid constraints")
@@ -7177,7 +7194,7 @@ mod tests {
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.noncon").unwrap();
         let cap = CapabilityId::new("cap.noncon").unwrap();
 
@@ -7199,12 +7216,14 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.serde")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.serde"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&test_constraints_cbor())
             .expect("valid constraints")
@@ -7212,7 +7231,7 @@ mod tests {
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.serde").unwrap();
         let cap = CapabilityId::new("cap.serde").unwrap();
 

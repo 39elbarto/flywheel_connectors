@@ -2521,7 +2521,10 @@ mod tests {
 
     #[test]
     fn baseline_report_zone_id_with_special_chars() {
-        let zone = "z:test-zone_123-prod";
+        // Underscores were removed from the ZoneId charset (4728b8918) so
+        // zone ids stay representable as Tailscale ACL tags; hyphens and
+        // digits remain valid.
+        let zone = "z:test-zone-123-prod";
         let report = DoctorReport::baseline(zone);
         assert_eq!(report.zone_id.as_str(), zone);
     }

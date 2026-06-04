@@ -86,13 +86,6 @@ fn baseline_ctx() -> FitnessContext {
     FitnessContext::new()
 }
 
-fn assert_zero_score(score: f64) {
-    assert!(
-        score.abs() < EPSILON,
-        "expected score to be 0.0 within {EPSILON}; got {score}"
-    );
-}
-
 fn fake_object_id(tag: &[u8]) -> ObjectId {
     let zone = ZoneId::work();
     let schema = SchemaId::new("fcp.test", "DeviceFitness", Version::new(1, 0, 0));

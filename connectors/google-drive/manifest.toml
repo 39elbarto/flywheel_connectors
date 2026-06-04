@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:638985fd11611f74c9c390e4a8ca3d1e309a592de7ac15b6c251e2d4b214f885"
 
 [connector]
 id = "fcp.google_drive"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Google Drive v3 (list, get, download, create folders, upload, trash, and share files)"
 archetypes = ["operational", "knowledge"]
 format = "wasi"
+status = "proven"
 
 [connector.state]
 model = "singleton_writer"

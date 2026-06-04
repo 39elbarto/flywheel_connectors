@@ -1,6 +1,6 @@
 # Google Drive Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: PROVEN runtime contract documented with manifest/runtime drift called out
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/google_drive_connector_verification.sh`
@@ -60,16 +60,15 @@ This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google_drive`, while runtime `BaseConnector` ID is `google-drive`.
 - Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
-- Manifest `interface_hash` is all zeroes.
 - Manifest optional capabilities include `media.download` and `media.upload`, but runtime introspection and capability verification use only `drive.read` and `drive.write`.
 - Runtime `drive.download_file` can return a JSON string in `content_base64` if the executor gives the client a JSON response body.
 - Runtime `drive.upload_file` advertises multipart upload but sends a JSON wrapper rather than constructing a true multipart request body or resumable upload session.
 - Runtime introspection says `max_results` has a maximum of 1000, but runtime input validation and client dispatch do not clamp the value.
 - Runtime `handle_shutdown` calls client shutdown but does not clear client, verifier, session, configured flags, or handshaken flags.
 - `self_check()` reports `DEFAULT_BASE_URL` in details even when a loopback or custom base URL was configured.
-- The dedicated tracked verification shell script is `scripts/e2e/google_drive_connector_verification.sh`; it is a verifier bundle, not a PROVEN promotion claim.
+- The dedicated tracked verification shell script is `scripts/e2e/google_drive_connector_verification.sh`.
 
-A follow-up parity bead should align connector ID spelling, replace placeholder interface proof, reconcile media capabilities, fix upload/download response semantics, clamp or reject out-of-range pagination input, reset lifecycle state consistently on shutdown, and report the active base URL in self-check.
+A follow-up parity bead should align connector ID spelling, reconcile media capabilities, fix upload/download response semantics, clamp or reject out-of-range pagination input, reset lifecycle state consistently on shutdown, and report the active base URL in self-check.
 
 ## First-Slice Scope
 
@@ -200,7 +199,12 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 The dedicated tracked verification bundle is `scripts/e2e/google_drive_connector_verification.sh`. It writes a redaction-safe artifact tree under `artifacts/e2e/google-drive/<run-id>` by default and records the gauntlet output, manifest check, connector-local Cargo proof logs, extracted `local_non_mock` JSONL, environment metadata, replay command, and summary status.
 
-This verifier intentionally keeps promotion truth separate from evidence gathering. In the current checkout it may report `graduation_gauntlet=pre_promotion_pending` while the README and manifest are not PROVEN/proven, and `manifest_check=manifest_drift_pending` while the manifest `interface_hash` is still the placeholder value. Those statuses are evidence to fix before promotion, not green PROVEN closeout.
+Promotion evidence:
+
+- Post-promotion gauntlet passed all 12 checks at `/tmp/fcp-google-drive-post-sagestork-20260604T195100Z.jsonl` (`sha256:13d378d685984c9228a39503db4c934982f517f16b509b778020e55d8bb4bc73`).
+- Pre-promotion verifier run `sagestork-drive-20260604T182350Z` wrote its summary to `/tmp/fcp-google-drive-e2e/sagestork-drive-20260604T182350Z/summary.json` (`sha256:f1d30af1911100d60db65d938887ddf5f72335734758d89223e61a7b42a55c45`). The run passed `cargo_check`, `format_check`, `connector_suite`, `local_non_mock`, `local_non_mock_jsonl`, and `clippy`; it remained non-green only because README/manifest promotion metadata and the manifest `interface_hash` update were still pending.
+- Extracted local non-mock evidence is `/tmp/fcp-google-drive-e2e/sagestork-drive-20260604T182350Z/evidence/local_non_mock.jsonl` (`sha256:47841b2c13a38b7fcc294fefad8567b98be097af515b98d7cd159c2f4fc30a24`). It records redaction-safe acceptance for `drive.get_file` through loopback HTTP, with authorization observed and no token, loopback endpoint, Google Drive host, refresh-token, client-secret, or bearer-header markers in the JSONL.
+- Pre-promotion gauntlet output is `/tmp/fcp-google-drive-e2e/sagestork-drive-20260604T182350Z/evidence/graduation_gauntlet.jsonl` (`sha256:1543bddf7339f56977f7ffc76be88fb8795368f947bfdfba17b09c940ba99990`), and manifest check evidence is `/tmp/fcp-google-drive-e2e/sagestork-drive-20260604T182350Z/evidence/manifest_check.json` (`sha256:3bca513ca8a6862dccff91958e127aab10318bb5ce987a3279990011d8626cc3`).
 
 The verification surface captures:
 
@@ -208,6 +212,8 @@ The verification surface captures:
 - deterministic WireMock coverage for Drive API paths
 - auth, endpoint policy, provider error, lifecycle, simulation, and introspection tests
 - formatting, check, test, and clippy proof through `rch`
+- extracted local non-mock acceptance records for `drive.get_file`
+- redaction checks for Drive access tokens, loopback endpoints, live Drive hosts, bearer headers, refresh tokens, and client secrets
 - UBS on changed files before commit
 
 ## Operator Guidance

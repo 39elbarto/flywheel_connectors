@@ -504,9 +504,9 @@ fn batch2_status_runner_writes_status_markdown() {
         fs::read_to_string(&status_path).expect("batch2 status markdown should be written");
     assert!(status_doc.contains("# Batch 2 Graduation Status"));
     assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch2"));
-    assert!(status_doc.contains("Summary: `1/9` Batch 2 connectors currently pass"));
-    assert!(status_doc.contains("Promotion status: `1/9` Batch 2 connectors are PROVEN"));
-    assert!(status_doc.contains("`8/9` still pass every check before `readme_status_match`"));
+    assert!(status_doc.contains("Summary: `2/9` Batch 2 connectors currently pass"));
+    assert!(status_doc.contains("Promotion status: `2/9` Batch 2 connectors are PROVEN"));
+    assert!(status_doc.contains("`7/9` still pass every check before `readme_status_match`"));
     for connector in BATCH2_CONNECTORS {
         assert!(
             status_doc.contains(connector),
@@ -519,9 +519,10 @@ fn batch2_status_runner_writes_status_markdown() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
         .collect::<Vec<_>>();
-    // Google Calendar is PROVEN and runs all 12 checks; the remaining eight are
-    // blocked at `readme_status_match` (check 8): 1 * 12 + 8 * 8 = 76 records.
-    assert_eq!(records.len(), 12 + 8 * 8);
+    // Google Calendar and Google Drive are PROVEN and run all 12 checks; the
+    // remaining seven are blocked at `readme_status_match` (check 8):
+    // 2 * 12 + 7 * 8 = 80 records.
+    assert_eq!(records.len(), 2 * 12 + 7 * 8);
     assert!(
         records
             .iter()
@@ -529,7 +530,7 @@ fn batch2_status_runner_writes_status_markdown() {
             .all(|record| record_str(record, "verdict") == Some("pass")),
         "Batch 2 connector paths should exist: {jsonl}"
     );
-    let proven_batch2 = BTreeSet::from(["connectors/google-calendar"]);
+    let proven_batch2 = BTreeSet::from(["connectors/google-calendar", "connectors/google-drive"]);
     assert!(
         records
             .iter()

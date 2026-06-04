@@ -33,13 +33,17 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use fcp_async_core::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+use fcp_async_core::net::TcpListener;
 use fcp_e2e::{AssertionsSummary, E2eLogEntry};
 use fcp_oauth::{OAuth2Client, OAuth2Config, OAuthError, validate_oauth_endpoint_url};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 const HARNESS_TIMEOUT_SECS: u64 = 15;
 
@@ -70,13 +74,47 @@ fn log(test: &str, phase: &str, result: &str, passed: u32, failed: u32, ctx: ser
 /// response. Any other path returns 404. Designed for one
 /// request-response cycle per test invocation; the spawned task exits
 /// after serving the first request.
+/// Read until the end-of-headers marker (`\r\n\r\n`) using the
+/// asupersync-native poll_read/ReadBuf API (the OAuth client pipeline
+/// runs under the asupersync runtime, so the loopback server must use
+/// the same runtime primitives — not tokio's AsyncReadExt).
+async fn read_request_headers<R>(stream: &mut R) -> io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = Vec::with_capacity(1024);
+    let mut temp = [0u8; 1024];
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *stream).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+        if read == 0 {
+            break;
+        }
+        buf.extend_from_slice(&temp[..read]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() >= 8192 {
+            break;
+        }
+    }
+    Ok(buf)
+}
+
 async fn spawn_oauth_token_server() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind 127.0.0.1:0");
     let addr = listener.local_addr().expect("local addr");
 
-    tokio::spawn(async move {
+    fcp_async_core::task::spawn_detached(async move {
         // Loop so the server can serve multiple sequential exchanges
         // (the happy-path test makes one, but adversarial timeouts
         // could spawn more).
@@ -85,26 +123,13 @@ async fn spawn_oauth_token_server() -> std::net::SocketAddr {
                 return;
             };
 
-            let mut buffer = [0u8; 8192];
-            let mut total_read = 0;
             // Read until we see "\r\n\r\n" (end of headers). Body is
             // form-encoded so we accept any body length.
-            loop {
-                let n = match socket.read(&mut buffer[total_read..]).await {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => return,
-                };
-                total_read += n;
-                if total_read >= 4 && buffer[..total_read].windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-                if total_read >= buffer.len() {
-                    break;
-                }
-            }
+            let Ok(request_bytes) = read_request_headers(&mut socket).await else {
+                return;
+            };
 
-            let request = String::from_utf8_lossy(&buffer[..total_read]);
+            let request = String::from_utf8_lossy(&request_bytes);
             let is_token_post =
                 request.starts_with("POST /token ") || request.starts_with("POST /token?");
 
@@ -136,14 +161,17 @@ async fn spawn_oauth_token_server() -> std::net::SocketAddr {
             };
 
             let _ = socket.write_all(response.as_bytes()).await;
-            let _ = socket.shutdown().await;
+            let _ = socket.flush().await;
+            // `Connection: close` + drop signals end-of-response; the
+            // asupersync TcpStream has no tokio-style `shutdown`.
+            drop(socket);
         }
     });
 
     addr
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test]
 async fn oauth_provider_real_token_exchange_against_loopback_server() {
     let started = Instant::now();
     let addr = spawn_oauth_token_server().await;
@@ -155,7 +183,7 @@ async fn oauth_provider_real_token_exchange_against_loopback_server() {
         1,
         0,
         json!({
-            "scenario": "real in-process tokio TCP server (no wiremock, no httpmock)",
+            "scenario": "real in-process asupersync TCP server (no wiremock, no httpmock)",
             "server_addr": addr.to_string(),
         }),
     );
@@ -172,7 +200,7 @@ async fn oauth_provider_real_token_exchange_against_loopback_server() {
 
     let client = OAuth2Client::new(config).expect("OAuth2Client must construct against loopback");
 
-    let outcome = tokio::time::timeout(
+    let outcome = fcp_async_core::time::timeout(
         Duration::from_secs(HARNESS_TIMEOUT_SECS),
         client.exchange_code("real-auth-code-from-callback"),
     )

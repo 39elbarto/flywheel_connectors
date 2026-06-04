@@ -17,6 +17,12 @@ call sites migrated to `fcp_sdk::ConnectorErrorMapping`.
 
 <!-- compat-shim-inventory-summary: suspected_core_compat_modules=0 suspected_core_compat_callers=0 scorecard_active_shims=0 scorecard_migrating_shims=0 -->
 
+<!-- Ratchet baseline consumed by crates/fcp-conformance/tests/compat_caller_count_decreasing.rs.
+     The forbidden `fcp_core::compat::{policy,evidence}` paths have zero workspace callers
+     (see the Suspected Core Compat Paths table above), so the ceiling is pinned at 0:
+     any newly introduced caller fails the ratchet. -->
+forbidden_compat_caller_baseline: 0
+
 ## Suspected Core Compat Paths
 
 | Shim guess | Module exists | Caller count | Status | Notes |

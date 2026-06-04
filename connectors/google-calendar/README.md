@@ -1,6 +1,6 @@
 # Google Calendar Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: PROVEN runtime contract documented with manifest/runtime drift called out
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/google_calendar_connector_verification.sh`
@@ -178,6 +178,12 @@ The deterministic integration evidence is anchored on connector-local tests cove
 ## Verification Bundle
 
 The dedicated tracked verification bundle is `scripts/e2e/google_calendar_connector_verification.sh`. It writes a redaction-safe artifact tree under `artifacts/e2e/google-calendar/<run-id>` by default and records the gauntlet output, manifest check, connector-local Cargo proof logs, extracted `local_non_mock` JSONL, environment metadata, replay command, and summary status.
+
+Promotion evidence:
+
+- Pre-promotion verifier run `sagestork-pre-20260604T153143Z` wrote its summary to `/tmp/fcp-google-calendar-e2e/sagestork-pre-20260604T153143Z/summary.json` (`sha256:fc9db13a7d0d70e5982ed6dae2695bc2c8ad46c89658b5653515e0dd6ebe8776`). The run passed `cargo_check`, `format_check`, `integration_suite`, `local_non_mock`, `local_non_mock_jsonl`, and `clippy`; it remained non-green only because README/manifest promotion metadata and the manifest `interface_hash` update were still pending.
+- Extracted local non-mock evidence is `/tmp/fcp-google-calendar-e2e/sagestork-pre-20260604T153143Z/evidence/local_non_mock.jsonl` (`sha256:5546317526fefad2d076c34d39626d678d4706abeec25f2f6812ce866324e2d2`). It records redaction-safe acceptance for `gcal.list_calendars`, `self_check`, `gcal.create_event`, and pre-egress wrong-capability denial.
+- Remote proof summaries are recorded for `cargo_check` on `vmi1156319`, plus `integration_suite`, `local_non_mock`, and `clippy` on `vmi1153651`.
 
 The verification surface captures:
 

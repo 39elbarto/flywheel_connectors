@@ -1383,12 +1383,14 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
     };
     let constraints_cbor = to_canonical_cbor(&constraints).expect("constraints should serialize");
 
+    let instance = InstanceId::new();
     let cose_capability = CapabilityBuilder::new()
         .capability_id("cap.test")
         .zone_id(zone.as_str())
         .principal("principal:test")
         .operations(&ops)
         .issuer("node:test")
+        .target_instance(instance.as_str())
         .validity(now, expires)
         .try_constraints_cbor(&constraints_cbor)
         .expect("constraints should parse")
@@ -1397,7 +1399,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
 
     let capability = CapabilityArtifact::from_raw(cose_capability);
 
-    let verifier = CapabilityVerifier::new(pub_bytes, zone.clone(), InstanceId::new());
+    let verifier = CapabilityVerifier::new(pub_bytes, zone.clone(), instance);
     let op = OperationId::new("op.test").expect("operation id must be canonical");
     let cap = CapabilityId::new("cap.test").expect("capability id must be canonical");
 

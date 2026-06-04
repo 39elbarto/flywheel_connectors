@@ -38337,6 +38337,39 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_connector_lease_status_offline_text_footer_reports_answer_source() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, output) = execute_text(&[
+            "fwc",
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
     fn execute_connector_lease_status_offline_uses_connector_target_zone() {
         let (_tempdir, path, _guard) = temp_context_config();
         let mut config = super::default_context_config();
@@ -38935,6 +38968,14 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_mesh_explain_availability_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "mesh", "explain-availability", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
     fn execute_mesh_explain_availability_with_host_reads_live_status_and_artifact_metadata() {
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -39013,6 +39054,40 @@ deny_ptrace = true
                 .as_array()
                 .is_some_and(|items| !items.is_empty())
         );
+    }
+
+    #[test]
+    fn execute_mesh_explain_availability_host_node_local_text_footer_reports_answer_source() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    mock_connector_admin_status_with_artifact(
+                        "local_path",
+                        "/opt/fcp/cache/github-enterprise",
+                        Value::Null,
+                    ),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, output) = execute_text(&[
+            "fwc",
+            "--host",
+            &host,
+            "mesh",
+            "explain-availability",
+            "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: node-local)\n"));
     }
 
     #[test]

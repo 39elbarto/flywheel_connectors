@@ -290,7 +290,7 @@ use std::process::{Command, ExitCode};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Utc};
-use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -375,7 +375,8 @@ use crate::render::{
     ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
 };
 use crate::truth::{
-    KnowledgeState, RequiredTruthSource, TRUTH_SOURCE_SCHEMA_VERSION, TruthSourceUnavailable,
+    KnowledgeState, RequiredTruthSource, ResolutionError, SourceOutcome,
+    TRUTH_SOURCE_SCHEMA_VERSION, TruthSourceUnavailable,
 };
 
 const ABOUT: &str =
@@ -3822,6 +3823,15 @@ fn build_render_options(
 }
 
 fn internal_error_dispatch(args: &[String], error: &anyhow::Error) -> DispatchOutcome {
+    if let Some(error) = error.downcast_ref::<ResolutionError>() {
+        let (command, subcommand) = truth_resolver_command_context(args);
+        return truth_resolver_internal_error_dispatch(
+            &command,
+            subcommand.as_deref(),
+            truth_resolver_redacted_cause(error),
+        );
+    }
+
     let mut dispatch = structured_error(
         "internal-error",
         "fwc hit an unexpected internal error before it could finish the request.",
@@ -3853,6 +3863,133 @@ fn internal_error_dispatch(args: &[String], error: &anyhow::Error) -> DispatchOu
     }
 
     dispatch
+}
+
+fn truth_resolver_command_context(args: &[String]) -> (String, Option<String>) {
+    let cli_command = Cli::command();
+    let mut command = None::<String>;
+    let mut subcommand = None::<String>;
+
+    for arg in args.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
+        let Some(command_name) = command.as_deref() else {
+            if cli_command.find_subcommand(arg).is_some() {
+                command = Some(arg.clone());
+            }
+            continue;
+        };
+
+        if cli_command
+            .find_subcommand(command_name)
+            .and_then(|command| command.find_subcommand(arg))
+            .is_some()
+        {
+            subcommand = Some(arg.clone());
+        }
+        break;
+    }
+
+    (command.unwrap_or_else(|| "fwc".to_owned()), subcommand)
+}
+
+fn truth_resolver_redacted_cause(error: &ResolutionError) -> String {
+    let outcomes = error
+        .attempts
+        .iter()
+        .map(|attempt| {
+            format!(
+                "{}:{}",
+                attempt.source.operator_truth_source(),
+                source_outcome_label(attempt.outcome)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if outcomes.is_empty() {
+        format!("{} strategy failed before querying sources", error.strategy)
+    } else {
+        format!(
+            "{} strategy exhausted {} source(s): {}",
+            error.strategy,
+            outcomes.len(),
+            outcomes.join(",")
+        )
+    }
+}
+
+fn source_outcome_label(outcome: SourceOutcome) -> &'static str {
+    match outcome {
+        SourceOutcome::Success => "success",
+        SourceOutcome::Partial => "partial",
+        SourceOutcome::Unreachable => "unreachable",
+        SourceOutcome::Error => "error",
+        SourceOutcome::Skipped => "skipped",
+        SourceOutcome::NotConfigured => "not-configured",
+    }
+}
+
+fn truth_resolver_internal_error_dispatch(
+    command: &str,
+    subcommand: Option<&str>,
+    redacted_cause: String,
+) -> DispatchOutcome {
+    truth_resolver_internal_error_dispatch_with_correlation(
+        command,
+        subcommand,
+        &redacted_cause,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+fn truth_resolver_internal_error_dispatch_with_correlation(
+    command: &str,
+    subcommand: Option<&str>,
+    redacted_cause: &str,
+    correlation_id: &str,
+) -> DispatchOutcome {
+    let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, command);
+    let display_command = subcommand.map_or_else(
+        || command.to_owned(),
+        |subcommand| format!("{command} {subcommand}"),
+    );
+
+    tracing::error!(
+        event = "fcp.truth_resolver.internal_error",
+        command = %display_command,
+        correlation_id = %correlation_id,
+        redacted_cause = %redacted_cause,
+        "truth resolver internal error"
+    );
+
+    let mut payload = json!({
+        "status": "error",
+        "command": command,
+        "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+        "_truth_source": "unavailable",
+        "error": {
+            "type": "truth-resolver-internal-error",
+            "message": format!(
+                "`fwc {display_command}` could not classify live truth because the resolver failed internally."
+            ),
+            "recoverable": false,
+            "redacted_cause": redacted_cause,
+            "log_event": "fcp.truth_resolver.internal_error",
+            "correlation_id": correlation_id,
+            "bead_reference": "flywheel_connectors-hr0rr.2.5",
+        },
+        "next_actions": [
+            "Inspect logs for `fcp.truth_resolver.internal_error` with the returned correlation_id.",
+            "Treat this response as non-authoritative until the resolver bug is fixed.",
+            "If the workflow cannot wait, use a lower-level host-backed command and record the weaker truth source.",
+        ],
+    });
+    if let Some(subcommand) = subcommand {
+        payload["subcommand"] = Value::String(subcommand.to_owned());
+    }
+    envelope.inject_into(&mut payload);
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Internal,
+    }
 }
 
 fn template_render_failure_dispatch(
@@ -30847,6 +30984,64 @@ mod tests {
         .expect("mesh truth-source payload should render");
 
         assert!(!outcome.text.contains("answer source"));
+    }
+
+    #[test]
+    fn internal_error_dispatch_maps_resolution_error_to_unavailable_truth_source() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "--host".to_owned(),
+            "https://secret-host.example/internal".to_owned(),
+            "list".to_owned(),
+        ];
+        let error = anyhow::Error::new(crate::truth::ResolutionError {
+            strategy: crate::truth::ResolutionStrategy::BestAvailable,
+            attempts: vec![crate::truth::SourceAttempt {
+                source: crate::truth::KnowledgeState::MeshBacked,
+                outcome: crate::truth::SourceOutcome::Error,
+                elapsed: Duration::from_millis(7),
+                detail: Some("token=raw-secret-value".to_owned()),
+            }],
+            reason: "raw database path /private/tmp/secret-store.sqlite leaked upstream".to_owned(),
+        });
+
+        let outcome = super::internal_error_dispatch(&args, &error);
+
+        assert_eq!(outcome.exit_code, CliExitCode::Internal);
+        assert_eq!(outcome.payload["status"], "error");
+        assert_eq!(outcome.payload["command"], "list");
+        assert_eq!(
+            outcome.payload["schema_version"],
+            TRUTH_SOURCE_SCHEMA_VERSION
+        );
+        assert_eq!(outcome.payload["_truth_source"], "unavailable");
+        assert_eq!(
+            outcome.payload["error"]["type"],
+            "truth-resolver-internal-error"
+        );
+        assert_eq!(
+            outcome.payload["error"]["redacted_cause"],
+            "best-available strategy exhausted 1 source(s): mesh:error"
+        );
+        assert_eq!(
+            outcome.payload["error"]["log_event"],
+            "fcp.truth_resolver.internal_error"
+        );
+        assert_eq!(
+            outcome.payload["error"]["bead_reference"],
+            "flywheel_connectors-hr0rr.2.5"
+        );
+        assert!(
+            outcome.payload["error"]["correlation_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+
+        let serialized = outcome.payload.to_string();
+        assert!(!serialized.contains("raw-secret-value"));
+        assert!(!serialized.contains("/private/tmp/secret-store.sqlite"));
+        assert!(!serialized.contains("secret-host.example"));
     }
 
     fn mock_direct_green_cutover_gate_snapshot() -> Value {

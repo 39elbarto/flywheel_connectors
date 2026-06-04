@@ -63,7 +63,11 @@ macro_rules! skip_without_token {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -78,6 +82,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .principal("user:live-test")
         .operations(&[op])
         .issuer("node:live-test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
@@ -123,7 +128,7 @@ async fn live_chat_completions() {
 
     let mut connector = OpenAIConnector::new();
     let signing_key = setup_live_connector(&mut connector, &api_key).await;
-    let capability = generate_read_token(&signing_key, "openai.simple_chat");
+    let capability = generate_read_token(&signing_key, connector.instance_id(), "openai.simple_chat");
 
     let result = connector
         .handle_invoke(json!({
@@ -188,7 +193,7 @@ async fn live_error_mapping_invalid_key() {
         .await
         .expect("handshake should succeed");
 
-    let capability = generate_read_token(&signing_key, "openai.simple_chat");
+    let capability = generate_read_token(&signing_key, connector.instance_id(), "openai.simple_chat");
 
     let err = connector
         .handle_invoke(json!({

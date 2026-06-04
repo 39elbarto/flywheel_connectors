@@ -62,7 +62,11 @@ macro_rules! skip_without_token {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -77,6 +81,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .principal("user:live-test")
         .operations(&[op])
         .issuer("node:live-test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
@@ -198,7 +203,7 @@ async fn live_get_file_nonexistent() {
 
     let mut connector = TelegramConnector::new();
     let signing_key = setup_live_connector(&mut connector, &token).await;
-    let capability = generate_read_token(&signing_key, "telegram.get_file");
+    let capability = generate_read_token(&signing_key, connector.instance_id().as_str(), "telegram.get_file");
 
     // Invoke get_file with a nonexistent file_id — should return a structured
     // Telegram API error (400 "Bad Request: invalid file_id"), not a panic.

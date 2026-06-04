@@ -61,7 +61,11 @@ macro_rules! skip_without_token {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> CapabilityToken {
     let cap = match op {
         "stripe.create_customer" | "stripe.update_customer" | "stripe.delete_customer" => {
             "stripe.write"
@@ -90,6 +94,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .principal("user:live-test")
         .operations(&[op])
         .issuer("node:live-test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
@@ -138,7 +143,7 @@ async fn live_customers_list() {
 
     let mut connector = fcp_stripe::connector::StripeConnector::new();
     let signing_key = setup_live_connector(&mut connector, &key).await;
-    let capability = generate_read_token(&signing_key, "stripe.list_customers");
+    let capability = generate_read_token(&signing_key, connector.instance_id(), "stripe.list_customers");
 
     let result = connector
         .handle_invoke(json!({
@@ -201,7 +206,7 @@ async fn live_error_mapping_invalid_key() {
         .await
         .expect("handshake should succeed");
 
-    let capability = generate_read_token(&signing_key, "stripe.list_customers");
+    let capability = generate_read_token(&signing_key, connector.instance_id(), "stripe.list_customers");
 
     let err = connector
         .handle_invoke(json!({

@@ -102,6 +102,26 @@ run_capture_stdout() {
   ) >"${stdout_path}" 2>"${log_path}"
 }
 
+manifest_check_json_is_drift() {
+  local json_path="$1"
+
+  [[ -s "${json_path}" ]] && jq -e '.mode == "check" and .changed == true and .wrote == false' "${json_path}" >/dev/null
+}
+
+recover_manifest_check_json_from_log() {
+  local log_path="$1"
+  local json_path="$2"
+  local recovered
+
+  recovered="$(sed -n '/^{$/,/^}$/p' "${log_path}")"
+  if [[ -n "${recovered}" ]] && jq -e '.mode == "check" and .changed == true and .wrote == false' <<<"${recovered}" >/dev/null; then
+    printf '%s\n' "${recovered}" >"${json_path}"
+    return 0
+  fi
+
+  return 1
+}
+
 run_step() {
   local name="$1"
   shift
@@ -164,7 +184,7 @@ then
   manifest_status="passed"
   cp "${manifest_stdout_path}" "${OUT_ROOT}/evidence/manifest_check.json"
 else
-  if [[ -s "${manifest_stdout_path}" ]] && jq -e '.mode == "check" and .changed == true and .wrote == false' "${manifest_stdout_path}" >/dev/null; then
+  if manifest_check_json_is_drift "${manifest_stdout_path}" || recover_manifest_check_json_from_log "${OUT_ROOT}/logs/manifest_check.log" "${manifest_stdout_path}"; then
     manifest_status="manifest_drift_pending"
     cp "${manifest_stdout_path}" "${OUT_ROOT}/evidence/manifest_check.json"
   else

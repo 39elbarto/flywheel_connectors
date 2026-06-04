@@ -1,6 +1,6 @@
 # DeepSeek Connector V3 Contract
 
-> **Status**: manifest/runtime contract documented
+> **Status**: PROVEN manifest/runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/deepseek_connector_verification.sh`

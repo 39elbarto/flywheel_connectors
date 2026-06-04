@@ -356,7 +356,10 @@ fn offline_coverage_bps_calculation() {
 fn offline_coverage_bps_zero_k() {
     let id = obj(b"zero-k");
     let access = OfflineAccess::new(id, 0, 0, 256);
-    assert_eq!(access.coverage_bps(), 0);
+    // k==0 means a zero-symbol object that is trivially reconstructable
+    // (no data to reconstruct), so coverage is full (10000 bps),
+    // consistent with can_access() returning true for k==0.
+    assert_eq!(access.coverage_bps(), 10_000);
 }
 
 #[test]

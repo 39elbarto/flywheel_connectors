@@ -3643,8 +3643,14 @@ mod tests {
 
     use parking_lot::Mutex;
 
+    // asupersync 0.3.2 gates `Cx::for_testing` out of non-test builds
+    // (cap-mask bypass hardening). `compatibility_cx()` reads the ambient
+    // runtime context, so it must be evaluated *inside* the future that
+    // `run`/`block_on_sync` drives — hence each `run(..)` site that needs a
+    // cx wraps its future in `async { ..await }` so `cx()` executes after the
+    // runtime context is installed, not as an eager argument.
     fn cx() -> fcp_async_core::Cx {
-        fcp_async_core::Cx::for_testing()
+        fcp_async_core::compatibility_cx()
     }
 
     fn sigv4_time() -> DateTime<Utc> {
@@ -3858,7 +3864,7 @@ mod tests {
         let auth = ApiKeyAuth::bearer("fixture-api-key-value").unwrap();
         let mut request = AuthRequest::new();
 
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
 
         assert_eq!(
             request.value_for("Authorization"),
@@ -3892,7 +3898,7 @@ mod tests {
             SetupTokenAuth::bearer("setup-token", Utc::now() - TimeDelta::seconds(1)).unwrap();
         let mut request = AuthRequest::new();
 
-        let error = run(auth.build_request_auth(&cx(), &mut request)).unwrap_err();
+        let error = run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap_err();
 
         assert!(matches!(
             error,
@@ -3909,7 +3915,7 @@ mod tests {
         let auth = AuthMethodKind::ApiKey(ApiKeyAuth::bearer("fixture-kind").unwrap());
         let mut request = AuthRequest::new();
 
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
 
         assert_eq!(auth.id(), "api_key");
         assert_eq!(
@@ -3937,9 +3943,12 @@ mod tests {
         assert_eq!(openai.provider, providers::openai_codex::PROVIDER_ID);
 
         let mut anthropic_request = AuthRequest::new();
-        run(anthropic
-            .method
-            .build_request_auth(&cx(), &mut anthropic_request))
+        run(async {
+            anthropic
+                .method
+                .build_request_auth(&cx(), &mut anthropic_request)
+                .await
+        })
         .unwrap();
         assert_eq!(
             anthropic_request.value_for(providers::anthropic::API_KEY_HEADER),
@@ -3947,7 +3956,7 @@ mod tests {
         );
 
         let mut openai_request = AuthRequest::new();
-        run(openai.method.build_request_auth(&cx(), &mut openai_request)).unwrap();
+        run(async { openai.method.build_request_auth(&cx(), &mut openai_request).await }).unwrap();
         assert_eq!(
             openai_request.value_for("Authorization"),
             Some("Bearer fixture-openai-key")
@@ -4126,7 +4135,7 @@ mod tests {
         assert_eq!(glm.provider, providers::glm::PROVIDER_ID);
 
         let mut request = AuthRequest::new();
-        run(glm.method.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { glm.method.build_request_auth(&cx(), &mut request).await }).unwrap();
         assert_eq!(
             request.value_for("Authorization"),
             Some("Bearer fixture-glm-jwt-0")
@@ -4143,30 +4152,28 @@ mod tests {
             OAuthDeviceCodeProviderResponse::SlowDown,
             OAuthDeviceCodeProviderResponse::Authorized(expected_tokens.clone()),
         ]);
-        let mut flow = run(OAuthDeviceCodeFlow::start(
-            &cx(),
-            oauth_config(),
-            &transport,
-        ))
+        let mut flow = run(async {
+            OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &transport).await
+        })
         .unwrap();
 
         assert_eq!(flow.challenge().user_code, "ABCD-EFGH");
         assert_eq!(flow.poll_interval(), StdDuration::from_secs(5));
         assert_eq!(
-            run(flow.poll(&cx(), &transport)).unwrap(),
+            run(async { flow.poll(&cx(), &transport).await }).unwrap(),
             OAuthDeviceCodePoll::Pending {
                 retry_after: StdDuration::from_secs(5)
             }
         );
         assert_eq!(
-            run(flow.poll(&cx(), &transport)).unwrap(),
+            run(async { flow.poll(&cx(), &transport).await }).unwrap(),
             OAuthDeviceCodePoll::Pending {
                 retry_after: StdDuration::from_secs(10)
             }
         );
 
         assert_eq!(
-            run(flow.poll(&cx(), &transport)).unwrap(),
+            run(async { flow.poll(&cx(), &transport).await }).unwrap(),
             OAuthDeviceCodePoll::Authorized(expected_tokens.clone())
         );
         assert_eq!(
@@ -4189,9 +4196,9 @@ mod tests {
                 reason: "operator denied browser authorization".to_string(),
             }]);
         let mut denied_flow =
-            run(OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &denied)).unwrap();
+            run(async { OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &denied).await }).unwrap();
 
-        let denied_error = run(denied_flow.poll(&cx(), &denied)).unwrap_err();
+        let denied_error = run(async { denied_flow.poll(&cx(), &denied).await }).unwrap_err();
         assert_eq!(
             denied_error,
             AuthError::ProviderRejected {
@@ -4206,9 +4213,9 @@ mod tests {
                 reason: "device code expired".to_string(),
             }]);
         let mut expired_flow =
-            run(OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &expired)).unwrap();
+            run(async { OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &expired).await }).unwrap();
 
-        let expired_error = run(expired_flow.poll(&cx(), &expired)).unwrap_err();
+        let expired_error = run(async { expired_flow.poll(&cx(), &expired).await }).unwrap_err();
         assert_eq!(
             expired_error,
             AuthError::ProviderRejected {
@@ -4225,11 +4232,9 @@ mod tests {
         challenge.interval = StdDuration::ZERO;
         let transport = ScriptedDeviceTransport::new([]).with_challenge(challenge);
 
-        let error = run(OAuthDeviceCodeFlow::start(
-            &cx(),
-            oauth_config(),
-            &transport,
-        ))
+        let error = run(async {
+            OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &transport).await
+        })
         .unwrap_err();
 
         assert_eq!(
@@ -4254,7 +4259,7 @@ mod tests {
         auth.apply_tokens(oauth_tokens());
         let mut request = AuthRequest::new();
 
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
 
         assert_eq!(
             request.value_for("Authorization"),
@@ -4392,7 +4397,7 @@ mod tests {
                 expected_tokens.clone(),
             )]);
 
-        let tokens = run(flow.exchange(&cx(), &transport, &grant)).unwrap();
+        let tokens = run(async { flow.exchange(&cx(), &transport, &grant).await }).unwrap();
 
         assert_eq!(tokens, expected_tokens);
         assert_eq!(
@@ -4421,7 +4426,7 @@ mod tests {
             reason: "authorization code expired".to_string(),
         }]);
 
-        let error = run(flow.exchange(&cx(), &rejected, &grant)).unwrap_err();
+        let error = run(async { flow.exchange(&cx(), &rejected, &grant).await }).unwrap_err();
         assert_eq!(
             error,
             AuthError::ProviderRejected {
@@ -4441,7 +4446,7 @@ mod tests {
         let malformed =
             ScriptedAuthCodeTransport::new([OAuthAuthCodeProviderResponse::Authorized(bad_tokens)]);
 
-        let error = run(flow.exchange(&cx(), &malformed, &grant)).unwrap_err();
+        let error = run(async { flow.exchange(&cx(), &malformed, &grant).await }).unwrap_err();
         assert_eq!(
             error,
             AuthError::InvalidConfig {
@@ -4466,7 +4471,7 @@ mod tests {
         auth.apply_tokens(oauth_tokens());
         let mut request = AuthRequest::new();
 
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
 
         assert_eq!(
             request.value_for("Authorization"),
@@ -4494,10 +4499,10 @@ mod tests {
             .unwrap(),
         )]);
 
-        run(auth.refresh_with_transport(&cx(), &transport)).unwrap();
+        run(async { auth.refresh_with_transport(&cx(), &transport).await }).unwrap();
 
         let mut request = AuthRequest::new();
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
         assert_eq!(
             request.value_for("Authorization"),
             Some("Bearer refreshed-access-token")
@@ -4540,10 +4545,10 @@ mod tests {
             .unwrap(),
         )]);
 
-        run(auth.refresh_with_transport(&cx(), &transport)).unwrap();
+        run(async { auth.refresh_with_transport(&cx(), &transport).await }).unwrap();
 
         let mut request = AuthRequest::new();
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
         assert_eq!(
             request.value_for("Authorization"),
             Some("Bearer refreshed-access-token")
@@ -4573,12 +4578,9 @@ mod tests {
             reason: "refresh token expired".to_string(),
         }]);
 
-        let error = run(OAuthRefreshTokenFlow::refresh(
-            &cx(),
-            &config,
-            &grant,
-            &rejected,
-        ))
+        let error = run(async {
+            OAuthRefreshTokenFlow::refresh(&cx(), &config, &grant, &rejected).await
+        })
         .unwrap_err();
         assert_eq!(
             error,
@@ -4599,12 +4601,9 @@ mod tests {
         let malformed =
             ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(bad_tokens)]);
 
-        let error = run(OAuthRefreshTokenFlow::refresh(
-            &cx(),
-            &config,
-            &grant,
-            &malformed,
-        ))
+        let error = run(async {
+            OAuthRefreshTokenFlow::refresh(&cx(), &config, &grant, &malformed).await
+        })
         .unwrap_err();
         assert_eq!(
             error,
@@ -4620,7 +4619,7 @@ mod tests {
         let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
         let transport = ScriptedRefreshTransport::new([]);
 
-        let error = run(auth.refresh_with_transport(&cx(), &transport)).unwrap_err();
+        let error = run(async { auth.refresh_with_transport(&cx(), &transport).await }).unwrap_err();
 
         assert_eq!(
             error,
@@ -4639,7 +4638,7 @@ mod tests {
         .unwrap();
         let mut request = AuthRequest::new();
 
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
 
         assert_eq!(
             request.value_for("Authorization"),
@@ -4662,19 +4661,19 @@ mod tests {
         .unwrap();
         let mut request = AuthRequest::new();
 
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
         assert_eq!(
             request.value_for("Authorization"),
             Some("Bearer fixture-jwt-0")
         );
 
-        run(auth.refresh(&cx())).unwrap();
+        run(async { auth.refresh(&cx()).await }).unwrap();
         let cached = auth.cached_token().unwrap();
         assert_eq!(cached.token.expose_secret(), "fixture-jwt-1");
         assert!(auth.requires_refresh_in().is_some());
 
         let mut refreshed_request = AuthRequest::new();
-        run(auth.build_request_auth(&cx(), &mut refreshed_request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut refreshed_request).await }).unwrap();
         assert_eq!(
             refreshed_request.value_for("Authorization"),
             Some("Bearer fixture-jwt-1")
@@ -4696,7 +4695,7 @@ mod tests {
             .unwrap();
         request.set_sigv4_context(context);
 
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
 
         assert_eq!(request.value_for("x-amz-date"), Some("20130524T000000Z"));
         assert_eq!(
@@ -4723,7 +4722,7 @@ mod tests {
         request.set_header("Host", "bedrock.amazonaws.com").unwrap();
         request.set_sigv4_context(context);
 
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
 
         assert_eq!(
             request.value_for("x-amz-security-token"),
@@ -4750,7 +4749,7 @@ mod tests {
             .set_header("Host", "examplebucket.s3.amazonaws.com")
             .unwrap();
 
-        let error = run(auth.build_request_auth(&cx(), &mut request)).unwrap_err();
+        let error = run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap_err();
 
         assert_eq!(error, AuthError::MissingSigningContext { method: "sigv4" });
     }
@@ -4822,7 +4821,7 @@ mod tests {
         })
         .unwrap();
         let mut request = AuthRequest::new();
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
         assert_eq!(
             request.value_for("Authorization"),
             Some("Bearer fixture-jwt-0")
@@ -4836,7 +4835,7 @@ mod tests {
             TokenRefreshPolicy::new(StdDuration::from_secs(7_200)),
         );
 
-        let report = run(actor.refresh_provider(&cx(), "GLM")).unwrap();
+        let report = run(async { actor.refresh_provider(&cx(), "GLM").await }).unwrap();
 
         assert_eq!(report.refreshed_count(), 1);
         assert_eq!(report.skipped_count(), 0);
@@ -4853,9 +4852,12 @@ mod tests {
         ));
         let refreshed = run(store.get_profile("glm", "work")).unwrap();
         let mut refreshed_request = AuthRequest::new();
-        run(refreshed
-            .method
-            .build_request_auth(&cx(), &mut refreshed_request))
+        run(async {
+            refreshed
+                .method
+                .build_request_auth(&cx(), &mut refreshed_request)
+                .await
+        })
         .unwrap();
         assert_eq!(
             refreshed_request.value_for("Authorization"),
@@ -4871,7 +4873,7 @@ mod tests {
         })
         .unwrap();
         let mut request = AuthRequest::new();
-        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        run(async { auth.build_request_auth(&cx(), &mut request).await }).unwrap();
         let jwt_profile =
             AuthProfile::new("fresh", "glm", AuthMethodKind::Jwt(auth), "fresh", 10).unwrap();
         let api_profile = api_profile("static", "glm", 0);
@@ -4883,7 +4885,7 @@ mod tests {
             TokenRefreshPolicy::new(StdDuration::from_secs(1)),
         );
 
-        let report = run(actor.refresh_provider(&cx(), "glm")).unwrap();
+        let report = run(async { actor.refresh_provider(&cx(), "glm").await }).unwrap();
 
         assert_eq!(report.refreshed_count(), 0);
         assert_eq!(report.skipped_count(), 2);
@@ -4922,7 +4924,7 @@ mod tests {
             TokenRefreshPolicy::new(StdDuration::from_secs(3_600)),
         );
 
-        let outcome = run(actor.refresh_profile(&cx(), "bootstrap", "setup")).unwrap();
+        let outcome = run(async { actor.refresh_profile(&cx(), "bootstrap", "setup").await }).unwrap();
 
         assert!(matches!(
             outcome,
@@ -4947,7 +4949,7 @@ mod tests {
         let store = Arc::new(InMemoryAuthProfileStore::new());
         let actor = TokenRefreshActor::new(Arc::clone(&store), TokenRefreshPolicy::default());
 
-        let error = run(actor.refresh_profile(&cx(), "openai", "work")).unwrap_err();
+        let error = run(async { actor.refresh_profile(&cx(), "openai", "work").await }).unwrap_err();
 
         assert_eq!(
             error,

@@ -8212,7 +8212,7 @@ async fn auth_refresh_profile_snapshot_with_transport(
         Ok(transport) => transport,
         Err(error) => return TokenRefreshOutcome::Failed { decision, error },
     };
-    let cx = fcp_async_core::Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     let refresh_result = match &mut profile.method {
         AuthMethodKind::OAuthDeviceCode(method) => {
             method.refresh_with_transport(&cx, &transport).await
@@ -8279,7 +8279,7 @@ async fn auth_profile_upsert_handler(
     .map_err(map_auth_profile_error)?;
     profile
         .method
-        .validate(&fcp_async_core::Cx::for_testing())
+        .validate(&fcp_async_core::compatibility_cx())
         .await
         .map_err(map_auth_profile_error)?;
     let store = auth_profile_store();
@@ -8374,7 +8374,7 @@ async fn auth_profile_oauth_device_start_handler(
         .map_err(map_auth_profile_error)?;
     let config = oauth_device_config_from_profile(&profile).map_err(map_auth_profile_error)?;
     let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
-    let flow = OAuthDeviceCodeFlow::start(&fcp_async_core::Cx::for_testing(), config, &transport)
+    let flow = OAuthDeviceCodeFlow::start(&fcp_async_core::compatibility_cx(), config, &transport)
         .await
         .map_err(map_auth_profile_error)?;
     let challenge = flow.challenge().clone();
@@ -8429,7 +8429,7 @@ async fn auth_profile_oauth_device_poll_handler(
     let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
     let poll = pending
         .flow
-        .poll(&fcp_async_core::Cx::for_testing(), &transport)
+        .poll(&fcp_async_core::compatibility_cx(), &transport)
         .await;
     match poll {
         Ok(OAuthDeviceCodePoll::Pending { retry_after }) => {
@@ -8565,7 +8565,7 @@ async fn auth_profile_oauth_auth_code_complete_handler(
     let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
     let tokens = pending
         .flow
-        .exchange(&fcp_async_core::Cx::for_testing(), &transport, &grant)
+        .exchange(&fcp_async_core::compatibility_cx(), &transport, &grant)
         .await
         .map_err(map_auth_profile_error)?;
 
@@ -11564,7 +11564,7 @@ async fn refresh_host_egress_credential_after_unauthorized(
     let transport = BlockingOAuthTransport::new().map_err(|err| {
         HostError::PreflightFailed(format!("host-egress OAuth refresh transport failed: {err}"))
     })?;
-    let cx = fcp_async_core::Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     let refresh_result = match &mut profile.method {
         AuthMethodKind::OAuthDeviceCode(method) => {
             method.refresh_with_transport(&cx, &transport).await

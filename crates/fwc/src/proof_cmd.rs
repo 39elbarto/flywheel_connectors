@@ -4712,6 +4712,7 @@ fn build_rerun_plan(target: &str, known: &KnownProofCommand) -> PlannedRerunComm
 }
 
 fn remote_argv(original: &[String], target_slug: &str) -> Vec<String> {
+    let target_dir = proof_target_dir(target_slug);
     let mut argv = vec![
         "env".to_owned(),
         "RCH_REQUIRE_REMOTE=1".to_owned(),
@@ -4720,11 +4721,23 @@ fn remote_argv(original: &[String], target_slug: &str) -> Vec<String> {
         "exec".to_owned(),
         "--".to_owned(),
         "env".to_owned(),
-        format!("CARGO_TARGET_DIR=/tmp/fwc-proof-{target_slug}"),
+        format!("CARGO_TARGET_DIR={}", target_dir.display()),
         "CARGO_INCREMENTAL=0".to_owned(),
     ];
     argv.extend(original.iter().cloned());
     argv
+}
+
+fn proof_target_dir(target_slug: &str) -> PathBuf {
+    proof_target_dir_from_tmpdir(target_slug, std::env::var_os("TMPDIR").as_deref())
+}
+
+fn proof_target_dir_from_tmpdir(target_slug: &str, tmpdir: Option<&std::ffi::OsStr>) -> PathBuf {
+    let target_root = tmpdir
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    target_root.join(format!("fwc-proof-{target_slug}"))
 }
 
 fn execute_plan(
@@ -7468,10 +7481,9 @@ related = []
         assert!(!argv.contains(&"RCH_FORCE_REMOTE=true"));
         assert!(argv.contains(&"rch"));
         assert!(argv.contains(&"CARGO_INCREMENTAL=0"));
-        assert!(
-            argv.iter()
-                .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-"))
-        );
+        assert!(argv.iter().any(|arg| {
+            arg.starts_with("CARGO_TARGET_DIR=") && arg.ends_with("/fwc-proof-claim-latency-proof")
+        }));
     }
 
     #[test]
@@ -7600,11 +7612,36 @@ related = []
         assert!(argv.contains(&"cargo"));
         assert!(argv.contains(&"fcp-slack"));
         assert!(argv.contains(&"live_verification"));
-        assert!(argv.iter().any(|arg| {
-            arg.starts_with(
-                "CARGO_TARGET_DIR=/tmp/fwc-proof-claim-slack-connector-verifier-live-smoke",
+        let expected_target_suffix = format!(
+            "/fwc-proof-{}",
+            safe_target_slug(
+                result.payload["plan"]["claim_id"]
+                    .as_str()
+                    .expect("claim id")
             )
+        );
+        assert!(argv.iter().any(|arg| {
+            arg.starts_with("CARGO_TARGET_DIR=") && arg.ends_with(&expected_target_suffix)
         }));
+    }
+
+    #[test]
+    fn proof_target_dir_uses_tmpdir_when_present() {
+        assert_eq!(
+            proof_target_dir_from_tmpdir("claim-test", None),
+            PathBuf::from("/tmp/fwc-proof-claim-test")
+        );
+        assert_eq!(
+            proof_target_dir_from_tmpdir("claim-test", Some(std::ffi::OsStr::new(""))),
+            PathBuf::from("/tmp/fwc-proof-claim-test")
+        );
+        assert_eq!(
+            proof_target_dir_from_tmpdir(
+                "claim-test",
+                Some(std::ffi::OsStr::new("/Volumes/fcp-scratch")),
+            ),
+            PathBuf::from("/Volumes/fcp-scratch/fwc-proof-claim-test")
+        );
     }
 
     fn remote_rch_plan() -> PlannedRerunCommand {

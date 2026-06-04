@@ -140,6 +140,22 @@ run_logged() {
   return "${rc}"
 }
 
+run_logged_source_state() {
+  local name="$1"
+  shift
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local previous_pwd
+  local rc
+
+  echo "[deepseek-verification] ${name}: $*" >&2
+  previous_pwd="$(pwd)"
+  cd "${REPO_ROOT}" || return
+  "$@" >"${log_path}" 2>&1
+  rc="$?"
+  cd "${previous_pwd}" || return
+  return "${rc}"
+}
+
 run_capture_stdout() {
   local name="$1"
   local stdout_path="$2"
@@ -164,6 +180,19 @@ run_step() {
   local name="$1"
   shift
   if run_logged "${name}" "$@"; then
+    echo "passed"
+  else
+    local status
+    status="$(classify_failure "${OUT_ROOT}/logs/${name}.log")"
+    promote_overall_status "${status}"
+    echo "${status}"
+  fi
+}
+
+run_source_state_step() {
+  local name="$1"
+  shift
+  if run_logged_source_state "${name}" "$@"; then
     echo "passed"
   else
     local status
@@ -242,7 +271,7 @@ else
 fi
 
 cargo_check_status="$(run_step cargo_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TARGET_PREFIX}-check" cargo check -p fcp-deepseek --all-targets)"
-format_check_status="$(run_step format_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TARGET_PREFIX}-fmt" cargo fmt -p fcp-deepseek -- --check)"
+format_check_status="$(run_source_state_step format_check env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TARGET_PREFIX}-fmt" cargo fmt -p fcp-deepseek -- --check)"
 integration_status="$(run_step integration_suite env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TARGET_PREFIX}-integration" cargo test -p fcp-deepseek --test integration -- --nocapture)"
 clippy_status="$(run_step clippy env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TARGET_PREFIX}-clippy" cargo clippy -p fcp-deepseek --all-targets -- -D warnings)"
 
@@ -332,7 +361,7 @@ jq -n \
   printf '%s\n' 'export RCH_FORCE_REMOTE=1'
   printf '%s\n' "env RCH_VISIBILITY=verbose \"\${RCH_BIN}\" exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"\${DEEPSEEK_TARGET_PREFIX}-fwc\" cargo run -q -p fwc -- manifest fix connectors/deepseek/manifest.toml --check --json"
   printf '%s\n' "env RCH_VISIBILITY=verbose \"\${RCH_BIN}\" exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"\${DEEPSEEK_TARGET_PREFIX}-check\" cargo check -p fcp-deepseek --all-targets"
-  printf '%s\n' "env RCH_VISIBILITY=verbose \"\${RCH_BIN}\" exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"\${DEEPSEEK_TARGET_PREFIX}-fmt\" cargo fmt -p fcp-deepseek -- --check"
+  printf '%s\n' "env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose \"\${RCH_BIN}\" exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"\${DEEPSEEK_TARGET_PREFIX}-fmt\" cargo fmt -p fcp-deepseek -- --check"
   printf '%s\n' "env RCH_VISIBILITY=verbose \"\${RCH_BIN}\" exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"\${DEEPSEEK_TARGET_PREFIX}-integration\" cargo test -p fcp-deepseek --test integration -- --nocapture"
   printf '%s\n' "env RCH_VISIBILITY=verbose \"\${RCH_BIN}\" exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"\${DEEPSEEK_TARGET_PREFIX}-clippy\" cargo clippy -p fcp-deepseek --all-targets -- -D warnings"
   printf '%s\n' "if [[ \"\${DEEPSEEK_E2E:-}\" == \"1\" ]]; then"

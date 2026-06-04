@@ -378,9 +378,14 @@ run_legacy_rch_cargo_step_with_remote_policy() {
   shift
   local name="$1"
   shift
+  local rch_require_remote="${RCH_REQUIRE_REMOTE:-1}"
+
+  if [[ "${require_remote_proof}" == "0" ]]; then
+    rch_require_remote=0
+  fi
 
   run_logged_with_remote_policy "${require_remote_proof}" "${name}" env \
-    RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \
+    RCH_REQUIRE_REMOTE="${rch_require_remote}" \
     RCH_FORCE_REMOTE=1 \
     RCH_VISIBILITY=verbose \
     rch exec -- env \

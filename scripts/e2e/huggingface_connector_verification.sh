@@ -120,6 +120,21 @@ run_logged() {
   return "${rc}"
 }
 
+run_logged_source_state() {
+  local name="$1"
+  shift
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
+
+  echo "[huggingface-verification] ${name}: $*" >&2
+  (
+    cd "${REPO_ROOT}" || exit
+    "$@"
+  ) >"${log_path}" 2>&1
+  rc="$?"
+  return "${rc}"
+}
+
 run_capture_stdout() {
   local name="$1"
   local stdout_path="$2"
@@ -143,6 +158,19 @@ run_step() {
   local name="$1"
   shift
   if run_logged "${name}" "$@"; then
+    LAST_STEP_STATUS="passed"
+  else
+    local status
+    status="$(classify_failure "${OUT_ROOT}/logs/${name}.log")"
+    promote_overall_status "${status}"
+    LAST_STEP_STATUS="${status}"
+  fi
+}
+
+run_source_state_step() {
+  local name="$1"
+  shift
+  if run_logged_source_state "${name}" "$@"; then
     LAST_STEP_STATUS="passed"
   else
     local status
@@ -178,7 +206,7 @@ fi
 
 run_step cargo_check env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-huggingface --all-targets
 cargo_check_status="${LAST_STEP_STATUS}"
-run_step format_check env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --package fcp-huggingface --check
+run_source_state_step format_check env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --package fcp-huggingface --check
 format_check_status="${LAST_STEP_STATUS}"
 run_step loopback_jsonl env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" HUGGINGFACE_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture
 loopback_status="${LAST_STEP_STATUS}"
@@ -237,7 +265,7 @@ export RCH_FORCE_REMOTE=1
 
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/huggingface/manifest.toml --check --json
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-huggingface --all-targets
-env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --package fcp-huggingface --check
+env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --package fcp-huggingface --check
 git_revision="\$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" HUGGINGFACE_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-huggingface --all-targets --no-deps -- -D warnings

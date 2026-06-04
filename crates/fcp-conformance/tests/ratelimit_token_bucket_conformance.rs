@@ -144,13 +144,17 @@ async fn token_bucket_refill_is_capped_by_burst_allowance() {
 
 #[fcp_async_core::runtime::test]
 async fn token_bucket_drain_then_refill_restores_tokens_at_smooth_rate() {
-    let limiter = TokenBucket::from_config(&RateLimitConfig::new(2, Duration::from_millis(100)));
+    // asupersync-uwp88: 0.3.2 floors timer wakes at ~250ms, so the refill
+    // interval (window/capacity) must sit well above that granularity and
+    // each sleep must land inside exactly one interval (1s interval, 1.1s
+    // sleeps; up to ~250ms of wake slop still stays under the 2s boundary).
+    let limiter = TokenBucket::from_config(&RateLimitConfig::new(2, Duration::from_secs(2)));
 
     assert!(limiter.try_acquire_n(2).await);
     assert_eq!(limiter.remaining(), 0);
     assert!(!limiter.try_acquire().await);
 
-    sleep(Duration::from_millis(60)).await;
+    sleep(Duration::from_millis(1100)).await;
     assert!(
         limiter.try_acquire().await,
         "one smooth refill interval should restore one token"
@@ -161,7 +165,7 @@ async fn token_bucket_drain_then_refill_restores_tokens_at_smooth_rate() {
         "consuming the first refilled token should drain the bucket again"
     );
 
-    sleep(Duration::from_millis(60)).await;
+    sleep(Duration::from_millis(1100)).await;
     assert!(
         limiter.try_acquire().await,
         "the next smooth refill interval should restore the next token"

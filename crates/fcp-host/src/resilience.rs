@@ -4183,13 +4183,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn timeout_only_failure_predicate_trips_on_timeout() {
+        // asupersync-uwp88: 0.3.2 floors timer wakes at ~250ms; competing
+        // deadlines sit >600ms apart so the race resolves deterministically.
         let layer = ResilienceLayer::new(ResilienceConfig {
-            operation_timeout: Some(Duration::from_millis(25)),
+            operation_timeout: Some(Duration::from_millis(300)),
             circuit_breaker: CircuitBreakerConfig {
                 failure_threshold: 1,
                 success_threshold: 1,
-                open_duration: Duration::from_millis(30),
-                window_duration: Duration::from_secs(1),
+                open_duration: Duration::from_secs(5),
+                window_duration: Duration::from_secs(10),
                 failure_predicate: FailurePredicate::TimeoutsOnly,
             },
             ..ResilienceConfig::default()
@@ -4198,7 +4200,7 @@ mod tests {
 
         let result = layer
             .execute(&connector_id, RequestPriority::Normal, "invoke", async {
-                time::sleep(Duration::from_millis(60)).await;
+                time::sleep(Duration::from_secs(2)).await;
                 Ok::<(), &str>(())
             })
             .await;
@@ -4209,18 +4211,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn probe_reservation_rolls_back_when_circuit_is_still_open() {
+        // asupersync-uwp88: 0.3.2 floors timer wakes at ~250ms; the original
+        // 100/200ms choreography is scaled x10 so each sleep lands in the
+        // intended window even with ~250ms of wake slop.
         let layer = ResilienceLayer::new(ResilienceConfig {
             circuit_breaker: CircuitBreakerConfig {
                 failure_threshold: 1,
                 success_threshold: 1,
-                open_duration: Duration::from_millis(200),
-                window_duration: Duration::from_secs(1),
+                open_duration: Duration::from_secs(2),
+                window_duration: Duration::from_secs(10),
                 failure_predicate: FailurePredicate::AnyError,
             },
             health: HealthRouterConfig {
                 unhealthy_threshold: 1,
                 recovery_success_threshold: 1,
-                probe_interval: Duration::from_millis(100),
+                probe_interval: Duration::from_secs(1),
                 ..HealthRouterConfig::default()
             },
             ..ResilienceConfig::default()
@@ -4238,7 +4243,7 @@ mod tests {
             ConnectorHealth::Unavailable { .. }
         ));
 
-        time::sleep(Duration::from_millis(110)).await;
+        time::sleep(Duration::from_millis(1100)).await;
         let rejected = layer
             .execute(&connector_id, RequestPriority::Normal, "invoke", async {
                 Ok::<(), &str>(())
@@ -4247,7 +4252,7 @@ mod tests {
         assert!(matches!(rejected, Err(ResilienceError::CircuitOpen { .. })));
         assert_eq!(layer.metrics(&connector_id).probe_requests, 0);
 
-        time::sleep(Duration::from_millis(100)).await;
+        time::sleep(Duration::from_millis(1100)).await;
         let recovered = layer
             .execute(&connector_id, RequestPriority::Normal, "invoke", async {
                 Ok::<(), &str>(())
@@ -6589,8 +6594,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn execute_timeout_records_metric() {
+        // asupersync-uwp88: 0.3.2 floors timer wakes at ~250ms, so competing
+        // deadlines must sit well apart (>600ms) for the race to resolve
+        // deterministically.
         let layer = ResilienceLayer::new(ResilienceConfig {
-            operation_timeout: Some(Duration::from_millis(10)),
+            operation_timeout: Some(Duration::from_millis(300)),
             circuit_breaker: CircuitBreakerConfig {
                 failure_threshold: 100, // High to avoid circuit tripping
                 ..CircuitBreakerConfig::default()
@@ -6600,7 +6608,7 @@ mod tests {
         let cid = test_connector_id();
         let result = layer
             .execute(&cid, RequestPriority::Normal, "op", async {
-                time::sleep(Duration::from_millis(50)).await;
+                time::sleep(Duration::from_secs(2)).await;
                 Ok::<_, &str>(())
             })
             .await;

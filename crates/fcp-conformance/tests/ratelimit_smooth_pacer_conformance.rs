@@ -124,11 +124,14 @@ async fn from_rate_infinite_yields_no_delay_pacer() {
 
 #[fcp_async_core::runtime::test]
 async fn wait_time_decreases_as_elapsed_time_grows() {
-    let pacer = SmoothPacer::new(Duration::from_millis(200));
+    // asupersync-uwp88: 0.3.2 floors timer wakes at ~250ms, so the
+    // min_interval must dwarf the wake slop: a 400ms sleep (worst case
+    // ~650ms observed) still leaves time on a 2s interval.
+    let pacer = SmoothPacer::new(Duration::from_secs(2));
     assert!(pacer.try_acquire().await);
 
     let w1 = pacer.wait_time().await;
-    sleep(Duration::from_millis(50)).await;
+    sleep(Duration::from_millis(400)).await;
     let w2 = pacer.wait_time().await;
     assert!(
         w2 < w1,
@@ -136,7 +139,7 @@ async fn wait_time_decreases_as_elapsed_time_grows() {
     );
     assert!(
         w2 > Duration::ZERO,
-        "we still have ~150 ms left; wait_time must remain positive"
+        "we still have over a second left; wait_time must remain positive"
     );
 }
 

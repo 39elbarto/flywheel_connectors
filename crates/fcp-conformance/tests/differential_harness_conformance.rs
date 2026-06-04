@@ -10,8 +10,44 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const EXPECTED_DIFFERENTIAL_GAP_CONNECTORS: &[&str] =
-    &["arxiv", "brave-search", "feishu", "hackernews"];
+const EXPECTED_DIFFERENTIAL_GAP_CONNECTORS: &[&str] = &[
+    "1password",
+    "amplitude",
+    "arxiv",
+    "bitwarden",
+    "brave-search",
+    "calendly",
+    "circleci",
+    "confluence",
+    "datadog",
+    "deepseek",
+    "discord",
+    "docusign",
+    "feishu",
+    "gmail",
+    "grafana",
+    "hackernews",
+    "homeassistant",
+    "hubspot",
+    "intercom",
+    "irc",
+    "linkedin",
+    "microsoft365",
+    "mixpanel",
+    "monday",
+    "netlify",
+    "paypal",
+    "posthog",
+    "sentry",
+    "slack",
+    "stripe",
+    "synology-chat",
+    "teams",
+    "telegram",
+    "twilio",
+    "vercel",
+    "zendesk",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

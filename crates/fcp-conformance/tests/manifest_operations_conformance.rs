@@ -865,7 +865,7 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
 }
 
 fn expected_sandbox_gap_connectors() -> Vec<String> {
-    connector_names(&["anthropic-vertex", "inworld"])
+    connector_names(&[])
 }
 
 fn expected_ai_hints_gap_connectors() -> Vec<String> {

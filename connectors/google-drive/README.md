@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented; manifest/runtime drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/google_drive_connector_verification.sh`
 > **Drive files upstream**: https://developers.google.com/drive/api/reference/rest/v3/files
 > **Drive files list upstream**: https://developers.google.com/drive/api/reference/rest/v3/files/list
 > **Drive files get upstream**: https://developers.google.com/drive/api/reference/rest/v3/files/get
@@ -67,7 +67,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Runtime introspection says `max_results` has a maximum of 1000, but runtime input validation and client dispatch do not clamp the value.
 - Runtime `handle_shutdown` calls client shutdown but does not clear client, verifier, session, configured flags, or handshaken flags.
 - `self_check()` reports `DEFAULT_BASE_URL` in details even when a loopback or custom base URL was configured.
-- There is no dedicated tracked verification shell script for this connector.
+- The dedicated tracked verification shell script is `scripts/e2e/google_drive_connector_verification.sh`; it is a verifier bundle, not a PROVEN promotion claim.
 
 A follow-up parity bead should align connector ID spelling, replace placeholder interface proof, reconcile media capabilities, fix upload/download response semantics, clamp or reject out-of-range pagination input, reset lifecycle state consistently on shutdown, and report the active base URL in self-check.
 
@@ -82,6 +82,7 @@ The current Google Drive README slice documents the existing runtime surface:
 - provider error mapping, retry behavior, redaction posture, doctor behavior, and health behavior
 - lifecycle, doctor, health, self-check, introspection, simulation, invoke, and shutdown surfaces
 - deterministic WireMock tests and direct proof commands
+- the tracked pre-promotion verifier bundle that ties gauntlet, manifest, Cargo, local non-mock JSONL, redaction, and replay evidence together
 
 ## Auth And Scope Boundary
 
@@ -197,7 +198,9 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/google_drive_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked verification bundle is `scripts/e2e/google_drive_connector_verification.sh`. It writes a redaction-safe artifact tree under `artifacts/e2e/google-drive/<run-id>` by default and records the gauntlet output, manifest check, connector-local Cargo proof logs, extracted `local_non_mock` JSONL, environment metadata, replay command, and summary status.
+
+This verifier intentionally keeps promotion truth separate from evidence gathering. In the current checkout it may report `graduation_gauntlet=pre_promotion_pending` while the README and manifest are not PROVEN/proven, and `manifest_check=manifest_drift_pending` while the manifest `interface_hash` is still the placeholder value. Those statuses are evidence to fix before promotion, not green PROVEN closeout.
 
 The verification surface captures:
 
@@ -237,6 +240,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `scripts/e2e/google_drive_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-drive-readme cargo check -p fcp-google-drive --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-drive-readme cargo test -p fcp-google-drive --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-drive-readme cargo clippy -p fcp-google-drive --all-targets --no-deps -- -D warnings`

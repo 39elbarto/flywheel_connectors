@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_deepseek::DeepSeekConnector;
 use fcp_deepseek::connector::test_handshake_request;
+use fcp_deepseek::{DeepSeekAuth, DeepSeekClient, DeepSeekConnector, DeepSeekProvider};
+use fcp_openai_compat::{ChatCompletionsRequest, ChatMessage, RateLimitPolicy};
 use fcp_prelude::{CapabilityConstraints, CapabilityId, FcpError, InstanceId};
 use serde_json::{Value, json};
 
@@ -46,6 +47,7 @@ impl RawLoopback {
                         stream
                             .write_all(response.as_bytes())
                             .expect("write loopback response");
+                        stream.flush().expect("flush loopback response");
                         captured.lock().expect("request lock").push(request);
                         handled += 1;
                     }
@@ -58,7 +60,11 @@ impl RawLoopback {
                     }
                 }
             }
-            assert_eq!(handled, expected_requests, "loopback request count");
+            let observed = captured.lock().expect("request lock").clone();
+            assert_eq!(
+                handled, expected_requests,
+                "loopback request count; captured requests: {observed:#?}"
+            );
         });
         Self {
             base_url,
@@ -142,7 +148,7 @@ fn response_for(request: &str) -> String {
     };
     let body = body.to_string();
     format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
 }
@@ -181,7 +187,8 @@ async fn configured_connector(base_url: &str) -> (DeepSeekConnector, Ed25519Sign
         .handle_configure(json!({
             "api_key": "deepseek-loopback-key",
             "base_url": base_url,
-            "default_model": "deepseek-v4-pro"
+            "default_model": "deepseek-v4-pro",
+            "request_timeout_ms": 1_000
         }))
         .await
         .expect("configure should succeed");
@@ -217,6 +224,58 @@ async fn invoke(
             "capability_token": grant,
         }))
         .await
+}
+
+#[fcp_async_core::runtime::test]
+async fn raw_loopback_client_chat_uses_shared_http_client() {
+    let loopback = RawLoopback::start(1);
+    let provider = DeepSeekProvider::new(
+        loopback.base_url.clone(),
+        DeepSeekAuth::ApiKey("deepseek-loopback-key".into()),
+    );
+    let client = DeepSeekClient::new(
+        provider,
+        Duration::from_secs(1),
+        Duration::from_secs(60),
+        RateLimitPolicy::FailFast,
+    );
+    let cx = fcp_async_core::compatibility_cx();
+    let response = client
+        .chat_completions(
+            &cx,
+            ChatCompletionsRequest::new(
+                "deepseek-v4-pro",
+                vec![ChatMessage::user_text("local secret prompt")],
+            ),
+        )
+        .await
+        .expect("direct client chat should succeed");
+
+    assert_eq!(response.id, "chatcmpl-local-non-mock");
+    assert_eq!(response.choices.len(), 1);
+    if let ChatMessage::Assistant {
+        content,
+        reasoning_content,
+        ..
+    } = &response.choices[0].message
+    {
+        assert_eq!(content.as_deref(), Some("loopback final"));
+        assert_eq!(
+            reasoning_content.as_deref(),
+            Some("private loopback reasoning")
+        );
+    } else {
+        panic!("expected assistant message");
+    }
+
+    let requests = loopback.finish();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("POST /chat/completions "));
+    assert!(
+        requests[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer deepseek-loopback-key")
+    );
 }
 
 #[fcp_async_core::runtime::test]

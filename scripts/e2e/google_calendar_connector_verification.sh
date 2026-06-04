@@ -182,7 +182,8 @@ fi
 run_step cargo_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-check" cargo check -p fcp-google-calendar --all-targets
 cargo_check_status="${LAST_STEP_STATUS}"
 
-run_step format_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-fmt" cargo fmt -p fcp-google-calendar -- --check
+# `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
+run_step format_check env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-fmt" cargo fmt -p fcp-google-calendar -- --check
 format_check_status="${LAST_STEP_STATUS}"
 
 run_step integration_suite env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-integration" cargo test -p fcp-google-calendar --test integration -- --nocapture
@@ -259,7 +260,7 @@ git_revision="\$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-fwc" cargo run -q -p fwc -- manifest fix connectors/google-calendar/manifest.toml --check --json
 env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-check" cargo check -p fcp-google-calendar --all-targets
-env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-fmt" cargo fmt -p fcp-google-calendar -- --check
+env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-fmt" cargo fmt -p fcp-google-calendar -- --check
 env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-integration" cargo test -p fcp-google-calendar --test integration -- --nocapture
 env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-local" GIT_REVISION="\${git_revision}" cargo test -p fcp-google-calendar --test local_non_mock -- --nocapture
 env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-clippy" cargo clippy -p fcp-google-calendar --all-targets -- -D warnings

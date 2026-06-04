@@ -16,10 +16,11 @@
 #![allow(clippy::manual_let_else)]
 //!
 //! - 78 connectors `USE_TYPESTATE` (`verify_bound` / `promote_with`_*).
-//! - 0 connectors `USE_LEGACY_VERIFY` (deprecated `verifier.verify_bound(...)`
-//!   alias — same code path as `verify_bound` but discards the
-//!   `BoundVerified` token, so the connector can no longer prove to
-//!   downstream code that the token was structurally verified).
+//! - 0 connectors `USE_LEGACY_VERIFY` (deprecated `verifier.verify(...)`
+//!   alias — the `#[deprecated]` `CapabilityVerifier::verify` entrypoint with
+//!   an ambiguous return type, which discards the structural-verification
+//!   typestate so the connector can no longer prove to downstream code that
+//!   the token was bound-verified).
 //! - The remaining files in `connectors/*/src/connector.rs` either
 //!   delegate verification to a shared helper or are scaffolds that
 //!   do not yet wire a verifier at all.
@@ -56,11 +57,21 @@ const TYPESTATE_MARKERS: &[&str] = &[
     "promote_with_constraints(",
 ];
 
-/// Marker for the deprecated `verifier.verify_bound(...)` alias. We look for
-/// the exact substring `verifier.verify_bound(` rather than `.verify(`
-/// alone so we don't false-flag e.g. `signing_key.verify(...)` (which
-/// is an Ed25519 signature check, not a capability gate).
-const LEGACY_VERIFY_MARKER: &str = "verifier.verify_bound(";
+/// Marker for the deprecated `verifier.verify(...)` alias — the
+/// `#[deprecated]` `CapabilityVerifier::verify` method ("ambiguous return
+/// type; use `verify_bound` (full enforcement) or `verify_unbound` (gateway
+/// vantage)"). We look for the exact substring `verifier.verify(` rather than
+/// `.verify(` alone so we don't false-flag e.g. `signing_key.verify(...)` or a
+/// webhook `verifier.verify(headers, payload, ...)` signature check (neither is
+/// a capability gate).
+///
+/// This MUST stay disjoint from `TYPESTATE_MARKERS`: `verify_bound` is the
+/// GOOD typestate method, so the legacy marker keys off the bare `verify(`
+/// method name, which is not a substring of `verify_bound(`. `classify`
+/// additionally checks the typestate markers first, so a connector that uses
+/// both a capability `verify_bound` and an unrelated webhook `verify(` is
+/// correctly classified as typestate-enforcing.
+const LEGACY_VERIFY_MARKER: &str = "verifier.verify(";
 
 /// Connectors known to currently use the legacy `.verify(...)` alias
 /// at the invoke/simulate boundary as of this commit. Any addition
@@ -320,7 +331,7 @@ fn dja9u_classification_function_is_self_consistent() {
     let typestate_src = "let bound = verifier.verify_bound(token, &cap, &op, &uris)?;";
     assert_eq!(classify(typestate_src), BoundaryStyle::UsesTypestate);
 
-    let legacy_src = "verifier.verify_bound(token, &cap, &op, &[])?;";
+    let legacy_src = "verifier.verify(token, &cap, &op, &[])?;";
     assert_eq!(classify(legacy_src), BoundaryStyle::UsesLegacyVerify);
 
     // Ed25519 / signature `.verify(...)` calls MUST NOT trip the legacy

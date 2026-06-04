@@ -26,9 +26,12 @@ artifacts/e2e/windows_appcontainer/<run-id>/
   "schema_version": "1.0.0",
   "record_type": "windows_appcontainer_process_launch_e2e",
   "bead_id": "flywheel_connectors-r4qcg.1.1",
-  "launch_mechanism": "startupinfoex_security_capabilities",
+  "launch_mechanism": "startup_info_ex_security_capabilities",
   "sid_present": true,
   "job_object_attached": true,
+  "allowed_process_startup": true,
+  "denied_user_profile_write": true,
+  "denied_user_profile_write_error_mapping": "user_profile_write_denied",
   "redaction_scope": "public",
   "test_status": "passed",
   "fallback_decision": "not_needed",
@@ -89,13 +92,13 @@ Do not promote Windows readiness to `ProfileLevel` after a failed launch.
 Successful launch:
 
 ```json
-{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","cargo_runner":"direct","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startupinfoex_security_capabilities","job_object_attached":true,"test_status":"passed","worker_execution_class":"not_applicable","fallback_decision":"not_needed","rch_summary":null,"action_result":"launched","final_readiness_layer":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","cargo_runner":"direct","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startup_info_ex_security_capabilities","job_object_attached":true,"allowed_process_startup":true,"denied_user_profile_write":true,"denied_user_profile_write_error_mapping":"user_profile_write_denied","test_status":"passed","worker_execution_class":"not_applicable","fallback_decision":"not_needed","rch_summary":null,"action_result":"launched","final_readiness_layer":"process_limit"}
 ```
 
 Skipped lane:
 
 ```json
-{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","test_status":"skipped","worker_execution_class":"local_fallback_refused","fallback_decision":"rch_local_fallback_refused","skip_reason":"rch_remote_prerequisite_unavailable","action_result":"structured_skip","final_readiness_layer":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","test_status":"skipped","allowed_process_startup":false,"denied_user_profile_write":false,"denied_user_profile_write_error_mapping":null,"worker_execution_class":"local_fallback_refused","fallback_decision":"rch_local_fallback_refused","skip_reason":"rch_remote_prerequisite_unavailable","action_result":"structured_skip","final_readiness_layer":"process_limit"}
 ```
 
 Denied capability:

@@ -253,6 +253,9 @@ if [[ "${test_status}" != "passed" ]]; then
 fi
 
 process_id_hash=""
+allowed_process_startup="false"
+denied_user_profile_write="false"
+denied_user_profile_write_error_mapping=""
 if [[ "${real_launch}" == "true" ]]; then
   process_id="$(sed -n 's/^WINDOWS_APPCONTAINER_E2E_PROCESS_ID=//p' "${RAW_LOG}" | tail -n 1)"
   if [[ -z "${process_id}" ]]; then
@@ -260,6 +263,19 @@ if [[ "${real_launch}" == "true" ]]; then
     exit 1
   fi
   process_id_hash="$(hash16 "${process_id}")"
+
+  if ! grep -aq '^WINDOWS_APPCONTAINER_E2E_ALLOWED_PROCESS_STARTUP=true$' "${RAW_LOG}"; then
+    echo "Windows AppContainer real launch proof did not emit allowed process-start evidence" >&2
+    exit 1
+  fi
+  allowed_process_startup="true"
+
+  if ! grep -aq '^WINDOWS_APPCONTAINER_E2E_DENIED_USER_PROFILE_WRITE=true$' "${RAW_LOG}"; then
+    echo "Windows AppContainer real launch proof did not emit denied user-profile write evidence" >&2
+    exit 1
+  fi
+  denied_user_profile_write="true"
+  denied_user_profile_write_error_mapping="user_profile_write_denied"
 fi
 
 jq -cn \
@@ -287,6 +303,9 @@ jq -cn \
   --arg skip_reason "${skip_reason}" \
   --arg real_launch "${real_launch}" \
   --arg process_id_hash "${process_id_hash}" \
+  --arg allowed_process_startup "${allowed_process_startup}" \
+  --arg denied_user_profile_write "${denied_user_profile_write}" \
+  --arg denied_user_profile_write_error_mapping "${denied_user_profile_write_error_mapping}" \
   --arg test_status "${test_status}" \
   --arg fallback_decision "${fallback_decision}" \
   --arg worker_execution_class "${worker_execution_class}" \
@@ -313,6 +332,9 @@ jq -cn \
     sid_present: ($real_launch == "true"),
     launch_mechanism: (if $real_launch == "true" then "startup_info_ex_security_capabilities" elif $test_status == "failed" then "verification_failed" else "skipped_inactive" end),
     process_id_hash: (if $process_id_hash == "" then null else $process_id_hash end),
+    allowed_process_startup: ($allowed_process_startup == "true"),
+    denied_user_profile_write: ($denied_user_profile_write == "true"),
+    denied_user_profile_write_error_mapping: (if $denied_user_profile_write_error_mapping == "" then null else $denied_user_profile_write_error_mapping end),
     job_object_id_hash: $job_object_id_hash,
     job_object_attached: ($real_launch == "true"),
     job_object_attachment_intent: (if $real_launch == "true" then "attach_after_launch" else "none" end),
@@ -353,6 +375,8 @@ jq -e '
       $record.capability_decision,
       $record.sid_present,
       $record.launch_mechanism,
+      $record.allowed_process_startup,
+      $record.denied_user_profile_write,
       $record.job_object_id_hash,
       $record.job_object_attached,
       $record.job_object_attachment_intent,
@@ -386,6 +410,9 @@ jq -e '
       and $record.job_object_attached == true
       and $record.job_object_attachment_intent == "attach_after_launch"
       and $record.process_id_hash != null
+      and $record.allowed_process_startup == true
+      and $record.denied_user_profile_write == true
+      and $record.denied_user_profile_write_error_mapping == "user_profile_write_denied"
       and $record.skip_reason == null
     elif $record.action_result == "verification_failed" then
       $record.test_status == "failed"
@@ -419,6 +446,9 @@ jq -cn \
   --arg target_dir_class "${TARGET_DIR_CLASS}" \
   --arg skip_reason "${skip_reason}" \
   --arg real_launch "${real_launch}" \
+  --arg allowed_process_startup "${allowed_process_startup}" \
+  --arg denied_user_profile_write "${denied_user_profile_write}" \
+  --arg denied_user_profile_write_error_mapping "${denied_user_profile_write_error_mapping}" \
   --arg test_status "${test_status}" \
   --arg fallback_decision "${fallback_decision}" \
   --arg worker_execution_class "${worker_execution_class}" \
@@ -429,6 +459,11 @@ jq -cn \
     bead_id: $bead_id,
     result: $result,
     real_launch: ($real_launch == "true"),
+    allowed_process_startup: ($allowed_process_startup == "true"),
+    denied_user_profile_write: ($denied_user_profile_write == "true"),
+    denied_user_profile_write_error_mapping: (if $denied_user_profile_write_error_mapping == "" then null else $denied_user_profile_write_error_mapping end),
+    action_result: (if $real_launch == "true" then "launched" elif $test_status == "failed" then "verification_failed" else "structured_skip" end),
+    final_readiness_layer: "process_limit",
     log_jsonl: $log_jsonl,
     raw_log: $raw_log,
     target_dir_class: $target_dir_class,

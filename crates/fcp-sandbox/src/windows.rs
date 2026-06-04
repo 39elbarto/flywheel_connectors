@@ -1664,6 +1664,28 @@ mod tests {
             .wait(Duration::from_secs(10))
             .expect("wait for AppContainer child");
         assert_eq!(exit_code, 0);
+        eprintln!("WINDOWS_APPCONTAINER_E2E_ALLOWED_PROCESS_STARTUP=true");
+
+        let user_profile = std::env::var_os("USERPROFILE").expect("USERPROFILE is available");
+        let denied_write_command = format!(
+            "echo denied>\"{}\\fcp-appcontainer-denied-write.txt\" && exit /B 86 || exit /B 5",
+            user_profile.to_string_lossy()
+        );
+        let denied_child = sandbox
+            .spawn_appcontainer_process(
+                Path::new("C:\\Windows\\System32\\cmd.exe"),
+                &[OsStr::new("/C"), OsStr::new(&denied_write_command)],
+                &policy,
+            )
+            .expect("launch AppContainer child for denied user-profile write");
+        let denied_exit_code = denied_child
+            .wait(Duration::from_secs(10))
+            .expect("wait for AppContainer denied-write child");
+        assert_eq!(
+            denied_exit_code, 5,
+            "AppContainer child did not report denied user-profile write"
+        );
+        eprintln!("WINDOWS_APPCONTAINER_E2E_DENIED_USER_PROFILE_WRITE=true");
 
         unsafe {
             match prev {

@@ -2929,9 +2929,9 @@ NODE A (current holder)                NODE B (target holder)
   (Terminated)                         │  the caller from B       │
 ```
 
-The closeout proof (`crates/fcp-e2e/tests/computation_migration_reference.rs`) verifies byte-equivalent completion: the final response delivered by Node B matches what Node A would have produced if migration had not occurred. Because the checkpoint is application-level, the migration is *cross-platform*: a `Running` operation on Linux can resume on macOS as long as both have the same connector binary and manifest hash. There is no OS-process snapshot to keep architecturally compatible.
+The closeout proofs (`crates/fcp-e2e/tests/computation_migration_reference.rs` and `crates/fcp-e2e/tests/computation_migration_unplanned_e2e.rs`) verify byte-equivalent completion for planned handoff and unplanned source loss: the final response delivered by Node B matches what Node A would have produced if migration had not occurred. Because the checkpoint is application-level, the migration is *cross-platform*: a `Running` operation on Linux can resume on macOS as long as both have the same connector binary and manifest hash. There is no OS-process snapshot to keep architecturally compatible.
 
-Automatic optimal-device execution (let the planner decide which node should hold a long-running operation) is still hardening, but the migration primitive itself is proven.
+Automatic optimal-device execution (let the planner decide which node should hold a long-running operation) is still hardening, but the planned and unplanned checkpoint-resume migration primitives are proven.
 
 ---
 

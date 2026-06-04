@@ -340,6 +340,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -356,6 +357,7 @@ fn build_token(
         .principal("user:test")
         .operations(operations)
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
@@ -434,6 +436,7 @@ async fn todoist_default_deny_compliance_suite_passes() {
     );
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "todoist.projects.read",
         &["todoist.projects.list"],
     );
@@ -493,6 +496,7 @@ async fn todoist_allow_valid_token_connector_suite_passes() {
     );
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "todoist.projects.read",
         &["todoist.projects.list"],
     );

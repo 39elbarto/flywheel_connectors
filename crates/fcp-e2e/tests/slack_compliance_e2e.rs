@@ -204,6 +204,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -213,12 +214,11 @@ fn build_token(
     let mut constraints_cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut constraints_cbor)
         .expect("serialize constraints to CBOR");
-    let resolved_capability = match capability {
-        "slack.get_channel_history" => "slack.read",
-        _ => capability,
-    };
+    // The connector's required_capability_for_operation() maps
+    // slack.get_channel_history to its own operation-named capability,
+    // so the token capability is used verbatim (no remap).
     let cose = CapabilityTokenBuilder::new()
-        .capability_id(resolved_capability)
+        .capability_id(capability)
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
@@ -226,6 +226,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -324,7 +326,7 @@ async fn slack_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["slack.write"]);
     // Token grants "slack.write" but invoke targets "slack.get_channel_history" -> denial
-    let token = build_token(&signing_key, "slack.write", &["slack.write"]);
+    let token = build_token(&signing_key, "slack.write", &["slack.write"], connector.connector.instance_id());
     let invoke = invoke_request(
         "slack.get_channel_history",
         json!({ "channel": "C0123456789" }),
@@ -333,7 +335,7 @@ async fn slack_default_deny_compliance_suite_passes() {
 
     let dynamic = DynamicSuite {
         config: json!({
-            "token": "xoxb-test-000",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "http://localhost:9999"
         }),
         handshake: handshake.clone(),
@@ -386,6 +388,7 @@ async fn slack_allow_valid_token_connector_suite_passes() {
         &signing_key,
         "slack.get_channel_history",
         &["slack.get_channel_history"],
+        connector.connector.instance_id(),
     );
     let invoke = invoke_request(
         "slack.get_channel_history",
@@ -395,7 +398,7 @@ async fn slack_allow_valid_token_connector_suite_passes() {
     let suite = ConnectorSuite {
         test_name: "slack_allow_valid_token".to_string(),
         config: json!({
-            "token": "xoxb-test-e2e",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }),
         handshake,

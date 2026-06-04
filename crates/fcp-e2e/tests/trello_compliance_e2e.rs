@@ -359,6 +359,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -376,6 +377,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -491,7 +494,7 @@ async fn trello_default_deny_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["trello.boards.read"],
     );
-    let token = build_token(&signing_key, "trello.boards.read", &["trello.boards.list"]);
+    let token = build_token(&signing_key, "trello.boards.read", &["trello.boards.list"], connector.instance_id.as_str());
     let invoke = invoke_request(
         "trello.cards.delete",
         json!({ "card_id": "card_abc123" }),
@@ -543,7 +546,7 @@ async fn trello_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["trello.boards.read"],
     );
-    let token = build_token(&signing_key, "trello.boards.read", &["trello.boards.list"]);
+    let token = build_token(&signing_key, "trello.boards.read", &["trello.boards.list"], connector.instance_id.as_str());
     let invoke = invoke_request("trello.boards.list", json!({}), token);
     let suite = ConnectorSuite {
         test_name: "trello_allow_valid_token".to_string(),
@@ -590,9 +593,12 @@ async fn trello_allow_valid_token_connector_suite_passes() {
 async fn trello_dangerous_delete_emits_receipt_audit_and_stable_evidence() {
     let mock = MockApiServer::start().await;
 
+    // Trello's real DELETE /cards/{id} returns a 200 with a JSON body
+    // ({"limits":{}}). The connector rejects a 200 with an empty body
+    // (decode_success_body), so the mock must carry a JSON body.
     Mock::given(method("DELETE"))
         .and(path_regex(r"^/cards/.*"))
-        .respond_with(ResponseTemplate::new(200))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "limits": {} })))
         .mount(mock.inner())
         .await;
 
@@ -602,7 +608,7 @@ async fn trello_dangerous_delete_emits_receipt_audit_and_stable_evidence() {
         signing_key.verifying_key().to_bytes(),
         &["trello.cards.write"],
     );
-    let token = build_token(&signing_key, "trello.cards.write", &["trello.cards.delete"]);
+    let token = build_token(&signing_key, "trello.cards.write", &["trello.cards.delete"], connector.instance_id.as_str());
     let invoke = invoke_request(
         "trello.cards.delete",
         json!({ "card_id": "card_abc123" }),

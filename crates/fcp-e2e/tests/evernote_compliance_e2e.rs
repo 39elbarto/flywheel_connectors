@@ -307,6 +307,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -325,6 +326,10 @@ fn build_token(
             .zone_id("z:work")
             .principal("user:test")
             .operations(operations)
+            // dja9u typestate ratchet: adapter verifies with `verify_bound`,
+            // which requires an INSTANCE_ID claim; bind to the adapter
+            // instance (instance-binding pattern, commit 16171621d).
+            .target_instance(instance_id)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
@@ -403,6 +408,7 @@ async fn evernote_default_deny_compliance_suite_passes() {
     );
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "evernote.notes.read",
         &["evernote.notes.list"],
     );
@@ -459,6 +465,7 @@ async fn evernote_allow_valid_token_connector_suite_passes() {
     );
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "evernote.notebooks.read",
         &["evernote.notebooks.list"],
     );

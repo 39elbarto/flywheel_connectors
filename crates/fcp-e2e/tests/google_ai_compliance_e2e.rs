@@ -190,7 +190,11 @@ fn reference_manifest_with_hash() -> String {
     )
 }
 
-fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    capabilities: &[&str],
+    instance_id: InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -203,12 +207,16 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // The connector honors requested_instance_id and verifies with
+        // verify_bound; pin it to the test instance so the token's INSTANCE_ID
+        // claim matches (instance-binding pattern, commit 16171621d).
+        requested_instance_id: Some(instance_id),
     }
 }
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -229,6 +237,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: connector verifies with verify_bound, which
+        // requires an INSTANCE_ID claim; bind to the test instance
+        // (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -322,13 +334,16 @@ fn gemini_success_response() -> serde_json::Value {
 async fn google_ai_default_deny_compliance_suite_passes() {
     let mut connector = GoogleAiConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
         &["google-ai.get_usage"],
+        instance_id.clone(),
     );
     // Token grants "google-ai.get_usage" but invoke targets "google-ai.generate_content" -> denial
     let token = build_token(
         &signing_key,
+        instance_id.as_str(),
         "google-ai.get_usage",
         &["google-ai.get_usage"],
     );
@@ -385,12 +400,15 @@ async fn google_ai_allow_valid_token_connector_suite_passes() {
 
     let mut connector = GoogleAiConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
         &["google-ai.generate_content"],
+        instance_id.clone(),
     );
     let token = build_token(
         &signing_key,
+        instance_id.as_str(),
         "google-ai.generate_content",
         &["google-ai.generate_content"],
     );

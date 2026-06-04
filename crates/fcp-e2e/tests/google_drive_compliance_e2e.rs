@@ -188,7 +188,11 @@ fn drive_config(base_url: &str) -> serde_json::Value {
     })
 }
 
-fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    capabilities: &[&str],
+    instance_id: InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -201,12 +205,16 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // The connector honors requested_instance_id and verifies with
+        // verify_bound; pin it to the test instance so the token's INSTANCE_ID
+        // claim matches (instance-binding pattern, commit 16171621d).
+        requested_instance_id: Some(instance_id),
     }
 }
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -222,6 +230,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: connector verifies with verify_bound, which
+        // requires an INSTANCE_ID claim; bind to the test instance
+        // (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -308,10 +320,20 @@ async fn google_drive_default_deny_compliance_suite_passes() {
 
     let mut connector = GoogleDriveConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["drive.write"]);
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["drive.write"],
+        instance_id.clone(),
+    );
     // Token grants `drive.write` but invoke targets `drive.get_file`
     // (which requires `drive.read`) → denial.
-    let token = build_token(&signing_key, "drive.write", &["drive.upload_file"]);
+    let token = build_token(
+        &signing_key,
+        instance_id.as_str(),
+        "drive.write",
+        &["drive.upload_file"],
+    );
     let invoke = invoke_request("drive.get_file", json!({ "file_id": "file_123" }), token);
 
     let dynamic = DynamicSuite {
@@ -355,8 +377,13 @@ async fn google_drive_happy_path_connector_suite_passes() {
 
     let mut connector = GoogleDriveConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["drive.read"]);
-    let token = build_token(&signing_key, "drive.read", &["drive.get_file"]);
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["drive.read"],
+        instance_id.clone(),
+    );
+    let token = build_token(&signing_key, instance_id.as_str(), "drive.read", &["drive.get_file"]);
     let invoke = invoke_request("drive.get_file", json!({ "file_id": "file_123" }), token);
 
     let suite = ConnectorSuite {

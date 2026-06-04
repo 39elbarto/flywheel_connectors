@@ -44,7 +44,8 @@ impl AmplitudeConnectorAdapter {
         Self {
             connector: AmplitudeConnector::new(),
             id: ConnectorId::from_static("amplitude"),
-            instance_id: InstanceId::new(),
+            instance_id: InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
             verifier: None,
         }
     }
@@ -359,7 +360,12 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // dja9u typestate ratchet: connector verifier binds to this id; the
+        // capability token's target_instance must match it (see build_token).
+        requested_instance_id: Some(
+            InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
+        ),
     }
 }
 
@@ -384,6 +390,7 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        .target_instance("inst_e2e_test_fixture")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -571,10 +578,11 @@ fn amplitude_manifest_network_guard_allows_and_denies() {
         .and_then(toml::Value::as_table)
         .expect("operations table");
 
+    // Commit 313822edf added the amplitude.health idempotent probe (4th op).
     assert_eq!(
         operations.len(),
-        3,
-        "Amplitude manifest should declare 3 operations"
+        4,
+        "Amplitude manifest should declare 4 operations"
     );
 
     let expected_hosts = vec!["amplitude.com".to_string(), "*.amplitude.com".to_string()];

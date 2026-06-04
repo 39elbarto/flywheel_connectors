@@ -121,6 +121,7 @@ impl FcpConnector for HubSpotConnectorAdapter {
         let expected_caps = std::collections::BTreeSet::from([
             "hubspot.contacts.read".to_string(),
             "hubspot.contacts.write".to_string(),
+            "hubspot.contacts.delete".to_string(),
             "hubspot.companies.read".to_string(),
             "hubspot.companies.write".to_string(),
             "hubspot.deals.read".to_string(),

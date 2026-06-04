@@ -342,6 +342,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -359,6 +360,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -431,7 +434,7 @@ async fn roam_default_deny_compliance_suite_passes() {
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["roam.pages.read"]);
     // Token grants roam.pages.read capability but only for roam.pages.list operation.
     // Invoke targets roam.blocks.create which requires roam.blocks.write -- should be denied.
-    let token = build_token(&signing_key, "roam.pages.read", &["roam.pages.list"]);
+    let token = build_token(&signing_key, "roam.pages.read", &["roam.pages.list"], connector.instance_id.as_str());
     let invoke = invoke_request(
         "roam.blocks.create",
         json!({ "page_uid": "abc123", "content": "test block" }),
@@ -477,7 +480,7 @@ async fn roam_happy_path_compliance_suite_passes() {
     let mut connector = RoamConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["roam.pages.read"]);
-    let token = build_token(&signing_key, "roam.pages.read", &["roam.pages.list"]);
+    let token = build_token(&signing_key, "roam.pages.read", &["roam.pages.list"], connector.instance_id.as_str());
     let invoke = invoke_request("roam.pages.list", json!({}), token);
 
     let suite = ConnectorSuite {

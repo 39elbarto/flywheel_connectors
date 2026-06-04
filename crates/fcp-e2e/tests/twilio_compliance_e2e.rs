@@ -248,6 +248,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -269,6 +270,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -381,7 +384,13 @@ async fn twilio_default_deny_compliance_suite_passes() {
     let mut connector = TwilioConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["twilio.voice"]);
-    let token = build_token(&signing_key, "twilio.voice", &["twilio.voice"]);
+    let twilio_instance = connector.connector.lock().await.instance_id().to_owned();
+    let token = build_token(
+        &signing_key,
+        "twilio.voice",
+        &["twilio.voice"],
+        &twilio_instance,
+    );
     let invoke = invoke_request("twilio.get_account", json!({}), token);
 
     let dynamic = DynamicSuite {
@@ -433,7 +442,13 @@ async fn twilio_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["twilio.get_account"],
     );
-    let token = build_token(&signing_key, "twilio.get_account", &["twilio.get_account"]);
+    let twilio_instance = connector.connector.lock().await.instance_id().to_owned();
+    let token = build_token(
+        &signing_key,
+        "twilio.get_account",
+        &["twilio.get_account"],
+        &twilio_instance,
+    );
     let invoke = invoke_request("twilio.get_account", json!({}), token);
     let suite = ConnectorSuite {
         test_name: "twilio_allow_valid_token".to_string(),
@@ -557,8 +572,8 @@ fn twilio_operation_risk_and_idempotency_gating() {
     let operations = operation_table(&manifest);
     assert_eq!(
         operations.len(),
-        10,
-        "twilio manifest should define exactly 10 operations"
+        42,
+        "twilio manifest should define exactly 42 operations"
     );
 
     // High-risk write operations.

@@ -336,6 +336,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -353,6 +354,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -423,7 +426,7 @@ async fn whisper_default_deny_compliance_suite_passes() {
     let mut connector = WhisperConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["whisper.info"]);
-    let token = build_token(&signing_key, "whisper.info", &["whisper.health"]);
+    let token = build_token(&signing_key, "whisper.info", &["whisper.health"], connector.instance_id.as_str());
     // Token grants whisper.info for whisper.health, but we invoke whisper.transcribe
     // which requires whisper.transcription -- should be denied.
     let invoke = invoke_request(
@@ -485,6 +488,7 @@ async fn whisper_happy_path_connector_suite_passes() {
         &signing_key,
         "whisper.transcription",
         &["whisper.transcribe"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request(
         "whisper.transcribe",

@@ -156,6 +156,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -173,6 +174,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -261,6 +264,7 @@ async fn vectordb_default_deny_compliance_suite_passes() {
         &signing_key,
         "vectordb.collections.delete",
         &["vectordb.collections.delete"],
+        connector.connector.instance_id().as_str(),
     );
     let invoke = invoke_request(
         "vectordb.list_collections",
@@ -311,6 +315,7 @@ async fn vectordb_allow_valid_token_connector_suite_passes() {
         &signing_key,
         "vectordb.collections.read",
         &["vectordb.list_collections"],
+        connector.connector.instance_id().as_str(),
     );
     let invoke = invoke_request(
         "vectordb.list_collections",

@@ -214,7 +214,11 @@ fn figma_manifest_with_hash() -> String {
     )
 }
 
-fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    capabilities: &[&str],
+    instance_id: InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -227,12 +231,16 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // Figma honors requested_instance_id and verifies with verify_bound;
+        // pin it to the adapter instance so the token's INSTANCE_ID claim
+        // matches (instance-binding pattern, commit 16171621d).
+        requested_instance_id: Some(instance_id),
     }
 }
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -253,6 +261,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: the Figma connector verifies with
+        // verify_bound, which requires an INSTANCE_ID claim; bind to the
+        // adapter instance (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -359,9 +371,18 @@ async fn figma_default_deny_compliance_suite_passes() {
 
     let mut connector = FigmaConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["figma.get_file"]);
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["figma.get_file"],
+        connector.instance_id.clone(),
+    );
     // Token grants get_file but invoke targets delete_comment → should be denied
-    let token = build_token(&signing_key, "figma.get_file", &["figma.get_file"]);
+    let token = build_token(
+        &signing_key,
+        connector.instance_id.as_str(),
+        "figma.get_file",
+        &["figma.get_file"],
+    );
     let invoke = invoke_request(
         "figma.delete_comment",
         json!({
@@ -412,8 +433,17 @@ async fn figma_allow_valid_token_connector_suite_passes() {
 
     let mut connector = FigmaConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["figma.get_file"]);
-    let token = build_token(&signing_key, "figma.get_file", &["figma.get_file"]);
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["figma.get_file"],
+        connector.instance_id.clone(),
+    );
+    let token = build_token(
+        &signing_key,
+        connector.instance_id.as_str(),
+        "figma.get_file",
+        &["figma.get_file"],
+    );
     let invoke = invoke_request("figma.get_file", json!({ "file_key": "abc123" }), token);
     let suite = ConnectorSuite {
         test_name: "figma_allow_valid_token".to_string(),
@@ -538,12 +568,18 @@ async fn figma_dangerous_delete_webhook_requires_delete_capability() {
         .handshake(handshake_request(
             signing_key.verifying_key().to_bytes(),
             &["figma.get_file"],
+            adapter.instance_id.clone(),
         ))
         .await
         .expect("handshake");
 
     // Token grants get_file but invoke targets delete_webhook
-    let token = build_token(&signing_key, "figma.get_file", &["figma.get_file"]);
+    let token = build_token(
+        &signing_key,
+        adapter.instance_id.as_str(),
+        "figma.get_file",
+        &["figma.get_file"],
+    );
     let req = invoke_request(
         "figma.delete_webhook",
         json!({ "webhook_id": "wh-123" }),
@@ -577,12 +613,14 @@ async fn figma_dangerous_delete_webhook_allows_with_correct_capability() {
         .handshake(handshake_request(
             signing_key.verifying_key().to_bytes(),
             &["figma.delete_webhook"],
+            adapter.instance_id.clone(),
         ))
         .await
         .expect("handshake");
 
     let token = build_token(
         &signing_key,
+        adapter.instance_id.as_str(),
         "figma.delete_webhook",
         &["figma.delete_webhook"],
     );

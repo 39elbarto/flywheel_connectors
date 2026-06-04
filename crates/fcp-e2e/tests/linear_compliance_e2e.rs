@@ -201,6 +201,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -220,6 +221,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: the Linear connector verifies with
+        // verify_bound, which requires an INSTANCE_ID claim; bind to the
+        // connector instance (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -338,7 +343,12 @@ async fn linear_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["linear.write"]);
     // Token grants "linear.write" but invoke targets "linear.get_issue" -> denial
-    let token = build_token(&signing_key, "linear.write", &["linear.write"]);
+    let token = build_token(
+        &signing_key,
+        connector.connector.instance_id().as_str(),
+        "linear.write",
+        &["linear.write"],
+    );
     let invoke = invoke_request("linear.get_issue", json!({ "issue_id": "LIN-42" }), token);
 
     let dynamic = DynamicSuite {
@@ -391,7 +401,12 @@ async fn linear_allow_valid_token_connector_suite_passes() {
     // Introspection declares `linear.get_issue` requires capability
     // `linear.read` (permission class), not the op id itself.
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["linear.read"]);
-    let token = build_token(&signing_key, "linear.read", &["linear.get_issue"]);
+    let token = build_token(
+        &signing_key,
+        connector.connector.instance_id().as_str(),
+        "linear.read",
+        &["linear.get_issue"],
+    );
     let invoke = invoke_request("linear.get_issue", json!({ "issue_id": "LIN-42" }), token);
     let suite = ConnectorSuite {
         test_name: "linear_allow_valid_token".to_string(),

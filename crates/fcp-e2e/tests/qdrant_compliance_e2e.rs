@@ -196,6 +196,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -219,6 +220,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: verifier binds to handshake instance.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -301,6 +304,11 @@ async fn qdrant_default_deny_compliance_suite_passes() {
         &signing_key,
         "qdrant.collections.read",
         &["qdrant.collections.read"],
+        handshake
+            .requested_instance_id
+            .as_ref()
+            .expect("handshake instance id")
+            .as_str(),
     );
     let invoke = invoke_request(
         "qdrant.upsert_points",
@@ -375,6 +383,11 @@ async fn qdrant_allow_read_with_valid_token_connector_suite_passes() {
         &signing_key,
         "qdrant.list_collections",
         &["qdrant.list_collections"],
+        handshake
+            .requested_instance_id
+            .as_ref()
+            .expect("handshake instance id")
+            .as_str(),
     );
     let invoke = invoke_request("qdrant.list_collections", json!({}), token);
     let suite = ConnectorSuite {
@@ -454,6 +467,11 @@ async fn qdrant_allow_write_with_valid_token_connector_suite_passes() {
         &signing_key,
         "qdrant.upsert_points",
         &["qdrant.upsert_points"],
+        handshake
+            .requested_instance_id
+            .as_ref()
+            .expect("handshake instance id")
+            .as_str(),
     );
     let invoke = invoke_request(
         "qdrant.upsert_points",
@@ -629,7 +647,12 @@ async fn qdrant_search_with_valid_token_returns_results() {
         .expect("handshake should succeed");
 
     // Build valid token and invoke search
-    let token = build_token(&signing_key, "qdrant.search", &["qdrant.search"]);
+    let token = build_token(
+        &signing_key,
+        "qdrant.search",
+        &["qdrant.search"],
+        connector.instance_id(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.search",

@@ -202,6 +202,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -217,6 +218,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: the Gmail connector verifies with
+        // verify_bound, which requires an INSTANCE_ID claim; bind to the
+        // connector instance (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -320,7 +325,12 @@ async fn gmail_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gmail.send"]);
     // Token grants `gmail.send` but invoke targets `gmail.get_message` → denial
-    let token = build_token(&signing_key, "gmail.send", &["gmail.send_message"]);
+    let token = build_token(
+        &signing_key,
+        connector.connector.instance_id().as_str(),
+        "gmail.send",
+        &["gmail.send_message"],
+    );
     let invoke = invoke_request(
         "gmail.get_message",
         json!({ "message_id": "18d1234abc567890" }),
@@ -328,8 +338,10 @@ async fn gmail_default_deny_compliance_suite_passes() {
     );
 
     let dynamic = DynamicSuite {
+        // Secretless ratchet (e99o6): the Gmail connector rejects raw `token`
+        // config; use the sanctioned credential_id reference shape.
         config: json!({
-            "token": "ya29.test-oauth-token",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "http://localhost:9999"
         }),
         handshake: handshake.clone(),
@@ -377,7 +389,12 @@ async fn gmail_allow_valid_token_connector_suite_passes() {
     let mut connector = GmailConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gmail.read"]);
-    let token = build_token(&signing_key, "gmail.read", &["gmail.get_message"]);
+    let token = build_token(
+        &signing_key,
+        connector.connector.instance_id().as_str(),
+        "gmail.read",
+        &["gmail.get_message"],
+    );
     let invoke = invoke_request(
         "gmail.get_message",
         json!({ "message_id": "18d1234abc567890" }),
@@ -385,8 +402,9 @@ async fn gmail_allow_valid_token_connector_suite_passes() {
     );
     let suite = ConnectorSuite {
         test_name: "gmail_allow_valid_token".to_string(),
+        // Secretless ratchet (e99o6): credential_id reference shape.
         config: json!({
-            "token": "ya29.test-oauth-token-e2e",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }),
         handshake,
@@ -456,9 +474,10 @@ fn gmail_manifest_network_guard_allows_and_denies() {
 
     assert_eq!(
         operations_table.len(),
-        10,
-        "Gmail manifest should declare 10 operations (matching the connector's \
-         dispatch surface in connectors/gmail/src/connector.rs); see \
+        11,
+        "Gmail manifest should declare 11 operations (matching the connector's \
+         dispatch surface in connectors/gmail/src/connector.rs, which now \
+         includes gmail.trash_message); see \
          gmail_manifest_matches_connector_dispatch_surface for the drift check"
     );
 

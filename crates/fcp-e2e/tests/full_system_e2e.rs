@@ -190,6 +190,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -205,6 +206,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: the GitHub connector verifies with
+        // verify_bound, which requires an INSTANCE_ID claim; bind to the
+        // connector instance (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -279,7 +284,9 @@ async fn e2e_connector_configure_and_handshake() {
     // Configure with mock base URL
     let config_result = connector
         .configure(json!({
-            "token": "ghp_test_token_full_e2e",
+            // Secretless ratchet (e99o6): GitHub rejects raw `token`; use the
+            // sanctioned credential_id reference shape.
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }))
         .await;
@@ -318,7 +325,7 @@ async fn e2e_connector_introspect_operations() {
 
     connector
         .configure(json!({
-            "token": "ghp_introspect_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }))
         .await
@@ -394,7 +401,7 @@ async fn e2e_connector_invoke_with_mock() {
 
     connector
         .configure(json!({
-            "token": "ghp_invoke_mock_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }))
         .await
@@ -403,7 +410,12 @@ async fn e2e_connector_invoke_with_mock() {
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["github.read"]);
     connector.handshake(handshake).await.expect("handshake");
 
-    let token = build_token(&signing_key, "github.read", &["github.get_repo"]);
+    let token = build_token(
+        &signing_key,
+        connector.connector.instance_id().as_str(),
+        "github.read",
+        &["github.get_repo"],
+    );
     let invoke = invoke_request(
         "github.get_repo",
         json!({ "owner": "octocat", "repo": "hello-world" }),
@@ -435,7 +447,12 @@ async fn e2e_connector_invoke_with_mock() {
     let signing_key2 = Ed25519SigningKey::generate();
     let mut connector2 = GitHubAdapter::new();
     let handshake2 = handshake_request(signing_key2.verifying_key().to_bytes(), &["github.read"]);
-    let token2 = build_token(&signing_key2, "github.read", &["github.get_repo"]);
+    let token2 = build_token(
+        &signing_key2,
+        connector2.connector.instance_id().as_str(),
+        "github.read",
+        &["github.get_repo"],
+    );
     let invoke2 = invoke_request(
         "github.get_repo",
         json!({ "owner": "octocat", "repo": "hello-world" }),
@@ -445,7 +462,7 @@ async fn e2e_connector_invoke_with_mock() {
     let suite = ConnectorSuite {
         test_name: "full_e2e_invoke_mock".to_string(),
         config: json!({
-            "token": "ghp_suite_invoke_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }),
         handshake: handshake2,
@@ -484,7 +501,7 @@ async fn e2e_capability_verification() {
 
     connector
         .configure(json!({
-            "token": "ghp_cap_verify_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }))
         .await
@@ -498,7 +515,12 @@ async fn e2e_capability_verification() {
     let mut connector2 = GitHubAdapter::new();
     let signing_key2 = Ed25519SigningKey::generate();
     let handshake2 = handshake_request(signing_key2.verifying_key().to_bytes(), &["github.write"]);
-    let token2 = build_token(&signing_key2, "github.write", &["github.write"]);
+    let token2 = build_token(
+        &signing_key2,
+        connector2.connector.instance_id().as_str(),
+        "github.write",
+        &["github.write"],
+    );
     let invoke2 = invoke_request(
         "github.get_repo",
         json!({ "owner": "octocat", "repo": "hello-world" }),
@@ -508,7 +530,7 @@ async fn e2e_capability_verification() {
     let suite = ConnectorSuite {
         test_name: "full_e2e_capability_rejection".to_string(),
         config: json!({
-            "token": "ghp_cap_reject_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }),
         handshake: handshake2,
@@ -570,7 +592,7 @@ async fn e2e_error_mapping_structured() {
 
     connector
         .configure(json!({
-            "token": "ghp_error_mapping_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }))
         .await
@@ -579,7 +601,12 @@ async fn e2e_error_mapping_structured() {
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["github.read"]);
     connector.handshake(handshake).await.expect("handshake");
 
-    let token = build_token(&signing_key, "github.read", &["github.get_repo"]);
+    let token = build_token(
+        &signing_key,
+        connector.connector.instance_id().as_str(),
+        "github.read",
+        &["github.get_repo"],
+    );
     let invoke = invoke_request(
         "github.get_repo",
         json!({ "owner": "octocat", "repo": "nonexistent" }),

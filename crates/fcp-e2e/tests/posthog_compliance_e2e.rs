@@ -332,6 +332,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -349,6 +350,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -426,6 +429,7 @@ async fn posthog_default_deny_compliance_suite_passes() {
         &signing_key,
         "posthog.events.read",
         &["posthog.events.query"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request("posthog.feature_flags.list", json!({}), token);
 
@@ -479,6 +483,7 @@ async fn posthog_happy_path_compliance_suite_passes() {
         &signing_key,
         "posthog.events.read",
         &["posthog.events.query"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request(
         "posthog.events.query",
@@ -534,30 +539,50 @@ fn posthog_manifest_network_guard_allows_and_denies() {
 
     assert_eq!(
         operations.len(),
-        3,
-        "PostHog manifest should declare 3 operations"
+        4,
+        "PostHog manifest should declare 4 operations"
     );
 
-    let expected_hosts = vec![
+    // Most operations target the PostHog app/query hosts. The
+    // ingestion operation (events.capture) targets the dedicated
+    // ingestion hosts plus the *.posthog.com wildcard.
+    let app_hosts = vec![
         "app.posthog.com".to_string(),
         "us.posthog.com".to_string(),
         "eu.posthog.com".to_string(),
     ];
+    let ingest_hosts = vec![
+        "us.i.posthog.com".to_string(),
+        "eu.i.posthog.com".to_string(),
+        "*.posthog.com".to_string(),
+    ];
 
     for operation_name in operations.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);
+        let expected_hosts = if operation_name == "posthog.events.capture" {
+            &ingest_hosts
+        } else {
+            &app_hosts
+        };
         assert_eq!(
-            host_allow, expected_hosts,
+            &host_allow, expected_hosts,
             "operation {operation_name} should use exact PostHog host allowlist"
         );
 
-        assert!(host_allowed("app.posthog.com", &host_allow));
-        assert!(host_allowed("us.posthog.com", &host_allow));
-        assert!(host_allowed("eu.posthog.com", &host_allow));
-        assert!(!host_allowed("posthog.com", &host_allow));
-        assert!(!host_allowed("evil.app.posthog.com", &host_allow));
-        assert!(!host_allowed("example.com", &host_allow));
-        assert!(!host_allowed("127.0.0.1", &host_allow));
+        if operation_name == "posthog.events.capture" {
+            assert!(host_allowed("us.i.posthog.com", &host_allow));
+            assert!(host_allowed("eu.i.posthog.com", &host_allow));
+            assert!(!host_allowed("example.com", &host_allow));
+            assert!(!host_allowed("127.0.0.1", &host_allow));
+        } else {
+            assert!(host_allowed("app.posthog.com", &host_allow));
+            assert!(host_allowed("us.posthog.com", &host_allow));
+            assert!(host_allowed("eu.posthog.com", &host_allow));
+            assert!(!host_allowed("posthog.com", &host_allow));
+            assert!(!host_allowed("evil.app.posthog.com", &host_allow));
+            assert!(!host_allowed("example.com", &host_allow));
+            assert!(!host_allowed("127.0.0.1", &host_allow));
+        }
 
         let constraints = operation_network_constraints(&manifest, operation_name);
         assert_eq!(

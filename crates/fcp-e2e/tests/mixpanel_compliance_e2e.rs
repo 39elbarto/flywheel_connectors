@@ -312,6 +312,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -329,6 +330,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -405,6 +408,7 @@ async fn mixpanel_default_deny_compliance_suite_passes() {
         &signing_key,
         "mixpanel.events.read",
         &["mixpanel.events.query"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request("mixpanel.funnels.list", json!({}), token);
 
@@ -456,6 +460,7 @@ async fn mixpanel_happy_path_connector_suite_passes() {
         &signing_key,
         "mixpanel.funnels.read",
         &["mixpanel.funnels.list"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request("mixpanel.funnels.list", json!({}), token);
 

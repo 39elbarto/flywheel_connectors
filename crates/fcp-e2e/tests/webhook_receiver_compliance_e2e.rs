@@ -350,6 +350,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -367,6 +368,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -495,6 +498,7 @@ async fn webhook_receiver_default_deny_compliance_suite_passes() {
         &signing_key,
         "webhook.endpoints.read",
         &["webhook.endpoints.list"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request(
         "webhook.endpoints.delete",
@@ -552,6 +556,7 @@ async fn webhook_receiver_happy_path_connector_suite_passes() {
         &signing_key,
         "webhook.endpoints.write",
         &["webhook.endpoints.create"],
+        connector.instance_id.as_str(),
     );
     let seed_create = invoke_request(
         "webhook.endpoints.create",
@@ -576,6 +581,7 @@ async fn webhook_receiver_happy_path_connector_suite_passes() {
         &signing_key,
         "webhook.endpoints.read",
         &["webhook.endpoints.list"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request("webhook.endpoints.list", json!({}), token);
 
@@ -620,6 +626,7 @@ async fn webhook_receiver_happy_path_connector_suite_passes() {
                 &signing_key,
                 "webhook.endpoints.read",
                 &["webhook.endpoints.list"],
+        connector.instance_id.as_str(),
             ),
         ))
         .await
@@ -651,8 +658,8 @@ fn webhook_receiver_manifest_network_guard_allows_and_denies() {
 
     assert_eq!(
         operations.len(),
-        4,
-        "Webhook Receiver manifest should declare 4 operations"
+        6,
+        "Webhook Receiver manifest should declare 6 operations"
     );
 
     let expected_hosts = vec!["localhost.localdomain".to_string()];

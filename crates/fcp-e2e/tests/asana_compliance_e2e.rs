@@ -47,7 +47,8 @@ impl AsanaConnectorAdapter {
         Self {
             connector: AsanaConnector::new(),
             id: ConnectorId::from_static("asana"),
-            instance_id: InstanceId::new(),
+            instance_id: InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
             verifier: None,
         }
     }
@@ -352,7 +353,12 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // dja9u typestate ratchet: connector verifier binds to this id; the
+        // capability token's target_instance must match it (see build_token).
+        requested_instance_id: Some(
+            InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
+        ),
     }
 }
 
@@ -377,6 +383,7 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        .target_instance("inst_e2e_test_fixture")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -671,10 +678,11 @@ fn asana_manifest_network_guard_allows_and_denies() {
         .and_then(toml::Value::as_table)
         .expect("operations table");
 
+    // Commit 9cbff34d4 added the asana.tasks.list operation (6th op).
     assert_eq!(
         operations.len(),
-        5,
-        "Asana manifest should declare 5 operations"
+        6,
+        "Asana manifest should declare 6 operations"
     );
 
     let expected_hosts = vec!["app.asana.com".to_string()];

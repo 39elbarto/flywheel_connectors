@@ -351,6 +351,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -359,6 +360,8 @@ fn build_token(
     };
     let mut constraints_cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
+    // dja9u typestate ratchet: connector verifies with verify_bound(), so tokens
+    // MUST carry target_instance matching the connector instance.
     let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -368,6 +371,7 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -483,6 +487,7 @@ async fn mailchimp_default_deny_compliance_suite_passes() {
         &signing_key,
         "mailchimp.lists.read",
         &["mailchimp.lists.list"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request(
         "mailchimp.campaigns.send",
@@ -541,6 +546,7 @@ async fn mailchimp_happy_path_connector_suite_passes() {
         &signing_key,
         "mailchimp.lists.read",
         &["mailchimp.lists.list"],
+        connector.instance_id.as_str(),
     );
     let invoke = invoke_request("mailchimp.lists.list", json!({}), token);
 

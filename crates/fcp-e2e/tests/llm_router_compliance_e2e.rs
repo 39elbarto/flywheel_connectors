@@ -333,7 +333,11 @@ fn llm_router_config() -> serde_json::Value {
     })
 }
 
-fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    capabilities: &[&str],
+    instance_id: InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -350,12 +354,17 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // The llm-router connector honors requested_instance_id and verifies
+        // tokens with verify_bound against it; pin it to the adapter instance
+        // so the token's INSTANCE_ID claim matches (instance-binding pattern,
+        // commit 16171621d).
+        requested_instance_id: Some(instance_id),
     }
 }
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -371,6 +380,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: adapter verifies with `verify_bound`,
+        // which requires an INSTANCE_ID claim; bind to the adapter instance
+        // (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -452,9 +465,15 @@ async fn llm_router_default_deny_compliance_suite_passes() {
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
         &["llm-router.admin"],
+        connector.instance_id.clone(),
     );
     // Token grants "llm-router.admin" but invoke targets "llm-router.route" -> denial
-    let token = build_token(&signing_key, "llm-router.admin", &["llm-router.admin"]);
+    let token = build_token(
+        &signing_key,
+        connector.instance_id.as_str(),
+        "llm-router.admin",
+        &["llm-router.admin"],
+    );
     let invoke = invoke_request(
         "llm-router.route",
         json!({
@@ -506,8 +525,14 @@ async fn llm_router_happy_path_connector_suite_passes() {
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
         &["llm-router.route"],
+        connector.instance_id.clone(),
     );
-    let token = build_token(&signing_key, "llm-router.route", &["llm-router.route"]);
+    let token = build_token(
+        &signing_key,
+        connector.instance_id.as_str(),
+        "llm-router.route",
+        &["llm-router.route"],
+    );
     let invoke = invoke_request(
         "llm-router.route",
         json!({
@@ -572,35 +597,33 @@ fn llm_router_manifest_network_guard_allows_and_denies() {
         "LLM Router manifest should declare 5 operations"
     );
 
-    let expected_hosts = vec![
-        "api.anthropic.com".to_string(),
-        "api.openai.com".to_string(),
-        "generativelanguage.googleapis.com".to_string(),
-    ];
+    // The LLM Router routes locally and never makes a direct upstream call;
+    // egress to providers happens through the host's credential-injecting
+    // proxy. As of commit 23958de02 (4kw5f.9.3) every operation's
+    // network_constraints pin host_allow to the sentinel ["none.invalid"], so
+    // NO provider host is directly reachable from the connector.
+    let expected_hosts = vec!["none.invalid".to_string()];
 
-    // Only route and list_providers have explicit network_constraints in the manifest.
-    // The other operations (estimate_cost, get_usage, get_budget) are local/computed
-    // and don't have network_constraints sections.
     let ops_with_constraints = ["llm-router.route", "llm-router.list_providers"];
     for operation_name in &ops_with_constraints {
         let host_allow = operation_host_allow_list(&manifest, operation_name);
         assert_eq!(
             host_allow, expected_hosts,
-            "operation {operation_name} should allow known AI provider hosts"
+            "operation {operation_name} should pin host_allow to the no-direct-egress sentinel"
         );
 
-        // Allowed hosts
+        // No real provider host is directly allowed; egress is proxy-only.
         assert!(
-            host_allowed("api.anthropic.com", &host_allow),
-            "api.anthropic.com should be allowed for {operation_name}"
+            !host_allowed("api.anthropic.com", &host_allow),
+            "api.anthropic.com should NOT be directly reachable for {operation_name}"
         );
         assert!(
-            host_allowed("api.openai.com", &host_allow),
-            "api.openai.com should be allowed for {operation_name}"
+            !host_allowed("api.openai.com", &host_allow),
+            "api.openai.com should NOT be directly reachable for {operation_name}"
         );
         assert!(
-            host_allowed("generativelanguage.googleapis.com", &host_allow),
-            "generativelanguage.googleapis.com should be allowed for {operation_name}"
+            !host_allowed("generativelanguage.googleapis.com", &host_allow),
+            "generativelanguage.googleapis.com should NOT be directly reachable for {operation_name}"
         );
 
         // Denied hosts
@@ -640,12 +663,15 @@ fn llm_router_manifest_network_guard_allows_and_denies() {
             Some(true),
             "operation {operation_name} must deny private ranges"
         );
+        // require_sni is false because the connector makes no direct TLS
+        // connection (host_allow is the no-egress sentinel); SNI is enforced by
+        // the egress proxy that actually dials providers.
         assert_eq!(
             constraints
                 .get("require_sni")
                 .and_then(toml::Value::as_bool),
-            Some(true),
-            "operation {operation_name} must require SNI"
+            Some(false),
+            "operation {operation_name} pins require_sni=false under proxy-only egress"
         );
     }
 }

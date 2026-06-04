@@ -56,6 +56,10 @@ impl AnthropicConnectorAdapter {
             id: ConnectorId::from_static("anthropic"),
         }
     }
+
+    fn instance_id(&self) -> &str {
+        self.connector.instance_id().as_str()
+    }
 }
 
 fcp_core::impl_fcp_sealed!(AnthropicConnectorAdapter);
@@ -210,7 +214,12 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // dja9u typestate ratchet: connector verifier binds to this id; the
+        // capability token's target_instance must match it (see build_token).
+        requested_instance_id: Some(
+            InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
+        ),
     }
 }
 
@@ -218,6 +227,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -226,6 +236,8 @@ fn build_token(
     };
     let mut constraints_cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
+    // dja9u typestate ratchet: the Anthropic connector verifies bound tokens
+    // against its own base.instance_id, so target_instance must be that id.
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -235,6 +247,7 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -379,6 +392,7 @@ async fn anthropic_default_deny_compliance_suite_passes() {
         &signing_key,
         "anthropic.get_usage",
         &["anthropic.get_usage"],
+        connector.instance_id(),
     );
     let invoke = invoke_request(
         "anthropic.chat",
@@ -440,7 +454,12 @@ async fn anthropic_allow_valid_token_connector_suite_passes() {
     let mut connector = AnthropicConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["anthropic.chat"]);
-    let token = build_token(&signing_key, "anthropic.chat", &["anthropic.chat"]);
+    let token = build_token(
+        &signing_key,
+        "anthropic.chat",
+        &["anthropic.chat"],
+        connector.instance_id(),
+    );
     let invoke = invoke_request(
         "anthropic.chat",
         json!({ "message": "hello from e2e" }),

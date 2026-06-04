@@ -203,6 +203,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -219,6 +220,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: the GitHub connector verifies with
+        // `verify_bound`, which requires an INSTANCE_ID claim; bind to the
+        // connector instance (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -325,7 +330,12 @@ async fn github_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["github.write"]);
     // Token grants "github.write" but invoke targets "github.get_repo" → denial
-    let token = build_token(&signing_key, "github.write", &["github.write"]);
+    let token = build_token(
+        &signing_key,
+        connector.connector.instance_id().as_str(),
+        "github.write",
+        &["github.write"],
+    );
     let invoke = invoke_request(
         "github.get_repo",
         json!({ "owner": "octocat", "repo": "hello-world" }),
@@ -333,8 +343,10 @@ async fn github_default_deny_compliance_suite_passes() {
     );
 
     let dynamic = DynamicSuite {
+        // Secretless ratchet (e99o6): the GitHub connector rejects raw
+        // `token` config; use the sanctioned credential_id reference shape.
         config: json!({
-            "token": "ghp_test_token_000",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "http://localhost:9999"
         }),
         handshake: handshake.clone(),
@@ -380,7 +392,12 @@ async fn github_allow_valid_token_connector_suite_passes() {
     let mut connector = GitHubConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["github.read"]);
-    let token = build_token(&signing_key, "github.read", &["github.get_repo"]);
+    let token = build_token(
+        &signing_key,
+        connector.connector.instance_id().as_str(),
+        "github.read",
+        &["github.get_repo"],
+    );
     let invoke = invoke_request(
         "github.get_repo",
         json!({ "owner": "octocat", "repo": "hello-world" }),
@@ -388,8 +405,9 @@ async fn github_allow_valid_token_connector_suite_passes() {
     );
     let suite = ConnectorSuite {
         test_name: "github_allow_valid_token".to_string(),
+        // Secretless ratchet (e99o6): credential_id reference shape.
         config: json!({
-            "token": "ghp_test_token_e2e",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": mock.base_url(),
         }),
         handshake,

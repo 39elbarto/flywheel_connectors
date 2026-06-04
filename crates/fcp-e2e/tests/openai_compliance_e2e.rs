@@ -217,6 +217,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -225,6 +226,8 @@ fn build_token(
     };
     let mut constraints_cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
+    // dja9u typestate ratchet: connector verifies with verify_bound(), so tokens
+    // MUST carry target_instance matching the connector instance.
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -234,6 +237,7 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -333,7 +337,12 @@ async fn openai_default_deny_compliance_suite_passes() {
         &["openai.get_usage"],
     );
     // Token grants "openai.get_usage" but invoke targets "openai.chat" -> denial
-    let token = build_token(&signing_key, "openai.get_usage", &["openai.get_usage"]);
+    let token = build_token(
+        &signing_key,
+        "openai.get_usage",
+        &["openai.get_usage"],
+        connector.connector.instance_id(),
+    );
     let invoke = invoke_request(
         "openai.chat",
         json!({
@@ -391,7 +400,12 @@ async fn openai_allow_valid_token_connector_suite_passes() {
     let mut connector = OpenAIConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["openai.chat"]);
-    let token = build_token(&signing_key, "openai.chat", &["openai.chat"]);
+    let token = build_token(
+        &signing_key,
+        "openai.chat",
+        &["openai.chat"],
+        connector.connector.instance_id(),
+    );
     let invoke = invoke_request(
         "openai.chat",
         json!({
@@ -457,13 +471,13 @@ fn openai_manifest_network_guard_allows_and_denies() {
     // Only chat and simple_chat have network_constraints; get_usage is local
     let operations_with_network = ["chat", "simple_chat"];
 
-    let expected_hosts = vec!["api.openai.com".to_string()];
+    let expected_hosts = vec!["api.openai.com".to_string(), "api.deepseek.com".to_string()];
 
     for operation_name in operations_with_network {
         let host_allow = operation_host_allow_list(&manifest, operation_name);
         assert_eq!(
             host_allow, expected_hosts,
-            "operation {operation_name} should allow only api.openai.com"
+            "operation {operation_name} should allow api.openai.com and api.deepseek.com"
         );
 
         // Allowed host

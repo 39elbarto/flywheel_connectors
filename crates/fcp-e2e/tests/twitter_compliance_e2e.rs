@@ -204,6 +204,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -213,7 +214,8 @@ fn build_token(
     let mut constraints_cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
-        "twitter.tweet.get" => "twitter.read",
+        // twitter.tweet.get's introspected capability is twitter.read.public.
+        "twitter.tweet.get" => "twitter.read.public",
         _ => capability,
     };
     let cose = CapabilityTokenBuilder::new()
@@ -225,6 +227,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -368,7 +372,7 @@ async fn twitter_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["twitter.write"]);
     // Token grants "twitter.write" but invoke targets "twitter.tweet.get" -> denial
-    let token = build_token(&signing_key, "twitter.write", &["twitter.write"]);
+    let token = build_token(&signing_key, "twitter.write", &["twitter.write"], connector.connector.instance_id());
     let invoke = invoke_request(
         "twitter.tweet.get",
         json!({ "tweet_id": "1234567890123456789" }),
@@ -430,7 +434,7 @@ async fn twitter_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["twitter.tweet.get"],
     );
-    let token = build_token(&signing_key, "twitter.tweet.get", &["twitter.tweet.get"]);
+    let token = build_token(&signing_key, "twitter.tweet.get", &["twitter.tweet.get"], connector.connector.instance_id());
     let invoke = invoke_request(
         "twitter.tweet.get",
         json!({ "tweet_id": "1234567890123456789" }),

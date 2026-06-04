@@ -217,6 +217,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     // Capability constraints are MANDATORY per C3.4 (default-deny): the
@@ -246,6 +247,8 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
         .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -340,7 +343,16 @@ async fn telegram_default_deny_compliance_suite_passes() {
         &["telegram.get_file"],
     );
     // Token grants "telegram.get_file" but invoke targets "telegram.send_message" -> denial
-    let token = build_token(&signing_key, "telegram.get_file", &["telegram.get_file"]);
+    let token = build_token(
+        &signing_key,
+        "telegram.get_file",
+        &["telegram.get_file"],
+        handshake
+            .requested_instance_id
+            .as_ref()
+            .expect("handshake instance id")
+            .as_str(),
+    );
     let invoke = invoke_request(
         "telegram.send_message",
         json!({
@@ -405,7 +417,16 @@ async fn telegram_allow_valid_token_connector_suite_passes() {
     // grant's `capability` field must equal the operation's required
     // capability. So the token must grant `telegram.send`, not the op id.
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["telegram.send"]);
-    let token = build_token(&signing_key, "telegram.send", &["telegram.send_message"]);
+    let token = build_token(
+        &signing_key,
+        "telegram.send",
+        &["telegram.send_message"],
+        handshake
+            .requested_instance_id
+            .as_ref()
+            .expect("handshake instance id")
+            .as_str(),
+    );
     let invoke = invoke_request(
         "telegram.send_message",
         json!({
@@ -551,7 +572,7 @@ async fn telegram_send_message_returns_message_id() {
 
     // Build valid token and invoke (capability class is `telegram.send`,
     // see test 2's comment for the C3.4 / br-8n0rm.6 rationale).
-    let token = build_token(&signing_key, "telegram.send", &["telegram.send_message"]);
+    let token = build_token(&signing_key, "telegram.send", &["telegram.send_message"], connector.instance_id().as_str());
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",

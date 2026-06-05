@@ -5,6 +5,7 @@
 //! exact decision cards and report links already stored in the evidence bundle.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -186,7 +187,7 @@ struct SwarmPressureSignal {
 struct SwarmPressureInputs {
     fixture_path: Option<PathBuf>,
     logical_cpus: usize,
-    active_agents: Option<usize>,
+    active_agents: Option<AgentPressureInput>,
     active_connectors: Option<usize>,
     disk_free: Option<PercentPressureInput>,
     inode_free: Option<PercentPressureInput>,
@@ -198,6 +199,28 @@ struct SwarmPressureInputs {
 #[derive(Debug, Clone)]
 struct PercentPressureInput {
     percent: u8,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct AgentPressureInput {
+    active_agents: usize,
+    warning_count: usize,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct BeadsPressureInput {
+    in_progress_count: usize,
+    unique_assignee_count: usize,
+    unassigned_count: usize,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct AgentMailPressureInput {
+    active_agents: usize,
+    warning_count: usize,
     evidence: Value,
 }
 
@@ -214,6 +237,7 @@ struct LocalPressureSamples {
     disk_free: Option<PercentPressureInput>,
     inode_free: Option<PercentPressureInput>,
     memory_free: Option<PercentPressureInput>,
+    active_agents: Option<AgentPressureInput>,
     rch_status: Option<RchPressureInput>,
 }
 
@@ -338,8 +362,14 @@ pub fn pressure(args: &SwarmPressureArgs) -> Result<Value> {
         .iter()
         .filter(|signal| signal.status == SwarmPressureStatus::Degraded)
         .count();
-    let recommended_agent_slots =
-        recommended_agent_slots(verdict, inputs.logical_cpus, inputs.active_agents);
+    let recommended_agent_slots = recommended_agent_slots(
+        verdict,
+        inputs.logical_cpus,
+        inputs
+            .active_agents
+            .as_ref()
+            .map(|input| input.active_agents),
+    );
     let recommended_cargo_lanes = recommended_cargo_lanes(verdict, inputs.logical_cpus);
     let remediation_commands = remediation_commands(&signals);
 
@@ -427,11 +457,20 @@ fn pressure_inputs(args: &SwarmPressureArgs) -> Result<SwarmPressureInputs> {
                 .map(|queued_jobs| provided_rch_input(queued_jobs, "fixture"))
         })
         .or(local_samples.rch_status);
+    let active_agents = args
+        .active_agents
+        .map(|active_agents| provided_agent_input(active_agents, "cli-argument"))
+        .or_else(|| {
+            fixture
+                .active_agents
+                .map(|active_agents| provided_agent_input(active_agents, "fixture"))
+        })
+        .or(local_samples.active_agents);
 
     Ok(SwarmPressureInputs {
         fixture_path: args.fixture.clone(),
         logical_cpus,
-        active_agents: args.active_agents.or(fixture.active_agents),
+        active_agents,
         active_connectors: args.active_connectors.or(fixture.active_connectors),
         disk_free,
         inode_free,
@@ -461,6 +500,7 @@ fn collect_local_pressure_samples() -> LocalPressureSamples {
         disk_free: disk_free_sample(),
         inode_free: inode_free_sample(),
         memory_free: memory_free_sample(),
+        active_agents: coordination_active_agents_sample(),
         rch_status: rch_status_sample(),
     }
 }
@@ -471,6 +511,20 @@ fn provided_percent_input(percent: u8, source: &str) -> PercentPressureInput {
         evidence: json!({
             "source": source,
             "live": false,
+        }),
+    }
+}
+
+fn provided_agent_input(active_agents: usize, source: &str) -> AgentPressureInput {
+    AgentPressureInput {
+        active_agents,
+        warning_count: 0,
+        evidence: json!({
+            "source": source,
+            "live": false,
+            "agent_mail_repair_attempted": false,
+            "agent_mail_service_restart_attempted": false,
+            "agent_mail_process_signal_attempted": false,
         }),
     }
 }
@@ -538,6 +592,168 @@ fn rch_status_sample() -> Option<RchPressureInput> {
     }
     let stdout = std::str::from_utf8(&output.stdout).ok()?;
     rch_status_sample_from_json(stdout)
+}
+
+fn coordination_active_agents_sample() -> Option<AgentPressureInput> {
+    let beads = beads_in_progress_sample();
+    let agent_mail = agent_mail_status_sample();
+    coordination_active_agents_from_samples(beads.as_ref(), agent_mail.as_ref())
+}
+
+fn beads_in_progress_sample() -> Option<BeadsPressureInput> {
+    let output = Command::new("br")
+        .args([
+            "list",
+            "--status",
+            "in_progress",
+            "--json",
+            "--limit",
+            "0",
+            "--no-auto-flush",
+            "--no-auto-import",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    beads_in_progress_sample_from_json(stdout)
+}
+
+fn agent_mail_status_sample() -> Option<AgentMailPressureInput> {
+    let output = Command::new("am")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    agent_mail_status_sample_from_json(stdout)
+}
+
+fn coordination_active_agents_from_samples(
+    beads: Option<&BeadsPressureInput>,
+    agent_mail: Option<&AgentMailPressureInput>,
+) -> Option<AgentPressureInput> {
+    if beads.is_none() && agent_mail.is_none() {
+        return None;
+    }
+
+    let beads_active_estimate = beads
+        .map(|input| {
+            input
+                .unique_assignee_count
+                .saturating_add(input.unassigned_count)
+        })
+        .unwrap_or(0);
+    let agent_mail_active = agent_mail.map_or(0, |input| input.active_agents);
+    let active_agents = beads_active_estimate.max(agent_mail_active);
+    let mut missing_sources = Vec::new();
+    if beads.is_none() {
+        missing_sources.push("beads");
+    }
+    if agent_mail.is_none() {
+        missing_sources.push("agent_mail");
+    }
+    let warning_count = missing_sources.len() + agent_mail.map_or(0, |input| input.warning_count);
+
+    Some(AgentPressureInput {
+        active_agents,
+        warning_count,
+        evidence: json!({
+            "source": "coordination",
+            "live": true,
+            "active_agents": active_agents,
+            "warning_count": warning_count,
+            "beads_in_progress_count": beads.map(|input| input.in_progress_count),
+            "missing_sources": missing_sources,
+            "beads": beads.map(|input| input.evidence.clone()),
+            "agent_mail": agent_mail.map(|input| input.evidence.clone()),
+            "agent_mail_repair_attempted": false,
+            "agent_mail_service_restart_attempted": false,
+            "agent_mail_process_signal_attempted": false,
+        }),
+    })
+}
+
+fn beads_in_progress_sample_from_json(stdout: &str) -> Option<BeadsPressureInput> {
+    let value = serde_json::from_str::<Value>(stdout).ok()?;
+    let issues = value
+        .get("issues")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())?;
+    let mut assignees = BTreeSet::new();
+    let mut in_progress_count = 0_usize;
+    let mut unassigned_count = 0_usize;
+
+    for issue in issues {
+        if issue
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "in_progress")
+        {
+            continue;
+        }
+        in_progress_count = in_progress_count.saturating_add(1);
+        match issue
+            .get("assignee")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|assignee| !assignee.is_empty())
+        {
+            Some(assignee) => {
+                assignees.insert(assignee.to_owned());
+            }
+            None => {
+                unassigned_count = unassigned_count.saturating_add(1);
+            }
+        }
+    }
+
+    Some(BeadsPressureInput {
+        in_progress_count,
+        unique_assignee_count: assignees.len(),
+        unassigned_count,
+        evidence: json!({
+            "source": "beads",
+            "live": true,
+            "method": "br list --status in_progress --json --limit 0 --no-auto-flush --no-auto-import",
+            "in_progress_count": in_progress_count,
+            "unique_assignee_count": assignees.len(),
+            "unassigned_count": unassigned_count,
+        }),
+    })
+}
+
+fn agent_mail_status_sample_from_json(stdout: &str) -> Option<AgentMailPressureInput> {
+    let value = serde_json::from_str::<Value>(stdout).ok()?;
+    let active_agents = value
+        .get("active_agents")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())?;
+    let health = value.get("health").and_then(Value::as_str);
+    let health_warning = health.is_some_and(|status| !matches!(status, "ok" | "healthy"));
+    let recovery_mode = value.pointer("/recovery/mode").and_then(Value::as_str);
+    let warning_count = usize::from(health_warning);
+
+    Some(AgentMailPressureInput {
+        active_agents,
+        warning_count,
+        evidence: json!({
+            "source": "agent-mail",
+            "live": true,
+            "method": "am status --json",
+            "active_agents": active_agents,
+            "health": health,
+            "recovery_mode": recovery_mode,
+            "warning_count": warning_count,
+            "agent_mail_repair_attempted": false,
+            "agent_mail_service_restart_attempted": false,
+            "agent_mail_process_signal_attempted": false,
+        }),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -887,23 +1103,32 @@ fn percent_signal(
 }
 
 fn agent_count_signal(inputs: &SwarmPressureInputs) -> SwarmPressureSignal {
-    match inputs.active_agents {
-        Some(active_agents) => {
+    match &inputs.active_agents {
+        Some(input) => {
+            let active_agents = input.active_agents;
             let yellow_threshold = inputs.logical_cpus;
             let red_threshold = inputs.logical_cpus.saturating_mul(2);
-            let status = threshold_status(active_agents, yellow_threshold, red_threshold);
+            let mut status = threshold_status(active_agents, yellow_threshold, red_threshold);
+            if status == SwarmPressureStatus::Green && input.warning_count > 0 {
+                status = SwarmPressureStatus::Yellow;
+            }
+            let value = if input.warning_count == 0 {
+                format!("{active_agents} active agent(s)")
+            } else {
+                format!(
+                    "{active_agents} active agent(s), {} coordination warning(s)",
+                    input.warning_count
+                )
+            };
             SwarmPressureSignal {
                 name: "agent_mail_agents".to_owned(),
                 status,
-                value: format!("{active_agents} active agent(s)"),
+                value,
                 threshold: format!(
                     "<{} green, {}-{} yellow, >{} red",
                     yellow_threshold, yellow_threshold, red_threshold, red_threshold
                 ),
-                evidence: json!({
-                    "source": "caller-provided",
-                    "agent_mail_repair_attempted": false,
-                }),
+                evidence: input.evidence.clone(),
             }
         }
         None => degraded_signal(
@@ -1683,10 +1908,11 @@ mod tests {
     use super::{
         PercentPressureInput, RchPressureInput, SwarmEvidenceCommand, SwarmEvidenceExploreArgs,
         SwarmEvidenceFilters, SwarmEvidenceReplayArgs, SwarmPressureArgs, SwarmPressureInputs,
-        SwarmPressureSignal, SwarmPressureStatus, explore, linux_memory_sample_from_meminfo,
-        macos_memory_sample_from_vm_stat, parse_df_disk_sample, parse_df_inode_sample, pressure,
-        pressure_score, pressure_signals, pressure_verdict, rch_status_sample_from_json, replay,
-        run,
+        SwarmPressureSignal, SwarmPressureStatus, agent_mail_status_sample_from_json,
+        beads_in_progress_sample_from_json, coordination_active_agents_from_samples, explore,
+        linux_memory_sample_from_meminfo, macos_memory_sample_from_vm_stat, parse_df_disk_sample,
+        parse_df_inode_sample, pressure, pressure_score, pressure_signals, pressure_verdict,
+        provided_agent_input, rch_status_sample_from_json, replay, run,
     };
 
     fn write_fixture() -> tempfile::NamedTempFile {
@@ -2099,7 +2325,7 @@ mod tests {
         let signals = pressure_signals(&SwarmPressureInputs {
             fixture_path: None,
             logical_cpus: 32,
-            active_agents: Some(1),
+            active_agents: Some(provided_agent_input(1, "test")),
             active_connectors: Some(1),
             disk_free: Some(PercentPressureInput {
                 percent: 80,
@@ -2127,6 +2353,122 @@ mod tests {
             .expect("rch signal");
 
         assert_eq!(rch_signal.status, SwarmPressureStatus::Yellow);
+    }
+
+    #[test]
+    fn pressure_parses_beads_in_progress_snapshot_without_issue_details() {
+        let input = beads_in_progress_sample_from_json(
+            r#"{
+              "issues": [
+                {"id": "fc-1", "title": "private detail", "status": "in_progress", "assignee": "IcyTern"},
+                {"id": "fc-2", "status": "in_progress", "assignee": "SageStork"},
+                {"id": "fc-3", "status": "in_progress"},
+                {"id": "fc-4", "status": "open", "assignee": "OtherAgent"}
+              ],
+              "total": 3
+            }"#,
+        )
+        .expect("beads sample");
+
+        assert_eq!(input.in_progress_count, 3);
+        assert_eq!(input.unique_assignee_count, 2);
+        assert_eq!(input.unassigned_count, 1);
+        assert_eq!(input.evidence["source"], "beads");
+        assert_eq!(input.evidence["in_progress_count"], 3);
+        assert!(input.evidence.get("title").is_none());
+        assert!(input.evidence.get("id").is_none());
+    }
+
+    #[test]
+    fn pressure_parses_agent_mail_status_without_repair_commands() {
+        let input = agent_mail_status_sample_from_json(
+            r#"{
+              "health": "degraded",
+              "active_agents": 2,
+              "recent_messages": 8,
+              "recommendations": [
+                {"safe_command": "am doctor check --json", "reason": "operator detail"}
+              ],
+              "recovery": {"mode": "degraded_read_only"}
+            }"#,
+        )
+        .expect("agent mail sample");
+
+        assert_eq!(input.active_agents, 2);
+        assert_eq!(input.warning_count, 1);
+        assert_eq!(input.evidence["source"], "agent-mail");
+        assert_eq!(input.evidence["health"], "degraded");
+        assert_eq!(input.evidence["recovery_mode"], "degraded_read_only");
+        assert_eq!(input.evidence["agent_mail_repair_attempted"], false);
+        assert!(input.evidence.get("recommendations").is_none());
+        assert!(input.evidence.get("safe_command").is_none());
+    }
+
+    #[test]
+    fn pressure_combines_beads_and_agent_mail_active_agents() {
+        let beads = beads_in_progress_sample_from_json(
+            r#"{
+              "issues": [
+                {"status": "in_progress", "assignee": "IcyTern"},
+                {"status": "in_progress", "assignee": "SageStork"}
+              ]
+            }"#,
+        )
+        .expect("beads sample");
+        let agent_mail =
+            agent_mail_status_sample_from_json(r#"{"health": "ok", "active_agents": 1}"#)
+                .expect("agent mail sample");
+        let input = coordination_active_agents_from_samples(Some(&beads), Some(&agent_mail))
+            .expect("coordination sample");
+
+        assert_eq!(input.active_agents, 2);
+        assert_eq!(input.warning_count, 0);
+        assert_eq!(input.evidence["source"], "coordination");
+        assert_eq!(input.evidence["beads"]["unique_assignee_count"], 2);
+        assert_eq!(input.evidence["agent_mail"]["active_agents"], 1);
+    }
+
+    #[test]
+    fn pressure_agent_mail_degraded_health_yellows_coordination_signal() {
+        let agent_mail = agent_mail_status_sample_from_json(
+            r#"{"health": "degraded", "active_agents": 1, "recovery": {"mode": "read_only"}}"#,
+        )
+        .expect("agent mail sample");
+        let input = coordination_active_agents_from_samples(None, Some(&agent_mail))
+            .expect("coordination sample");
+        let signals = pressure_signals(&SwarmPressureInputs {
+            fixture_path: None,
+            logical_cpus: 32,
+            active_agents: Some(input),
+            active_connectors: Some(1),
+            disk_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            inode_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            memory_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            rch_status: Some(RchPressureInput {
+                queued_jobs: 0,
+                active_builds: 1,
+                warning_count: 0,
+                evidence: json!({}),
+            }),
+            signals: Vec::new(),
+        });
+        let agent_signal = signals
+            .iter()
+            .find(|signal| signal.name == "agent_mail_agents")
+            .expect("agent signal");
+
+        assert_eq!(agent_signal.status, SwarmPressureStatus::Yellow);
+        assert_eq!(agent_signal.evidence["agent_mail"]["health"], "degraded");
+        assert_eq!(agent_signal.evidence["agent_mail_repair_attempted"], false);
     }
 
     #[test]

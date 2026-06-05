@@ -3,7 +3,7 @@
 > **Status**: manifest/runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/comfyui_connector_verification.sh`
 > **Primary upstream**: https://docs.comfy.org/development/comfyui-server/comms_routes
 
 ## Purpose
@@ -178,7 +178,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Verification Bundle
 
-The dedicated tracked verification bundle is `scripts/e2e/comfyui_connector_verification.sh`. It runs manifest validation, crate check, package formatting, deterministic WireMock JSONL coverage, optional live-health verification, clippy, and redaction checks through `rch`.
+The dedicated tracked verification bundle is `scripts/e2e/comfyui_connector_verification.sh`. It runs manifest validation, remote crate check, local package formatting, remote deterministic WireMock JSONL coverage, optional remote live-health verification, remote clippy, and redaction checks.
 
 The verification surface captures:
 
@@ -228,6 +228,6 @@ The verification surface captures:
 
 - `scripts/e2e/comfyui_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-comfyui-e2e cargo check -p fcp-comfyui --all-targets`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-comfyui-e2e cargo fmt --package fcp-comfyui --check`
+- `cargo fmt --package fcp-comfyui --check`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-comfyui-e2e cargo test -p fcp-comfyui --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-comfyui-e2e cargo clippy -p fcp-comfyui --all-targets --no-deps -- -D warnings`

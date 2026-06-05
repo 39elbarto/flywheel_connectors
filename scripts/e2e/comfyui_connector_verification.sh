@@ -110,6 +110,7 @@ require_rch_remote_proof() {
     echo "rch command did not produce remote proof" >>"${log_path}"
     return 1
   fi
+  return 0
 }
 
 run_logged() {
@@ -200,7 +201,7 @@ else
 fi
 
 cargo_check_status="$(run_step cargo_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-comfyui --all-targets)"
-format_check_status="$(run_step format_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --package fcp-comfyui --check)"
+format_check_status="$(run_step format_check env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt --package fcp-comfyui --check)"
 loopback_status="$(run_step loopback_jsonl env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" COMFYUI_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-comfyui --test integration comfyui_loopback_e2e_jsonl_matrix -- --nocapture)"
 live_status="$(run_step live_jsonl env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" COMFYUI_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-comfyui --test live_verification comfyui_live_health_or_structured_skip_jsonl -- --nocapture)"
 clippy_status="$(run_step clippy env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-comfyui --all-targets --no-deps -- -D warnings)"

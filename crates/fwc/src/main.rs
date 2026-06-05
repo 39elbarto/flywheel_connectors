@@ -1704,6 +1704,10 @@ struct DoctorArgs {
     #[arg(long, value_enum, value_name = "PROBE")]
     probe: Option<DoctorProbe>,
 
+    /// Deterministic swarm-pressure fixture for `fwc doctor --probe swarm-pressure`.
+    #[arg(long = "swarm-pressure-fixture", value_name = "PATH")]
+    swarm_pressure_fixture: Option<PathBuf>,
+
     /// Zone to diagnose.
     #[arg(long, short = 'z')]
     zone: Option<String>,
@@ -1797,6 +1801,8 @@ enum DoctorProbe {
     Iblt,
     /// Verify migration dirty-tracking, pre-copy, and post-copy local thresholds.
     Migration,
+    /// Verify local swarm pressure and resource-headroom thresholds.
+    SwarmPressure,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -13186,6 +13192,10 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         return doctor_migration_probe_dispatch();
     }
 
+    if matches!(args.probe, Some(DoctorProbe::SwarmPressure)) {
+        return doctor_swarm_pressure_probe_dispatch(args);
+    }
+
     if let Some(command) = &args.command {
         return doctor_subcommand_dispatch(command);
     }
@@ -14066,6 +14076,79 @@ fn preview_for_doctor(text: &str) -> String {
 const HLC_PROBE_SKEW_WARN_MS: u64 = 2_000;
 const HLC_PROBE_HIERVV_SIZE_WARN_BYTES: usize = 4_096;
 const HLC_PROBE_COUNTER_WARN_WITHIN_1S: u32 = 1_000;
+
+fn doctor_swarm_pressure_probe_dispatch(args: &DoctorArgs) -> Result<DispatchOutcome> {
+    let pressure_payload = swarm_evidence_cmd::pressure(&swarm_evidence_cmd::SwarmPressureArgs {
+        fixture: args.swarm_pressure_fixture.clone(),
+        ..swarm_evidence_cmd::SwarmPressureArgs::default()
+    })?;
+    let verdict = pressure_payload["verdict"]
+        .as_str()
+        .unwrap_or("yellow")
+        .to_owned();
+    let score = pressure_payload["pressure_score_0_100"]
+        .as_u64()
+        .unwrap_or(55);
+    let degraded_dependency_count = pressure_payload
+        .pointer("/telemetry_event/fields/degraded_dependency_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let recommended_agent_slots = pressure_payload["recommended_agent_slots"]
+        .as_u64()
+        .unwrap_or(0);
+    let recommended_cargo_lanes = pressure_payload["recommended_cargo_lanes"]
+        .as_u64()
+        .unwrap_or(0);
+    let healthy = verdict == "green";
+    let status = if healthy { "ok" } else { "warn" };
+    let message = if healthy {
+        "Swarm pressure is green; local resource-headroom thresholds are within doctor policy."
+    } else {
+        "Swarm pressure is not green; inspect degraded or warning signals before starting more work."
+    };
+    let warnings = if healthy {
+        Vec::new()
+    } else {
+        vec!["swarm_pressure_verdict_not_green"]
+    };
+    let exit_code = if healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "probe": "swarm-pressure",
+        "source": "local-swarm-pressure-probe",
+        "message": message,
+        "report": {
+            "schema_version": "fcp.fwc.doctor.swarm-pressure.v1",
+            "verdict": verdict,
+            "pressure_score_0_100": score,
+            "degraded_dependency_count": degraded_dependency_count,
+            "recommended_agent_slots": recommended_agent_slots,
+            "recommended_cargo_lanes": recommended_cargo_lanes,
+            "warnings": warnings,
+            "commands": [
+                "fwc swarm pressure --json",
+                "fwc doctor --probe swarm-pressure --json",
+                "rch status --json",
+            ],
+            "pressure": pressure_payload,
+        },
+        "next_actions": [
+            "fwc swarm pressure --json",
+            "fwc doctor --probe swarm-pressure --json",
+            "rch status --json",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
+}
 
 fn doctor_hlc_probe_dispatch() -> Result<DispatchOutcome> {
     let report = doctor_hlc_probe_report()?;
@@ -35856,6 +35939,18 @@ deny_ptrace = true
     }
 
     #[test]
+    fn doctor_swarm_pressure_probe_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "--probe", "swarm-pressure"])
+            .expect("doctor --probe swarm-pressure should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.probe, Some(DoctorProbe::SwarmPressure)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
     fn doctor_migration_check_parses_without_live_zone() {
         let cli = Cli::try_parse_from(["fwc", "doctor", "migration", "--json"])
             .expect("doctor migration should parse without --zone");
@@ -36306,6 +36401,69 @@ deny_ptrace = true
                 .iter()
                 .any(|command| command == "fwc doctor --zone <zone> --host <endpoint>")
         );
+    }
+
+    #[test]
+    fn doctor_swarm_pressure_probe_reports_fixture_pressure_and_commands() {
+        let mut fixture = tempfile::NamedTempFile::new().expect("swarm pressure fixture");
+        serde_json::to_writer(
+            &mut fixture,
+            &json!({
+                "logical_cpus": 64,
+                "active_agents": 4,
+                "active_connectors": 12,
+                "disk_free_percent": 80,
+                "inode_free_percent": 90,
+                "memory_free_percent": 70,
+                "rch_queued_jobs": 0
+            }),
+        )
+        .expect("write swarm pressure fixture");
+        let fixture_path = fixture
+            .path()
+            .to_str()
+            .expect("fixture path should be valid UTF-8");
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "doctor",
+            "--probe",
+            "swarm-pressure",
+            "--swarm-pressure-fixture",
+            fixture_path,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["probe"], "swarm-pressure");
+        assert_eq!(payload["source"], "local-swarm-pressure-probe");
+        assert_eq!(
+            payload["report"]["schema_version"],
+            "fcp.fwc.doctor.swarm-pressure.v1"
+        );
+        assert_eq!(payload["report"]["verdict"], "green");
+        assert_eq!(payload["report"]["pressure_score_0_100"], 10);
+        assert_eq!(payload["report"]["degraded_dependency_count"], 0);
+        assert_eq!(
+            payload["report"]["pressure"]["schema_version"],
+            "fwc.swarm-pressure/v1"
+        );
+        assert_eq!(payload["report"]["pressure"]["verdict"], "green");
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc swarm pressure --json")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc doctor --probe swarm-pressure --json")
+        );
+        assert!(payload["report"]["warnings"].as_array().unwrap().is_empty());
     }
 
     #[test]

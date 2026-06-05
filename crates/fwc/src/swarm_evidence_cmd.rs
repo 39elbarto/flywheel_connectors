@@ -329,7 +329,7 @@ fn replay(args: &SwarmEvidenceReplayArgs) -> Result<Value> {
     Ok(payload)
 }
 
-fn pressure(args: &SwarmPressureArgs) -> Result<Value> {
+pub fn pressure(args: &SwarmPressureArgs) -> Result<Value> {
     let inputs = pressure_inputs(args)?;
     let signals = pressure_signals(&inputs);
     let score = pressure_score(&signals);

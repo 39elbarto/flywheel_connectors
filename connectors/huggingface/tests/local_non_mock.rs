@@ -10,7 +10,7 @@
 )]
 
 use std::{
-    io::{Read, Write},
+    io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     thread::{self, JoinHandle},
     time::Duration,
@@ -20,10 +20,15 @@ use fcp_huggingface::connector::HuggingfaceConnector;
 use serde_json::{Value, json};
 
 const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
+const BATCH_BEAD_ID: &str = "flywheel_connectors-angoc.16.4";
 const ACCESS_TOKEN: &str = "hf_local_acceptance_token";
 const OP_TEXT_GENERATION: &str = "huggingface.inference.text_generation";
-const EXPECTED_PATH: &str = "/models/gpt2";
-const RESPONSE_BODY: &str = r#"[{"generated_text":"Flywheel connectors ship local proof."}]"#;
+const OP_SUMMARIZATION: &str = "huggingface.inference.summarization";
+const TEXT_GENERATION_PATH: &str = "/models/gpt2";
+const SUMMARIZATION_PATH: &str = "/models/facebook/bart-large-cnn";
+const TEXT_GENERATION_RESPONSE_BODY: &str =
+    r#"[{"generated_text":"Flywheel connectors ship local proof."}]"#;
+const SUMMARIZATION_RESPONSE_BODY: &str = r#"[{"summary_text":"Local Hugging Face summary."}]"#;
 
 #[derive(Debug)]
 struct FixtureObservation {
@@ -39,12 +44,12 @@ struct LoopbackFixture {
 }
 
 impl LoopbackFixture {
-    fn start() -> Self {
+    fn start(response_body: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
         let address = listener.local_addr().expect("read listener address");
         let handle = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept connector request");
-            handle_request(stream)
+            handle_request(stream, response_body)
         });
 
         Self {
@@ -66,7 +71,7 @@ impl LoopbackFixture {
     }
 }
 
-fn handle_request(mut stream: TcpStream) -> FixtureObservation {
+fn handle_request(mut stream: TcpStream, response_body: &'static str) -> FixtureObservation {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");
@@ -89,8 +94,8 @@ fn handle_request(mut stream: TcpStream) -> FixtureObservation {
     write!(
         stream,
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        RESPONSE_BODY.len(),
-        RESPONSE_BODY
+        response_body.len(),
+        response_body
     )
     .expect("write connector response");
 
@@ -188,7 +193,7 @@ async fn setup_connector(base_url: &str) -> HuggingfaceConnector {
 
 #[fcp_async_core::runtime::test]
 async fn loopback_text_generation_uses_production_client_request() {
-    let fixture = LoopbackFixture::start();
+    let fixture = LoopbackFixture::start(TEXT_GENERATION_RESPONSE_BODY);
     let mut connector = setup_connector(fixture.base_url()).await;
 
     let result = connector
@@ -212,7 +217,7 @@ async fn loopback_text_generation_uses_production_client_request() {
     assert_eq!(ACCEPTANCE_SUITE_CLASS, "local_non_mock");
     assert_eq!(
         observation.request_line,
-        format!("POST {EXPECTED_PATH} HTTP/1.1")
+        format!("POST {TEXT_GENERATION_PATH} HTTP/1.1")
     );
     assert!(observation.authorization_seen);
     assert!(observation.content_type_json_seen);
@@ -242,7 +247,7 @@ async fn loopback_text_generation_uses_production_client_request() {
         "provider_class": "local_sufficient",
         "request_response_boundary": {
             "method": "POST",
-            "path": EXPECTED_PATH
+            "path": TEXT_GENERATION_PATH
         },
         "auth_gate": {
             "mode": "bearer",
@@ -251,6 +256,117 @@ async fn loopback_text_generation_uses_production_client_request() {
         },
         "request_body": observation.body,
         "cleanup": "connector_shutdown_and_fixture_thread_joined",
+        "result": "passed"
+    });
+    println!("{artifact}");
+}
+
+#[fcp_async_core::runtime::test]
+async fn loopback_summarization_uses_production_client_request() {
+    let fixture = LoopbackFixture::start(SUMMARIZATION_RESPONSE_BODY);
+    let mut connector = setup_connector(fixture.base_url()).await;
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": OP_SUMMARIZATION,
+            "input": {
+                "model_id": "facebook/bart-large-cnn",
+                "text": "Flywheel connectors need a concise local acceptance proof.",
+                "max_length": 32,
+                "min_length": 4
+            }
+        }))
+        .await
+        .expect("summarization through loopback fixture");
+    connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown connector");
+    let observation = fixture.join();
+
+    assert_eq!(ACCEPTANCE_SUITE_CLASS, "local_non_mock");
+    assert_eq!(
+        observation.request_line,
+        format!("POST {SUMMARIZATION_PATH} HTTP/1.1")
+    );
+    assert!(observation.authorization_seen);
+    assert!(observation.content_type_json_seen);
+    assert_eq!(
+        observation.body,
+        json!({
+            "inputs": "Flywheel connectors need a concise local acceptance proof.",
+            "parameters": {
+                "max_length": 32,
+                "min_length": 4
+            }
+        })
+    );
+    assert_eq!(
+        result["output"][0]["summary_text"],
+        "Local Hugging Face summary."
+    );
+
+    let artifact = json!({
+        "connector": "huggingface",
+        "suite_class": ACCEPTANCE_SUITE_CLASS,
+        "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
+        "bead_id": BATCH_BEAD_ID,
+        "command": "cargo test -p fcp-huggingface --test local_non_mock -- --nocapture",
+        "git_revision": option_env!("GIT_REVISION").unwrap_or("worktree"),
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
+        "request_response_boundary": {
+            "method": "POST",
+            "path": SUMMARIZATION_PATH
+        },
+        "auth_gate": {
+            "mode": "bearer",
+            "credentials_used": true,
+            "authorization_header_verified": observation.authorization_seen
+        },
+        "request_body": observation.body,
+        "cleanup": "connector_shutdown_and_fixture_thread_joined",
+        "result": "passed"
+    });
+    println!("{artifact}");
+}
+
+#[fcp_async_core::runtime::test]
+async fn missing_summarization_text_fails_before_loopback_network_dispatch() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set nonblocking listener");
+    let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+    let connector = setup_connector(&base_url).await;
+
+    let error = connector
+        .handle_invoke(json!({
+            "operation_id": OP_SUMMARIZATION,
+            "input": {
+                "model_id": "facebook/bart-large-cnn"
+            }
+        }))
+        .await
+        .expect_err("missing summarization text should fail before HTTP dispatch");
+    assert!(error.to_string().contains("text"));
+
+    let accept_error = listener
+        .accept()
+        .expect_err("input validation should happen before loopback egress");
+    assert_eq!(accept_error.kind(), io::ErrorKind::WouldBlock);
+
+    let artifact = json!({
+        "connector": "huggingface",
+        "suite_class": ACCEPTANCE_SUITE_CLASS,
+        "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
+        "bead_id": BATCH_BEAD_ID,
+        "command": "cargo test -p fcp-huggingface --test local_non_mock -- --nocapture",
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
+        "operation": OP_SUMMARIZATION,
+        "error_boundary": "missing_text_rejected_before_network_dispatch",
+        "loopback_egress_attempted": false,
         "result": "passed"
     });
     println!("{artifact}");

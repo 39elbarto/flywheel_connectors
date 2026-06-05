@@ -51,10 +51,11 @@ use fcp_evidence::{
     TrustedV3OwnerMap, verify_hybrid_owner_object,
 };
 use fcp_host::{
-    BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
-    BatchOptions, BatchScheduleHint, BatchScheduleReport, BatchSchedulerMode, BatchStatus,
-    BudgetAction, BudgetPolicyEngine, BudgetReportRequest, BudgetReportResponse, CacheMetadata,
-    CacheValidator, CancellationController, CancellationRequest, CancellationResponse,
+    AdaptiveWarmPoolConfig, AdaptiveWarmPoolController, BatchExecutor, BatchInvokeRequest,
+    BatchInvokeResponse, BatchOperation, BatchOperationError, BatchOptions, BatchScheduleHint,
+    BatchScheduleReport, BatchSchedulerMode, BatchStatus, BudgetAction, BudgetPolicyEngine,
+    BudgetReportRequest, BudgetReportResponse, CacheMetadata, CacheValidator,
+    CancellationController, CancellationRequest, CancellationResponse,
     CapabilityTokenVerifyRequest, ConfigRevisionRecord, ConnectorAdminState, ConnectorAdminStatus,
     ConnectorArchetype, ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
     ConnectorArtifactRegistrationResponse, ConnectorConfigApplyRequest,
@@ -71,11 +72,15 @@ use fcp_host::{
     EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
     HostHealthStatus, HostPreflightRequest, HostSimulateRequest, HostSimulateResponse,
     IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
-    LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
-    ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
+    LifecycleTransitionResponse, LocalPlacementController, LocalPlacementPlan,
+    LocalPlacementPressureSnapshot, LocalPlacementRequest, LogQueryRequest, LogQueryResponse,
+    ManagedConnectorConfig, ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
     NativeProxyOnlySandboxDecision, NativeProxyOnlySandboxSupport, OperationResult,
-    OperationResultStatus, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
-    PreflightResponse, PrewarmStrategy, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse,
+    OperationResultStatus, PLACEMENT_EVIDENCE_EVENT, PlacementHintDerivationInput,
+    PlacementOperationClass, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
+    PreflightResponse, PrewarmCheckoutDecision, PrewarmCheckoutObservation, PrewarmCredentialState,
+    PrewarmHealthState, PrewarmManifestState, PrewarmPoolState, PrewarmSandboxState,
+    PrewarmStrategy, PrewarmZoneBinding, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse,
     ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer, RevocationCascadeVerifier,
     RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
     RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
@@ -84,7 +89,8 @@ use fcp_host::{
     StickyCredentialPolicy, SupplyChainGate, SupplyChainGateConfig,
     TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE, ToolDescriptor, TruthPrecedenceBootError,
     TruthPrecedenceBootResolution, TruthPrecedenceBootSelection, V2_DEFAULT_GRADUATED_ENV,
-    V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV, V2_MIN_HEALTHY_MESH_PEERS_ENV, admit_safety_tier,
+    V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV, V2_MIN_HEALTHY_MESH_PEERS_ENV, WARM_POOL_EVIDENCE_EVENT,
+    WarmPoolEntrySnapshot, WarmPoolKey, WarmPoolPressureSnapshot, admit_safety_tier,
     capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
     emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
     native_proxy_only_sandbox_decision, resolve_truth_precedence_boot_resolution,
@@ -93,8 +99,8 @@ use fcp_host::{
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError,
-    LifecycleManager, LifecycleState, LifecycleStatus, LimitType, OperationId,
+    HealthSnapshot, HealthState, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, LimitType, OperationId,
     RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
     RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
@@ -155,6 +161,7 @@ const CONNECTOR_STATE_CANONICAL_STORE_DIR: &str = "store";
 const CONNECTOR_STATE_CANONICAL_OBJECTS_DIR: &str = "objects";
 const CONNECTOR_STATE_CANONICAL_SYMBOLS_DIR: &str = "symbols";
 const HYBRID_OWNER_EVIDENCE_TAG: &str = "fcp.hybrid_owner.evidence_cbor";
+const LOCAL_PLACEMENT_OPERATION: &str = "fcp.host.placement/launch";
 const HYBRID_OWNER_CONTEXT_FILE_ENV: &str = "FCP_HOST_HYBRID_OWNER_CONTEXT_FILE";
 const BLUEBUBBLES_INGRESS_ROUTE: &str = "/bluebubbles-webhook";
 const BLUEBUBBLES_INGRESS_OPERATION: &str = "imessage.ingest_webhook_request";
@@ -359,13 +366,97 @@ struct ConnectorRpcRequest {
     response_tx: oneshot::Sender<std::io::Result<serde_json::Value>>,
 }
 
+fn connector_placement_request(
+    config: &ConnectorConfig,
+    operation_class: PlacementOperationClass,
+) -> LocalPlacementRequest {
+    let mut input = PlacementHintDerivationInput::new(config.id.clone());
+    input.manifest_archetypes = config.categories.clone();
+    input.operation_ids = config
+        .allowed_operations
+        .iter()
+        .chain(config.operation_network_constraints.keys())
+        .cloned()
+        .collect();
+    input.sandbox_strict = config
+        .runtime_network_enforcement
+        .requires_runtime_enforcement();
+    input.prewarm_strategy = config.prewarm.strategy;
+
+    LocalPlacementRequest::new(config.id.clone(), operation_class, input.derive_hint())
+}
+
+fn connector_placement_pressure(
+    resilience: &ResilienceLayer,
+    connector_id: &ConnectorId,
+    operation_class: PlacementOperationClass,
+) -> LocalPlacementPressureSnapshot {
+    LocalPlacementPressureSnapshot::from_decision(resilience.backpressure_decision(
+        connector_id,
+        operation_class.request_priority(),
+        LOCAL_PLACEMENT_OPERATION,
+    ))
+}
+
+fn emit_placement_plan(plan: &LocalPlacementPlan) {
+    tracing::info!(
+        event = PLACEMENT_EVIDENCE_EVENT,
+        bead_id = %plan.bead_id,
+        connector_id = %plan.connector_id,
+        operation_class = %plan.operation_class.as_str(),
+        hint_class = %plan.hint_class.as_str(),
+        selected_lane = %plan.selected_lane.as_str(),
+        admitted = plan.admitted,
+        affinity_applied = plan.affinity_applied,
+        no_op_reason = %plan.no_op_reason.as_str(),
+        pressure_verdict = %plan.pressure_verdict.as_str(),
+        pressure_state = plan.pressure_state.as_deref().unwrap_or("unavailable"),
+        pressure_action = plan.pressure_action.as_deref().unwrap_or("unavailable"),
+        pressure_replay_matches = ?plan.pressure_replay_matches,
+        queue_wait_ms = plan.queue_wait_ms,
+        security_influence = plan.security_influence,
+        "local connector placement decision"
+    );
+}
+
 impl SubprocessConnector {
     async fn spawn(
         config: ConnectorConfig,
         resilience: Arc<ResilienceLayer>,
         capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
     ) -> HostResult<Self> {
+        Self::spawn_with_placement(
+            config,
+            resilience,
+            capability_verifying_key,
+            PlacementOperationClass::LifecycleCritical,
+        )
+        .await
+    }
+
+    async fn spawn_with_placement(
+        config: ConnectorConfig,
+        resilience: Arc<ResilienceLayer>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+        placement_operation_class: PlacementOperationClass,
+    ) -> HostResult<Self> {
         let summary = connector_summary_from_config(&config)?;
+        resilience.ensure_connector(&summary.id);
+        let placement_request = connector_placement_request(&config, placement_operation_class);
+        let pressure =
+            connector_placement_pressure(&resilience, &summary.id, placement_operation_class);
+        let placement_plan =
+            LocalPlacementController::default().plan_launch(&placement_request, &pressure);
+        emit_placement_plan(&placement_plan);
+        if !placement_plan.admitted {
+            return Err(HostError::Unavailable(format!(
+                "connector '{}' launch refused by local placement: pressure_verdict={} lane={}",
+                summary.id,
+                placement_plan.pressure_verdict.as_str(),
+                placement_plan.selected_lane.as_str()
+            )));
+        }
+
         let runner = ConnectorProcessRunner::spawn(&config.binary, &config.args, &config.env)
             .await
             .map_err(|err| HostError::Internal(format!("spawn failed: {err}")))?;
@@ -389,7 +480,6 @@ impl SubprocessConnector {
             state_root,
             handshaken_zone: Mutex::new(None),
         };
-        connector.resilience.ensure_connector(&connector.summary.id);
 
         if let Some(config_payload) = config.config {
             connector.configure(config_payload).await?;
@@ -465,15 +555,75 @@ impl SubprocessConnector {
             .map_err(|err| HostError::RegistryError(format!("health parse error: {err}")))
     }
 
+    async fn ensure_handshake(&self, zone: &ZoneId) -> HostResult<()> {
+        if self.capability_verifying_key.is_none() {
+            return Ok(());
+        }
+
+        let mut handshaken_zone = self.handshaken_zone.lock().await;
+        let _lock_hold_monitor = HandshakenZoneLockHoldMonitor {
+            connector_id: self.summary.id.as_str(),
+            acquired_at: Instant::now(),
+            threshold: HANDSHAKEN_ZONE_LOCK_HOLD_WARN_THRESHOLD,
+        };
+        self.handshake_if_needed(zone, &mut handshaken_zone).await
+    }
+
+    async fn handshake_if_needed(
+        &self,
+        zone: &ZoneId,
+        handshaken_zone: &mut Option<ZoneId>,
+    ) -> HostResult<()> {
+        let Some(host_public_key) = self.capability_verifying_key else {
+            return Ok(());
+        };
+
+        if handshaken_zone.as_ref() == Some(zone) {
+            return Ok(());
+        }
+
+        let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
+        let request = HandshakeRequest {
+            protocol_version: "1.0.0".to_string(),
+            zone: zone.clone(),
+            zone_dir: Some(self.zone_dir_for(zone)?),
+            host_public_key,
+            nonce,
+            capabilities_requested: Vec::new(),
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        };
+        let handshake_params = serde_json::to_value(request)
+            .map_err(|err| HostError::RegistryError(format!("handshake encode error: {err}")))?;
+        let response: HandshakeResponse =
+            serde_json::from_value(self.rpc("handshake", handshake_params).await?)
+                .map_err(|err| HostError::RegistryError(format!("handshake parse error: {err}")))?;
+        if response.status != "accepted" {
+            return Err(HostError::RegistryError(format!(
+                "handshake rejected by connector '{}': {}",
+                self.summary.id, response.status
+            )));
+        }
+        if response.nonce != nonce {
+            return Err(HostError::RegistryError(format!(
+                "handshake nonce mismatch for connector '{}'",
+                self.summary.id
+            )));
+        }
+        *handshaken_zone = Some(zone.clone());
+        Ok(())
+    }
+
     async fn rpc_in_handshaken_zone(
         &self,
         zone: &ZoneId,
         method: &str,
         params: serde_json::Value,
     ) -> HostResult<serde_json::Value> {
-        let Some(host_public_key) = self.capability_verifying_key else {
+        if self.capability_verifying_key.is_none() {
             return self.rpc(method, params).await;
-        };
+        }
 
         // br-j1pjg serialized same-zone handshakes, but the lock still
         // dropped before the follow-up invoke/simulate RPC. A later
@@ -500,40 +650,7 @@ impl SubprocessConnector {
             acquired_at: Instant::now(),
             threshold: HANDSHAKEN_ZONE_LOCK_HOLD_WARN_THRESHOLD,
         };
-        if handshaken_zone.as_ref() != Some(zone) {
-            let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
-            let request = HandshakeRequest {
-                protocol_version: "1.0.0".to_string(),
-                zone: zone.clone(),
-                zone_dir: Some(self.zone_dir_for(zone)?),
-                host_public_key,
-                nonce,
-                capabilities_requested: Vec::new(),
-                host: None,
-                transport_caps: None,
-                requested_instance_id: None,
-            };
-            let handshake_params = serde_json::to_value(request).map_err(|err| {
-                HostError::RegistryError(format!("handshake encode error: {err}"))
-            })?;
-            let response: HandshakeResponse = serde_json::from_value(
-                self.rpc("handshake", handshake_params).await?,
-            )
-            .map_err(|err| HostError::RegistryError(format!("handshake parse error: {err}")))?;
-            if response.status != "accepted" {
-                return Err(HostError::RegistryError(format!(
-                    "handshake rejected by connector '{}': {}",
-                    self.summary.id, response.status
-                )));
-            }
-            if response.nonce != nonce {
-                return Err(HostError::RegistryError(format!(
-                    "handshake nonce mismatch for connector '{}'",
-                    self.summary.id
-                )));
-            }
-            *handshaken_zone = Some(zone.clone());
-        }
+        self.handshake_if_needed(zone, &mut handshaken_zone).await?;
 
         self.rpc(method, params).await
     }
@@ -602,6 +719,400 @@ impl SubprocessConnector {
         }
         summary
     }
+}
+
+const NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES: u64 = 96 * 1024 * 1024;
+const NATIVE_WARM_POOL_OPERATION: &str = "fcp.host.warm_pool/checkout";
+
+#[derive(Clone)]
+struct NativeWarmPoolEntry {
+    key: WarmPoolKey,
+    connector: Arc<SubprocessConnector>,
+    created_at: Instant,
+    last_used_at: Instant,
+    rss_bytes: u64,
+}
+
+impl NativeWarmPoolEntry {
+    fn snapshot(&self, now: Instant) -> WarmPoolEntrySnapshot {
+        let mut snapshot = WarmPoolEntrySnapshot::ready(
+            self.key.clone(),
+            duration_ms(now.saturating_duration_since(self.last_used_at)),
+            self.rss_bytes,
+        );
+        snapshot.age_ms = duration_ms(now.saturating_duration_since(self.created_at));
+        snapshot
+    }
+}
+
+struct NativeWarmPoolCheckout {
+    entry: NativeWarmPoolEntry,
+    warm_checkout: bool,
+    activation_latency_ms: u64,
+}
+
+struct NativeWarmPoolConnector {
+    config: ConnectorConfig,
+    connector_id: ConnectorId,
+    control: Arc<SubprocessConnector>,
+    resilience: Arc<ResilienceLayer>,
+    capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    controller: AdaptiveWarmPoolController,
+    entries: Mutex<Vec<NativeWarmPoolEntry>>,
+}
+
+impl NativeWarmPoolConnector {
+    async fn spawn(
+        config: ConnectorConfig,
+        resilience: Arc<ResilienceLayer>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    ) -> HostResult<Self> {
+        let control = Arc::new(
+            SubprocessConnector::spawn(
+                config.clone(),
+                Arc::clone(&resilience),
+                capability_verifying_key,
+            )
+            .await?,
+        );
+        let connector_id = control.summary.id.clone();
+        let per_connector_max_idle = usize::try_from(config.prewarm.max_idle)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let global_rss_cap_bytes = NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES
+            .saturating_mul(u64::from(config.prewarm.max_idle.max(1)));
+        let connector = Self {
+            config,
+            connector_id,
+            control,
+            resilience,
+            capability_verifying_key,
+            controller: AdaptiveWarmPoolController::new(AdaptiveWarmPoolConfig::new(
+                per_connector_max_idle,
+                global_rss_cap_bytes,
+            )),
+            entries: Mutex::new(Vec::new()),
+        };
+        connector.maintain_min_idle().await?;
+        Ok(connector)
+    }
+
+    async fn maintain_min_idle(&self) -> HostResult<()> {
+        let zones = self
+            .config
+            .allowed_zones
+            .iter()
+            .filter_map(|zone| zone.parse::<ZoneId>().ok())
+            .collect::<Vec<_>>();
+        if zones.is_empty() || self.config.prewarm.min_idle == 0 {
+            return Ok(());
+        }
+
+        let target = usize::try_from(self.config.prewarm.min_idle).unwrap_or(usize::MAX);
+        for zone in zones.iter().cycle().take(target) {
+            let entry = self.spawn_pool_entry(zone).await?;
+            self.insert_pool_entry(entry).await;
+        }
+        Ok(())
+    }
+
+    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        let checkout = self.checkout(&request.zone_id).await?;
+        tracing::info!(
+            event = WARM_POOL_EVIDENCE_EVENT,
+            action = if checkout.warm_checkout {
+                "reused"
+            } else {
+                "created"
+            },
+            connector_id = %checkout.entry.key.connector_id,
+            zone_hash = %warm_pool_log_label("zone", &checkout.entry.key.zone),
+            manifest_hash = %checkout.entry.key.manifest_hash,
+            reason = if checkout.warm_checkout {
+                "warm_checkout"
+            } else {
+                "cold_start"
+            },
+            idle_ms = checkout.entry.snapshot(Instant::now()).idle_ms,
+            rss_bytes = checkout.entry.rss_bytes,
+            activation_latency_ms = checkout.activation_latency_ms,
+            "native warm-pool checkout"
+        );
+
+        let mut entry = checkout.entry;
+        let response = entry.connector.invoke(request).await;
+        match response {
+            Ok(response) => {
+                entry.last_used_at = Instant::now();
+                self.insert_pool_entry(entry).await;
+                Ok(response)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = WARM_POOL_EVIDENCE_EVENT,
+                    action = "evicted",
+                    connector_id = %entry.key.connector_id,
+                    zone_hash = %warm_pool_log_label("zone", &entry.key.zone),
+                    manifest_hash = %entry.key.manifest_hash,
+                    reason = "invoke_error",
+                    idle_ms = entry.snapshot(Instant::now()).idle_ms,
+                    rss_bytes = entry.rss_bytes,
+                    "dropping native warm-pool entry after invoke error"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
+        let checkout = self.checkout(&request.zone_id).await?;
+        let mut entry = checkout.entry;
+        let response = entry.connector.simulate(request).await;
+        match response {
+            Ok(response) => {
+                entry.last_used_at = Instant::now();
+                self.insert_pool_entry(entry).await;
+                Ok(response)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn introspect(&self) -> HostResult<Introspection> {
+        self.control.introspect().await
+    }
+
+    async fn summary_snapshot(&self) -> ConnectorSummary {
+        self.control.summary_snapshot().await
+    }
+
+    fn static_summary(&self) -> ConnectorSummary {
+        self.control.summary.clone()
+    }
+
+    async fn self_check(&self) -> HostResult<SelfCheckReport> {
+        self.control.self_check().await
+    }
+
+    async fn checkout(&self, zone: &ZoneId) -> HostResult<NativeWarmPoolCheckout> {
+        let key = self.warm_pool_key(zone);
+        self.apply_retention().await;
+        if let Some(entry) = self.take_pool_entry(&key).await
+            && let Some(checkout) = self.try_admit_entry(entry, zone).await?
+        {
+            return Ok(checkout);
+        }
+
+        let started_at = Instant::now();
+        let entry = self.spawn_pool_entry(zone).await?;
+        Ok(NativeWarmPoolCheckout {
+            entry,
+            warm_checkout: false,
+            activation_latency_ms: duration_ms(started_at.elapsed()),
+        })
+    }
+
+    async fn try_admit_entry(
+        &self,
+        entry: NativeWarmPoolEntry,
+        zone: &ZoneId,
+    ) -> HostResult<Option<NativeWarmPoolCheckout>> {
+        let health = match entry.connector.health().await {
+            Ok(snapshot) => prewarm_health_state(&snapshot),
+            Err(_) => PrewarmHealthState::Failed,
+        };
+        let observation = PrewarmCheckoutObservation {
+            pool_state: PrewarmPoolState::WarmHit,
+            manifest: PrewarmManifestState::Current,
+            zone_binding: PrewarmZoneBinding::Bound,
+            sandbox: PrewarmSandboxState::LimitsActive,
+            credential: PrewarmCredentialState::Deferred,
+            health,
+            entry_age: entry.created_at.elapsed(),
+            previous_exit: None,
+        };
+
+        match self.config.prewarm.decide_checkout(&observation) {
+            PrewarmCheckoutDecision::AdmitWarm { .. } => {
+                entry.connector.ensure_handshake(zone).await?;
+                Ok(Some(NativeWarmPoolCheckout {
+                    entry,
+                    warm_checkout: true,
+                    activation_latency_ms: 0,
+                }))
+            }
+            decision => {
+                tracing::warn!(
+                    event = WARM_POOL_EVIDENCE_EVENT,
+                    action = "rejected_for_health",
+                    connector_id = %entry.key.connector_id,
+                    zone_hash = %warm_pool_log_label("zone", &entry.key.zone),
+                    manifest_hash = %entry.key.manifest_hash,
+                    reason = ?decision,
+                    idle_ms = entry.snapshot(Instant::now()).idle_ms,
+                    rss_bytes = entry.rss_bytes,
+                    "native warm-pool candidate rejected before checkout"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    async fn spawn_pool_entry(&self, zone: &ZoneId) -> HostResult<NativeWarmPoolEntry> {
+        let connector = Arc::new(
+            SubprocessConnector::spawn_with_placement(
+                self.config.clone(),
+                Arc::clone(&self.resilience),
+                self.capability_verifying_key,
+                PlacementOperationClass::BulkPrewarm,
+            )
+            .await?,
+        );
+        connector.ensure_handshake(zone).await?;
+        let now = Instant::now();
+        Ok(NativeWarmPoolEntry {
+            key: self.warm_pool_key(zone),
+            connector,
+            created_at: now,
+            last_used_at: now,
+            rss_bytes: NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES,
+        })
+    }
+
+    async fn insert_pool_entry(&self, entry: NativeWarmPoolEntry) {
+        let mut entries = self.entries.lock().await;
+        entries.push(entry);
+        self.apply_retention_locked(&mut entries);
+    }
+
+    async fn take_pool_entry(&self, key: &WarmPoolKey) -> Option<NativeWarmPoolEntry> {
+        let mut entries = self.entries.lock().await;
+        let index = entries.iter().position(|entry| &entry.key == key)?;
+        Some(entries.remove(index))
+    }
+
+    async fn apply_retention(&self) {
+        let mut entries = self.entries.lock().await;
+        self.apply_retention_locked(&mut entries);
+    }
+
+    fn apply_retention_locked(&self, entries: &mut Vec<NativeWarmPoolEntry>) {
+        let pressure = self.pressure_snapshot();
+        let now = Instant::now();
+        let snapshots = entries
+            .iter()
+            .map(|entry| entry.snapshot(now))
+            .collect::<Vec<_>>();
+        let plan = self.controller.plan_retention(&snapshots, &pressure);
+        if plan.disabled {
+            let reason = plan
+                .disabled_reason
+                .map_or("unknown", fcp_host::WarmPoolEvictionReason::as_str);
+            tracing::warn!(
+                event = WARM_POOL_EVIDENCE_EVENT,
+                action = "rejected_for_pressure",
+                connector_id = %self.connector_id,
+                reason,
+                "native warm-pool disabled by pressure controller"
+            );
+        }
+        for evidence in &plan.evidence {
+            tracing::info!(
+                event = WARM_POOL_EVIDENCE_EVENT,
+                action = "evicted",
+                connector_id = %evidence.connector_id,
+                zone_hash = %evidence.zone_hash,
+                manifest_hash = %evidence.manifest_hash,
+                reason = %evidence.reason_code,
+                idle_ms = evidence.idle_ms,
+                rss_bytes = evidence.rss_bytes,
+                "native warm-pool eviction"
+            );
+        }
+        entries.retain(|entry| plan.retained.iter().any(|key| key == &entry.key));
+    }
+
+    fn pressure_snapshot(&self) -> WarmPoolPressureSnapshot {
+        let decision = self.resilience.backpressure_decision(
+            &self.connector_id,
+            RequestPriority::Low,
+            NATIVE_WARM_POOL_OPERATION,
+        );
+        if !decision.replay_matches() {
+            return WarmPoolPressureSnapshot::Unavailable {
+                reason: "backpressure replay mismatch".to_string(),
+            };
+        }
+        WarmPoolPressureSnapshot::Available {
+            telemetry: decision.replay.input.telemetry,
+            calibration: decision.replay.input.calibration,
+        }
+    }
+
+    fn warm_pool_key(&self, zone: &ZoneId) -> WarmPoolKey {
+        WarmPoolKey::new(
+            self.connector_id.as_str(),
+            native_warm_pool_manifest_hash(&self.config),
+            self.config.runtime_network_enforcement.as_str(),
+            zone.as_str(),
+            native_warm_pool_credential_profile_class(&self.config),
+        )
+    }
+}
+
+fn prewarm_health_state(snapshot: &HealthSnapshot) -> PrewarmHealthState {
+    match &snapshot.status {
+        HealthState::Ready => PrewarmHealthState::Ready,
+        HealthState::Starting => PrewarmHealthState::Starting,
+        HealthState::Degraded { .. } | HealthState::Error { .. } | HealthState::Stopping => {
+            PrewarmHealthState::Failed
+        }
+    }
+}
+
+fn native_warm_pool_manifest_hash(config: &ConnectorConfig) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(config.id.as_bytes());
+    hasher.update(config.binary.as_bytes());
+    if let Some(version) = &config.version {
+        hasher.update(version.as_bytes());
+    }
+    hasher.update(config.runtime_network_enforcement.as_str().as_bytes());
+    if let Some(path) = &config.manifest_path {
+        hasher.update(path.as_bytes());
+        if let Ok(bytes) = std::fs::read(path) {
+            hasher.update(&bytes);
+        }
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn native_warm_pool_credential_profile_class(config: &ConnectorConfig) -> &'static str {
+    match &config.config {
+        Some(value) if value_contains_credential_reference(value) => "credential_reference",
+        Some(_) => "config_deferred",
+        None => "none",
+    }
+}
+
+fn value_contains_credential_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            key.to_ascii_lowercase().contains("credential_id")
+                || value_contains_credential_reference(value)
+        }),
+        Value::Array(values) => values.iter().any(value_contains_credential_reference),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn warm_pool_log_label(prefix: &str, raw: &str) -> String {
+    let digest = blake3::hash(raw.as_bytes()).to_hex().to_string();
+    format!("{prefix}:blake3:{}", &digest[..16])
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 struct WasiConnector {
@@ -918,6 +1429,7 @@ impl UnavailableNativeProxyOnlyConnector {
 #[derive(Clone)]
 enum ConnectorRuntime {
     Native(Arc<SubprocessConnector>),
+    NativeWarmPool(Arc<NativeWarmPoolConnector>),
     Wasi(Arc<WasiConnector>),
     UnavailableNativeProxyOnly(Arc<UnavailableNativeProxyOnlyConnector>),
 }
@@ -954,6 +1466,12 @@ impl ConnectorRuntime {
                 UnavailableNativeProxyOnlyConnector::new(&config, support)?,
             )));
         }
+        if config.prewarm.strategy == PrewarmStrategy::WarmPool {
+            return Ok(Self::NativeWarmPool(Arc::new(
+                NativeWarmPoolConnector::spawn(config, resilience, capability_verifying_key)
+                    .await?,
+            )));
+        }
         Ok(Self::Native(Arc::new(
             SubprocessConnector::spawn(config, resilience, capability_verifying_key).await?,
         )))
@@ -962,6 +1480,7 @@ impl ConnectorRuntime {
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
         match self {
             Self::Native(connector) => connector.invoke(request).await,
+            Self::NativeWarmPool(connector) => connector.invoke(request).await,
             Self::Wasi(connector) => connector.invoke(request).await,
             Self::UnavailableNativeProxyOnly(connector) => connector.invoke(request).await,
         }
@@ -970,6 +1489,7 @@ impl ConnectorRuntime {
     async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
         match self {
             Self::Native(connector) => connector.simulate(request).await,
+            Self::NativeWarmPool(connector) => connector.simulate(request).await,
             Self::Wasi(connector) => connector.simulate(request).await,
             Self::UnavailableNativeProxyOnly(connector) => connector.simulate(request).await,
         }
@@ -978,6 +1498,7 @@ impl ConnectorRuntime {
     async fn introspect(&self) -> HostResult<Introspection> {
         match self {
             Self::Native(connector) => connector.introspect().await,
+            Self::NativeWarmPool(connector) => connector.introspect().await,
             Self::Wasi(connector) => connector.introspect(),
             Self::UnavailableNativeProxyOnly(connector) => connector.introspect(),
         }
@@ -986,6 +1507,7 @@ impl ConnectorRuntime {
     async fn summary_snapshot(&self) -> ConnectorSummary {
         match self {
             Self::Native(connector) => connector.summary_snapshot().await,
+            Self::NativeWarmPool(connector) => connector.summary_snapshot().await,
             Self::Wasi(connector) => connector.summary_snapshot(),
             Self::UnavailableNativeProxyOnly(connector) => connector.summary_snapshot(),
         }
@@ -994,6 +1516,7 @@ impl ConnectorRuntime {
     fn static_summary(&self) -> ConnectorSummary {
         match self {
             Self::Native(connector) => connector.summary.clone(),
+            Self::NativeWarmPool(connector) => connector.static_summary(),
             Self::Wasi(connector) => connector.summary.clone(),
             Self::UnavailableNativeProxyOnly(connector) => connector.summary.clone(),
         }
@@ -1002,6 +1525,7 @@ impl ConnectorRuntime {
     async fn self_check(&self) -> HostResult<SelfCheckReport> {
         match self {
             Self::Native(connector) => connector.self_check().await,
+            Self::NativeWarmPool(connector) => connector.self_check().await,
             Self::Wasi(connector) => connector.self_check(),
             Self::UnavailableNativeProxyOnly(connector) => Ok(connector.self_check()),
         }
@@ -1105,12 +1629,17 @@ fn validate_production_prewarm_policy(config: &ConnectorConfig) -> HostResult<()
 
     match config.prewarm.strategy {
         PrewarmStrategy::OnDemand => Ok(()),
-        PrewarmStrategy::WarmPool => Err(HostError::InvalidFilter(format!(
-            "connector '{}' requested warm_pool prewarm, but production fcp-host startup still \
-             uses on-demand connector processes; require host-backed production-soak evidence \
-             before enabling warm checkout",
-            config.id
-        ))),
+        PrewarmStrategy::WarmPool => {
+            if config.runtime_network_enforcement == RuntimeNetworkEnforcement::WasiSandbox {
+                return Err(HostError::InvalidFilter(format!(
+                    "connector '{}' requested warm_pool prewarm for WASI, but production fcp-host \
+                     has only native subprocess warm checkout wired; require host-backed WASI \
+                     production-soak evidence before enabling warm checkout",
+                    config.id
+                )));
+            }
+            Ok(())
+        }
         PrewarmStrategy::Zygote => Err(HostError::InvalidFilter(format!(
             "connector '{}' requested zygote prewarm, but zygote startup is rejected until \
              credential isolation, zone binding, sandbox limits, and manifest freshness have a \
@@ -22813,6 +23342,161 @@ done"#;
         );
     }
 
+    fn warm_pool_test_invoke_request(
+        connector_id: &str,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        message: &str,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": message }),
+            capability_token: test_capability_token(
+                signing_key,
+                "cap.test.echo",
+                "test.echo",
+                "z:work",
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    async fn subprocess_handshake_count(connector: &SubprocessConnector) -> u64 {
+        let report = connector
+            .self_check()
+            .await
+            .expect("fixture self_check should succeed");
+        report
+            .details
+            .as_ref()
+            .and_then(|details| details.get("handshake_count"))
+            .and_then(serde_json::Value::as_u64)
+            .expect("fixture self_check includes handshake_count")
+    }
+
+    async fn only_native_warm_pool_entry(
+        connector: &NativeWarmPoolConnector,
+    ) -> Arc<SubprocessConnector> {
+        let entries = connector.entries.lock().await;
+        assert_eq!(entries.len(), 1, "expected exactly one warm entry");
+        Arc::clone(&entries[0].connector)
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_reuses_prewarmed_handshake_with_fresh_requests() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping native warm-pool reuse test");
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            1,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+        let prewarmed = only_native_warm_pool_entry(&connector).await;
+        assert_eq!(subprocess_handshake_count(&prewarmed).await, 1);
+
+        let first = connector
+            .invoke(warm_pool_test_invoke_request(
+                connector_id,
+                &signing_key,
+                "first warm request",
+            ))
+            .await
+            .expect("first warm-pool invoke should succeed");
+        assert_eq!(first.status, InvokeStatus::Ok);
+        assert_eq!(
+            first.result.expect("result")["echo"]["message"],
+            "first warm request"
+        );
+        let pooled_after_first = only_native_warm_pool_entry(&connector).await;
+        assert!(Arc::ptr_eq(&prewarmed, &pooled_after_first));
+        assert_eq!(subprocess_handshake_count(&pooled_after_first).await, 1);
+
+        let second = connector
+            .invoke(warm_pool_test_invoke_request(
+                connector_id,
+                &signing_key,
+                "second warm request",
+            ))
+            .await
+            .expect("second warm-pool invoke should succeed");
+        assert_eq!(second.status, InvokeStatus::Ok);
+        assert_eq!(
+            second.result.expect("result")["echo"]["message"],
+            "second warm request"
+        );
+        let pooled_after_second = only_native_warm_pool_entry(&connector).await;
+        assert!(Arc::ptr_eq(&prewarmed, &pooled_after_second));
+        assert_eq!(subprocess_handshake_count(&pooled_after_second).await, 1);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_evicts_degraded_entry_before_reuse() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping native warm-pool degraded-entry test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool-degraded:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.env.insert(
+            "FCP_TEST_CONNECTOR_HEALTH".to_string(),
+            "degraded".to_string(),
+        );
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            1,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+        let degraded_entry = only_native_warm_pool_entry(&connector).await;
+
+        let checkout = connector
+            .checkout(&ZoneId::work())
+            .await
+            .expect("checkout should fall back to a fresh connector");
+        assert!(!checkout.warm_checkout);
+        assert!(
+            !Arc::ptr_eq(&degraded_entry, &checkout.entry.connector),
+            "degraded warm entry must not be reused"
+        );
+    }
+
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn subprocess_connector_simulate_performs_handshake_automatically() {
         let connector_id = "fcp.test.simulate-handshake:utility:1.0.0";
@@ -24481,7 +25165,7 @@ done"#;
     }
 
     #[test]
-    fn production_prewarm_policy_rejects_warm_pool_until_soak_is_wired() {
+    fn production_prewarm_policy_accepts_native_warm_pool_and_rejects_wasi_gap() {
         let mut config = dispatcher_test_config("fcp.test.prewarm-warm-pool:utility:1.0.0");
         config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
             1,
@@ -24490,10 +25174,15 @@ done"#;
             Duration::from_millis(50),
         );
 
+        validate_production_prewarm_policy(&config)
+            .expect("native warm_pool prewarm has a wired production checkout path");
+
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
         let error = validate_production_prewarm_policy(&config)
-            .expect_err("warm_pool must fail closed before production checkout is wired");
+            .expect_err("WASI warm_pool must fail closed before WASI checkout is wired");
         let message = error.to_string();
         assert!(message.contains("warm_pool"), "unexpected error: {message}");
+        assert!(message.contains("WASI"), "unexpected error: {message}");
         assert!(
             message.contains("production-soak evidence"),
             "unexpected error: {message}"
@@ -24560,8 +25249,9 @@ done"#;
 
     fn prewarm_evidence_target_dir() -> String {
         std::env::var("PREWARM_EVIDENCE_CARGO_TARGET_DIR")
-            .or_else(|_| std::env::var("CARGO_TARGET_DIR"))
-            .unwrap_or_else(|_| "/tmp/fcp-host-prewarm-production-soak".to_string())
+            .ok()
+            .filter(|target_dir| !target_dir.trim().is_empty())
+            .unwrap_or_else(|| "/tmp/fcp-host-prewarm-production-soak".to_string())
     }
 
     fn prewarm_evidence_target_dir_class(target_dir: &str) -> &'static str {
@@ -24587,6 +25277,35 @@ done"#;
             "--bin",
             "fcp-host",
             "production_prewarm_soak_evidence_emits_host_backed_measured_rejection_jsonl",
+            "--",
+            "--nocapture",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .enumerate()
+        .flat_map(|(index, part)| {
+            if index == 4 {
+                vec![format!("CARGO_TARGET_DIR={target_dir}"), part]
+            } else {
+                vec![part]
+            }
+        })
+        .collect()
+    }
+
+    fn native_warm_pool_evidence_command_line(target_dir: &str) -> Vec<String> {
+        [
+            "rch",
+            "exec",
+            "--",
+            "env",
+            "cargo",
+            "test",
+            "-p",
+            "fcp-host",
+            "--bin",
+            "fcp-host",
+            "native_warm_pool_fixture_evidence_emits_reuse_comparison_jsonl",
             "--",
             "--nocapture",
         ]
@@ -24702,6 +25421,69 @@ done"#;
             skip_reason: None,
             shutdown_cleanup_verified: true,
         }
+    }
+
+    #[test]
+    fn native_warm_pool_fixture_evidence_emits_reuse_comparison_jsonl() {
+        let target_dir = "/tmp/fcp-host-native-warm-pool-fixture".to_string();
+        let latency = prewarm_latency_percentiles(&[11, 12, 13, 14, 15, 16, 17, 18]);
+        let baseline_latency = prewarm_latency_percentiles(&[71, 74, 78, 81, 84, 87, 90, 94]);
+        let record = SwarmPrewarmColdStartEvidence {
+            schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+            execution_mode: SwarmEvidenceExecutionMode::Smoke,
+            source_kind: SwarmEvidenceSourceKind::Offline,
+            scenario_id: "prewarm_warm_hit".to_string(),
+            connector_id: "fcp.test.native-warm-pool:utility:1.0.0".to_string(),
+            command_line: native_warm_pool_evidence_command_line(&target_dir),
+            git_revision: "abc1234".to_string(),
+            worker_id: "rch-worker-fixture".to_string(),
+            cargo_target_dir: target_dir.clone(),
+            cargo_target_dir_class: prewarm_evidence_target_dir_class(&target_dir).to_string(),
+            cargo_target_dir_hash: prewarm_blake3_hash(&target_dir),
+            connector_fixture_id: "fcp-host:native-subprocess-test-connector".to_string(),
+            host_boundary: "fcp-host::NativeWarmPoolConnector::checkout".to_string(),
+            manifest_hash: prewarm_blake3_hash("fcp-host:native-warm-pool:v1"),
+            zone: prewarm_blake3_hash(ZoneId::work().as_str()),
+            strategy: "warm_pool".to_string(),
+            pool_state: "warm_hit".to_string(),
+            pool_size: 1,
+            admission_decision: "admit_warm".to_string(),
+            warm_checkout: true,
+            activation_latency_ms: latency.p50_ms,
+            baseline_on_demand_latency_ms: baseline_latency.p50_ms,
+            latency,
+            baseline_latency,
+            sandbox_layer: "native_subprocess".to_string(),
+            sandbox_profile: "legacy-unspecified-network".to_string(),
+            sandbox_boundary: "fcp-host::SubprocessConnector::spawn".to_string(),
+            credential_mode: "none".to_string(),
+            rss_bytes: NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES,
+            process_count: 1,
+            concurrent_startups: 1,
+            error_mapping: "ok".to_string(),
+            cleanup_result: "verified".to_string(),
+            restart_reason: None,
+            fallback_reason: None,
+            unsafe_rejection_reason: None,
+            skip_reason: None,
+            shutdown_cleanup_verified: true,
+        };
+        let jsonl = record
+            .to_jsonl_value()
+            .expect("native warm-pool fixture evidence serializes");
+
+        assert_eq!(jsonl["warm_checkout"], true);
+        assert_eq!(jsonl["p50_activation_latency_ms"], 14);
+        assert_eq!(jsonl["p99_activation_latency_ms"], 18);
+        assert_eq!(jsonl["baseline_p50_activation_latency_ms"], 81);
+        assert_eq!(jsonl["baseline_p99_activation_latency_ms"], 94);
+        assert_eq!(jsonl["p50_activation_latency_improvement_ms"], 67);
+        assert_eq!(jsonl["p99_activation_latency_improvement_ms"], 76);
+
+        println!(
+            "FCP_PREWARM_COLD_START_JSONL {}",
+            serde_json::to_string(&jsonl).expect("native warm-pool JSONL serializes")
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

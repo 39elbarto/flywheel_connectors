@@ -52761,6 +52761,26 @@ require_attestation_types = ["in-toto"]"#,
     }
 
     #[test]
+    fn catalog_commands_match_clap_top_level_commands() {
+        let mut clap_commands = Cli::command()
+            .get_subcommands()
+            .map(|command| command.get_name().to_owned())
+            .collect::<Vec<_>>();
+        clap_commands.sort_unstable();
+
+        let mut catalog_commands = catalog::COMMANDS
+            .iter()
+            .map(|command| (*command).to_owned())
+            .collect::<Vec<_>>();
+        catalog_commands.sort_unstable();
+
+        assert_eq!(
+            catalog_commands, clap_commands,
+            "fwc catalog::COMMANDS must cover every Clap top-level command exactly"
+        );
+    }
+
+    #[test]
     fn confusion_ci_gate_structured_error_always_has_command_field() {
         // Every structured error from the error dispatch path must include
         // a "command" key in the `input` envelope so CI can route failures.

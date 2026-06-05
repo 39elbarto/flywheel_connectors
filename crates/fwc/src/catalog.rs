@@ -127,6 +127,24 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "Local agent-mail coordination surface and inbox rendering",
     },
     CommandClassification {
+        command: "agent-bootstrap",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local agent session bootstrap over Beads, Agent Mail state, and file-reservation evidence",
+    },
+    CommandClassification {
+        command: "agent-readiness",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local redaction-safe readiness plans, fixtures, replay validation, and handoff bundles",
+    },
+    CommandClassification {
         command: "proof",
         truth_source: CommandTruthSource::OfflineArtifact,
         execution_mode: CommandExecutionMode::LocalOnly,
@@ -206,6 +224,33 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         requires_capability_token: false,
         may_need_approval: false,
         transport_note: "Manifest-backed zone topology and inferred policy summary",
+    },
+    CommandClassification {
+        command: "bootstrap",
+        truth_source: CommandTruthSource::Passthrough,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::PassthroughDependent,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local owner-key transition ceremonies with redaction-safe evidence bundles",
+    },
+    CommandClassification {
+        command: "swarm-evidence",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local replayable swarm decision-card and evidence-bundle inspection",
+    },
+    CommandClassification {
+        command: "telemetry",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local sanitized telemetry configuration readiness checks",
     },
     // ── Dual-source commands (live by default, explicit offline opt-in) ─
     CommandClassification {
@@ -306,6 +351,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         requires_capability_token: false,
         may_need_approval: false,
         transport_note: "Mesh status uses the live host when available; targeting and availability hints fall back to local context state",
+    },
+    CommandClassification {
+        command: "connector",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::ReadOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Connector state and lease queries default to local catalog/cache evidence; explicit host input uses host admin evidence",
     },
     CommandClassification {
         command: "preflight",
@@ -433,6 +487,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         requires_capability_token: false,
         may_need_approval: false,
         transport_note: "Capability usage is derived from local execution history and may be enriched with current host metadata when available",
+    },
+    CommandClassification {
+        command: "capability",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::ReadOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Capability-token predicate traces are reconstructed from local audit-chain evidence",
     },
     CommandClassification {
         command: "lifecycle",
@@ -3456,9 +3519,12 @@ pub const COMMANDS: &[&str] = &[
     "guide",
     "context",
     "mesh",
+    "connector",
     "task",
     "session",
     "agent",
+    "agent-bootstrap",
+    "agent-readiness",
     "proof",
     "lifecycle",
     "auth",
@@ -3473,7 +3539,9 @@ pub const COMMANDS: &[&str] = &[
     "schema",
     "examples",
     "supply-chain",
+    "bootstrap",
     "audit",
+    "swarm-evidence",
     "manifest",
     "net",
     "trace",
@@ -3483,7 +3551,9 @@ pub const COMMANDS: &[&str] = &[
     "status",
     "health",
     "budget",
+    "telemetry",
     "capabilities",
+    "capability",
     "install",
     "update",
     "pin",
@@ -3598,7 +3668,7 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                 "families": [
                     {
                         "name": "workflow",
-                        "commands": ["task"],
+                        "commands": ["context", "mesh", "task", "session", "agent", "agent-bootstrap"],
                     },
                     {
                         "name": "intent",
@@ -3606,19 +3676,19 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "discovery",
-                        "commands": ["list", "zones", "search", "show", "ops", "schema", "examples"],
+                        "commands": ["connector", "list", "zones", "search", "show", "ops", "schema", "examples"],
                     },
                     {
                         "name": "evidence",
-                        "commands": ["proof", "supply-chain", "audit", "manifest", "net", "trace", "policy", "package"],
+                        "commands": ["agent-readiness", "proof", "supply-chain", "bootstrap", "audit", "swarm-evidence", "manifest", "net", "trace", "policy", "package", "bench"],
                     },
                     {
                         "name": "lifecycle",
-                        "commands": ["doctor", "status", "health", "budget", "install", "update", "pin", "unpin", "rollout"],
+                        "commands": ["doctor", "status", "health", "budget", "telemetry", "lifecycle", "install", "update", "pin", "unpin", "rollout", "new"],
                     },
                     {
                         "name": "capability-governance",
-                        "commands": ["capabilities"],
+                        "commands": ["capabilities", "capability"],
                     },
                     {
                         "name": "auth",
@@ -3630,8 +3700,8 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "execution",
-                        "commands": ["simulate", "invoke", "cancel", "export-tools", "serve-mcp", "suggest", "template", "validate", "history", "pipe", "pipeline", "recipe", "map", "batch-file"],
-                    }
+                        "commands": ["simulate", "invoke", "preflight", "cancel", "export-tools", "serve-mcp", "suggest", "template", "validate", "history", "replay", "compare", "undo", "approvals", "pipe", "pipeline", "recipe", "map", "batch-file", "tail", "watch"],
+                    },
                 ],
                 "phase": {
                     "current_bead": "flywheel_connectors-1g7z0.2",
@@ -3711,6 +3781,10 @@ fn command_contract(command: &str) -> Option<Value> {
             "Inspect mesh availability and persist explicit node-targeting hints.",
             "A mixed live-and-local surface that reports host-backed mesh state when available and preserves durable local targeting decisions otherwise.",
         )),
+        "connector" => Some(discovery_contract(
+            "Inspect connector-local operator state surfaces.",
+            "A hybrid connector state and lease surface that reports host-backed evidence when supplied and local catalog/cache evidence otherwise.",
+        )),
         "task" => Some(workflow_contract(
             "Create and resume durable workflow capsules for connector jobs.",
             "A resumable capsule view over compiled intent, bindings, approvals, and execution receipts so agents can operate on a short task id instead of replaying the full workflow from scratch.",
@@ -3723,6 +3797,21 @@ fn command_contract(command: &str) -> Option<Value> {
             "Coordinate local multi-agent work through the fwc agent-mail hub.",
             "An inbox/outbox and reservation surface for short coordination messages, local file claims, and collaborator discovery.",
         )),
+        "agent-bootstrap" => Some(workflow_contract(
+            "Bootstrap an agent session with identity, reservation, ready beads, and doctor checks.",
+            "A local startup report over agent identity, optional file-reservation intent, ready Beads, and exact allowed next actions.",
+        )),
+        "agent-readiness" => Some(json!({
+            "family": "evidence",
+            "summary": "Build and replay redaction-safe agent readiness handoff bundles.",
+            "intended_shape": "Offline readiness plans, no-network fixtures, replay validation, and stalled-work reports that refuse unsafe repair actions.",
+            "next_beads": ["flywheel_connectors-angoc.6.2.1"],
+            "workflow_handoff": [
+                "Use `fwc agent-readiness plan` before wiring live startup probes.",
+                "Use `fwc agent-readiness fixture --out-dir <dir>` to materialize a redaction-safe handoff bundle.",
+                "Use `fwc agent-readiness replay --report <path>` to validate a stored handoff bundle before resuming work."
+            ],
+        })),
         "proof" => Some(json!({
             "family": "evidence",
             "summary": "Inspect, rank, explain, and safely rerun ProofGraph claims.",
@@ -3792,12 +3881,26 @@ fn command_contract(command: &str) -> Option<Value> {
             "next_beads": ["flywheel_connectors-1pjhh"],
             "workflow_handoff": ["Use `fwc package` first if you need to generate fresh package metadata before verification."],
         })),
+        "bootstrap" => Some(json!({
+            "family": "evidence",
+            "summary": "Run bootstrap and owner-key transition ceremonies.",
+            "intended_shape": "Machine-checkable bootstrap evidence bundles that avoid serializing secret key material.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc bootstrap migrate-owner-key --dry-run` before writing an owner-key migration evidence bundle."],
+        })),
         "audit" => Some(json!({
             "family": "evidence",
             "summary": "Inspect audit-chain artifacts and reports.",
             "intended_shape": "Evidence-first audit workflows over retained chain material and host-backed reports.",
             "next_beads": ["flywheel_connectors-1pjhh"],
             "workflow_handoff": ["Use `fwc history` for operation-level receipts, or `fwc audit` when you need chain artifacts and verification detail."],
+        })),
+        "swarm-evidence" => Some(json!({
+            "family": "evidence",
+            "summary": "Inspect replayable swarm decision cards and evidence bundles.",
+            "intended_shape": "Local replay and exploration of retained multi-agent decision evidence without mutating shared services.",
+            "next_beads": ["flywheel_connectors-angoc.6.2.1"],
+            "workflow_handoff": ["Use `fwc swarm-evidence explore` when resuming or auditing multi-agent work decisions."],
         })),
         "manifest" => Some(json!({
             "family": "evidence",
@@ -3850,6 +3953,13 @@ fn command_contract(command: &str) -> Option<Value> {
             "Report current usage-budget state for configured zones through `fcp-host`.",
             "Live per-zone budget snapshots with exceeded-limit visibility and no fabricated usage data.",
         )),
+        "telemetry" => Some(json!({
+            "family": "lifecycle",
+            "summary": "Inspect local host/runtime telemetry configuration.",
+            "intended_shape": "Redaction-safe local OTLP readiness checks that validate configuration without claiming runtime export happened.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc telemetry otlp-readiness` before enabling runtime OTLP export in `fcp-host`."],
+        })),
         "capabilities" => Some(json!({
             "family": "capability-governance",
             "summary": "Report, recommend, and export capability usage using recorded execution history.",
@@ -3859,6 +3969,13 @@ fn command_contract(command: &str) -> Option<Value> {
                 "Use `fwc history` to inspect the underlying receipts when a recommendation needs explanation.",
                 "Use `fwc capabilities suggest` before tightening grants or policy bundles."
             ],
+        })),
+        "capability" => Some(json!({
+            "family": "capability-governance",
+            "summary": "Reconstruct capability-token predicate traces from audit-chain evidence.",
+            "intended_shape": "Audit-chain replay of token verification predicates with explicit evidence gaps and no fabricated grant decisions.",
+            "next_beads": ["flywheel_connectors-1pjhh"],
+            "workflow_handoff": ["Use `fwc capability replay` when a denied or accepted operation needs predicate-level explanation."],
         })),
         "install" => Some(lifecycle_contract(
             "Install or verify a connector package into the persistent host inventory.",
@@ -3971,14 +4088,14 @@ fn command_contract(command: &str) -> Option<Value> {
             "File-driven multi-operation execution over real host-backed batch endpoints.",
         )),
         "bench" => Some(json!({
-            "family": "tooling",
+            "family": "evidence",
             "summary": "Run benchmark and profiling helpers for FCP primitives.",
             "intended_shape": "Passthrough benchmarking workflows that delegate to the dedicated benchmarking subsystem.",
             "next_beads": ["flywheel_connectors-1pjhh"],
             "workflow_handoff": ["Use `fwc bench` when you need dedicated measurement rather than connector-facing runtime behavior."],
         })),
         "new" => Some(json!({
-            "family": "tooling",
+            "family": "lifecycle",
             "summary": "Scaffold a new FCP connector crate or validate an existing scaffold.",
             "intended_shape": "Passthrough scaffolding workflows that delegate to the connector-generator subsystem.",
             "next_beads": ["flywheel_connectors-1pjhh"],

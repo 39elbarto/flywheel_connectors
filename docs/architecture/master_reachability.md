@@ -48,7 +48,7 @@ Each row records:
 - code_path: `crates/fcp-core/src/zone_keys.rs`
 - test_path: `crates/fcp-host/src/bin/fcp-host.rs`
 - test_fn: `verify_live_request_empty_allowed_zones_requires_zone_envelope`
-- proof_path: `lean/FCP/Zone/Lattice.lean`
+- proof_path: `lean/Fcp/Zone/Lattice.lean`
 - pending: "graduation to PROVEN tracked by flywheel_connectors-angoc.2 (Phase C)"
 
 ### 4. Capability Tokens (CWT/COSE)

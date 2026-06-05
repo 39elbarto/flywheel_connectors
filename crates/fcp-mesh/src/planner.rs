@@ -2252,7 +2252,12 @@ impl ExecutionPlanner {
 }
 
 fn compute_migration_cost_model_enabled() -> bool {
-    std::env::var("FCP_COMPUTE_MIGRATION_COST_MODEL").map_or(true, |value| {
+    let raw = std::env::var("FCP_COMPUTE_MIGRATION_COST_MODEL").ok();
+    compute_migration_cost_model_enabled_for(raw.as_deref())
+}
+
+fn compute_migration_cost_model_enabled_for(raw: Option<&str>) -> bool {
+    raw.is_none_or(|value| {
         let value = value.trim();
         !(value == "0" || value.eq_ignore_ascii_case("false") || value.eq_ignore_ascii_case("off"))
     })
@@ -2411,6 +2416,23 @@ mod tests {
                     if message.contains("compute_migration_cost rank=1")
             )
         }));
+    }
+
+    #[test]
+    fn compute_migration_cost_env_classifier_disables_only_explicit_false_values() {
+        for raw in [None, Some(""), Some("1"), Some("true"), Some("enabled")] {
+            assert!(
+                compute_migration_cost_model_enabled_for(raw),
+                "{raw:?} should leave the cost model enabled"
+            );
+        }
+
+        for raw in [Some("0"), Some("false"), Some("FALSE"), Some(" off ")] {
+            assert!(
+                !compute_migration_cost_model_enabled_for(raw),
+                "{raw:?} should disable the cost model"
+            );
+        }
     }
 
     #[test]

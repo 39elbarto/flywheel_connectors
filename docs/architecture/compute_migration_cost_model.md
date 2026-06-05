@@ -1,6 +1,7 @@
 # Computation Migration Cost Model
 
-Status: foundational planner surface for `flywheel_connectors-angoc.4.3`.
+Status: planner + deterministic five-device conformance surface for
+`flywheel_connectors-angoc.4.3`.
 
 The mesh planner exposes an explainable computation-migration placement model through
 `fcp_mesh::planner::DeviceCostModel`. Callers attach live observations with
@@ -37,10 +38,27 @@ Default weights:
 The ranking is deterministic: candidates sort by `total_cost` ascending and then
 by `NodeId` string for exact ties.
 
+## Proven Coverage
+
+- `crates/fcp-mesh/tests/cost_model_monotonicity.rs` covers monotonicity for
+  legacy device-cost inputs plus computation-migration latency, memory pressure,
+  and CPU load.
+- `crates/fcp-conformance/tests/computation_migration_5device_e2e.rs` builds a
+  deterministic five-device topology (`local-fast`, `local-busy`,
+  `lan-balanced`, `lan-slow`, `derp-relay`) and verifies 50 sample operations
+  route to the lowest-cost eligible device while preserving output bytes.
+- The same conformance test asserts that placement evidence serializes the full
+  `compute_migration_cost` ranking with all five candidates and the selected
+  winner.
+- Inline planner tests verify that cost observations do not bypass hard
+  connector eligibility constraints and that the rollback override classifier
+  disables the cost model only for `0`, `false`, and `off`.
+
 ## Rollback
 
 The existing deterministic `ExecutionPlanner` ranking remains intact when no
 compute-migration observations are supplied. Operators can also disable the
 reranker with `FCP_COMPUTE_MIGRATION_COST_MODEL=0`, `false`, or `off`; hard
-constraints continue to run either way. The five-device live E2E remains future
-work for the parent bead.
+constraints continue to run either way. The deterministic five-device
+conformance harness is local and hermetic; a future live multi-machine soak can
+reuse the same evidence contract when physical devices are available.

@@ -161,6 +161,7 @@ mod error_taxonomy;
 mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
+mod evidence_index_cmd;
 #[allow(dead_code)]
 mod export_tools;
 #[allow(dead_code)] // jq-style field extraction with --extract flag.
@@ -583,6 +584,9 @@ enum Commands {
     /// Inspect replayable swarm decision cards and evidence bundles.
     #[command(name = "swarm-evidence", visible_alias = "swarm")]
     SwarmEvidence(swarm_evidence_cmd::SwarmEvidenceArgs),
+
+    /// Index and query replayable evidence bundles and verifier records.
+    Evidence(evidence_index_cmd::EvidenceArgs),
 
     /// Inspect, rank, explain, and rerun ProofGraph claims.
     Proof(proof_cmd::ProofArgs),
@@ -4135,6 +4139,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Bootstrap(args) => bootstrap_dispatch(args)?,
         Commands::Audit(args) => audit_dispatch(args)?,
         Commands::SwarmEvidence(args) => swarm_evidence_dispatch(args, cli.host.as_deref())?,
+        Commands::Evidence(args) => evidence_index_cmd::dispatch(args)?,
         Commands::Proof(args) => proof_dispatch(args)?,
         Commands::Manifest(_) => passthrough_only_dispatch("manifest"),
         Commands::Net(_) => passthrough_only_dispatch("net"),

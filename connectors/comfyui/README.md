@@ -178,7 +178,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/comfyui_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked verification bundle is `scripts/e2e/comfyui_connector_verification.sh`. It runs manifest validation, crate check, package formatting, deterministic WireMock JSONL coverage, optional live-health verification, clippy, and redaction checks through `rch`.
 
 The verification surface captures:
 
@@ -226,6 +226,8 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `scripts/e2e/comfyui_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-comfyui-e2e cargo check -p fcp-comfyui --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-comfyui-e2e cargo fmt --package fcp-comfyui --check`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-comfyui-e2e cargo test -p fcp-comfyui --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-comfyui-e2e cargo clippy -p fcp-comfyui --all-targets --no-deps -- -D warnings`

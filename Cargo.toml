@@ -201,6 +201,7 @@ members = [
     "connectors/square",
     "connectors/calendly",
     "connectors/coda",
+    "connectors/comfyui",
     "connectors/mastodon",
     "connectors/hackernews",
     "connectors/obsidian",

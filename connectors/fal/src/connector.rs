@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use fcp_async_core::time;
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::{
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+};
 use reqwest::header::{
     ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER,
     USER_AGENT,
@@ -40,6 +43,11 @@ const OP_HEALTH: &str = "fal.health";
 const CAP_MEDIA: &str = "fal.media.generate";
 const CAP_JOBS: &str = "fal.jobs";
 const CAP_HEALTH: &str = "fal.health.read";
+
+const FAL_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 6] = [
+    OP_SUBMIT, OP_STATUS, OP_RESULT, OP_CANCEL, OP_WAIT, OP_HEALTH,
+];
 
 #[derive(Clone)]
 enum FalAuth {
@@ -501,14 +509,7 @@ impl FalConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [
-                operation_schema(OP_SUBMIT, "Submit a media-generation job to the Fal queue", CAP_MEDIA, "none"),
-                operation_schema(OP_STATUS, "Poll Fal queue job status", CAP_JOBS, "strict"),
-                operation_schema(OP_RESULT, "Fetch Fal queue job result JSON without proxying binary outputs", CAP_JOBS, "strict"),
-                operation_schema(OP_CANCEL, "Request cancellation of a queued or running Fal job", CAP_JOBS, "none"),
-                operation_schema(OP_WAIT, "Poll status until completion and then fetch the result", CAP_JOBS, "none"),
-                operation_schema(OP_HEALTH, "Return Fal connector readiness metadata without live generation", CAP_HEALTH, "strict"),
-            ],
+            "operations": operations_info()?,
             "events": [],
             "resource_types": ["fal.queue_job", "fal.media_output"]
         }))
@@ -587,23 +588,80 @@ impl Default for FalConnector {
     }
 }
 
-fn operation_schema(id: &str, summary: &str, capability: &str, idempotency: &str) -> Value {
-    json!({
-        "id": id,
-        "summary": summary,
-        "capability": capability,
-        "risk_level": if id == OP_SUBMIT || id == OP_WAIT { "medium" } else { "low" },
-        "safety_tier": "safe",
-        "idempotency": idempotency,
-        "input_schema": {"type": "object"},
-        "output_schema": {"type": "object"},
-        "ai_hints": {
-            "common_mistakes": [
-                "Do not log prompts, raw request bodies, Fal API keys, or signed output URLs.",
-                "Do not fetch or proxy binary media through this connector; return Fal URLs and redacted metadata only."
-            ]
-        }
-    })
+fn operations_info() -> FcpResult<Vec<Value>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| {
+            let operation_info = operation_info_from_manifest(id, &operation);
+            introspect_operation_from_manifest(operation_info, &operation)
+        })
+        .collect())
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest =
+        ConnectorManifest::parse_str(FAL_MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Fal manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata =
+        serde_json::to_value(operation_info).expect("Fal operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 const fn health_status(configured: bool, handshaken: bool) -> &'static str {

@@ -3,7 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::{
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde_json::{Map, Value, json};
@@ -19,6 +22,12 @@ const MAX_VIDEO_POLL_INTERVAL_MS: u64 = 60_000;
 const MAX_VIDEO_POLL_ATTEMPTS: u64 = 120;
 const MAX_VIDEO_INPUT_IMAGES: usize = 4;
 const DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
+const OPENROUTER_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 3] = [
+    "openrouter.chat.completions",
+    "openrouter.models.list",
+    "openrouter.videos.generate",
+];
 
 #[derive(Clone)]
 enum Auth {
@@ -389,7 +398,7 @@ impl OpenRouterConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": operations_info(),
+            "operations": operations_info()?,
             "events": [],
             "resource_types": [],
         }))
@@ -883,292 +892,81 @@ impl Default for OpenRouterConnector {
     }
 }
 
-fn chat_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["messages"],
-        "additionalProperties": false,
-        "properties": {
-            "model": {
-                "type": "string",
-                "minLength": 1,
-                "default": "openai/gpt-4.1-mini"
-            },
-            "messages": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "required": ["role", "content"],
-                    "additionalProperties": true,
-                    "properties": {
-                        "role": {
-                            "type": "string",
-                            "enum": ["system", "user", "assistant", "tool", "developer"]
-                        },
-                        "content": {
-                            "oneOf": [
-                                {"type": "string"},
-                                {"type": "array"},
-                                {"type": "null"}
-                            ]
-                        },
-                        "name": {"type": "string"},
-                        "tool_call_id": {"type": "string"},
-                        "tool_calls": {"type": "array"}
-                    }
-                }
-            },
-            "max_tokens": {"type": "integer", "minimum": 1},
-            "temperature": {"type": "number", "minimum": 0, "maximum": 2},
-            "top_p": {"type": "number", "minimum": 0, "maximum": 1},
-            "response_format": {"type": "object"},
-            "tools": {"type": "array", "items": {"type": "object"}},
-            "tool_choice": {
-                "oneOf": [
-                    {"type": "string"},
-                    {"type": "object"},
-                    {"type": "null"}
-                ]
-            }
+fn operations_info() -> FcpResult<Vec<Value>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| {
+            let operation_info = operation_info_from_manifest(id, &operation);
+            introspect_operation_from_manifest(operation_info, &operation)
+        })
+        .collect())
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest = ConnectorManifest::parse_str(OPENROUTER_MANIFEST_TOML).map_err(|error| {
+        FcpError::Internal {
+            message: format!("Embedded OpenRouter manifest is invalid: {error}"),
         }
-    })
+    })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
 }
 
-fn chat_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["id", "model", "content", "finish_reason", "usage", "raw"],
-        "additionalProperties": false,
-        "properties": {
-            "id": {"type": ["string", "null"]},
-            "model": {"type": ["string", "null"]},
-            "content": {
-                "oneOf": [
-                    {"type": "string"},
-                    {"type": "array"},
-                    {"type": "null"}
-                ]
-            },
-            "finish_reason": {"type": ["string", "null"]},
-            "usage": {
-                "oneOf": [
-                    {"type": "object"},
-                    {"type": "null"}
-                ]
-            },
-            "raw": {"type": "object"}
-        }
-    })
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
 }
 
-fn models_list_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-    })
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
 }
 
-fn models_list_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["data"],
-        "additionalProperties": true,
-        "properties": {
-            "data": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": ["id"],
-                    "additionalProperties": true,
-                    "properties": {
-                        "id": {"type": "string"},
-                        "name": {"type": "string"},
-                        "created": {"type": "integer"},
-                        "description": {"type": "string"},
-                        "context_length": {"type": "integer"},
-                        "pricing": {"type": "object"},
-                        "architecture": {"type": "object"},
-                        "top_provider": {"type": "object"},
-                        "per_request_limits": {
-                            "oneOf": [
-                                {"type": "object"},
-                                {"type": "null"}
-                            ]
-                        }
-                    }
-                }
-            }
-        }
-    })
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata = serde_json::to_value(operation_info)
+        .expect("OpenRouter operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata
 }
 
-fn video_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["prompt"],
-        "additionalProperties": false,
-        "properties": {
-            "model": {
-                "type": "string",
-                "minLength": 1,
-                "default": DEFAULT_VIDEO_MODEL
-            },
-            "prompt": {"type": "string", "minLength": 1},
-            "duration_seconds": {"type": "integer", "minimum": 1},
-            "resolution": {"type": "string"},
-            "aspect_ratio": {"type": "string"},
-            "size": {"type": "string"},
-            "audio": {"type": "boolean"},
-            "input_images": {
-                "type": "array",
-                "maxItems": MAX_VIDEO_INPUT_IMAGES,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "anyOf": [
-                        {"required": ["url"]},
-                        {"required": ["data_url"]},
-                        {"required": ["base64"]}
-                    ],
-                    "properties": {
-                        "role": {
-                            "type": "string",
-                            "enum": ["first_frame", "last_frame", "reference_image"]
-                        },
-                        "url": {"type": "string", "format": "uri"},
-                        "data_url": {
-                            "type": "string",
-                            "pattern": "^data:image/[^;]+;base64,"
-                        },
-                        "base64": {"type": "string", "minLength": 1},
-                        "mime_type": {"type": "string", "pattern": "^image/"}
-                    }
-                }
-            },
-            "input_videos": {"type": "array", "maxItems": 0},
-            "callback_url": {"type": "string", "format": "uri"},
-            "seed": {"type": "integer"},
-            "provider_options": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "callback_url": {"type": "string", "format": "uri"},
-                    "seed": {"type": "integer"}
-                }
-            },
-            "poll_interval_ms": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": MAX_VIDEO_POLL_INTERVAL_MS
-            },
-            "max_poll_attempts": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_VIDEO_POLL_ATTEMPTS
-            },
-            "max_download_bytes": {"type": "integer", "minimum": 1}
-        }
-    })
-}
-
-fn video_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["job_id", "status", "generation_id", "model", "usage", "video", "raw"],
-        "additionalProperties": false,
-        "properties": {
-            "job_id": {"type": "string", "minLength": 1},
-            "status": {"type": "string", "minLength": 1},
-            "generation_id": {"type": ["string", "null"]},
-            "model": {"type": "string", "minLength": 1},
-            "usage": {
-                "oneOf": [
-                    {"type": "object"},
-                    {"type": "null"}
-                ]
-            },
-            "video": {
-                "type": "object",
-                "required": ["mime_type", "base64", "byte_len", "file_name"],
-                "additionalProperties": false,
-                "properties": {
-                    "mime_type": {"type": "string", "pattern": "^video/"},
-                    "base64": {"type": "string", "minLength": 1},
-                    "byte_len": {"type": "integer", "minimum": 0},
-                    "file_name": {"type": "string", "enum": ["video-1.mp4", "video-1.webm"]}
-                }
-            },
-            "raw": {"type": "object"}
-        }
-    })
-}
-
-fn operations_info() -> Vec<Value> {
-    vec![
-        json!({
-            "id": "openrouter.chat.completions",
-            "summary": "Create a non-streaming OpenRouter chat completion",
-            "description": "Uses OpenRouter's OpenAI-compatible POST /chat/completions surface. This first slice deliberately omits streaming event delivery.",
-            "capability": "openrouter.chat",
-            "risk_level": "medium",
-            "safety_tier": "safe",
-            "idempotency": "none",
-            "input_schema": chat_input_schema(),
-            "output_schema": chat_output_schema(),
-            "ai_hints": {
-                "when_to_use": "Use when you need one routed model request through OpenRouter without building provider-specific clients.",
-                "common_mistakes": [
-                    "This first slice is non-streaming.",
-                    "Pass provider-qualified model IDs such as openai/gpt-4.1-mini."
-                ],
-                "examples": [
-                    "{\"model\":\"openai/gpt-4.1-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"Summarize FCP in 3 bullets.\"}]}"
-                ],
-                "related": ["openrouter.models.list"]
-            }
-        }),
-        json!({
-            "id": "openrouter.models.list",
-            "summary": "List OpenRouter models",
-            "description": "Reads the current OpenRouter model catalog.",
-            "capability": "openrouter.models",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": models_list_input_schema(),
-            "output_schema": models_list_output_schema(),
-            "ai_hints": {
-                "when_to_use": "Use to discover valid provider-qualified model IDs.",
-                "common_mistakes": ["Do not assume a first-party provider model ID works unchanged without the OpenRouter prefix."],
-                "examples": ["{}"],
-                "related": ["openrouter.chat.completions"]
-            }
-        }),
-        json!({
-            "id": "openrouter.videos.generate",
-            "summary": "Generate one video through OpenRouter",
-            "description": "Submits POST /videos, polls the returned job URL until completion, and downloads the generated video without forwarding provider credentials to cross-origin polling or unsigned download URLs.",
-            "capability": "openrouter.video",
-            "risk_level": "medium",
-            "safety_tier": "safe",
-            "idempotency": "none",
-            "input_schema": video_input_schema(),
-            "output_schema": video_output_schema(),
-            "ai_hints": {
-                "when_to_use": "Use for a bounded OpenRouter image-to-video or text-to-video job when the caller can accept a base64-encoded returned asset.",
-                "common_mistakes": [
-                    "Do not pass video references; OpenRouter video-to-video is not exposed.",
-                    "Cross-origin polling and unsigned download URLs are fetched without provider credentials."
-                ],
-                "examples": [
-                    "{\"prompt\":\"A chrome sphere glides across a quiet moonlit beach\",\"model\":\"google/veo-3.1-fast\",\"duration_seconds\":6,\"aspect_ratio\":\"16:9\",\"resolution\":\"720P\",\"poll_interval_ms\":0,\"max_poll_attempts\":3}"
-                ],
-                "related": ["openrouter.models.list"]
-            }
-        }),
-    ]
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 const fn health_status(
@@ -1519,12 +1317,8 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 mod tests {
     use super::*;
 
-    const MANIFEST_TOML: &str = include_str!("../manifest.toml");
-    const EXPECTED_OPERATION_IDS: [&str; 3] = [
-        "openrouter.chat.completions",
-        "openrouter.models.list",
-        "openrouter.videos.generate",
-    ];
+    const MANIFEST_TOML: &str = OPENROUTER_MANIFEST_TOML;
+    const EXPECTED_OPERATION_IDS: [&str; 3] = OPERATION_ORDER;
 
     fn openrouter_manifest() -> Result<toml::Value, String> {
         toml::from_str(MANIFEST_TOML)
@@ -1539,6 +1333,21 @@ mod tests {
             .and_then(|provides| provides.get("operations"))
             .and_then(toml::Value::as_table)
             .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn manifest_operation<'a>(
+        manifest_operations: &'a toml::map::Map<String, toml::Value>,
+        operation_id: &str,
+    ) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+        manifest_operations
+            .get(operation_id)
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("manifest should declare operation {operation_id}"))
+    }
+
+    fn manifest_json(value: &toml::Value, context: &str) -> Result<Value, String> {
+        serde_json::to_value(value)
+            .map_err(|err| format!("{context} should convert to JSON: {err}"))
     }
 
     fn operation_schema(
@@ -1805,17 +1614,47 @@ mod tests {
     fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
         let manifest = openrouter_manifest()?;
         let manifest_operations = manifest_operations(&manifest)?;
-        let operation_catalog = operations_info();
+        let operation_catalog = operations_info().map_err(|error| error.to_string())?;
 
         for operation_id in EXPECTED_OPERATION_IDS {
-            assert!(
-                manifest_operations.contains_key(operation_id),
-                "manifest should declare operation {operation_id}"
-            );
+            let manifest_operation = manifest_operation(manifest_operations, operation_id)?;
             let operation = operation_catalog
                 .iter()
                 .find(|operation| operation["id"] == operation_id)
                 .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            let manifest_description = manifest_operation
+                .get("description")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("{operation_id} should declare description"))?;
+            assert_eq!(
+                operation.get("summary").and_then(Value::as_str),
+                Some(manifest_description)
+            );
+            assert_eq!(
+                operation.get("description").and_then(Value::as_str),
+                Some(manifest_description)
+            );
+            for field in [
+                "capability",
+                "risk_level",
+                "safety_tier",
+                "idempotency",
+                "requires_approval",
+                "ai_hints",
+                "network_constraints",
+            ] {
+                let manifest_value = manifest_operation
+                    .get(field)
+                    .ok_or_else(|| format!("{operation_id} should declare {field}"))?;
+                assert_eq!(
+                    operation.get(field),
+                    Some(&manifest_json(
+                        manifest_value,
+                        &format!("{operation_id}.{field}")
+                    )?),
+                    "{operation_id} {field} should match manifest"
+                );
+            }
             for field in ["input_schema", "output_schema"] {
                 let schema = operation_schema(&manifest, operation_id, field)?;
                 let _validator = validator_for(&schema)?;

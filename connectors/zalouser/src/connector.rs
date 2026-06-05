@@ -1,12 +1,17 @@
 use std::sync::Arc;
 
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::{
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+};
 use serde_json::{Value, json};
 
 const CONNECTOR_ID: &str = "fcp.zalouser";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const BOUNDARY: &str = "This first slice is a planned-only helper-process contract. It does not bundle or emulate the upstream personal-account runtime.";
 const PLANNED_HELPER_OPERATION_ID: &str = "zalouser.helper.exec";
+const ZALOUSER_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 1] = [PLANNED_HELPER_OPERATION_ID];
 const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
 const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
 const UNIMPLEMENTED_REASON_CODE: &str = "invoke_surface_unimplemented";
@@ -105,9 +110,7 @@ impl ZalouserConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [
-                { "id": PLANNED_HELPER_OPERATION_ID, "summary": "Planned guarded helper operation", "capability": "zalouser.helper", "risk_level": "high", "safety_tier": "risky", "requires_approval": "policy", "idempotency": "none", "implemented": false, "execution_enabled": false, "reason_code": EXEC_DISABLED_REASON_CODE }
-            ],
+            "operations": operations_info()?,
             "surface_status": "quarantined",
             "surface_status_rationale": "High-risk surface requiring explicit operator approval",
             "helper_process_policy": null,
@@ -178,17 +181,95 @@ impl Default for ZalouserConnector {
     }
 }
 
+fn operations_info() -> FcpResult<Vec<Value>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| {
+            let operation_info = operation_info_from_manifest(id, &operation);
+            introspect_operation_from_manifest(operation_info, &operation)
+        })
+        .collect())
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest = ConnectorManifest::parse_str(ZALOUSER_MANIFEST_TOML).map_err(|error| {
+        FcpError::Internal {
+            message: format!("Embedded ZaloUser manifest is invalid: {error}"),
+        }
+    })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata =
+        serde_json::to_value(operation_info).expect("ZaloUser operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata["implemented"] = json!(false);
+    metadata["execution_enabled"] = json!(false);
+    metadata["reason_code"] = json!(EXEC_DISABLED_REASON_CODE);
+    metadata
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_manifest::ConnectorManifest;
+    use serde::Serialize;
 
     #[test]
     fn manifest_declares_no_egress_for_planned_helper() {
-        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
-        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
-        let unchecked =
-            ConnectorManifest::parse_str_unchecked(&raw).expect("manifest should parse");
+        let unchecked = ConnectorManifest::parse_str_unchecked(ZALOUSER_MANIFEST_TOML)
+            .expect("manifest should parse");
         let computed_hash = unchecked
             .compute_interface_hash()
             .expect("compute interface hash");
@@ -197,7 +278,8 @@ mod tests {
             computed_hash.to_string()
         );
 
-        let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
+        let manifest =
+            ConnectorManifest::parse_str(ZALOUSER_MANIFEST_TOML).expect("manifest should validate");
         let operation = manifest
             .provides
             .operations
@@ -224,6 +306,77 @@ mod tests {
         assert_eq!(constraints.connect_timeout_ms, 1_000);
         assert_eq!(constraints.total_timeout_ms, 15_000);
         assert_eq!(constraints.max_response_bytes, 1_048_576);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_matches_manifest_operation_surface() {
+        let manifest =
+            ConnectorManifest::parse_str(ZALOUSER_MANIFEST_TOML).expect("manifest should validate");
+        let manifest_operation = manifest
+            .provides
+            .operations
+            .get(PLANNED_HELPER_OPERATION_ID)
+            .expect("planned helper operation");
+
+        let connector = ZalouserConnector::new();
+        let introspect = connector
+            .handle_introspect()
+            .await
+            .expect("introspect should succeed");
+        let operations = introspect["operations"]
+            .as_array()
+            .expect("operations should be an array");
+        assert_eq!(operations.len(), 1);
+
+        let runtime_operation = &operations[0];
+        assert_eq!(runtime_operation["id"], PLANNED_HELPER_OPERATION_ID);
+        assert_eq!(
+            runtime_operation["summary"],
+            json!(&manifest_operation.description)
+        );
+        assert_eq!(
+            runtime_operation["description"],
+            json!(&manifest_operation.description)
+        );
+        assert_eq!(
+            runtime_operation["capability"],
+            json!(&manifest_operation.capability)
+        );
+        assert_eq!(
+            runtime_operation["risk_level"],
+            serialized_value(&manifest_operation.risk_level)
+        );
+        assert_eq!(
+            runtime_operation["safety_tier"],
+            serialized_value(&manifest_operation.safety_tier)
+        );
+        assert_eq!(
+            runtime_operation["idempotency"],
+            serialized_value(&manifest_operation.idempotency)
+        );
+        assert_eq!(
+            runtime_operation["requires_approval"],
+            serialized_value(&manifest_operation.requires_approval)
+        );
+        assert_eq!(
+            runtime_operation["input_schema"],
+            serialized_value(&manifest_operation.input_schema)
+        );
+        assert_eq!(
+            runtime_operation["output_schema"],
+            serialized_value(&manifest_operation.output_schema)
+        );
+        assert_eq!(
+            runtime_operation["ai_hints"],
+            serialized_value(&manifest_operation.ai_hints)
+        );
+        assert_eq!(
+            runtime_operation["network_constraints"],
+            serialized_value(&manifest_operation.network_constraints)
+        );
+        assert_eq!(runtime_operation["implemented"], false);
+        assert_eq!(runtime_operation["execution_enabled"], false);
+        assert_eq!(runtime_operation["reason_code"], EXEC_DISABLED_REASON_CODE);
     }
 
     #[fcp_async_core::runtime::test]
@@ -379,5 +532,9 @@ mod tests {
         assert!(!simulate["allowed"].as_bool().expect("bool"));
         assert_eq!(simulate["reason_code"], "unknown_operation");
         assert!(!simulate["execution_enabled"].as_bool().expect("bool"));
+    }
+
+    fn serialized_value<T: Serialize>(value: &T) -> Value {
+        serde_json::to_value(value).expect("manifest value should serialize")
     }
 }

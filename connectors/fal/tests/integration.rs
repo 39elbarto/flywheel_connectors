@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use fcp_fal::{FalConnector, redacted_media_summary};
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::FcpError;
 use pretty_assertions::assert_eq;
 use serde_json::{Value, json};
@@ -17,6 +18,10 @@ const OP_RESULT: &str = "fal.job.result";
 const OP_CANCEL: &str = "fal.job.cancel";
 const OP_WAIT: &str = "fal.job.wait_until_complete";
 const OP_HEALTH: &str = "fal.health";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const EXPECTED_OPERATION_IDS: [&str; 6] = [
+    OP_SUBMIT, OP_STATUS, OP_RESULT, OP_CANCEL, OP_WAIT, OP_HEALTH,
+];
 
 #[fcp_async_core::runtime::test]
 async fn submit_sends_key_auth_and_returns_provider_urls() {
@@ -240,6 +245,116 @@ async fn lifecycle_and_validation_are_redaction_safe() {
     assert_eq!(summary.output_count, 2);
 }
 
+#[fcp_async_core::runtime::test]
+async fn fal_manifest_operations_match_runtime_introspection() {
+    let manifest = fal_manifest_unchecked();
+    manifest
+        .validate()
+        .expect("Fal manifest should validate with its checked interface hash");
+
+    let connector = FalConnector::new();
+    let introspection = connector
+        .handle_introspect()
+        .await
+        .expect("introspection should serialize");
+    let runtime_operations = introspection
+        .get("operations")
+        .and_then(Value::as_array)
+        .expect("introspection operations should be an array");
+    let runtime_ids: Vec<_> = runtime_operations
+        .iter()
+        .map(|operation| {
+            operation
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("operation id should be a string")
+        })
+        .collect();
+    assert_eq!(runtime_ids, EXPECTED_OPERATION_IDS);
+    assert_eq!(
+        manifest.provides.operations.len(),
+        EXPECTED_OPERATION_IDS.len()
+    );
+
+    for operation_id in EXPECTED_OPERATION_IDS {
+        let manifest_operation = manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("manifest operation should be declared");
+        let runtime_operation = operation(&introspection, operation_id);
+
+        assert_eq!(
+            runtime_operation.get("summary").and_then(Value::as_str),
+            Some(manifest_operation.description.as_str())
+        );
+        assert_eq!(
+            runtime_operation.get("description").and_then(Value::as_str),
+            Some(manifest_operation.description.as_str())
+        );
+        assert_eq!(
+            runtime_operation.get("capability").and_then(Value::as_str),
+            Some(manifest_operation.capability.as_str())
+        );
+        assert_eq!(
+            runtime_operation
+                .get("risk_level")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.risk_level))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("safety_tier")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.safety_tier))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("idempotency")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.idempotency))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("requires_approval")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.requires_approval))
+        );
+        assert_eq!(
+            runtime_operation.get("input_schema"),
+            Some(&manifest_operation.input_schema)
+        );
+        assert_eq!(
+            runtime_operation.get("output_schema"),
+            Some(&manifest_operation.output_schema)
+        );
+
+        let expected_network_constraints = serde_json::to_value(
+            manifest_operation
+                .network_constraints
+                .as_ref()
+                .expect("Fal operation should declare network constraints"),
+        )
+        .expect("network constraints should serialize");
+        assert_eq!(
+            runtime_operation.get("network_constraints"),
+            Some(&expected_network_constraints)
+        );
+
+        assert!(
+            !manifest_operation.ai_hints.when_to_use.trim().is_empty(),
+            "{operation_id} should declare AI guidance"
+        );
+        let expected_ai_hints =
+            serde_json::to_value(&manifest_operation.ai_hints).expect("AI hints should serialize");
+        assert_eq!(runtime_operation.get("ai_hints"), Some(&expected_ai_hints));
+    }
+}
+
 fn handle_payload(server: &MockServer, request_id: &str) -> Value {
     json!({
         "request_id": request_id,
@@ -297,4 +412,27 @@ async fn configured_connector_with(
 
 fn invoke(operation: &str, input: Value) -> Value {
     json!({"operation_id": operation, "input": input})
+}
+
+fn fal_manifest_unchecked() -> ConnectorManifest {
+    ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+        .expect("Fal manifest should parse before hash validation")
+}
+
+fn json_string<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .expect("value should serialize")
+        .as_str()
+        .expect("serialized value should be a string")
+        .to_string()
+}
+
+fn operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {
+    introspection
+        .get("operations")
+        .and_then(Value::as_array)
+        .expect("operations should be advertised")
+        .iter()
+        .find(|operation| operation.get("id").and_then(Value::as_str) == Some(id))
+        .expect("expected operation should be advertised")
 }

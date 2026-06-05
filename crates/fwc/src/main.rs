@@ -4134,7 +4134,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::SupplyChain(_) => passthrough_only_dispatch("supply-chain"),
         Commands::Bootstrap(args) => bootstrap_dispatch(args)?,
         Commands::Audit(args) => audit_dispatch(args)?,
-        Commands::SwarmEvidence(args) => swarm_evidence_dispatch(args)?,
+        Commands::SwarmEvidence(args) => swarm_evidence_dispatch(args, cli.host.as_deref())?,
         Commands::Proof(args) => proof_dispatch(args)?,
         Commands::Manifest(_) => passthrough_only_dispatch("manifest"),
         Commands::Net(_) => passthrough_only_dispatch("net"),
@@ -8022,8 +8022,9 @@ fn audit_dispatch(args: &audit_chain::AuditArgs) -> Result<DispatchOutcome> {
 
 fn swarm_evidence_dispatch(
     args: &swarm_evidence_cmd::SwarmEvidenceArgs,
+    explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
-    let mut payload = swarm_evidence_cmd::run(args)?;
+    let mut payload = swarm_evidence_cmd::run_with_host(args, explicit_host)?;
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "swarm-evidence");
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
@@ -13193,7 +13194,7 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
     }
 
     if matches!(args.probe, Some(DoctorProbe::SwarmPressure)) {
-        return doctor_swarm_pressure_probe_dispatch(args);
+        return doctor_swarm_pressure_probe_dispatch(args, explicit_host);
     }
 
     if let Some(command) = &args.command {
@@ -14077,11 +14078,17 @@ const HLC_PROBE_SKEW_WARN_MS: u64 = 2_000;
 const HLC_PROBE_HIERVV_SIZE_WARN_BYTES: usize = 4_096;
 const HLC_PROBE_COUNTER_WARN_WITHIN_1S: u32 = 1_000;
 
-fn doctor_swarm_pressure_probe_dispatch(args: &DoctorArgs) -> Result<DispatchOutcome> {
-    let pressure_payload = swarm_evidence_cmd::pressure(&swarm_evidence_cmd::SwarmPressureArgs {
-        fixture: args.swarm_pressure_fixture.clone(),
-        ..swarm_evidence_cmd::SwarmPressureArgs::default()
-    })?;
+fn doctor_swarm_pressure_probe_dispatch(
+    args: &DoctorArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let pressure_payload = swarm_evidence_cmd::pressure_with_host(
+        &swarm_evidence_cmd::SwarmPressureArgs {
+            fixture: args.swarm_pressure_fixture.clone(),
+            ..swarm_evidence_cmd::SwarmPressureArgs::default()
+        },
+        explicit_host,
+    )?;
     let verdict = pressure_payload["verdict"]
         .as_str()
         .unwrap_or("yellow")

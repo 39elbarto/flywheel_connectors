@@ -1,8 +1,8 @@
 //! Operator-facing swarm evidence exploration.
 //!
-//! This command intentionally reads replayable JSONL artifacts offline. It does
-//! not contact live services or reinterpret adaptive decisions; it surfaces the
-//! exact decision cards and report links already stored in the evidence bundle.
+//! Explore and replay intentionally read replayable JSONL artifacts offline.
+//! Pressure is read-only but may sample local OS state, coordination status, rch
+//! status, and an operator-provided host admin endpoint.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -11,12 +11,15 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{Args, Subcommand};
+use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use url::Url;
 
 /// Arguments for `fwc swarm-evidence`.
 #[derive(Args, Debug, Clone, Serialize)]
@@ -127,6 +130,10 @@ pub struct SwarmPressureArgs {
     #[arg(long = "active-connectors")]
     pub active_connectors: Option<usize>,
 
+    /// Optional fcp-host endpoint for live connector lifecycle pressure.
+    #[arg(long = "host", value_name = "ENDPOINT")]
+    pub host: Option<String>,
+
     /// Current disk free percentage for the working volume.
     #[arg(long = "disk-free-percent")]
     pub disk_free_percent: Option<u8>,
@@ -188,7 +195,7 @@ struct SwarmPressureInputs {
     fixture_path: Option<PathBuf>,
     logical_cpus: usize,
     active_agents: Option<AgentPressureInput>,
-    active_connectors: Option<usize>,
+    active_connectors: Option<ConnectorPressureInput>,
     disk_free: Option<PercentPressureInput>,
     inode_free: Option<PercentPressureInput>,
     memory_free: Option<PercentPressureInput>,
@@ -225,6 +232,13 @@ struct AgentMailPressureInput {
 }
 
 #[derive(Debug, Clone)]
+struct ConnectorPressureInput {
+    active_connectors: usize,
+    warning_count: usize,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
 struct RchPressureInput {
     queued_jobs: usize,
     active_builds: usize,
@@ -237,6 +251,7 @@ struct LocalPressureSamples {
     disk_free: Option<PercentPressureInput>,
     inode_free: Option<PercentPressureInput>,
     memory_free: Option<PercentPressureInput>,
+    active_connectors: Option<ConnectorPressureInput>,
     active_agents: Option<AgentPressureInput>,
     rch_status: Option<RchPressureInput>,
 }
@@ -268,12 +283,11 @@ struct DecisionCardEntry {
     raw_record: Value,
 }
 
-/// Run a `fwc swarm-evidence` command and return a structured payload.
-pub fn run(args: &SwarmEvidenceArgs) -> Result<Value> {
+pub fn run_with_host(args: &SwarmEvidenceArgs, explicit_host: Option<&str>) -> Result<Value> {
     match &args.command {
         SwarmEvidenceCommand::Explore(args) => explore(args),
         SwarmEvidenceCommand::Replay(args) => replay(args),
-        SwarmEvidenceCommand::Pressure(args) => pressure(args),
+        SwarmEvidenceCommand::Pressure(args) => pressure_with_host(args, explicit_host),
     }
 }
 
@@ -353,8 +367,8 @@ fn replay(args: &SwarmEvidenceReplayArgs) -> Result<Value> {
     Ok(payload)
 }
 
-pub fn pressure(args: &SwarmPressureArgs) -> Result<Value> {
-    let inputs = pressure_inputs(args)?;
+pub fn pressure_with_host(args: &SwarmPressureArgs, explicit_host: Option<&str>) -> Result<Value> {
+    let inputs = pressure_inputs(args, explicit_host)?;
     let signals = pressure_signals(&inputs);
     let score = pressure_score(&signals);
     let verdict = pressure_verdict(&signals);
@@ -381,7 +395,7 @@ pub fn pressure(args: &SwarmPressureArgs) -> Result<Value> {
         "source": {
             "fixture": inputs.fixture_path.as_ref().map(|path| path.display().to_string()),
             "mode": if inputs.fixture_path.is_some() { "fixture" } else { "local-with-degraded-dependencies" },
-            "caveat": "This command is read-only. Missing live dependencies are represented as degraded signals; it never starts Cargo work, repairs Agent Mail, or contacts external services.",
+            "caveat": "This command is read-only. Missing live dependencies are represented as degraded signals; live probes are limited to local OS state, coordination status, rch status, and an optional fcp-host admin endpoint. It never starts Cargo work, repairs Agent Mail, or contacts external providers.",
         },
         "pressure_score_0_100": score,
         "verdict": verdict,
@@ -407,7 +421,10 @@ pub fn pressure(args: &SwarmPressureArgs) -> Result<Value> {
     Ok(payload)
 }
 
-fn pressure_inputs(args: &SwarmPressureArgs) -> Result<SwarmPressureInputs> {
+fn pressure_inputs(
+    args: &SwarmPressureArgs,
+    explicit_host: Option<&str>,
+) -> Result<SwarmPressureInputs> {
     let fixture = match &args.fixture {
         Some(path) => load_pressure_fixture(path)?,
         None => SwarmPressureFixture::default(),
@@ -415,7 +432,7 @@ fn pressure_inputs(args: &SwarmPressureArgs) -> Result<SwarmPressureInputs> {
     let local_samples = if args.fixture.is_some() {
         LocalPressureSamples::default()
     } else {
-        collect_local_pressure_samples()
+        collect_local_pressure_samples(resolve_pressure_host(args, explicit_host).as_deref())
     };
     let logical_cpus = args
         .logical_cpus
@@ -466,12 +483,21 @@ fn pressure_inputs(args: &SwarmPressureArgs) -> Result<SwarmPressureInputs> {
                 .map(|active_agents| provided_agent_input(active_agents, "fixture"))
         })
         .or(local_samples.active_agents);
+    let active_connectors = args
+        .active_connectors
+        .map(|active_connectors| provided_connector_input(active_connectors, "cli-argument"))
+        .or_else(|| {
+            fixture
+                .active_connectors
+                .map(|active_connectors| provided_connector_input(active_connectors, "fixture"))
+        })
+        .or(local_samples.active_connectors);
 
     Ok(SwarmPressureInputs {
         fixture_path: args.fixture.clone(),
         logical_cpus,
         active_agents,
-        active_connectors: args.active_connectors.or(fixture.active_connectors),
+        active_connectors,
         disk_free,
         inode_free,
         memory_free,
@@ -495,14 +521,34 @@ fn available_logical_cpus() -> usize {
     thread::available_parallelism().map_or(1, usize::from)
 }
 
-fn collect_local_pressure_samples() -> LocalPressureSamples {
+fn collect_local_pressure_samples(host: Option<&str>) -> LocalPressureSamples {
     LocalPressureSamples {
         disk_free: disk_free_sample(),
         inode_free: inode_free_sample(),
         memory_free: memory_free_sample(),
+        active_connectors: host.and_then(host_connector_lifecycle_sample),
         active_agents: coordination_active_agents_sample(),
         rch_status: rch_status_sample(),
     }
+}
+
+fn resolve_pressure_host(args: &SwarmPressureArgs, explicit_host: Option<&str>) -> Option<String> {
+    args.host
+        .as_deref()
+        .or(explicit_host)
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            ["FWC_HOST", "FCP_HOST_ENDPOINT", "FCP_HOST_BIND"]
+                .into_iter()
+                .find_map(|env_name| {
+                    std::env::var(env_name)
+                        .ok()
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty())
+                })
+        })
 }
 
 fn provided_percent_input(percent: u8, source: &str) -> PercentPressureInput {
@@ -527,6 +573,239 @@ fn provided_agent_input(active_agents: usize, source: &str) -> AgentPressureInpu
             "agent_mail_process_signal_attempted": false,
         }),
     }
+}
+
+fn provided_connector_input(active_connectors: usize, source: &str) -> ConnectorPressureInput {
+    ConnectorPressureInput {
+        active_connectors,
+        warning_count: 0,
+        evidence: json!({
+            "source": source,
+            "live": false,
+            "host_contacted": false,
+        }),
+    }
+}
+
+const HOST_CONNECTOR_SAMPLE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+struct PressureHostClient {
+    client: BlockingClient,
+    base_url: String,
+}
+
+impl PressureHostClient {
+    fn new(endpoint: &str) -> Result<Self> {
+        let endpoint = normalize_pressure_host_endpoint(endpoint)?;
+
+        #[cfg(unix)]
+        {
+            if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+                let socket_path = endpoint.strip_prefix("unix://").unwrap_or(&endpoint);
+                let client = BlockingClientBuilder::new()
+                    .timeout(HOST_CONNECTOR_SAMPLE_TIMEOUT)
+                    .unix_socket(socket_path)
+                    .build()
+                    .context("failed to build Unix-socket pressure host client")?;
+                return Ok(Self {
+                    client,
+                    base_url: "http://localhost".to_owned(),
+                });
+            }
+        }
+
+        let client = BlockingClientBuilder::new()
+            .timeout(HOST_CONNECTOR_SAMPLE_TIMEOUT)
+            .build()
+            .context("failed to build pressure host client")?;
+        Ok(Self {
+            client,
+            base_url: endpoint,
+        })
+    }
+
+    fn get_json(&self, path: &str) -> Result<Value> {
+        let response = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .send()
+            .context("host GET request failed")?;
+        json_response(response)
+    }
+
+    fn post_json(&self, path: &str, body: &Value) -> Result<Value> {
+        let response = self
+            .client
+            .post(format!("{}{}", self.base_url, path))
+            .json(body)
+            .send()
+            .context("host POST request failed")?;
+        json_response(response)
+    }
+}
+
+fn json_response(response: reqwest::blocking::Response) -> Result<Value> {
+    let status = response.status();
+    if !status.is_success() {
+        bail!("host returned non-success status");
+    }
+    response
+        .json::<Value>()
+        .context("host returned invalid JSON")
+}
+
+fn normalize_pressure_host_endpoint(endpoint: &str) -> Result<String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        bail!("host endpoint cannot be empty");
+    }
+    if endpoint.contains("://")
+        && !(endpoint.starts_with("http://")
+            || endpoint.starts_with("https://")
+            || endpoint.starts_with("tcp://")
+            || endpoint.starts_with("unix://"))
+    {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+
+    #[cfg(unix)]
+    if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+        let socket_path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+        if socket_path.trim().is_empty() {
+            bail!("Unix host endpoint must include a socket path");
+        }
+        return Ok(endpoint.to_owned());
+    }
+
+    let normalized = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_owned()
+    } else {
+        let stripped = endpoint.strip_prefix("tcp://").unwrap_or(endpoint);
+        format!("http://{stripped}")
+    };
+    let url =
+        Url::parse(&normalized).with_context(|| format!("invalid host endpoint `{endpoint}`"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+    if url.host_str().is_none() {
+        bail!("host endpoint must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("host endpoint must not include username or password components");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("host endpoint must not include query or fragment components");
+    }
+    Ok(normalized.trim_end_matches('/').to_owned())
+}
+
+fn host_connector_lifecycle_sample(endpoint: &str) -> Option<ConnectorPressureInput> {
+    let client = match PressureHostClient::new(endpoint) {
+        Ok(client) => client,
+        Err(_) => return Some(host_connector_unavailable_sample("invalid_endpoint")),
+    };
+    let discover = match client.post_json("/rpc/discover", &json!({ "filter": null })) {
+        Ok(discover) => discover,
+        Err(_) => return Some(host_connector_unavailable_sample("discover_unavailable")),
+    };
+    let (health, transport_warning_count) = match client.get_json("/rpc/health") {
+        Ok(health) => (Some(health), 0),
+        Err(_) => (None, 1),
+    };
+    Some(connector_pressure_from_host_values(
+        &discover,
+        health.as_ref(),
+        transport_warning_count,
+    ))
+}
+
+fn host_connector_unavailable_sample(reason: &str) -> ConnectorPressureInput {
+    ConnectorPressureInput {
+        active_connectors: 0,
+        warning_count: 1,
+        evidence: json!({
+            "source": "host-admin-api",
+            "live": false,
+            "host_contacted": false,
+            "status": reason,
+            "active_connectors": 0,
+            "warning_count": 1,
+        }),
+    }
+}
+
+fn connector_pressure_from_host_values(
+    discover: &Value,
+    health: Option<&Value>,
+    transport_warning_count: usize,
+) -> ConnectorPressureInput {
+    let connectors = discover
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut active_connectors = 0_usize;
+    let mut enabled_connectors = 0_usize;
+    let mut unhealthy_enabled_connectors = 0_usize;
+    let mut warning_count = transport_warning_count;
+
+    for connector in connectors {
+        let enabled = connector
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        enabled_connectors = enabled_connectors.saturating_add(1);
+        let health_state = connector_health_state(connector);
+        if !matches!(
+            health_state.as_deref(),
+            Some("unavailable" | "error" | "stopped" | "missing")
+        ) {
+            active_connectors = active_connectors.saturating_add(1);
+        }
+        if !matches!(health_state.as_deref(), Some("healthy")) {
+            unhealthy_enabled_connectors = unhealthy_enabled_connectors.saturating_add(1);
+        }
+    }
+
+    warning_count = warning_count.saturating_add(unhealthy_enabled_connectors);
+    let host_health = health
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    if host_health.is_some_and(|status| status != "healthy") {
+        warning_count = warning_count.saturating_add(1);
+    }
+
+    ConnectorPressureInput {
+        active_connectors,
+        warning_count,
+        evidence: json!({
+            "source": "host-admin-api",
+            "live": true,
+            "host_contacted": true,
+            "method": "POST /rpc/discover + GET /rpc/health",
+            "connector_count": connectors.len(),
+            "enabled_connectors": enabled_connectors,
+            "active_connectors": active_connectors,
+            "unhealthy_enabled_connectors": unhealthy_enabled_connectors,
+            "host_health": host_health,
+            "registry_version": discover.get("registry_version").and_then(Value::as_u64),
+            "health_unavailable": health.is_none(),
+            "warning_count": warning_count,
+        }),
+    }
+}
+
+fn connector_health_state(connector: &Value) -> Option<String> {
+    connector
+        .pointer("/health/status")
+        .and_then(Value::as_str)
+        .or_else(|| connector.pointer("/health/state").and_then(Value::as_str))
+        .or_else(|| connector.get("health").and_then(Value::as_str))
+        .map(str::to_ascii_lowercase)
 }
 
 fn provided_rch_input(queued_jobs: usize, source: &str) -> RchPressureInput {
@@ -1141,30 +1420,39 @@ fn agent_count_signal(inputs: &SwarmPressureInputs) -> SwarmPressureSignal {
 }
 
 fn connector_count_signal(inputs: &SwarmPressureInputs) -> SwarmPressureSignal {
-    match inputs.active_connectors {
-        Some(active_connectors) => {
+    match &inputs.active_connectors {
+        Some(input) => {
+            let active_connectors = input.active_connectors;
             let yellow_threshold = inputs.logical_cpus.saturating_mul(2);
             let red_threshold = inputs.logical_cpus.saturating_mul(4);
-            let status = threshold_status(active_connectors, yellow_threshold, red_threshold);
+            let mut status = threshold_status(active_connectors, yellow_threshold, red_threshold);
+            if status == SwarmPressureStatus::Green && input.warning_count > 0 {
+                status = SwarmPressureStatus::Yellow;
+            }
+            let value = if input.warning_count == 0 {
+                format!("{active_connectors} active connector(s)")
+            } else {
+                format!(
+                    "{active_connectors} active connector(s), {} host warning(s)",
+                    input.warning_count
+                )
+            };
             SwarmPressureSignal {
                 name: "host_connectors".to_owned(),
                 status,
-                value: format!("{active_connectors} active connector(s)"),
+                value,
                 threshold: format!(
                     "<{} green, {}-{} yellow, >{} red",
                     yellow_threshold, yellow_threshold, red_threshold, red_threshold
                 ),
-                evidence: json!({
-                    "source": "caller-provided",
-                    "host_contacted": false,
-                }),
+                evidence: input.evidence.clone(),
             }
         }
         None => degraded_signal(
             "host_connectors",
             "unavailable",
             "host connector count available",
-            "No host endpoint was queried by this offline command slice",
+            "No host endpoint was configured; pass --host, FWC_HOST, FCP_HOST_ENDPOINT, FCP_HOST_BIND, --active-connectors, or a fixture to make this explicit evidence",
         ),
     }
 }
@@ -1909,10 +2197,12 @@ mod tests {
         PercentPressureInput, RchPressureInput, SwarmEvidenceCommand, SwarmEvidenceExploreArgs,
         SwarmEvidenceFilters, SwarmEvidenceReplayArgs, SwarmPressureArgs, SwarmPressureInputs,
         SwarmPressureSignal, SwarmPressureStatus, agent_mail_status_sample_from_json,
-        beads_in_progress_sample_from_json, coordination_active_agents_from_samples, explore,
-        linux_memory_sample_from_meminfo, macos_memory_sample_from_vm_stat, parse_df_disk_sample,
-        parse_df_inode_sample, pressure, pressure_score, pressure_signals, pressure_verdict,
-        provided_agent_input, rch_status_sample_from_json, replay, run,
+        beads_in_progress_sample_from_json, connector_pressure_from_host_values,
+        coordination_active_agents_from_samples, explore, linux_memory_sample_from_meminfo,
+        macos_memory_sample_from_vm_stat, parse_df_disk_sample, parse_df_inode_sample,
+        pressure_score, pressure_signals, pressure_verdict, pressure_with_host,
+        provided_agent_input, provided_connector_input, rch_status_sample_from_json, replay,
+        run_with_host,
     };
 
     fn write_fixture() -> tempfile::NamedTempFile {
@@ -2172,10 +2462,13 @@ mod tests {
         )
         .expect("write pressure fixture");
 
-        let payload = pressure(&SwarmPressureArgs {
-            fixture: Some(file.path().to_path_buf()),
-            ..SwarmPressureArgs::default()
-        })
+        let payload = pressure_with_host(
+            &SwarmPressureArgs {
+                fixture: Some(file.path().to_path_buf()),
+                ..SwarmPressureArgs::default()
+            },
+            None,
+        )
         .expect("pressure");
 
         assert_eq!(payload["schema_version"], "fwc.swarm-pressure/v1");
@@ -2203,16 +2496,20 @@ mod tests {
 
     #[test]
     fn pressure_disk_red_selects_worst_safe_verdict() {
-        let payload = pressure(&SwarmPressureArgs {
-            logical_cpus: Some(32),
-            active_agents: Some(2),
-            active_connectors: Some(8),
-            disk_free_percent: Some(2),
-            inode_free_percent: Some(80),
-            memory_free_percent: Some(60),
-            rch_queued_jobs: Some(0),
-            fixture: None,
-        })
+        let payload = pressure_with_host(
+            &SwarmPressureArgs {
+                logical_cpus: Some(32),
+                active_agents: Some(2),
+                active_connectors: Some(8),
+                disk_free_percent: Some(2),
+                inode_free_percent: Some(80),
+                memory_free_percent: Some(60),
+                rch_queued_jobs: Some(0),
+                fixture: None,
+                host: None,
+            },
+            None,
+        )
         .expect("pressure");
 
         assert_eq!(payload["verdict"], "red");
@@ -2238,10 +2535,13 @@ mod tests {
         )
         .expect("write pressure fixture");
 
-        let payload = pressure(&SwarmPressureArgs {
-            fixture: Some(file.path().to_path_buf()),
-            ..SwarmPressureArgs::default()
-        })
+        let payload = pressure_with_host(
+            &SwarmPressureArgs {
+                fixture: Some(file.path().to_path_buf()),
+                ..SwarmPressureArgs::default()
+            },
+            None,
+        )
         .expect("pressure");
 
         assert_eq!(payload["verdict"], "yellow");
@@ -2326,7 +2626,7 @@ mod tests {
             fixture_path: None,
             logical_cpus: 32,
             active_agents: Some(provided_agent_input(1, "test")),
-            active_connectors: Some(1),
+            active_connectors: Some(provided_connector_input(1, "test")),
             disk_free: Some(PercentPressureInput {
                 percent: 80,
                 evidence: json!({}),
@@ -2353,6 +2653,55 @@ mod tests {
             .expect("rch signal");
 
         assert_eq!(rch_signal.status, SwarmPressureStatus::Yellow);
+    }
+
+    #[test]
+    fn pressure_host_lifecycle_aggregate_stays_redaction_safe() {
+        let input = connector_pressure_from_host_values(
+            &json!({
+                "registry_version": 42,
+                "connectors": [
+                    {
+                        "id": "fcp.github:enterprise:v1",
+                        "name": "GitHub Enterprise",
+                        "enabled": true,
+                        "health": {"status": "healthy"}
+                    },
+                    {
+                        "id": "fcp.slack:workspace:v1",
+                        "name": "Slack Workspace",
+                        "enabled": true,
+                        "health": {"status": "degraded", "reason": "rate budget"}
+                    },
+                    {
+                        "id": "fcp.gmail:workspace:v1",
+                        "name": "Gmail Workspace",
+                        "enabled": true,
+                        "health": {"status": "unavailable", "reason": "stopped"}
+                    },
+                    {
+                        "id": "fcp.disabled:workspace:v1",
+                        "name": "Disabled Connector",
+                        "enabled": false,
+                        "health": {"status": "healthy"}
+                    }
+                ]
+            }),
+            Some(&json!({"status": "healthy"})),
+            0,
+        );
+
+        assert_eq!(input.active_connectors, 2);
+        assert_eq!(input.warning_count, 2);
+        assert_eq!(input.evidence["source"], "host-admin-api");
+        assert_eq!(input.evidence["connector_count"], 4);
+        assert_eq!(input.evidence["enabled_connectors"], 3);
+        assert_eq!(input.evidence["unhealthy_enabled_connectors"], 2);
+        assert_eq!(input.evidence["registry_version"], 42);
+        let evidence = serde_json::to_string(&input.evidence).expect("evidence JSON");
+        assert!(!evidence.contains("fcp.github"));
+        assert!(!evidence.contains("Slack Workspace"));
+        assert!(!evidence.contains("rate budget"));
     }
 
     #[test]
@@ -2440,7 +2789,7 @@ mod tests {
             fixture_path: None,
             logical_cpus: 32,
             active_agents: Some(input),
-            active_connectors: Some(1),
+            active_connectors: Some(provided_connector_input(1, "test")),
             disk_free: Some(PercentPressureInput {
                 percent: 80,
                 evidence: json!({}),
@@ -2498,18 +2847,22 @@ mod tests {
 
     #[test]
     fn pressure_run_dispatches_new_subcommand() {
-        let payload = run(&super::SwarmEvidenceArgs {
-            command: SwarmEvidenceCommand::Pressure(SwarmPressureArgs {
-                logical_cpus: Some(8),
-                active_agents: Some(1),
-                active_connectors: Some(2),
-                disk_free_percent: Some(20),
-                inode_free_percent: Some(20),
-                memory_free_percent: Some(20),
-                rch_queued_jobs: Some(0),
-                fixture: None,
-            }),
-        })
+        let payload = run_with_host(
+            &super::SwarmEvidenceArgs {
+                command: SwarmEvidenceCommand::Pressure(SwarmPressureArgs {
+                    logical_cpus: Some(8),
+                    active_agents: Some(1),
+                    active_connectors: Some(2),
+                    disk_free_percent: Some(20),
+                    inode_free_percent: Some(20),
+                    memory_free_percent: Some(20),
+                    rch_queued_jobs: Some(0),
+                    fixture: None,
+                    host: None,
+                }),
+            },
+            None,
+        )
         .expect("run pressure");
 
         assert_eq!(payload["command"], "swarm pressure");

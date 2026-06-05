@@ -301,8 +301,9 @@ async fn local_non_mock_get_document_uses_docs_request_boundary() {
         "provider_class": "local_sufficient",
         "operation": OP_GET_DOCUMENT,
         "method": "GET",
-        "path": EXPECTED_PATH,
-        "request_line": observation.request_line,
+        "endpoint_shape": "/v1/documents/{document_id}",
+        "request_target_verified": true,
+        "document_id_redacted": true,
         "auth_gate": {
             "mode": "bearer",
             "authorization_header_verified": observation.authorization_seen

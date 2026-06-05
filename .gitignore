@@ -204,3 +204,36 @@ ubs_*.json
 
 # git-stash-janitor workspace (transient, persists across phases of one run)
 .stash_janitor_workspace/
+
+# RCH per-job target directories synced back from remote workers
+# (e.g. .rch-target-vmi1149989-job-<id>-<nonce>-0/)
+.rch-target-*/
+
+# Agent CLI disk-space write probe (zero-byte, recurs per session;
+# sibling of .codex-write-probe above)
+.restore-space-probe
+
+# Chaos harness runtime campaign output (events.jsonl per campaign id);
+# same class as artifacts/ — generated evidence, never repo content
+chaos-results/
+
+# Stray rustc metadata artifacts from one-off `rustc --emit=metadata` checks
+*.rmeta
+
+# Python bytecode caches (e.g. scripts/ci/__pycache__/)
+__pycache__/
+*.pyc
+
+# Agent audit-sweep grep scratch outputs (panic/unwrap inventories)
+/panics.txt
+/unwrap_*.txt
+
+# One-off agent test driver script (run_test / run_test.rs already ignored)
+/run_test.sh
+
+# Clippy analysis output, suffix variants (clippy_*.json already ignored)
+*_clippy.json
+*_clippy.txt
+
+# Ephemeral root-level test binary from cargo test experiments
+/test_default

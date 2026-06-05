@@ -294,7 +294,7 @@ Gateway -> Zone Check -> Capability Check -> Connector -> External Service
 ### Workspace Structure
 
 This is a schematic map, not an exhaustive directory dump. The current tree has
-29 crate directories (28 active Cargo workspace members) and 89 connector
+42 crate directories (42 active Cargo workspace members) and 177 connector
 crates.
 
 ```
@@ -328,7 +328,7 @@ flywheel_connectors/
 |   |-- fcp-testkit/                   # Shared fixtures and mocks
 |   |-- fcp-e2e/                       # End-to-end harness
 |   +-- fwc/                           # Canonical Flywheel connectors CLI
-|-- connectors/                        # 89 connector crates at varying maturity
+|-- connectors/                        # 177 connector crates at varying maturity
 |   |-- anthropic/
 |   |-- discord/
 |   |-- github/

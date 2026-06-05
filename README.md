@@ -822,7 +822,7 @@ Properties:
 
 ## Connectors
 
-The workspace ships 177 connector crates — 176 production connectors plus one adversarial conformance test crate (`connectors/_adversarial/`). All 176 production crates ship a `manifest.toml`, tests, and `ConnectorErrorMapping`. The connector surface is broad but not perfectly uniform: 158 currently follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and 168 currently publish explicit `OperationInfo` structs. A workspace conformance guard fails CI if a mature connector lacks a `tests/` directory.
+The workspace ships 177 connector crates — 176 production connectors plus one adversarial conformance test crate (`connectors/_adversarial/`). All 176 production crates ship a `manifest.toml` and tests. The connector surface is broad but not perfectly uniform: 156 currently implement the formal `ConnectorErrorMapping` trait, 158 currently follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and 160 currently publish explicit `OperationInfo` structs. A workspace conformance guard fails CI if a mature connector lacks a `tests/` directory.
 
 ### Tier 1: Critical Infrastructure
 

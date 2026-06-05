@@ -6290,6 +6290,164 @@ fn attach_template_provenance(
     }
 }
 
+const FWC_METADATA_CACHE_SCHEMA_VERSION: &str = "fwc.metadata-cache.v1";
+const FWC_METADATA_CACHE_ALL_CONNECTORS: &str = "*";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FwcMetadataCacheKey {
+    command: String,
+    source_class: String,
+    connector_id: String,
+    manifest_hash: String,
+    output_format: String,
+    schema_version: String,
+    truth_source: String,
+    request_fingerprint: String,
+}
+
+impl FwcMetadataCacheKey {
+    fn new(
+        command: impl Into<String>,
+        source_class: impl Into<String>,
+        connector_id: impl Into<String>,
+        manifest_hash: impl Into<String>,
+        output_format: impl Into<String>,
+        truth_source: KnowledgeState,
+        request_fingerprint: impl Into<String>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            source_class: source_class.into(),
+            connector_id: connector_id.into(),
+            manifest_hash: manifest_hash.into(),
+            output_format: output_format.into(),
+            schema_version: FWC_METADATA_CACHE_SCHEMA_VERSION.to_owned(),
+            truth_source: truth_source.operator_truth_source().to_owned(),
+            request_fingerprint: request_fingerprint.into(),
+        }
+    }
+
+    fn etag(&self) -> String {
+        let encoded = serde_json::to_vec(self).unwrap_or_else(|_| {
+            format!(
+                "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+                self.command,
+                self.source_class,
+                self.connector_id,
+                self.manifest_hash,
+                self.output_format,
+                self.schema_version,
+                self.truth_source,
+                self.request_fingerprint
+            )
+            .into_bytes()
+        });
+        blake3_prefixed(&encoded)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FwcMetadataCacheEvidence {
+    hit: bool,
+    validated: bool,
+    etag: String,
+    age_ms: u64,
+    source: String,
+}
+
+fn metadata_cache_evidence(key: &FwcMetadataCacheKey, hit: bool) -> FwcMetadataCacheEvidence {
+    FwcMetadataCacheEvidence {
+        hit,
+        validated: true,
+        etag: key.etag(),
+        age_ms: 0,
+        source: key.source_class.clone(),
+    }
+}
+
+fn attach_metadata_cache_evidence(payload: &mut Value, key: &FwcMetadataCacheKey, hit: bool) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "_cache".to_owned(),
+            serde_json::to_value(metadata_cache_evidence(key, hit)).unwrap_or(Value::Null),
+        );
+    }
+}
+
+fn metadata_request_fingerprint(request: &Value) -> String {
+    let encoded = serde_json::to_vec(request).unwrap_or_default();
+    blake3_prefixed(&encoded)
+}
+
+fn update_metadata_cache_hash_component(hasher: &mut blake3::Hasher, value: &str) {
+    let bytes = value.as_bytes();
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn metadata_manifest_hash(connector: &DiscoveredConnector) -> Result<String> {
+    let manifest_path = readiness::workspace_root().join(&connector.manifest_path);
+    let manifest_bytes = std::fs::read(&manifest_path).with_context(|| {
+        format!(
+            "failed to read connector manifest for metadata cache key: {}",
+            manifest_path.display()
+        )
+    })?;
+    Ok(blake3_prefixed(&manifest_bytes))
+}
+
+fn metadata_manifest_set_hash<'a>(
+    connectors: impl IntoIterator<Item = &'a DiscoveredConnector>,
+) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FWC-METADATA-MANIFEST-SET-V1");
+    let mut count = 0_u64;
+
+    for connector in connectors {
+        count = count.saturating_add(1);
+        update_metadata_cache_hash_component(&mut hasher, &connector.slug);
+        update_metadata_cache_hash_component(&mut hasher, &connector.detail.summary.id);
+        update_metadata_cache_hash_component(&mut hasher, &metadata_manifest_hash(connector)?);
+    }
+
+    hasher.update(&count.to_le_bytes());
+    Ok(blake3_prefixed(hasher.finalize().as_bytes()))
+}
+
+fn offline_manifest_set_cache_key<'a>(
+    command: &str,
+    connectors: impl IntoIterator<Item = &'a DiscoveredConnector>,
+    output_format: &str,
+    request: &Value,
+) -> Result<FwcMetadataCacheKey> {
+    Ok(FwcMetadataCacheKey::new(
+        command,
+        "workspace-manifests",
+        FWC_METADATA_CACHE_ALL_CONNECTORS,
+        metadata_manifest_set_hash(connectors)?,
+        output_format,
+        KnowledgeState::Offline,
+        metadata_request_fingerprint(request),
+    ))
+}
+
+fn offline_connector_cache_key(
+    command: &str,
+    connector: &DiscoveredConnector,
+    output_format: &str,
+    request: &Value,
+) -> Result<FwcMetadataCacheKey> {
+    Ok(FwcMetadataCacheKey::new(
+        command,
+        "workspace-manifests",
+        &connector.detail.summary.id,
+        metadata_manifest_hash(connector)?,
+        output_format,
+        KnowledgeState::Offline,
+        metadata_request_fingerprint(request),
+    ))
+}
+
 fn attach_live_host_admin_contract(
     payload: &mut Value,
     command: &str,
@@ -7733,6 +7891,16 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
         "category": args.category.clone(),
         "include_hidden": args.include_hidden,
     });
+    let cache_key = offline_manifest_set_cache_key(
+        "list",
+        catalog.list(
+            args.zone.as_deref(),
+            args.category.as_deref(),
+            args.include_hidden,
+        ),
+        "json",
+        &filters,
+    )?;
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
     let mut payload = json!({
@@ -7763,6 +7931,7 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
         "list",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
@@ -12496,6 +12665,24 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
     .into_iter()
     .flatten()
     .collect();
+    let cache_key = offline_manifest_set_cache_key(
+        "search",
+        catalog.connectors().iter(),
+        "json",
+        &json!({
+            "query": &args.query,
+            "connector": &args.connector,
+            "capability": &args.capability,
+            "risk": &args.risk,
+            "safety": &args.safety,
+            "archetype": &args.archetype,
+            "category": &args.category,
+            "zone": &args.zone,
+            "idempotent": args.idempotent,
+            "include_hidden": args.include_hidden,
+            "limit": args.limit,
+        }),
+    )?;
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "search");
     let mut payload = json!({
@@ -12521,6 +12708,7 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
         "search",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     envelope.inject_into(&mut payload);
     inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
@@ -12611,6 +12799,14 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
         || "<operation>".to_owned(),
         |operation| operation.preferred_selector.clone(),
     );
+    let cache_key = offline_connector_cache_key(
+        "show",
+        connector,
+        "json",
+        &json!({
+            "requested_connector": &args.connector,
+        }),
+    )?;
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "show");
     let mut payload = serde_json::to_value(build_offline_show_operator_contract(
         connector,
@@ -12620,6 +12816,7 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
         &example_operation,
     ))?;
     envelope.inject_into(&mut payload);
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
@@ -12698,6 +12895,15 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
         .filter(|operation| risk_filter_allows(operation, args.risk_at_most.as_deref()))
         .map(operation_summary_entry)
         .collect::<Vec<_>>();
+    let cache_key = offline_connector_cache_key(
+        "ops",
+        connector,
+        "json",
+        &json!({
+            "requested_connector": &args.connector,
+            "risk_at_most": &args.risk_at_most,
+        }),
+    )?;
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "ops");
     let mut payload = json!({
@@ -12725,6 +12931,7 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
         "ops",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     envelope.inject_into(&mut payload);
     inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
@@ -12803,6 +13010,19 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
             return Ok(outcome);
         }
     };
+    let cache_key = offline_connector_cache_key(
+        "schema",
+        connector,
+        "json",
+        &json!({
+            "requested_connector": &args.connector,
+            "operation": &args.operation,
+            "field": &args.field,
+            "required_only": args.required_only,
+            "examples": args.examples,
+            "scaffold": args.scaffold,
+        }),
+    )?;
 
     if let Some(operation_selector) = args.operation.as_deref() {
         let operation = match connector.resolve_operation(operation_selector) {
@@ -12834,6 +13054,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 "schema",
                 catalog::DiscoveryDataSource::WorkspaceManifest,
             );
+            attach_metadata_cache_evidence(&mut payload, &cache_key, false);
             envelope.inject_into(&mut payload);
             inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
             return Ok(DispatchOutcome {
@@ -12885,6 +13106,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 "schema",
                 catalog::DiscoveryDataSource::WorkspaceManifest,
             );
+            attach_metadata_cache_evidence(&mut payload, &cache_key, false);
             envelope.inject_into(&mut payload);
             inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
             return Ok(DispatchOutcome {
@@ -12937,6 +13159,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
             "schema",
             catalog::DiscoveryDataSource::WorkspaceManifest,
         );
+        attach_metadata_cache_evidence(&mut payload, &cache_key, false);
         envelope.inject_into(&mut payload);
         inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
@@ -12969,6 +13192,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
         "schema",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     envelope.inject_into(&mut payload);
     inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
@@ -13044,6 +13268,15 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             return Ok(outcome);
         }
     };
+    let cache_key = offline_connector_cache_key(
+        "examples",
+        connector,
+        "json",
+        &json!({
+            "requested_connector": &args.connector,
+            "operation": &args.operation,
+        }),
+    )?;
 
     if let Some(operation_selector) = args.operation.as_deref() {
         let operation = match connector.resolve_operation(operation_selector) {
@@ -13092,6 +13325,7 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             "examples",
             catalog::TemplateDataSource::WorkspaceManifest,
         );
+        attach_metadata_cache_evidence(&mut payload, &cache_key, false);
         envelope.inject_into(&mut payload);
         inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
@@ -13146,6 +13380,7 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
         "examples",
         catalog::TemplateDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     envelope.inject_into(&mut payload);
     inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
@@ -20979,6 +21214,23 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             .len()
             .saturating_sub(connectors.len())
     };
+    let tool_format = args.tool_format.to_string();
+    let cache_key = offline_manifest_set_cache_key(
+        "export-tools",
+        connectors.iter().copied(),
+        &tool_format,
+        &json!({
+            "connector": &args.connector,
+            "format": tool_format,
+            "risk_max": &args.risk_max,
+            "capability": &args.capability,
+            "strip_prefix": &args.strip_prefix,
+            "no_safety": args.no_safety,
+            "no_hints": args.no_hints,
+            "no_examples": args.no_examples,
+            "include_hidden": args.include_hidden,
+        }),
+    )?;
 
     // Gather all operations with filters applied.
     let operations: Vec<&DiscoveredOperation> = connectors
@@ -21036,6 +21288,8 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             catalog::ToolAvailability::Unknown,
             tool_provenance.clone(),
         );
+        attach_metadata_cache_evidence(&mut payload, &cache_key, false);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -21076,6 +21330,8 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
         catalog::ToolAvailability::Unknown,
         tool_provenance,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -30954,12 +31210,12 @@ mod tests {
 
     use super::{
         ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, DoctorLocalCheck, DoctorProbe,
-        HostConnectorCatalog, LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch,
-        MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
-        PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, TRUTH_SOURCE_SCHEMA_VERSION,
-        catalog, doctor_hlc_probe_warnings, doctor_iblt_probe_warnings,
-        doctor_migration_probe_warnings, doctor_reality_cadence_report, execute,
-        host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
+        FwcMetadataCacheKey, HostConnectorCatalog, KnowledgeState, LiveAuthArgs,
+        LiveTruthKnowledgeState, LiveTruthResolverBranch, MetadataField, PACKAGE_OUTPUT_FILENAME,
+        PackageBuildMetadata, PackageOutput, PrepareCliError, ResolvedHostConfig,
+        ResolvedHostOperation, TRUTH_SOURCE_SCHEMA_VERSION, catalog, doctor_hlc_probe_warnings,
+        doctor_iblt_probe_warnings, doctor_migration_probe_warnings, doctor_reality_cadence_report,
+        execute, host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
         host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
         mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
         resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
@@ -31013,6 +31269,61 @@ mod tests {
         let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         let outcome = execute(&owned_args).expect("execution should not fail internally");
         (outcome.exit_code, outcome.text)
+    }
+
+    #[test]
+    fn metadata_cache_key_separates_connector_manifest_format_and_truth_source() {
+        let base = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.github",
+            "blake3-256:manifest-a",
+            "json",
+            KnowledgeState::Offline,
+            "blake3-256:request-a",
+        );
+
+        let different_connector = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.slack",
+            "blake3-256:manifest-a",
+            "json",
+            KnowledgeState::Offline,
+            "blake3-256:request-a",
+        );
+        let different_manifest = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.github",
+            "blake3-256:manifest-b",
+            "json",
+            KnowledgeState::Offline,
+            "blake3-256:request-a",
+        );
+        let different_format = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.github",
+            "blake3-256:manifest-a",
+            "toon",
+            KnowledgeState::Offline,
+            "blake3-256:request-a",
+        );
+        let different_truth = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.github",
+            "blake3-256:manifest-a",
+            "json",
+            KnowledgeState::HostBacked,
+            "blake3-256:request-a",
+        );
+
+        assert_ne!(base.etag(), different_connector.etag());
+        assert_ne!(base.etag(), different_manifest.etag());
+        assert_ne!(base.etag(), different_format.etag());
+        assert_ne!(base.etag(), different_truth.etag());
     }
 
     #[test]
@@ -31868,6 +32179,60 @@ max_state_replication_staleness_secs = 120
                 .as_str()
                 .is_some_and(|caveat| !caveat.is_empty())
         );
+    }
+
+    fn assert_metadata_cache_evidence(payload: &Value, source: &str) {
+        assert_eq!(payload["_cache"]["hit"], false);
+        assert_eq!(payload["_cache"]["validated"], true);
+        assert_eq!(payload["_cache"]["age_ms"], 0);
+        assert_eq!(payload["_cache"]["source"], source);
+        assert!(
+            payload["_cache"]["etag"]
+                .as_str()
+                .is_some_and(|etag| etag.starts_with("blake3-256:"))
+        );
+    }
+
+    #[test]
+    fn execute_offline_metadata_commands_expose_cache_evidence_without_losing_truth_source() {
+        let cases = vec![
+            vec!["fwc", "--json", "list", "--offline"],
+            vec!["fwc", "--json", "search", "github issue", "--offline"],
+            vec!["fwc", "--json", "show", "github", "--offline"],
+            vec!["fwc", "--json", "ops", "github", "--offline"],
+            vec![
+                "fwc",
+                "--json",
+                "schema",
+                "github",
+                "issues.create",
+                "--offline",
+            ],
+            vec![
+                "fwc",
+                "--json",
+                "examples",
+                "github",
+                "issues.create",
+                "--offline",
+            ],
+            vec![
+                "fwc",
+                "--json",
+                "export-tools",
+                "--offline",
+                "--format",
+                "mcp",
+                "github",
+            ],
+        ];
+
+        for args in cases {
+            let (exit_code, payload) = execute_json(&args);
+            assert_eq!(exit_code, CliExitCode::Success.into(), "{args:?}");
+            assert_eq!(payload["_truth_source"], "offline", "{args:?}");
+            assert_metadata_cache_evidence(&payload, "workspace-manifests");
+        }
     }
 
     fn assert_template_provenance(payload: &Value, source: &str, authoritative: bool, mode: &str) {
@@ -34612,6 +34977,9 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_tool_inventory_provenance(
             &payload,
             "workspace_manifest",
@@ -38142,6 +38510,7 @@ deny_ptrace = true
         assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
         assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert!(
             payload["connectors"]
                 .as_array()
@@ -40381,6 +40750,7 @@ deny_ptrace = true
         assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
         assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert!(payload["results"].as_array().unwrap().iter().any(|result| {
             result["connector"] == "github" && result["operation"] == "github.create_issue"
         }));
@@ -40530,6 +40900,7 @@ deny_ptrace = true
         assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
         assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
         assert_eq!(payload["connector"]["format"], "wasi");
@@ -40627,6 +40998,7 @@ deny_ptrace = true
         assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
         assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_eq!(payload["connector"]["slug"], "github");
         assert!(
             payload["operations"]
@@ -40764,6 +41136,7 @@ deny_ptrace = true
         assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
         assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["requested_selector"], "issues.create");
         assert_eq!(payload["operation"]["selector"], "issues.create");
@@ -40861,6 +41234,7 @@ deny_ptrace = true
         assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
         assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["selector"], "issues.create");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");

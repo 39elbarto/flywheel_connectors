@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use fcp_async_core::sync::RwLock;
+use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_kernel::{
     AgentHint, ApprovalMode, ConnectorHealth, ConnectorId, IdempotencyClass, Introspection,
     OperationInfo, RateLimitDeclarations, RequestId, SelfCheckReport, UsageBudgetSnapshot,
@@ -1280,6 +1280,8 @@ where
 pub struct DiscoveryCache {
     /// Cached connector summaries.
     cache: RwLock<Option<CachedDiscovery>>,
+    /// Serializes cache refreshes so concurrent misses collapse to one load.
+    refresh_lock: Mutex<()>,
     /// Time-to-live.
     ttl: Duration,
 }
@@ -1304,6 +1306,7 @@ impl DiscoveryCache {
     pub fn new(ttl: Duration) -> Self {
         Self {
             cache: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
             ttl,
         }
     }
@@ -1318,24 +1321,31 @@ impl DiscoveryCache {
         CacheMetadata::strong(payload, last_modified, ttl_seconds, Some(ttl_seconds))
     }
 
+    async fn cached_result(&self, registry_version: u64) -> Option<DiscoveryCacheResult> {
+        let read = self.cache.read().await;
+        let cached = read.as_ref()?;
+        if cached.registry_version != registry_version || cached.cached_at.elapsed() >= self.ttl {
+            return None;
+        }
+
+        Some(DiscoveryCacheResult {
+            connectors: cached.connectors.clone(),
+            registry_version: cached.registry_version,
+            cache_hit: true,
+            last_modified: cached.last_modified,
+        })
+    }
+
     /// Get cached connectors or refresh from registry.
     async fn get_or_refresh<R: ConnectorRegistry>(&self, registry: &R) -> DiscoveryCacheResult {
-        let registry_version = registry.version();
+        if let Some(cached) = self.cached_result(registry.version()).await {
+            return cached;
+        }
 
-        // Try to read from cache
-        {
-            let read = self.cache.read().await;
-            if let Some(ref cached) = *read
-                && cached.registry_version == registry_version
-                && cached.cached_at.elapsed() < self.ttl
-            {
-                return DiscoveryCacheResult {
-                    connectors: cached.connectors.clone(),
-                    registry_version: cached.registry_version,
-                    cache_hit: true,
-                    last_modified: cached.last_modified,
-                };
-            }
+        let _refresh_guard = self.refresh_lock.lock().await;
+        let registry_version = registry.version();
+        if let Some(cached) = self.cached_result(registry_version).await {
+            return cached;
         }
 
         // Cache miss or expired - refresh
@@ -1382,6 +1392,7 @@ impl DiscoveryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_async_core::{task, time};
     use fcp_kernel::SelfCheckStatus;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1772,6 +1783,69 @@ mod tests {
         }
     }
 
+    struct SlowCountingRegistry {
+        connectors: Vec<ConnectorSummary>,
+        list_calls: Arc<AtomicUsize>,
+        list_delay: Duration,
+    }
+
+    impl SlowCountingRegistry {
+        fn new(
+            connectors: Vec<ConnectorSummary>,
+            list_calls: Arc<AtomicUsize>,
+            list_delay: Duration,
+        ) -> Self {
+            Self {
+                connectors,
+                list_calls,
+                list_delay,
+            }
+        }
+
+        fn find(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            self.connectors.iter().find(|c| &c.id == id).cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectorRegistry for SlowCountingRegistry {
+        async fn list(&self) -> Vec<ConnectorSummary> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            time::sleep(self.list_delay).await;
+            self.connectors.clone()
+        }
+
+        async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            self.find(id)
+        }
+
+        async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
+            self.find(id).map(|_| Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            })
+        }
+
+        async fn get_archetype(&self, _id: &ConnectorId) -> Option<ConnectorArchetype> {
+            None
+        }
+
+        async fn get_rate_limits(&self, _id: &ConnectorId) -> Option<RateLimitDeclarations> {
+            None
+        }
+
+        async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+            self.find(id).map(|_| SelfCheckReport::ok())
+        }
+
+        fn version(&self) -> u64 {
+            1
+        }
+    }
+
     struct MutableRegistry {
         connectors: RwLock<Vec<ConnectorSummary>>,
         list_calls: Arc<AtomicUsize>,
@@ -1951,6 +2025,78 @@ mod tests {
         assert!(!first.cache_hit);
         assert!(second.cache_hit);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_cache_collapses_concurrent_cold_misses() {
+        const CALLERS: usize = 128;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "stampede",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = Arc::new(SlowCountingRegistry::new(
+            vec![summary.clone()],
+            Arc::clone(&calls),
+            Duration::from_millis(25),
+        ));
+        #[allow(clippy::duration_suboptimal_units)]
+        let cache = Arc::new(DiscoveryCache::new(Duration::from_secs(60)));
+
+        let mut handles = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let cache = Arc::clone(&cache);
+            let registry = Arc::clone(&registry);
+            handles.push(task::spawn(async move {
+                cache.get_or_refresh(Arc::as_ref(&registry)).await
+            }));
+        }
+
+        let mut misses = 0_usize;
+        let mut hits = 0_usize;
+        for handle in handles {
+            let result = handle.await.expect("cache caller task should complete");
+            if result.cache_hit {
+                hits += 1;
+            } else {
+                misses += 1;
+            }
+            assert_eq!(result.connectors.len(), 1);
+            assert_eq!(
+                result.connectors.first().map(|connector| &connector.id),
+                Some(&summary.id)
+            );
+        }
+
+        assert_eq!(misses, 1);
+        assert_eq!(hits, CALLERS - 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let evidence = serde_json::json!({
+            "event": "fcp.host.metadata_cache",
+            "case": "discovery_cache_collapses_concurrent_cold_misses",
+            "callers": CALLERS,
+            "hits": hits,
+            "misses": misses,
+            "registry_list_calls": calls.load(Ordering::SeqCst),
+            "collapsed_waiters": hits,
+        });
+        let evidence_jsonl = format!("{}\n", serde_json::to_string(&evidence).unwrap());
+        let parsed: serde_json::Value = serde_json::from_str(evidence_jsonl.trim_end()).unwrap();
+        let caller_count = u64::try_from(CALLERS).expect("caller count should fit in u64");
+        let collapsed_count =
+            u64::try_from(CALLERS - 1).expect("collapsed caller count should fit in u64");
+        assert_eq!(parsed["event"], "fcp.host.metadata_cache");
+        assert_eq!(parsed["callers"].as_u64(), Some(caller_count));
+        assert_eq!(parsed["hits"].as_u64(), Some(collapsed_count));
+        assert_eq!(parsed["misses"].as_u64(), Some(1));
+        assert_eq!(parsed["registry_list_calls"].as_u64(), Some(1));
+        print!("{evidence_jsonl}");
     }
 
     #[fcp_async_core::runtime::test]

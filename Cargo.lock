@@ -8487,6 +8487,7 @@ dependencies = [
  "jaq-core",
  "jaq-json",
  "jaq-std",
+ "jsonschema",
  "keyring",
  "rand 0.8.6",
  "reqwest 0.13.2",

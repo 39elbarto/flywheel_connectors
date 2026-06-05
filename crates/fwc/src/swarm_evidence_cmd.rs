@@ -393,7 +393,7 @@ pub fn pressure_with_host(args: &SwarmPressureArgs, explicit_host: Option<&str>)
         "schema_version": "fwc.swarm-pressure/v1",
         "generated_at": Utc::now().to_rfc3339(),
         "source": {
-            "fixture": inputs.fixture_path.as_ref().map(|path| path.display().to_string()),
+            "fixture": inputs.fixture_path.as_ref().map(|path| redaction_safe_fixture_label(path)),
             "mode": if inputs.fixture_path.is_some() { "fixture" } else { "local-with-degraded-dependencies" },
             "caveat": "This command is read-only. Missing live dependencies are represented as degraded signals; live probes are limited to local OS state, coordination status, rch status, and an optional fcp-host admin endpoint. It never starts Cargo work, repairs Agent Mail, or contacts external providers.",
         },
@@ -419,6 +419,24 @@ pub fn pressure_with_host(args: &SwarmPressureArgs, explicit_host: Option<&str>)
     let toon = format_pressure_toon(&payload);
     insert_toon(&mut payload, toon);
     Ok(payload)
+}
+
+fn redaction_safe_fixture_label(path: &Path) -> String {
+    let raw_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("provided-fixture");
+    let mut safe_name = raw_name
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect::<String>();
+    if safe_name.is_empty() {
+        safe_name = "provided-fixture".to_owned();
+    }
+    format!("fixture:{safe_name}")
 }
 
 fn pressure_inputs(
@@ -2189,9 +2207,12 @@ fn format_pressure_toon(payload: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::io::Write;
+    use std::path::PathBuf;
 
-    use serde_json::json;
+    use jsonschema::Validator;
+    use serde_json::{Value, json};
 
     use super::{
         PercentPressureInput, RchPressureInput, SwarmEvidenceCommand, SwarmEvidenceExploreArgs,
@@ -2204,6 +2225,28 @@ mod tests {
         provided_agent_input, provided_connector_input, rch_status_sample_from_json, replay,
         run_with_host,
     };
+
+    fn swarm_pressure_schema_validator() -> Validator {
+        let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("schemas")
+            .join("swarm_pressure.schema.json");
+        let schema_text =
+            std::fs::read_to_string(schema_path).expect("swarm pressure schema should load");
+        let schema: Value =
+            serde_json::from_str(&schema_text).expect("swarm pressure schema should parse");
+        Validator::new(&schema).expect("swarm pressure schema should compile")
+    }
+
+    fn assert_schema_valid(validator: &Validator, payload: &Value) {
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| format!("{} at {}", error, error.instance_path()))
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "swarm pressure artifact should validate against schema: {errors:?}"
+        );
+    }
 
     fn write_fixture() -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().expect("temp file");
@@ -2484,6 +2527,11 @@ mod tests {
             payload["toon"]
                 .as_str()
                 .is_some_and(|toon| { toon.contains("swarm pressure verdict=green") })
+        );
+        assert!(
+            payload["source"]["fixture"]
+                .as_str()
+                .is_some_and(|fixture| fixture.starts_with("fixture:") && !fixture.contains('/'))
         );
         let disk_signal = payload["signals"]
             .as_array()
@@ -2867,6 +2915,53 @@ mod tests {
 
         assert_eq!(payload["command"], "swarm pressure");
         assert_eq!(payload["verdict"], "green");
+    }
+
+    #[test]
+    fn pressure_fixture_artifact_validates_schema_without_private_paths() {
+        let mut fixture = tempfile::NamedTempFile::new().expect("pressure fixture");
+        serde_json::to_writer(
+            &mut fixture,
+            &json!({
+                "logical_cpus": 32,
+                "active_agents": 2,
+                "active_connectors": 4,
+                "disk_free_percent": 70,
+                "inode_free_percent": 75,
+                "memory_free_percent": 65,
+                "rch_queued_jobs": 0
+            }),
+        )
+        .expect("write pressure fixture");
+
+        let payload = pressure_with_host(
+            &SwarmPressureArgs {
+                fixture: Some(fixture.path().to_path_buf()),
+                ..SwarmPressureArgs::default()
+            },
+            None,
+        )
+        .expect("pressure");
+
+        let mut artifact = tempfile::NamedTempFile::new().expect("pressure artifact");
+        serde_json::to_writer_pretty(&mut artifact, &payload).expect("write pressure artifact");
+        let artifact_payload: Value =
+            serde_json::from_reader(File::open(artifact.path()).expect("artifact reopens"))
+                .expect("artifact parses");
+
+        assert_schema_valid(&swarm_pressure_schema_validator(), &artifact_payload);
+
+        let fixture_source = artifact_payload["source"]["fixture"]
+            .as_str()
+            .expect("fixture source should be labeled");
+        assert!(fixture_source.starts_with("fixture:"));
+        assert!(!fixture_source.contains('/'));
+        assert!(!fixture_source.contains('\\'));
+
+        let artifact_text = serde_json::to_string(&artifact_payload).expect("artifact serializes");
+        assert!(!artifact_text.contains(&fixture.path().display().to_string()));
+        assert!(!artifact_text.contains("secret-token"));
+        assert!(!artifact_text.contains("private-crate"));
     }
 
     #[test]

@@ -320,3 +320,67 @@ fn fwc_command_truth_source_schemas_reject_wrong_subcommand_identity() {
         );
     }
 }
+
+#[test]
+fn fwc_swarm_pressure_schema_validates_redaction_safe_artifact() {
+    let validator = validator("swarm_pressure.schema.json");
+    let payload = json!({
+        "status": "ok",
+        "command": "swarm pressure",
+        "schema_version": "fwc.swarm-pressure/v1",
+        "generated_at": "2026-06-05T10:00:00Z",
+        "source": {
+            "fixture": "fixture:pressure_fixture.json",
+            "mode": "fixture",
+            "caveat": "This command is read-only and never starts Cargo work."
+        },
+        "pressure_score_0_100": 55,
+        "verdict": "yellow",
+        "signals": [
+            {
+                "name": "cpu_capacity",
+                "status": "green",
+                "value": "32 logical CPU(s)",
+                "threshold": ">=8 green, >=2 yellow, 1 red",
+                "evidence": {
+                    "source": "fixture"
+                }
+            },
+            {
+                "name": "rch_status",
+                "status": "degraded",
+                "value": "unavailable",
+                "threshold": "rch queued jobs known",
+                "evidence": {
+                    "source": "not-yet-wired",
+                    "degraded_reason": "rch status unavailable"
+                }
+            }
+        ],
+        "recommended_agent_slots": 4,
+        "recommended_cargo_lanes": 1,
+        "remediation_commands": [
+            "continue with normal rch-backed validation"
+        ],
+        "telemetry_event": {
+            "name": "fwc.swarm_pressure.run",
+            "fields": {
+                "verdict": "yellow",
+                "pressure_score": 55,
+                "degraded_dependency_count": 1,
+                "recommended_agent_slots": 4
+            }
+        },
+        "message": "Swarm pressure is Yellow with score 55/100; 1 signal(s) are degraded.",
+        "toon": "swarm pressure verdict=yellow score=55 degraded=1"
+    });
+
+    assert_valid(&validator, &payload, "swarm_pressure.schema.json");
+
+    let mut unsafe_payload = payload;
+    unsafe_payload["source"]["fixture"] = json!("/Users/operator/private/pressure.json");
+    assert!(
+        !validator.is_valid(&unsafe_payload),
+        "swarm pressure schema should reject raw fixture paths"
+    );
+}

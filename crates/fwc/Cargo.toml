@@ -72,6 +72,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }
+jsonschema.workspace = true
 tempfile = "3"
 
 [[bench]]

@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for PostHog product analytics (events, insights, feature flags)"
 archetypes = ["knowledge"]
 format = "wasi"
+status = "proven"
 
 [connector.state]
 model = "singleton_writer"

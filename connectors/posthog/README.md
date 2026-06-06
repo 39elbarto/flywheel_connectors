@@ -1,7 +1,9 @@
 # PostHog Connector V3 Contract
 
-> **Status**: retrofit contract
-> **Bead**: `flywheel_connectors-j05nu.12.6`
+> **Status**: PROVEN runtime contract documented with remote PostHog verifier proof
+> **Bead**: `flywheel_connectors-angoc.16.5`
+> **Verification script**: `scripts/e2e/posthog_connector_verification.sh`
+> **Proof**: `/tmp/fcp-posthog-proof1-20260606T1752Z/summary.json`, sha256 `7c42e4f94c605ef16e59d12414d69b5de53d1eeae082f63d0e61a8017f3d0d67`, 11 passed steps, rch remotes `vmi1293453`, `vmi1227854`
 > **Connector**: `fcp.posthog`
 
 ## Purpose
@@ -58,6 +60,29 @@ Explicit non-goals for this slice:
 - Localhost overrides are allowed only for deterministic tests
 - Capture operations must use namespaced sandbox distinct IDs and set `$process_person_profile=false` when the caller does not intend to create person profiles
 
+## Operation Inventory
+
+| Operation | Capability | SafetyTier | RiskLevel | Idempotency | Purpose |
+|-----------|------------|------------|-----------|-------------|---------|
+| `posthog.events.query` | `posthog.events.read` | `Safe` | `Low` | `Strict` | Query PostHog events with caller-provided HogQL. |
+| `posthog.events.capture` | `posthog.events.write` | `Risky` | `Medium` | `None` | Capture one namespaced event in a dedicated sandbox project. |
+| `posthog.insights.list` | `posthog.insights.read` | `Safe` | `Low` | `Strict` | List saved insights visible to the configured credentials. |
+| `posthog.feature_flags.list` | `posthog.feature_flags.read` | `Safe` | `Low` | `Strict` | List feature flags visible to the configured credentials. |
+
+## Operator Guidance
+
+- Use a dedicated sandbox PostHog project for `posthog.events.capture`; production project API keys can create analytics artifacts.
+- Prefer host-managed `credential_id` injection for personal API keys; when direct secrets are used, keep them out of logs and artifacts.
+- Run the health or self-check flow before query, insight, feature-flag, or capture operations when validating a fresh deployment.
+- Keep HogQL queries bounded and specific; the manifest caps responses at 50 MiB, but returned analytics rows may still contain sensitive event properties.
+- Preserve `$process_person_profile=false` for verification captures unless the caller intentionally wants PostHog to create or update person profiles.
+- Treat localhost and non-HTTPS endpoint overrides as deterministic test-only configuration, not production provider targets.
+
+Rerun commands:
+
+- `env -u CARGO_TARGET_DIR RUN_ID=manual-posthog bash scripts/e2e/posthog_connector_verification.sh`
+- `scripts/graduation/run_gauntlet.sh connectors/posthog`
+
 ## Readiness And Verification
 
 Verification is replayed through:
@@ -65,6 +90,8 @@ Verification is replayed through:
 ```bash
 scripts/e2e/posthog_connector_verification.sh
 ```
+
+Promotion proof `purple-posthog-proof1-20260606T1752Z` passed the tracked verifier with accepted remote Cargo proof for manifest validation, crate check, health/doctor/self-check/retryable-failure/compliance evidence, full integration tests, crate-local tests, and clippy, plus source-state formatting.
 
 Artifacts land under:
 

@@ -1,9 +1,10 @@
 # PayPal Connector V3 Contract
 
-> **Status**: implemented first-slice contract
+> **Status**: PROVEN runtime contract documented with remote PayPal local no-mock verifier proof
 > **Bead**: `flywheel_connectors-j05nu.6.2.1`
 > **Unblocks**: `flywheel_connectors-j05nu.6.2.2`
 > **Verification script**: `scripts/e2e/paypal_connector_verification.sh`
+> **Proof**: `/tmp/fcp-paypal-proof2-20260606T103700Z/paypal_connector_verification.jsonl`, sha256 `7d9477c794316c4d3187e24a1dbe602bcf8e5cbe470c35f5a2f7dcdb05dc1e07`, 7 redaction-scanned records, rch remote `vmi1293453`
 > **Primary upstream**: https://developer.paypal.com/api/rest/
 
 ## Purpose
@@ -101,6 +102,8 @@ The tracked verification entry point is `scripts/e2e/paypal_connector_verificati
 
 `connectors/paypal/tests/local_non_mock.rs` covers the no-live-credential provider boundary with a raw TCP HTTP loopback server. Because production connector configuration rejects localhost and non-TLS provider URLs, the test also verifies that connector-level guard before exercising the REST client against the local server. The loopback proof covers OAuth client-credentials token exchange, order create/get/capture, transaction search, capture get, refund, invoice create/list/send, health reachability, path traversal rejection before provider traffic, idempotency headers, and redaction-safe JSON evidence.
 
+Promotion proof `purple-paypal-proof2-20260606T103700Z` passed the tracked verifier with accepted remote Cargo proof for `cargo_check`, `local_non_mock`, `connector_tests`, and `clippy`, plus source-state formatting and local redaction scan checks.
+
 ## Explicit Non-Goals
 
 The accepted first slice does not include:
@@ -147,7 +150,7 @@ Use sandbox PayPal app credentials for live operator checks. Do not point the co
 
 Rerun commands:
 
-- `bash scripts/e2e/paypal_connector_verification.sh`
+- `env -u CARGO_TARGET_DIR RUN_ID=manual-paypal bash scripts/e2e/paypal_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-paypal-readme cargo test -p fcp-paypal --test local_non_mock -- --nocapture`
 - `scripts/graduation/run_gauntlet.sh --jsonl /tmp/fcp-paypal-gauntlet.jsonl connectors/paypal`
 - `ubs connectors/paypal/src/connector.rs connectors/paypal/src/client.rs connectors/paypal/tests/integration.rs connectors/paypal/tests/local_non_mock.rs connectors/paypal/README.md scripts/e2e/paypal_connector_verification.sh`

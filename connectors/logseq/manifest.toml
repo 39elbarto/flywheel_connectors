@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4b8012552728ac10f036f777bffb125894957efb6a4d7f0bc1a251beefe106fd"
+interface_hash = "blake3-256:fcp.interface.v2:2591dd7b7c3c1660ca874877202b4617f22861f0c25e9b6955cdf07c41c3627d"
 
 [connector]
 id = "fcp.logseq"

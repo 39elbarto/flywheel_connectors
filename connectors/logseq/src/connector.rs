@@ -3,20 +3,33 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, OperationId,
+    OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId,
+    SelfCheckReport, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{info, instrument};
 
 use crate::{
     client::{DEFAULT_BASE_URL, LogseqAuth, LogseqClient},
     error::LogseqError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OP_PAGES_LIST: &str = "logseq.pages.list";
+const OP_PAGES_GET: &str = "logseq.pages.get";
+const OP_BLOCKS_LIST: &str = "logseq.blocks.list";
+const OP_BLOCKS_CREATE: &str = "logseq.blocks.create";
+const OPERATION_ORDER: [&str; 4] = [
+    OP_PAGES_LIST,
+    OP_PAGES_GET,
+    OP_BLOCKS_LIST,
+    OP_BLOCKS_CREATE,
+];
 
 /// Parsed and validated `Logseq` connector configuration.
 #[derive(Debug, Clone)]
@@ -336,11 +349,11 @@ impl LogseqConnector {
 
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let ops = typed_operations_info();
+        let ops = introspect_operations()?;
         Ok(json!({
             "connector_id": "fcp.logseq",
             "version": "0.1.0",
-            "operations": serde_json::to_value(&ops).unwrap_or_default(),
+            "operations": ops,
         }))
     }
 
@@ -366,10 +379,10 @@ impl LogseqConnector {
         })?;
 
         let result = match operation {
-            "logseq.pages.list" => self.invoke_pages_list(client).await,
-            "logseq.pages.get" => self.invoke_pages_get(client, &input).await,
-            "logseq.blocks.list" => self.invoke_blocks_list(client, &input).await,
-            "logseq.blocks.create" => self.invoke_blocks_create(client, &input).await,
+            OP_PAGES_LIST => self.invoke_pages_list(client).await,
+            OP_PAGES_GET => self.invoke_pages_get(client, &input).await,
+            OP_BLOCKS_LIST => self.invoke_blocks_list(client, &input).await,
+            OP_BLOCKS_CREATE => self.invoke_blocks_create(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -391,10 +404,9 @@ impl LogseqConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = typed_operations_info()?
+            .iter()
+            .any(|op| op.id.as_str() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -549,95 +561,105 @@ fn is_local_test_host(host: &str) -> bool {
 }
 
 /// Build typed operations info for introspection.
-fn typed_operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static("logseq.pages.list"),
-            summary: "List all pages in the graph".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {}}),
-            output_schema: json!({"type": "object", "properties": {"pages": {"type": "array"}}}),
-            capability: CapabilityId::from_static("logseq.pages.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to discover all pages in the Logseq graph".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("logseq.pages.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("logseq.pages.get"),
-            summary: "Get a page by name".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
-            output_schema: json!({"type": "object", "properties": {"page": {"type": "object"}}}),
-            capability: CapabilityId::from_static("logseq.pages.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to retrieve a specific page by its name".into(),
-                common_mistakes: vec!["Using page ID instead of page name".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("logseq.pages.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("logseq.blocks.list"),
-            summary: "List blocks on a page".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"page": {"type": "string"}}, "required": ["page"]}),
-            output_schema: json!({"type": "object", "properties": {"blocks": {"type": "array"}}}),
-            capability: CapabilityId::from_static("logseq.blocks.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to list all content blocks on a specific page".into(),
-                common_mistakes: vec!["Not providing the page name".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("logseq.blocks.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("logseq.blocks.create"),
-            summary: "Create a block on a page".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"page": {"type": "string"}, "content": {"type": "string"}}, "required": ["page", "content"]}),
-            output_schema: json!({"type": "object", "properties": {"block": {"type": "object"}}}),
-            capability: CapabilityId::from_static("logseq.blocks.write"),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use to add a new content block to a page".into(),
-                common_mistakes: vec!["Not providing both page and content".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("logseq.blocks.write")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-    ]
+fn typed_operations_info() -> FcpResult<Vec<OperationInfo>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect())
 }
 
 /// Build the operations info for introspection (JSON format for simulate).
-fn operations_info() -> serde_json::Value {
-    serde_json::to_value(typed_operations_info()).unwrap_or_default()
+fn operations_info() -> Value {
+    Value::Array(
+        introspect_operations()
+            .expect("embedded Logseq manifest should validate for introspection"),
+    )
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest =
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Logseq manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
+}
+
+fn introspect_operations() -> FcpResult<Vec<Value>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| {
+            let operation_info = operation_info_from_manifest(id, &operation);
+            introspect_operation_from_manifest(operation_info, &operation)
+        })
+        .collect())
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata =
+        serde_json::to_value(operation_info).expect("Logseq operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strict_logseq_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML)
+            .map_err(|err| format!("Logseq manifest should parse with strict schema: {err}"))
+    }
 
     #[test]
     fn config_from_access_token() {
@@ -852,10 +874,94 @@ mod tests {
             .iter()
             .filter_map(|o| o["id"].as_str())
             .collect();
-        assert!(ids.contains(&"logseq.pages.list"));
-        assert!(ids.contains(&"logseq.pages.get"));
-        assert!(ids.contains(&"logseq.blocks.list"));
-        assert!(ids.contains(&"logseq.blocks.create"));
+        assert_eq!(ids, OPERATION_ORDER.to_vec());
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_logseq_manifest()?;
+        let operation_catalog =
+            typed_operations_info().map_err(|err| format!("typed operation catalog: {err}"))?;
+        let operation_metadata = operations_info();
+        let runtime_operations = operation_metadata
+            .as_array()
+            .ok_or_else(|| "runtime operations should serialize as an array".to_owned())?;
+
+        let catalog_ids: Vec<&str> = operation_catalog
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect();
+        let metadata_ids: Vec<&str> = runtime_operations
+            .iter()
+            .filter_map(|operation| operation["id"].as_str())
+            .collect();
+
+        assert_eq!(catalog_ids, OPERATION_ORDER.to_vec());
+        assert_eq!(metadata_ids, OPERATION_ORDER.to_vec());
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+
+        for operation in operation_catalog {
+            let operation_id = operation.id.as_str();
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest should declare {operation_id}"))?;
+            let metadata = runtime_operations
+                .iter()
+                .find(|candidate| candidate["id"].as_str() == Some(operation_id))
+                .ok_or_else(|| format!("runtime metadata should declare {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_ref(),
+                Some(&manifest_operation.description)
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                operation.ai_hints.when_to_use,
+                manifest_operation.ai_hints.when_to_use
+            );
+            assert_eq!(
+                operation.ai_hints.common_mistakes,
+                manifest_operation.ai_hints.common_mistakes
+            );
+            assert_eq!(
+                operation.ai_hints.examples,
+                manifest_operation.ai_hints.examples
+            );
+            assert_eq!(
+                operation.ai_hints.related,
+                manifest_operation.ai_hints.related
+            );
+            assert_eq!(
+                metadata["requires_approval"],
+                json!(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                metadata["revocation_freshness"],
+                json!(manifest_operation.revocation_freshness)
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should declare manifest network constraints"
+            );
+            assert_eq!(
+                metadata["network_constraints"],
+                json!(manifest_operation.network_constraints.as_ref().unwrap())
+            );
+        }
+
+        Ok(())
     }
 
     #[test]

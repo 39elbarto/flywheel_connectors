@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:437010b963c720e1545cb17363fab90c2e408aa579266e81200ac3737b848cb7"
+interface_hash = "blake3-256:fcp.interface.v2:042fb86c36faf3fadd2db682d88d06a083623910b06195c68af47dfc0e1c6336"
 
 [connector]
 id = "fcp.salesforce"
@@ -17,6 +17,7 @@ archetypes = [
     "operational",
 ]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "singleton_writer"
@@ -70,6 +71,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.accounts.get".input_schema]
 required = ["account_id"]
@@ -122,6 +124,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.accounts.list".input_schema]
 required = []
@@ -186,6 +189,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.cases.create".input_schema]
 required = ["subject"]
@@ -247,6 +251,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.cases.list".input_schema]
 required = []
@@ -304,6 +309,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.contacts.create".input_schema]
 required = ["last_name"]
@@ -362,6 +368,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.contacts.delete".input_schema]
 required = ["contact_id"]
@@ -407,6 +414,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.contacts.list".input_schema]
 required = []
@@ -471,6 +479,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.leads.convert".input_schema]
 required = ["lead_id"]
@@ -538,6 +547,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.leads.list".input_schema]
 required = []
@@ -599,6 +609,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.opportunities.create".input_schema]
 required = [
@@ -668,6 +679,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.opportunities.list".input_schema]
 required = []
@@ -732,6 +744,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.reports.get".input_schema]
 required = ["report_id"]
@@ -790,6 +803,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."salesforce.soql.query".input_schema]
 required = ["query"]
@@ -937,16 +951,16 @@ burst = 10
 scope = "instance"
 
 [rate_limits.operation_pools]
-"salesforce.opportunities.create" = ["salesforce.opportunities.write"]
-"salesforce.reports.get" = ["salesforce.reports.read"]
-"salesforce.contacts.delete" = ["salesforce.contacts.write"]
-"salesforce.opportunities.list" = ["salesforce.opportunities.read"]
-"salesforce.soql.query" = ["salesforce.soql.read"]
-"salesforce.cases.create" = ["salesforce.cases.write"]
 "salesforce.contacts.list" = ["salesforce.contacts.read"]
-"salesforce.contacts.create" = ["salesforce.contacts.write"]
-"salesforce.accounts.get" = ["salesforce.accounts.read"]
-"salesforce.leads.convert" = ["salesforce.leads.write"]
-"salesforce.leads.list" = ["salesforce.leads.read"]
-"salesforce.accounts.list" = ["salesforce.accounts.read"]
 "salesforce.cases.list" = ["salesforce.cases.read"]
+"salesforce.contacts.create" = ["salesforce.contacts.write"]
+"salesforce.accounts.list" = ["salesforce.accounts.read"]
+"salesforce.contacts.delete" = ["salesforce.contacts.write"]
+"salesforce.accounts.get" = ["salesforce.accounts.read"]
+"salesforce.opportunities.create" = ["salesforce.opportunities.write"]
+"salesforce.leads.convert" = ["salesforce.leads.write"]
+"salesforce.cases.create" = ["salesforce.cases.write"]
+"salesforce.leads.list" = ["salesforce.leads.read"]
+"salesforce.opportunities.list" = ["salesforce.opportunities.read"]
+"salesforce.reports.get" = ["salesforce.reports.read"]
+"salesforce.soql.query" = ["salesforce.soql.read"]

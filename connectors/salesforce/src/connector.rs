@@ -3,14 +3,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
-    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, OAuthRecipe,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{info, instrument};
 
 use crate::{
@@ -20,6 +21,36 @@ use crate::{
     },
     error::SalesforceError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OP_ACCOUNTS_GET: &str = "salesforce.accounts.get";
+const OP_ACCOUNTS_LIST: &str = "salesforce.accounts.list";
+const OP_CONTACTS_LIST: &str = "salesforce.contacts.list";
+const OP_CONTACTS_CREATE: &str = "salesforce.contacts.create";
+const OP_CONTACTS_DELETE: &str = "salesforce.contacts.delete";
+const OP_LEADS_LIST: &str = "salesforce.leads.list";
+const OP_LEADS_CONVERT: &str = "salesforce.leads.convert";
+const OP_OPPORTUNITIES_LIST: &str = "salesforce.opportunities.list";
+const OP_OPPORTUNITIES_CREATE: &str = "salesforce.opportunities.create";
+const OP_CASES_LIST: &str = "salesforce.cases.list";
+const OP_CASES_CREATE: &str = "salesforce.cases.create";
+const OP_SOQL_QUERY: &str = "salesforce.soql.query";
+const OP_REPORTS_GET: &str = "salesforce.reports.get";
+const OPERATION_ORDER: [&str; 13] = [
+    OP_ACCOUNTS_GET,
+    OP_ACCOUNTS_LIST,
+    OP_CONTACTS_LIST,
+    OP_CONTACTS_CREATE,
+    OP_CONTACTS_DELETE,
+    OP_LEADS_LIST,
+    OP_LEADS_CONVERT,
+    OP_OPPORTUNITIES_LIST,
+    OP_OPPORTUNITIES_CREATE,
+    OP_CASES_LIST,
+    OP_CASES_CREATE,
+    OP_SOQL_QUERY,
+    OP_REPORTS_GET,
+];
 
 /// Parsed and validated `Salesforce` connector configuration.
 #[derive(Debug, Clone)]
@@ -423,10 +454,11 @@ impl SalesforceConnector {
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let operations = introspect_operations()?;
         Ok(json!({
             "connector_id": "fcp.salesforce",
             "version": "0.1.0",
-            "operations": serde_json::to_value(operations_info()).unwrap_or_default(),
+            "operations": operations,
         }))
     }
 
@@ -482,7 +514,9 @@ impl SalesforceConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let allowed = operations_info()?
+            .iter()
+            .any(|o| o.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -786,491 +820,88 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     ))
 }
 
-/// Construct a single [`OperationInfo`].
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
+/// Build the operations info for introspection.
+fn operations_info() -> FcpResult<Vec<OperationInfo>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect())
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest =
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Salesforce manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
+}
+
+fn introspect_operations() -> FcpResult<Vec<Value>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| {
+            let operation_info = operation_info_from_manifest(id, &operation);
+            introspect_operation_from_manifest(operation_info, &operation)
+        })
+        .collect())
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
 }
 
-/// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "salesforce.accounts.get",
-            "Get a single account by ID",
-            json!({
-                "type": "object",
-                "required": ["account_id"],
-                "properties": {
-                    "account_id": {"type": "string"},
-                    "fields": {"type": "array"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["account"],
-                "properties": {"account": {"type": "object"}}
-            }),
-            "salesforce.accounts.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Retrieve a specific Salesforce account by ID.".into(),
-                common_mistakes: vec![
-                    "Using a 15-character ID instead of the 18-character case-safe ID.".into(),
-                ],
-                examples: vec![
-                    r#"{"account_id": "001xx000003DGbY", "fields": ["Name", "Industry"]}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("salesforce.accounts.list")],
-            },
-        ),
-        op_info(
-            "salesforce.accounts.list",
-            "Query accounts with optional filters",
-            json!({
-                "type": "object",
-                "required": [],
-                "properties": {
-                    "fields": {"type": "array", "description": "sObject fields to return"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
-                    "offset": {"type": "integer"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["records"],
-                "properties": {
-                    "records": {"type": "array"},
-                    "total_size": {"type": "integer"}
-                }
-            }),
-            "salesforce.accounts.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List or search Salesforce accounts.".into(),
-                common_mistakes: vec![
-                    "Not specifying fields — returns all fields which can be slow.".into(),
-                ],
-                examples: vec![
-                    r#"{"limit": 50, "fields": ["Id", "Name", "Industry", "AnnualRevenue"]}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("salesforce.accounts.get"),
-                    CapabilityId::from_static("salesforce.soql.query"),
-                ],
-            },
-        ),
-        op_info(
-            "salesforce.contacts.list",
-            "Query contacts with optional filters",
-            json!({
-                "type": "object",
-                "required": [],
-                "properties": {
-                    "account_id": {"type": "string", "description": "Filter by parent account"},
-                    "fields": {"type": "array"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 2000}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["records"],
-                "properties": {
-                    "records": {"type": "array"},
-                    "total_size": {"type": "integer"}
-                }
-            }),
-            "salesforce.contacts.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List or search Salesforce contacts.".into(),
-                common_mistakes: vec![
-                    "Not specifying fields — returns all fields which can be slow and hit response size limits.".into(),
-                ],
-                examples: vec![
-                    r#"{"limit": 50, "fields": ["Id", "FirstName", "LastName", "Email"]}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("salesforce.contacts.create"),
-                    CapabilityId::from_static("salesforce.accounts.list"),
-                ],
-            },
-        ),
-        op_info(
-            "salesforce.contacts.create",
-            "Create a new contact",
-            json!({
-                "type": "object",
-                "required": ["last_name"],
-                "properties": {
-                    "last_name": {"type": "string"},
-                    "first_name": {"type": "string"},
-                    "email": {"type": "string"},
-                    "account_id": {"type": "string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {"id": {"type": "string"}}
-            }),
-            "salesforce.contacts.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Create a new contact in Salesforce.".into(),
-                common_mistakes: vec![
-                    "Creating duplicate contacts — check for existing email first.".into(),
-                ],
-                examples: vec![
-                    r#"{"last_name": "Smith", "first_name": "Alice", "email": "alice@example.com", "account_id": "001xx000003DGbY"}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("salesforce.contacts.list")],
-            },
-        ),
-        op_info(
-            "salesforce.contacts.delete",
-            "Delete a contact",
-            json!({
-                "type": "object",
-                "required": ["contact_id"],
-                "properties": {"contact_id": {"type": "string"}}
-            }),
-            json!({"type": "object"}),
-            "salesforce.contacts.write",
-            RiskLevel::High,
-            SafetyTier::Dangerous,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Permanently delete a contact. Cannot be undone.".into(),
-                common_mistakes: vec![
-                    "Deleting contacts with active opportunities.".into(),
-                ],
-                examples: vec![
-                    r#"{"contact_id": "003xx000004TmiQ"}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("salesforce.contacts.list")],
-            },
-        ),
-        op_info(
-            "salesforce.leads.list",
-            "Query leads with optional status filters",
-            json!({
-                "type": "object",
-                "required": [],
-                "properties": {
-                    "fields": {"type": "array"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
-                    "status": {"type": "string", "description": "Filter by Status"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["records"],
-                "properties": {"records": {"type": "array"}}
-            }),
-            "salesforce.leads.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List or search leads.".into(),
-                common_mistakes: vec![
-                    "Not filtering by status — includes converted and disqualified leads by default.".into(),
-                ],
-                examples: vec![
-                    r#"{"limit": 50, "fields": ["Id", "FirstName", "LastName", "Company", "Status"]}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("salesforce.leads.convert"),
-                    CapabilityId::from_static("salesforce.contacts.list"),
-                ],
-            },
-        ),
-        op_info(
-            "salesforce.leads.convert",
-            "Convert a lead to account/contact/opportunity",
-            json!({
-                "type": "object",
-                "required": ["lead_id"],
-                "properties": {
-                    "lead_id": {"type": "string"},
-                    "create_opportunity": {"type": "boolean"},
-                    "opportunity_name": {"type": "string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["accountId", "contactId"],
-                "properties": {
-                    "accountId": {"type": "string"},
-                    "contactId": {"type": "string"},
-                    "opportunityId": {"type": "string"}
-                }
-            }),
-            "salesforce.leads.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Convert a qualified lead into an account, contact, and optionally an opportunity.".into(),
-                common_mistakes: vec![
-                    "Converting leads without checking for duplicate accounts.".into(),
-                ],
-                examples: vec![
-                    r#"{"lead_id": "00Qxx000001LaPt", "create_opportunity": true, "opportunity_name": "New Deal"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("salesforce.leads.list"),
-                    CapabilityId::from_static("salesforce.accounts.list"),
-                ],
-            },
-        ),
-        op_info(
-            "salesforce.opportunities.list",
-            "Query opportunities with optional stage/account filters",
-            json!({
-                "type": "object",
-                "required": [],
-                "properties": {
-                    "fields": {"type": "array"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
-                    "stage": {"type": "string", "description": "Filter by StageName"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["records"],
-                "properties": {
-                    "records": {"type": "array"},
-                    "total_size": {"type": "integer"}
-                }
-            }),
-            "salesforce.opportunities.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List or search opportunities in the sales pipeline.".into(),
-                common_mistakes: vec![
-                    "Not filtering by stage — returns all stages including Closed Lost, which inflates results.".into(),
-                ],
-                examples: vec![
-                    r#"{"limit": 50, "fields": ["Id", "Name", "StageName", "Amount", "CloseDate"]}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("salesforce.opportunities.create"),
-                    CapabilityId::from_static("salesforce.accounts.list"),
-                ],
-            },
-        ),
-        op_info(
-            "salesforce.opportunities.create",
-            "Create a new opportunity",
-            json!({
-                "type": "object",
-                "required": ["name", "stage_name", "close_date"],
-                "properties": {
-                    "name": {"type": "string"},
-                    "stage_name": {"type": "string"},
-                    "close_date": {"type": "string", "description": "ISO 8601 date"},
-                    "amount": {"type": "number"},
-                    "account_id": {"type": "string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {"id": {"type": "string"}}
-            }),
-            "salesforce.opportunities.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Create a new sales opportunity.".into(),
-                common_mistakes: vec![
-                    "Not specifying account_id — opportunity won't be linked to an account.".into(),
-                ],
-                examples: vec![
-                    r#"{"name": "Enterprise Deal", "stage_name": "Prospecting", "close_date": "2026-06-30", "amount": 50000}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("salesforce.opportunities.list"),
-                    CapabilityId::from_static("salesforce.accounts.list"),
-                ],
-            },
-        ),
-        op_info(
-            "salesforce.cases.list",
-            "Query support cases",
-            json!({
-                "type": "object",
-                "required": [],
-                "properties": {
-                    "fields": {"type": "array"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
-                    "status": {"type": "string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["records"],
-                "properties": {"records": {"type": "array"}}
-            }),
-            "salesforce.cases.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List or search support cases.".into(),
-                common_mistakes: vec![
-                    "Not filtering by status — returns all cases including closed, which can be a very large result set.".into(),
-                ],
-                examples: vec![
-                    r#"{"limit": 50, "status": "Open", "fields": ["Id", "Subject", "Status", "Priority"]}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("salesforce.cases.create")],
-            },
-        ),
-        op_info(
-            "salesforce.cases.create",
-            "Create a new support case",
-            json!({
-                "type": "object",
-                "required": ["subject"],
-                "properties": {
-                    "subject": {"type": "string"},
-                    "description": {"type": "string"},
-                    "priority": {"type": "string"},
-                    "account_id": {"type": "string"},
-                    "contact_id": {"type": "string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {"id": {"type": "string"}}
-            }),
-            "salesforce.cases.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Create a new support case.".into(),
-                common_mistakes: vec![
-                    "Not linking the case to an account_id or contact_id — unlinked cases are hard to track.".into(),
-                ],
-                examples: vec![
-                    r#"{"subject": "Login issue", "priority": "High", "account_id": "001xx000003DGbY"}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("salesforce.cases.list")],
-            },
-        ),
-        op_info(
-            "salesforce.soql.query",
-            "Execute a SOQL query",
-            json!({
-                "type": "object",
-                "required": ["query"],
-                "properties": {
-                    "query": {"type": "string", "description": "SOQL query string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["records"],
-                "properties": {
-                    "records": {"type": "array"},
-                    "total_size": {"type": "integer"},
-                    "done": {"type": "boolean"}
-                }
-            }),
-            "salesforce.soql.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Run a SOQL query for complex or cross-object queries.".into(),
-                common_mistakes: vec![
-                    "Unbounded queries without LIMIT — can return huge result sets.".into(),
-                    "Not handling pagination via nextRecordsUrl when done=false.".into(),
-                ],
-                examples: vec![
-                    r#"{"query": "SELECT Id, Name, Amount FROM Opportunity WHERE StageName = 'Closed Won' LIMIT 100"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("salesforce.accounts.list"),
-                    CapabilityId::from_static("salesforce.contacts.list"),
-                    CapabilityId::from_static("salesforce.reports.get"),
-                ],
-            },
-        ),
-        op_info(
-            "salesforce.reports.get",
-            "Run a saved Salesforce report by ID",
-            json!({
-                "type": "object",
-                "required": ["report_id"],
-                "properties": {
-                    "report_id": {"type": "string"},
-                    "include_details": {"type": "boolean"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["reportMetadata", "factMap"],
-                "properties": {
-                    "reportMetadata": {"type": "object"},
-                    "factMap": {"type": "object"}
-                }
-            }),
-            "salesforce.reports.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Run a saved Salesforce report and get its data.".into(),
-                common_mistakes: vec![
-                    "Not checking report format — tabular/summary/matrix return different structures.".into(),
-                ],
-                examples: vec![
-                    r#"{"report_id": "00Oxx0000004cGr", "include_details": true}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("salesforce.soql.query")],
-            },
-        ),
-    ]
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata = serde_json::to_value(operation_info)
+        .expect("Salesforce operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -1649,7 +1280,14 @@ mod tests {
     // -- operations_info --
 
     fn ops_json() -> serde_json::Value {
-        serde_json::to_value(operations_info()).unwrap()
+        Value::Array(introspect_operations().unwrap())
+    }
+
+    fn strict_salesforce_manifest() -> Result<ConnectorManifest, String> {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())?;
+        manifest.validate().map_err(|error| error.to_string())?;
+        Ok(manifest)
     }
 
     #[test]
@@ -1748,24 +1386,92 @@ mod tests {
             .iter()
             .filter_map(|o| o["id"].as_str())
             .collect();
-        let expected = [
-            "salesforce.accounts.get",
-            "salesforce.accounts.list",
-            "salesforce.contacts.list",
-            "salesforce.contacts.create",
-            "salesforce.contacts.delete",
-            "salesforce.leads.list",
-            "salesforce.leads.convert",
-            "salesforce.opportunities.list",
-            "salesforce.opportunities.create",
-            "salesforce.cases.list",
-            "salesforce.cases.create",
-            "salesforce.soql.query",
-            "salesforce.reports.get",
-        ];
-        for e in &expected {
-            assert!(ids.contains(e), "missing expected operation {e}");
+        assert_eq!(ids, OPERATION_ORDER.to_vec());
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_salesforce_manifest()?;
+        let operation_catalog =
+            operations_info().map_err(|error| format!("typed operation catalog: {error}"))?;
+        let operation_metadata = ops_json();
+        let metadata_operations = operation_metadata
+            .as_array()
+            .ok_or_else(|| "operation metadata should be an array".to_string())?;
+
+        let catalog_ids: Vec<&str> = operation_catalog
+            .iter()
+            .map(|operation| operation.id.as_ref())
+            .collect();
+        let metadata_ids: Vec<&str> = metadata_operations
+            .iter()
+            .filter_map(|operation| operation["id"].as_str())
+            .collect();
+
+        assert_eq!(catalog_ids, OPERATION_ORDER.to_vec());
+        assert_eq!(metadata_ids, OPERATION_ORDER.to_vec());
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+
+        for operation in &operation_catalog {
+            let id = operation.id.as_ref();
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(id)
+                .ok_or_else(|| format!("missing manifest operation {id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            let expected_rate_limit = manifest_operation
+                .rate_limit
+                .as_ref()
+                .map(|rate_limit| rate_limit.0.clone());
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(&expected_rate_limit).map_err(|error| error.to_string())?
+            );
+
+            let metadata_operation = metadata_operations
+                .iter()
+                .find(|metadata| metadata["id"].as_str() == Some(id))
+                .ok_or_else(|| format!("missing introspection operation {id}"))?;
+            assert_eq!(
+                metadata_operation["requires_approval"],
+                json!(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                metadata_operation["revocation_freshness"],
+                json!(manifest_operation.revocation_freshness)
+            );
+            if let Some(network_constraints) = &manifest_operation.network_constraints {
+                assert_eq!(
+                    metadata_operation["network_constraints"],
+                    json!(network_constraints)
+                );
+            } else {
+                assert!(metadata_operation.get("network_constraints").is_none());
+            }
         }
+
+        Ok(())
     }
 
     // -- Connector default --

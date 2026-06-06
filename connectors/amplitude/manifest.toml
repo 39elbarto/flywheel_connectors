@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Amplitude product analytics (events, cohorts, charts)"
 archetypes = ["knowledge"]
 format = "wasi"
+status = "proven"
 
 [connector.state]
 model = "singleton_writer"

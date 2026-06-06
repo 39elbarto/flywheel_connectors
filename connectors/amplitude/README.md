@@ -1,7 +1,9 @@
 # Amplitude Connector V3 Contract
 
-> **Status**: retrofit contract
-> **Bead**: `flywheel_connectors-j05nu.12.6`
+> **Status**: PROVEN runtime contract documented with remote Amplitude verifier proof
+> **Bead**: `flywheel_connectors-angoc.16.5`
+> **Verification script**: `scripts/e2e/amplitude_connector_verification.sh`
+> **Proof**: `/tmp/fcp-amplitude-proof2-20260606T1410Z/summary.json`, sha256 `0c6fc8e4446ffe8556e113a4f2d0d75e8b0bfb99437d740adfb546142e3bb726`, 11 passed steps, rch remotes `vmi1293453`, `vmi1152480`, `vmi1227854`
 > **Connector**: `fcp.amplitude`
 
 ## Purpose
@@ -53,6 +55,27 @@ Explicit non-goals for this slice:
 - Localhost overrides are allowed only for deterministic tests
 - Connector remains read-only even when upstream Amplitude plans expose richer mutation APIs
 
+## Operation Inventory
+
+| Operation | Capability | SafetyTier | RiskLevel | Idempotency | Purpose |
+|-----------|------------|------------|-----------|-------------|---------|
+| `amplitude.charts.query` | `amplitude.charts.read` | `Safe` | `Low` | `Strict` | Query one Amplitude chart by chart ID. |
+| `amplitude.cohorts.list` | `amplitude.cohorts.read` | `Safe` | `Low` | `Strict` | List cohort metadata visible to the configured credentials. |
+| `amplitude.events.export` | `amplitude.events.read` | `Safe` | `Low` | `Strict` | Export raw events for a caller-bounded date range. |
+| `amplitude.health` | `amplitude.cohorts.read` | `Safe` | `Low` | `Strict` | Verify credentials and Amplitude API reachability. |
+
+## Operator Guidance
+
+- Use dedicated Amplitude service credentials scoped to the analytics project that should be visible to this connector.
+- Keep event export windows narrow; the manifest caps the response at 50 MiB, but the upstream export can still include sensitive product analytics payloads.
+- Run `amplitude.health` before chart, cohort, or event-export operations when validating a fresh deployment.
+- Treat localhost and non-HTTPS base URLs as test-only overrides, not production provider targets.
+
+Rerun commands:
+
+- `env -u CARGO_TARGET_DIR RUN_ID=manual-amplitude bash scripts/e2e/amplitude_connector_verification.sh`
+- `scripts/graduation/run_gauntlet.sh connectors/amplitude`
+
 ## Readiness And Verification
 
 Verification is replayed through:
@@ -60,6 +83,8 @@ Verification is replayed through:
 ```bash
 scripts/e2e/amplitude_connector_verification.sh
 ```
+
+Promotion proof `purple-amplitude-proof2-20260606T1410Z` passed the tracked verifier with accepted remote Cargo proof for manifest validation, crate check, health/doctor/self-check/compliance evidence, full integration tests, crate-local tests, and clippy, plus source-state formatting.
 
 Artifacts land under:
 

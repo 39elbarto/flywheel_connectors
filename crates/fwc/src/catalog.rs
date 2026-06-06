@@ -244,6 +244,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "Local replayable swarm decision-card and evidence-bundle inspection",
     },
     CommandClassification {
+        command: "evidence",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local replay-bundle and verifier-record index/search over retained evidence artifacts",
+    },
+    CommandClassification {
         command: "telemetry",
         truth_source: CommandTruthSource::OfflineArtifact,
         execution_mode: CommandExecutionMode::LocalOnly,
@@ -3542,6 +3551,7 @@ pub const COMMANDS: &[&str] = &[
     "bootstrap",
     "audit",
     "swarm-evidence",
+    "evidence",
     "manifest",
     "net",
     "trace",
@@ -3680,7 +3690,7 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "evidence",
-                        "commands": ["agent-readiness", "proof", "supply-chain", "bootstrap", "audit", "swarm-evidence", "manifest", "net", "trace", "policy", "package", "bench"],
+                        "commands": ["agent-readiness", "proof", "supply-chain", "bootstrap", "audit", "swarm-evidence", "evidence", "manifest", "net", "trace", "policy", "package", "bench"],
                     },
                     {
                         "name": "lifecycle",
@@ -3901,6 +3911,16 @@ fn command_contract(command: &str) -> Option<Value> {
             "intended_shape": "Local replay and exploration of retained multi-agent decision evidence without mutating shared services.",
             "next_beads": ["flywheel_connectors-angoc.6.2.1"],
             "workflow_handoff": ["Use `fwc swarm-evidence explore` when resuming or auditing multi-agent work decisions."],
+        })),
+        "evidence" => Some(json!({
+            "family": "evidence",
+            "summary": "Index and search replay bundles plus connector verifier records.",
+            "intended_shape": "Local evidence inventory over retained trace, summary, environment, replay, and verifier JSONL artifacts with redaction-safe search metadata.",
+            "next_beads": ["flywheel_connectors-ql87d.5"],
+            "workflow_handoff": [
+                "Use `fwc evidence index --root <dir>` to build a deterministic local evidence inventory.",
+                "Use `fwc evidence find --root <dir> --connector <id>` when resuming proof work or auditing a verifier lane."
+            ],
         })),
         "manifest" => Some(json!({
             "family": "evidence",

@@ -1,8 +1,8 @@
-//! Windows sandbox implementation using AppContainer and Job Objects.
+//! Windows sandbox implementation using `AppContainer` and Job Objects.
 //!
 //! # Enforcement Layers
 //!
-//! 1. **AppContainer**: Low-integrity child-process isolation with
+//! 1. **`AppContainer`**: Low-integrity child-process isolation with
 //!    capability-based access when launched through
 //!    [`WindowsSandbox::spawn_appcontainer_process`]
 //! 2. **Job Objects**: Resource limits (memory, CPU, process count) — the
@@ -20,17 +20,17 @@
 //! no named-operation profile (macOS SBPL) is in place. Enforcement is
 //! limited to the job object's `ActiveProcessLimit`, `JobMemoryLimit`,
 //! and `PerProcessUserTimeLimit` unless the host uses the Windows-only
-//! AppContainer spawn entrypoint. A connector that stays inside those
+//! `AppContainer` spawn entrypoint. A connector that stays inside those
 //! budgets can invoke any Win32/NT API the process integrity level
 //! allows. Connectors requiring the full strict-profile guarantee MUST
 //! run under [`WasiRuntime`](crate::WasiRuntime) (no host syscalls
-//! reach the kernel from WASI guests) until the AppContainer, integrity,
+//! reach the kernel from WASI guests) until the `AppContainer`, integrity,
 //! firewall, and readiness children under bead `flywheel_connectors-r4qcg`
 //! are all proven end to end.
 //!
-//! # AppContainer
+//! # `AppContainer`
 //!
-//! AppContainer provides a low-privilege sandbox similar to Windows Store apps:
+//! `AppContainer` provides a low-privilege sandbox similar to Windows Store apps:
 //! - Separate SID with no default access to user resources
 //! - Capability-based permissions (files, network, etc.)
 //! - Network isolation by default (requires explicit capability)
@@ -44,7 +44,9 @@
 //! - UI restrictions
 
 #![cfg(target_os = "windows")]
+#![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+#![allow(clippy::upper_case_acronyms)]
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -79,9 +81,8 @@ type DWORD_PTR = usize;
 
 const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 const FALSE: BOOL = 0;
-const TRUE: BOOL = 1;
 const S_OK: HRESULT = 0;
-const HRESULT_ERROR_ALREADY_EXISTS: HRESULT = 0x8007_00b7u32 as HRESULT;
+const HRESULT_ERROR_ALREADY_EXISTS: HRESULT = -2_147_024_713;
 const ERROR_INSUFFICIENT_BUFFER: DWORD = 122;
 
 // Job object limits
@@ -97,8 +98,6 @@ const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: DWORD = 9;
 // Token integrity levels
 const SECURITY_MANDATORY_LOW_RID: DWORD = 0x1000;
 const SECURITY_MANDATORY_MEDIUM_RID: DWORD = 0x2000;
-const SECURITY_MANDATORY_HIGH_RID: DWORD = 0x3000;
-
 // Token information class
 const TOKEN_INTEGRITY_LEVEL: DWORD = 25;
 
@@ -117,12 +116,12 @@ const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: DWORD_PTR = 0x0002_0009;
 // Windows Sandbox
 // ============================================================================
 
-/// Windows sandbox using AppContainer and Job Objects.
+/// Windows sandbox using `AppContainer` and Job Objects.
 #[derive(Debug)]
 pub struct WindowsSandbox {
     /// Job object handle (if created).
     job_handle: Option<HANDLE>,
-    /// Whether AppContainer is available.
+    /// Whether `AppContainer` is available.
     appcontainer_available: bool,
 }
 
@@ -159,9 +158,9 @@ impl WindowsSandbox {
         }
     }
 
-    /// Whether AppContainer is *actually active* for this process.
+    /// Whether `AppContainer` is *actually active* for this process.
     ///
-    /// Pre-br-3hrw3 the sandbox unconditionally claimed AppContainer
+    /// Pre-br-3hrw3 the sandbox unconditionally claimed `AppContainer`
     /// availability even though no dedicated child-process launch path
     /// existed; this getter exposes the post-fix truth so conformance
     /// tests and observability surfaces can assert against it.
@@ -170,7 +169,7 @@ impl WindowsSandbox {
         self.appcontainer_available
     }
 
-    /// Derive the AppContainer profile metadata for this policy.
+    /// Derive the `AppContainer` profile metadata for this policy.
     fn appcontainer_profile(
         policy: &CompiledPolicy,
     ) -> Result<WindowsAppContainerProfile, SandboxError> {
@@ -178,7 +177,7 @@ impl WindowsSandbox {
         policy.windows_appcontainer_profile(&connector_seed)
     }
 
-    /// Create or resolve the AppContainer profile when the operator has enabled the path.
+    /// Create or resolve the `AppContainer` profile when the operator has enabled the path.
     fn prepare_appcontainer_profile(
         &self,
         policy: &CompiledPolicy,
@@ -246,7 +245,7 @@ impl WindowsSandbox {
         let mut attributes = ProcThreadAttributeList::new(1)?;
         attributes.update_security_capabilities(&mut security_capabilities)?;
 
-        let job = OwnedHandle::new(self.create_job_object(policy)?);
+        let job = OwnedHandle::new(Self::create_job_object(policy)?);
         let mut command_line = build_windows_command_line(program, args);
         let application_name = to_wide_os_str(program.as_os_str());
         let mut startup_info = STARTUPINFOEXW::with_attribute_list(attributes.as_mut_ptr())?;
@@ -320,7 +319,7 @@ impl WindowsSandbox {
     }
 
     /// Create and configure a job object.
-    fn create_job_object(&self, policy: &CompiledPolicy) -> Result<HANDLE, SandboxError> {
+    fn create_job_object(policy: &CompiledPolicy) -> Result<HANDLE, SandboxError> {
         // Create job object
         let job = unsafe { CreateJobObjectW(ptr::null_mut(), ptr::null()) };
         if job.is_null() {
@@ -361,7 +360,7 @@ impl WindowsSandbox {
             SetInformationJobObject(
                 job,
                 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                &limit_info as *const _ as *const std::ffi::c_void,
+                std::ptr::from_ref(&limit_info).cast::<std::ffi::c_void>(),
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as DWORD,
             )
         };
@@ -386,7 +385,7 @@ impl WindowsSandbox {
     }
 
     /// Assign current process to job object.
-    fn assign_to_job(&self, job: HANDLE) -> Result<(), SandboxError> {
+    fn assign_to_job(job: HANDLE) -> Result<(), SandboxError> {
         let current_process = unsafe { GetCurrentProcess() };
 
         let result = unsafe { AssignProcessToJobObject(job, current_process) };
@@ -403,7 +402,7 @@ impl WindowsSandbox {
     }
 
     /// Set process integrity level.
-    fn set_integrity_level(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    fn set_integrity_level(policy: &CompiledPolicy) -> Result<(), SandboxError> {
         let level = if policy.platform_flags.windows_low_integrity {
             SECURITY_MANDATORY_LOW_RID
         } else {
@@ -456,7 +455,7 @@ impl WindowsSandbox {
             SetTokenInformation(
                 token,
                 TOKEN_INTEGRITY_LEVEL,
-                &label as *const _ as *const std::ffi::c_void,
+                std::ptr::from_ref(&label).cast::<std::ffi::c_void>(),
                 std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as DWORD + GetLengthSid(sid) as DWORD,
             )
         };
@@ -487,9 +486,9 @@ impl WindowsSandbox {
     }
 
     /// Configure Windows Firewall rules for network isolation.
-    fn configure_firewall(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    fn configure_firewall(policy: &CompiledPolicy) {
         if !policy.block_direct_network {
-            return Ok(());
+            return;
         }
 
         // Windows Firewall configuration requires elevated privileges
@@ -503,8 +502,6 @@ impl WindowsSandbox {
             "Network isolation relies on AppContainer; \
              explicit firewall rules require elevation"
         );
-
-        Ok(())
     }
 }
 
@@ -590,8 +587,8 @@ impl Sandbox for WindowsSandbox {
         let appcontainer_report = self.prepare_appcontainer_profile(policy)?;
 
         // Step 2: Create and assign job object
-        let job = self.create_job_object(policy)?;
-        self.assign_to_job(job)?;
+        let job = Self::create_job_object(policy)?;
+        Self::assign_to_job(job)?;
         let appcontainer_evidence = WindowsAppContainerEvidence::from_lifecycle(
             &windows_appcontainer_connector_seed(policy),
             &appcontainer_report,
@@ -618,14 +615,12 @@ impl Sandbox for WindowsSandbox {
         }
 
         // Step 3: Set integrity level
-        if let Err(e) = self.set_integrity_level(policy) {
+        if let Err(e) = Self::set_integrity_level(policy) {
             warn!(error = %e, "Failed to set integrity level");
         }
 
         // Step 4: Configure firewall (best effort)
-        if let Err(e) = self.configure_firewall(policy) {
-            warn!(error = %e, "Failed to configure firewall");
-        }
+        Self::configure_firewall(policy);
 
         // AppContainer enforcement is only available through the dedicated
         // STARTUPINFOEX child-process launch path. The in-process apply()
@@ -1046,14 +1041,14 @@ unsafe extern "system" {
 // ============================================================================
 
 /// Environment variable that opts the process into the Windows
-/// AppContainer child-process launch path.
+/// `AppContainer` child-process launch path.
 ///
-/// AppContainer enforcement cannot be retrofitted onto an already-running
+/// `AppContainer` enforcement cannot be retrofitted onto an already-running
 /// process or an arbitrary [`std::process::Command`]. Callers that need
-/// AppContainer must use [`WindowsSandbox::spawn_appcontainer_process`],
+/// `AppContainer` must use [`WindowsSandbox::spawn_appcontainer_process`],
 /// which launches a child process with `STARTUPINFOEX` security capabilities
 /// before it is resumed. The availability flag remains an explicit opt-in so
-/// generic readiness surfaces do not infer AppContainer protection from
+/// generic readiness surfaces do not infer `AppContainer` protection from
 /// kernel support alone.
 ///
 /// Operators running the Windows-gated proof lane can flip this env var to
@@ -1061,25 +1056,25 @@ unsafe extern "system" {
 /// under test.
 pub const FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV: &str = "FCP_SANDBOX_WINDOWS_APPCONTAINER";
 
-/// Check if AppContainer is *actually wired* and active for this
+/// Check if `AppContainer` is *actually wired* and active for this
 /// process (NOT just available on the kernel).
 ///
 /// Pre-fix this returned `true` unconditionally on the assumption that
-/// AppContainer was present on Windows 8+. That was wrong: the downstream
-/// `apply()` and `apply_to_command()` paths still cannot attach AppContainer
+/// `AppContainer` was present on Windows 8+. That was wrong: the downstream
+/// `apply()` and `apply_to_command()` paths still cannot attach `AppContainer`
 /// to the current process or mutate a generic command, so reporting `true`
 /// by default gave the rest of the system a false sense of process isolation —
 /// br-flywheel_connectors-3hrw3.
 ///
 /// We fail closed unless a Windows operator explicitly opts into the dedicated
-/// AppContainer child-process launch path via
+/// `AppContainer` child-process launch path via
 /// [`FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV`].
 fn check_appcontainer_available() -> bool {
     matches!(
         std::env::var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV)
             .ok()
             .as_deref(),
-        Some("1") | Some("true") | Some("TRUE")
+        Some("1" | "true" | "TRUE")
     )
 }
 
@@ -1182,7 +1177,7 @@ fn delete_appcontainer_profile(profile_name: &str) -> Result<(), SandboxError> {
 struct OwnedSid(PSID);
 
 impl OwnedSid {
-    fn as_ptr(&self) -> PSID {
+    const fn as_ptr(&self) -> PSID {
         self.0
     }
 }
@@ -1200,11 +1195,11 @@ impl Drop for OwnedSid {
 struct OwnedHandle(HANDLE);
 
 impl OwnedHandle {
-    fn new(handle: HANDLE) -> Self {
+    const fn new(handle: HANDLE) -> Self {
         Self(handle)
     }
 
-    fn as_raw(&self) -> HANDLE {
+    const fn as_raw(&self) -> HANDLE {
         self.0
     }
 
@@ -1388,16 +1383,13 @@ fn derive_capability_sid(capability: &str) -> Result<PSID, SandboxError> {
         )));
     }
 
-    let capability_sid_count = match usize::try_from(capability_sid_count) {
-        Ok(count) => count,
-        Err(_) => {
-            unsafe {
-                free_local_sid_array(capability_sids, capability_sid_count);
-            }
-            return Err(SandboxError::SyscallFailed(format!(
-                "DeriveCapabilitySidsFromName({capability}) returned too many capability SIDs"
-            )));
+    let Ok(capability_sid_count) = usize::try_from(capability_sid_count) else {
+        unsafe {
+            free_local_sid_array(capability_sids, capability_sid_count);
         }
+        return Err(SandboxError::SyscallFailed(format!(
+            "DeriveCapabilitySidsFromName({capability}) returned too many capability SIDs"
+        )));
     };
     let sid = unsafe { *capability_sids };
     unsafe {
@@ -1415,14 +1407,11 @@ unsafe fn free_local_sid_array(sids: *mut PSID, count: DWORD) {
         return;
     }
 
-    let count = match usize::try_from(count) {
-        Ok(count) => count,
-        Err(_) => {
-            unsafe {
-                LocalFree(sids.cast());
-            }
-            return;
+    let Ok(count) = usize::try_from(count) else {
+        unsafe {
+            LocalFree(sids.cast());
         }
+        return;
     };
 
     for idx in 0..count {
@@ -1486,7 +1475,7 @@ fn quote_windows_command_arg(arg: &OsStr) -> String {
         if ch == '\\' {
             backslashes += 1;
         } else if ch == '"' {
-            for _ in 0..(backslashes * 2 + 1) {
+            for _ in 0..=(backslashes * 2) {
                 quoted.push('\\');
             }
             quoted.push('"');
@@ -1530,7 +1519,7 @@ mod tests {
             deny_ptrace: true,
             block_direct_network: true,
             state_dir: Some(PathBuf::from("C:\\Temp\\test")),
-            platform_flags: Default::default(),
+            platform_flags: crate::sandbox::PlatformFlags::default(),
         }
     }
 
@@ -1541,10 +1530,10 @@ mod tests {
         assert_eq!(sandbox.platform_name(), "windows");
     }
 
-    /// br-3hrw3 regression: AppContainer must NOT report itself as
+    /// br-3hrw3 regression: `AppContainer` must NOT report itself as
     /// active by default, because generic sandbox application cannot attach
-    /// AppContainer to the current process. Pre-fix, `check_appcontainer_available()` returned
-    /// `true` unconditionally and the constructor logged "AppContainer
+    /// `AppContainer` to the current process. Pre-fix, `check_appcontainer_available()` returned
+    /// `true` unconditionally and the constructor logged "`AppContainer`
     /// available for process isolation" — giving downstream observers a
     /// false sense of process isolation that the rest of `apply()`
     /// never delivered. Post-fix, the default is fail-closed.
@@ -1585,8 +1574,7 @@ mod tests {
         let sandbox = WindowsSandbox::new();
         assert!(
             sandbox.appcontainer_active(),
-            "explicit opt-in via {} must flip AppContainer to active",
-            FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV
+            "explicit opt-in via {FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV} must flip AppContainer to active"
         );
         unsafe {
             match prev {
@@ -1637,7 +1625,7 @@ mod tests {
             std::env::var("FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E")
                 .ok()
                 .as_deref(),
-            Some("1") | Some("true") | Some("TRUE")
+            Some("1" | "true" | "TRUE")
         ) {
             eprintln!(
                 "structured_skip: FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E not enabled for real launch"

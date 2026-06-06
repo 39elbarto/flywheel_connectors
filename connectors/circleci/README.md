@@ -1,9 +1,10 @@
 # CircleCI Connector V3 Contract
 
-> **Status**: planning contract
-> **Bead**: `flywheel_connectors-j05nu.4.2.1`
+> **Status**: PROVEN runtime contract documented with remote CircleCI verifier proof
+> **Bead**: `flywheel_connectors-angoc.16.5`
 > **Verification script**: `scripts/e2e/circleci_connector_verification.sh`
-> **Unblocks**: `flywheel_connectors-j05nu.4.2.2`
+> **Proof**: `/tmp/fcp-circleci-proof2-20260606T212949Z/circleci_connector_verification.jsonl`, sha256 `c3a0d8d16066f8a0217533cb22f78ab025b26a933ac0b2c10a0e20ea8756a022`, 6 passed steps, rch remote `vmi1156319`
+> **Connector**: `fcp.circleci`
 > **Primary upstreams**:
 > - https://circleci.com/docs/guides/toolkit/api-developers-guide/
 > - https://circleci.com/docs/api/v2/
@@ -12,13 +13,13 @@
 
 ## Purpose
 
-This document fixes the first implementation slice for `fcp.circleci` so the follow-on runtime bead can converge on a stable contract instead of inventing CircleCI scope while coding.
+This document fixes the proven runtime slice for `fcp.circleci` so the connector stays aligned with its manifest, operation inventory, and verifier proof.
 
 The connector targets CircleCI API v2 as a request-response CI/CD control surface. The intended first slice is project discovery plus pipeline, workflow, and job inspection, with a narrow set of risky workflow and pipeline mutation flows.
 
 ## Current Runtime Snapshot
 
-The current connector code already exposes these operations:
+The connector exposes these operations:
 
 - `circleci.projects.list`
 - `circleci.pipelines.list`
@@ -32,7 +33,7 @@ The current connector code already exposes these operations:
 - `circleci.jobs.get`
 - `circleci.health`
 
-The current implementation bead is reconciling manifest and runtime so this operation inventory is now the authoritative first-slice surface.
+This operation inventory is the authoritative first-slice surface.
 
 ## First-Slice Scope
 
@@ -100,6 +101,19 @@ The connector is `operational` and effectively stateless aside from configuratio
 | `circleci.jobs.get` | `GET /project/{project_slug}/job/{job_number}` | `circleci.jobs.read` | `Safe` | `Low` | `None` | Read-only inspection of a specific job. |
 | `circleci.health` | `GET /me` | `circleci.projects.read` | `Safe` | `Low` | `Strict` | Deterministic auth/reachability probe used for configure, doctor, and self-check. |
 
+## Operator Guidance
+
+- Use a dedicated sandbox CircleCI account or project for verification; personal API tokens inherit the user's full visible project authority.
+- Run `circleci.health` before project, pipeline, workflow, or job operations when validating a fresh deployment.
+- Keep `project_slug` explicit and provider-qualified, such as `gh/org/repo` or `circleci/<org-id>/<project-id>`.
+- Treat `circleci.pipelines.trigger`, `circleci.workflows.cancel`, and `circleci.workflows.rerun` as real CI/CD mutations that can consume compute or affect deployments.
+- Treat localhost and CircleCI Server `base_url` overrides as deterministic test-only configuration until a later manifest formalizes them.
+
+Rerun commands:
+
+- `env -u CARGO_TARGET_DIR RUN_ID=manual-circleci bash scripts/e2e/circleci_connector_verification.sh`
+- `scripts/graduation/run_gauntlet.sh connectors/circleci`
+
 ## Explicit Non-Goals
 
 The first implementation slice does not include these provider surfaces:
@@ -142,6 +156,8 @@ worker execution for each Cargo step; local fallback is classified as
 `infra_blocked` rather than proof.
 
 `connectors/circleci/tests/local_non_mock.rs` covers the production connector boundary against a raw TCP loopback CircleCI API fixture. It exercises `circleci.projects.list`, `circleci.pipelines.list`, `circleci.pipelines.trigger`, `circleci.health`, `Circle-Token` forwarding, trigger parameter body preservation, `429 Retry-After` mapping, and redaction-safe evidence logs without live CircleCI credentials.
+
+Latest accepted proof: `/tmp/fcp-circleci-proof2-20260606T212949Z/circleci_connector_verification.jsonl` (sha256 `c3a0d8d16066f8a0217533cb22f78ab025b26a933ac0b2c10a0e20ea8756a022`) recorded 6 passed steps on `97fe5da6c`, with remote Cargo steps on `vmi1156319` and redaction scan passing.
 
 Focused proof for this connector:
 

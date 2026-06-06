@@ -2,14 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_openai_compat::{ChatChunk, OpenAiError, RateLimitPolicy};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError,
-    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
+    InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
@@ -36,6 +37,14 @@ const OP_EMBEDDINGS: &str = "fireworks.embeddings.create";
 const OP_MODELS: &str = "fireworks.models.list";
 const OP_HEALTH: &str = "fireworks.health";
 const OP_LEGACY: &str = "fireworks.completions.legacy";
+const OPERATION_ORDER: [&str; 6] = [
+    OP_CHAT,
+    OP_CHAT_STREAM,
+    OP_EMBEDDINGS,
+    OP_MODELS,
+    OP_HEALTH,
+    OP_LEGACY,
+];
 
 const CAP_CHAT: &str = "fireworks.chat";
 const CAP_EMBEDDINGS: &str = "fireworks.embeddings";
@@ -582,180 +591,67 @@ impl FcpConnector for FireworksConnector {
 }
 
 fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT),
-            summary: "Create a Fireworks chat completion".into(),
-            description: Some("Uses Fireworks OpenAI-compatible POST /chat/completions endpoint.".into()),
-            input_schema: chat_schema(false),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use direct Fireworks for fast open-source model inference such as Llama, Qwen, DeepSeek distilled, and other Fireworks-hosted text models.".into(),
-                common_mistakes: vec![
-                    "Do not log prompts, completions, tool-call arguments, or API keys.".into(),
-                    "Fireworks hosted model IDs often use accounts/<account>/models/<model>, for example accounts/fireworks/models/llama-v3p1-8b-instruct.".into(),
-                    "Do not use this connector for Fireworks workflow image generation; that surface is deferred.".into(),
-                ],
-                examples: vec![r#"{"model":"accounts/fireworks/models/llama-v3p1-8b-instruct","messages":[{"role":"user","content":"Hello"}]}"#.into()],
-                related: vec![
-                    CapabilityId::from_static(CAP_CHAT),
-                    CapabilityId::from_static(CAP_MODELS),
-                ],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT_STREAM),
-            summary: "Create a Fireworks streaming chat completion".into(),
-            description: Some("Uses Fireworks SSE stream and returns chunk metadata plus assembled content.".into()),
-            input_schema: chat_schema(true),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use for incremental Fireworks chat output.".into(),
-                common_mistakes: vec!["Handle finish_reason and tool-call deltas.".into()],
-                examples: vec![r#"{"messages":[{"role":"user","content":"Stream one sentence."}],"max_tokens":64}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_EMBEDDINGS),
-            summary: "Create Fireworks text embeddings".into(),
-            description: Some("Uses Fireworks POST /embeddings with the documented embedding model surface.".into()),
-            input_schema: embeddings_schema(),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_EMBEDDINGS),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use for Fireworks-hosted embedding models such as nomic-ai/nomic-embed-text-v1.5.".into(),
-                common_mistakes: vec!["Do not log input text or embedding vectors.".into()],
-                examples: vec![r#"{"model":"nomic-ai/nomic-embed-text-v1.5","input":"hello"}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_MODELS),
-            summary: "List Fireworks models".into(),
-            description: Some("Reads and caches GET /models, accepting Fireworks's array response and OpenAI-compatible list envelopes.".into()),
-            input_schema: json!({ "type": "object", "properties": { "refresh": { "type": "boolean" } } }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_MODELS),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use before choosing a Fireworks model id.".into(),
-                common_mistakes: vec!["Filter by model type before choosing an operation.".into()],
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_HEALTH),
-            summary: "Probe Fireworks health".into(),
-            description: Some("Performs a bounded models.list probe.".into()),
-            input_schema: json!({ "type": "object", "properties": {} }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_HEALTH),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to confirm Fireworks credentials and network path.".into(),
-                common_mistakes: Vec::new(),
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_LEGACY),
-            summary: "Create a deprecated legacy Fireworks completion".into(),
-            description: Some("Minimal /completions support for old OpenAI-compatible clients.".into()),
-            input_schema: legacy_schema(),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use only for older callers that cannot send chat messages.".into(),
-                common_mistakes: vec!["Prefer fireworks.chat.completions for new work.".into()],
-                examples: vec![r#"{"prompt":"One sentence about FCP."}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-    ]
+    fireworks_operations_info()
+        .expect("embedded Fireworks manifest should validate for introspection")
 }
 
-fn chat_schema(streaming: bool) -> Value {
-    json!({
-        "type": "object",
-        "required": ["messages"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_MODEL, "pattern": ".+/.+" },
-            "messages": { "type": "array", "minItems": 1 },
-            "max_tokens": { "type": "integer", "minimum": 1 },
-            "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-            "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
-            "stop": {},
-            "response_format": { "type": "object" },
-            "tools": { "type": "array" },
-            "tool_choice": {},
-            "reasoning_effort": { "type": "string", "enum": ["none", "low", "medium", "high", "max"] },
-            "context_length_exceeded_behavior": { "type": "string", "enum": ["truncate", "error"] },
-            "streaming_response": { "const": streaming },
-            "provider_extensions": { "type": "object" }
-        }
-    })
+fn fireworks_operations_info() -> FcpResult<Vec<OperationInfo>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect())
 }
 
-fn embeddings_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["input"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_EMBEDDING_MODEL, "pattern": ".+/.+" },
-            "input": {},
-            "encoding_format": { "type": "string" },
-            "dimensions": { "type": "integer", "minimum": 1 },
-            "provider_extensions": { "type": "object" }
-        }
-    })
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest =
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Fireworks manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
 }
 
-fn legacy_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["prompt"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_MODEL, "pattern": ".+/.+" },
-            "prompt": {},
-            "max_tokens": { "type": "integer", "minimum": 1 },
-            "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-            "context_length_exceeded_behavior": { "type": "string", "enum": ["truncate", "error"] },
-            "provider_extensions": { "type": "object" }
-        }
-    })
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {

@@ -2,14 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_openai_compat::{ChatChunk, OpenAiError, RateLimitPolicy};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError,
-    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
+    InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
@@ -33,6 +34,14 @@ const OP_MODELS: &str = "groq.models.list";
 const OP_HEALTH: &str = "groq.health";
 const OP_EMBEDDINGS: &str = "groq.embeddings.create";
 const OP_LEGACY: &str = "groq.completions.legacy";
+const OPERATION_ORDER: [&str; 6] = [
+    OP_CHAT,
+    OP_CHAT_STREAM,
+    OP_MODELS,
+    OP_HEALTH,
+    OP_EMBEDDINGS,
+    OP_LEGACY,
+];
 
 const CAP_CHAT: &str = "groq.chat";
 const CAP_MODELS: &str = "groq.models.read";
@@ -572,157 +581,66 @@ impl FcpConnector for GroqConnector {
 }
 
 fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT),
-            summary: "Create a Groq chat completion".into(),
-            description: Some("Uses Groq's OpenAI-compatible POST /chat/completions endpoint.".into()),
-            input_schema: chat_schema(false),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use direct Groq when ultra-low latency first-party LPU inference is desired.".into(),
-                common_mistakes: vec![
-                    "Do not log prompts, completions, or tool-call arguments.".into(),
-                    "Do not pass unsupported OpenAI fields such as logprobs, logit_bias, top_logprobs, messages[].name, or n values other than 1.".into(),
-                ],
-                examples: vec![r#"{"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":"Hello"}]}"#.into()],
-                related: vec![
-                    CapabilityId::from_static(CAP_CHAT),
-                    CapabilityId::from_static(CAP_MODELS),
-                ],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT_STREAM),
-            summary: "Create a Groq streaming chat completion".into(),
-            description: Some("Uses Groq's SSE stream and returns chunk metadata plus assembled content.".into()),
-            input_schema: chat_schema(true),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use for latency-sensitive Groq responses.".into(),
-                common_mistakes: vec!["Handle finish_reason and tool-call deltas.".into()],
-                examples: vec![r#"{"messages":[{"role":"user","content":"Stream a sentence."}],"max_tokens":64}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_MODELS),
-            summary: "List Groq models".into(),
-            description: Some("Reads and caches GET /models.".into()),
-            input_schema: json!({ "type": "object", "properties": { "refresh": { "type": "boolean" } } }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_MODELS),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use before choosing a Groq model id.".into(),
-                common_mistakes: Vec::new(),
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_HEALTH),
-            summary: "Probe Groq health".into(),
-            description: Some("Performs a bounded models.list probe.".into()),
-            input_schema: json!({ "type": "object", "properties": {} }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_HEALTH),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to confirm Groq credentials and network path.".into(),
-                common_mistakes: Vec::new(),
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_EMBEDDINGS),
-            summary: "Groq embeddings unavailable".into(),
-            description: Some("Declared for introspection honesty; this operation deterministically returns not supported.".into()),
-            input_schema: json!({ "type": "object", "properties": { "availability": { "const": "not_supported" } } }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_EMBEDDINGS),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Do not invoke; use to discover that Groq embeddings are intentionally unsupported.".into(),
-                common_mistakes: vec!["Do not proxy embeddings through another provider from this connector.".into()],
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_LEGACY),
-            summary: "Create a deprecated legacy Groq completion".into(),
-            description: Some("Minimal /completions support for old OpenAI-compatible clients.".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["prompt"],
-                "properties": {
-                    "model": { "type": "string", "default": DEFAULT_MODEL },
-                    "prompt": {},
-                    "max_tokens": { "type": "integer", "minimum": 1 },
-                    "temperature": { "type": "number", "minimum": 0, "maximum": 2 }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use only for older callers that cannot send chat messages.".into(),
-                common_mistakes: vec!["Prefer groq.chat.completions for new work.".into()],
-                examples: vec![r#"{"prompt":"One sentence about FCP."}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-    ]
+    groq_operations_info().expect("embedded Groq manifest should validate for introspection")
 }
 
-fn chat_schema(streaming: bool) -> Value {
-    json!({
-        "type": "object",
-        "required": ["messages"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_MODEL },
-            "messages": { "type": "array", "minItems": 1 },
-            "max_tokens": { "type": "integer", "minimum": 1 },
-            "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-            "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
-            "stop": {},
-            "response_format": { "type": "object" },
-            "tools": { "type": "array" },
-            "tool_choice": {},
-            "streaming_response": { "const": streaming },
-            "provider_extensions": { "type": "object" }
-        }
-    })
+fn groq_operations_info() -> FcpResult<Vec<OperationInfo>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect())
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest =
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Groq manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {

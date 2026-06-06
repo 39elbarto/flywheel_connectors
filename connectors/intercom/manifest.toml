@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:2bb16f9d79569be2e9e2b43844b8ecddde83371f3101ac6605a5d75333ab1280"
+interface_hash = "blake3-256:fcp.interface.v2:d08f67f0c141966ba956221b0d022797bf43e1ae4b69aaf6e9b53452a8114eb7"
 
 [connector]
 id = "fcp.intercom"
@@ -17,6 +17,7 @@ archetypes = [
     "operational",
 ]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "singleton_writer"
@@ -46,6 +47,7 @@ required = [
 optional = [
     "intercom.contacts.write",
     "intercom.contacts.read",
+    "intercom.contacts.delete",
     "intercom.conversations.read",
     "intercom.conversations.write",
     "intercom.tags.read",
@@ -64,6 +66,13 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."intercom.contacts.create".rate_limit]
+max = 100
+per_ms = 60000
+burst = 15
+pool_name = "intercom.contacts.write"
 
 [provides.operations."intercom.contacts.create".input_schema]
 required = ["role"]
@@ -118,11 +127,18 @@ related = [
 
 [provides.operations."intercom.contacts.delete"]
 description = "Delete a contact"
-capability = "intercom.contacts.write"
+capability = "intercom.contacts.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."intercom.contacts.delete".rate_limit]
+max = 100
+per_ms = 60000
+burst = 15
+pool_name = "intercom.contacts.delete"
 
 [provides.operations."intercom.contacts.delete".input_schema]
 required = ["contact_id"]
@@ -168,6 +184,13 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."intercom.contacts.list".rate_limit]
+max = 500
+per_ms = 60000
+burst = 50
+pool_name = "intercom.contacts.read"
 
 [provides.operations."intercom.contacts.list".input_schema]
 required = []
@@ -225,6 +248,13 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."intercom.conversations.list".rate_limit]
+max = 500
+per_ms = 60000
+burst = 50
+pool_name = "intercom.conversations.read"
 
 [provides.operations."intercom.conversations.list".input_schema]
 required = []
@@ -275,6 +305,13 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."intercom.conversations.reply".rate_limit]
+max = 100
+per_ms = 60000
+burst = 15
+pool_name = "intercom.conversations.write"
 
 [provides.operations."intercom.conversations.reply".input_schema]
 required = [
@@ -335,6 +372,13 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."intercom.tags.list".rate_limit]
+max = 100
+per_ms = 60000
+burst = 10
+pool_name = "intercom.tags.read"
 
 [provides.operations."intercom.tags.list".input_schema]
 required = []
@@ -367,9 +411,7 @@ max_response_bytes = 1048576
 
 [provides.operations."intercom.tags.list".ai_hints]
 when_to_use = "List available tags."
-common_mistakes = [
-    "Assuming tag names are unique — Intercom allows duplicate tag names; always use the tag ID for subsequent operations.",
-]
+common_mistakes = ["Assuming tag names are unique — Intercom allows duplicate tag names; always use the tag ID for subsequent operations."]
 examples = ["{}"]
 related = ["intercom.contacts.list"]
 
@@ -401,6 +443,13 @@ burst = 15
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "intercom.contacts.delete"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "intercom.conversations.read"
 requests = 500
 window_ms = 60000
@@ -422,9 +471,9 @@ burst = 10
 scope = "instance"
 
 [rate_limits.operation_pools]
-"intercom.conversations.reply" = ["intercom.conversations.write"]
-"intercom.contacts.list" = ["intercom.contacts.read"]
-"intercom.tags.list" = ["intercom.tags.read"]
-"intercom.contacts.delete" = ["intercom.contacts.write"]
-"intercom.contacts.create" = ["intercom.contacts.write"]
 "intercom.conversations.list" = ["intercom.conversations.read"]
+"intercom.contacts.delete" = ["intercom.contacts.delete"]
+"intercom.conversations.reply" = ["intercom.conversations.write"]
+"intercom.contacts.create" = ["intercom.contacts.write"]
+"intercom.tags.list" = ["intercom.tags.read"]
+"intercom.contacts.list" = ["intercom.contacts.read"]

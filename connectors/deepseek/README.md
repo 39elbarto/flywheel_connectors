@@ -1,8 +1,9 @@
 # DeepSeek Connector V3 Contract
 
-> **Status**: PROVEN manifest/runtime contract documented
+> **Status**: PROVEN manifest-derived runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
+> **Interface hash**: `blake3-256:fcp.interface.v2:a2d5c2ff83484ed0e81fce9363edaafe7b2e0ff22bca65ec3e35b3e4538b588f`
 > **Verification script**: `scripts/e2e/deepseek_connector_verification.sh`
 > **Primary upstream**: https://api-docs.deepseek.com/
 
@@ -37,6 +38,7 @@ Important runtime truths the contract preserves:
 - SSE chat streaming assembles `reasoning_content` and final `content` separately and records only delta byte counts in chunk metadata.
 - FCP subscribe is not implemented; streaming is a bounded invoke operation.
 - Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+- Runtime introspection derives operation descriptions, schemas, capabilities, safety, risk, idempotency, approval mode, rate-limit metadata, and AI hints from the embedded manifest while preserving the five-operation order below.
 
 ## First-Slice Scope
 
@@ -127,6 +129,7 @@ These are excluded on purpose:
 - explicit reasoning redaction policy
 - model-list probe health metadata
 - operation schemas, safety, risk, idempotency, and AI hints
+- manifest-derived runtime operation metadata parity
 - deterministic denial for unsupported embeddings
 
 The deterministic integration evidence is anchored on WireMock loopback runs covering:

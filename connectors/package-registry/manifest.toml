@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:c21df258ce24502e59023ecb09be4bff6b4990bf5f9c4dbfc35fae44d14da908"
+interface_hash = "blake3-256:fcp.interface.v2:3c8305f3a0231c8f86ce391e9f62079270a857bc27b3206e69991c0ae8290c6e"
 
 [connector]
 id = "fcp.package-registry"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "Provider-bound package registry metadata connector for npm, PyPI, and crates.io"
 archetypes = ["operational"]
 format = "native"
+status = "ready"
 
 [connector.state]
 model = "stateless"
@@ -38,7 +39,14 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "registry.search",
+    "registry.packages.read",
+    "registry.versions.read",
+    "registry.dependencies.read",
+    "registry.artifacts.read",
+    "registry.downloads.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",
@@ -52,6 +60,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."registry.artifacts.list".input_schema]
 required = ["name"]
@@ -119,6 +128,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."registry.dependencies.get".input_schema]
 required = ["name"]
@@ -189,6 +199,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."registry.downloads.get".input_schema]
 required = ["name"]
@@ -249,6 +260,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."registry.health".input_schema]
 type = "object"
@@ -301,6 +313,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."registry.packages.get".input_schema]
 required = ["name"]
@@ -360,6 +373,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."registry.search".input_schema]
 required = ["query"]
@@ -416,7 +430,10 @@ max_response_bytes = 1048576
 [provides.operations."registry.search".ai_hints]
 when_to_use = "Use when you need npm or crates.io package discovery for a text query."
 common_mistakes = ["PyPI search is intentionally unsupported in the first slice."]
-examples = ['{"query":"serde","limit":5,"page":1}']
+examples = [
+    '{"query":"serde","limit":5,"page":1}',
+    '{"query":"react","limit":10,"page":2}',
+]
 related = ["registry.packages.get"]
 
 [provides.operations."registry.versions.list"]
@@ -426,6 +443,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."registry.versions.list".input_schema]
 required = ["name"]

@@ -3,10 +3,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+    ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, SelfCheckReport, StepId,
     log_redaction::redact_url,
 };
 use reqwest::Url;
@@ -22,6 +22,25 @@ use crate::{
         tool_name_collides_with_builtin,
     },
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+const OP_TOOLS_LIST: &str = "mcp.tools.list";
+const OP_TOOLS_CALL: &str = "mcp.tools.call";
+const OP_RESOURCES_LIST: &str = "mcp.resources.list";
+const OP_RESOURCES_READ: &str = "mcp.resources.read";
+const OP_PROMPTS_LIST: &str = "mcp.prompts.list";
+const OP_SAMPLING_HANDLE: &str = "mcp.sampling.handle";
+const OP_SERVER_METRICS: &str = "mcp.server.metrics";
+const OPERATION_ORDER: [&str; 7] = [
+    OP_TOOLS_LIST,
+    OP_TOOLS_CALL,
+    OP_RESOURCES_LIST,
+    OP_RESOURCES_READ,
+    OP_PROMPTS_LIST,
+    OP_SAMPLING_HANDLE,
+    OP_SERVER_METRICS,
+];
 
 /// Parsed and validated MCP Bridge connector configuration.
 #[derive(Debug, Clone)]
@@ -426,13 +445,13 @@ impl McpBridgeConnector {
         })?;
 
         let result = match operation {
-            "mcp.tools.list" => self.invoke_tools_list(client).await,
-            "mcp.tools.call" => self.invoke_tools_call(client, &input).await,
-            "mcp.resources.list" => self.invoke_resources_list(client).await,
-            "mcp.resources.read" => self.invoke_resources_read(client, &input).await,
-            "mcp.prompts.list" => self.invoke_prompts_list(client).await,
-            "mcp.sampling.handle" => self.invoke_sampling_handle(&input).await,
-            "mcp.server.metrics" => self.invoke_server_metrics(client).await,
+            OP_TOOLS_LIST => self.invoke_tools_list(client).await,
+            OP_TOOLS_CALL => self.invoke_tools_call(client, &input).await,
+            OP_RESOURCES_LIST => self.invoke_resources_list(client).await,
+            OP_RESOURCES_READ => self.invoke_resources_read(client, &input).await,
+            OP_PROMPTS_LIST => self.invoke_prompts_list(client).await,
+            OP_SAMPLING_HANDLE => self.invoke_sampling_handle(&input).await,
+            OP_SERVER_METRICS => self.invoke_server_metrics(client).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -872,179 +891,57 @@ fn max_severity_label(findings: &[crate::security::InjectionFinding]) -> &'stati
 
 /// Build typed operations info for introspection.
 fn typed_operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static("mcp.tools.list"),
-            summary: "List available tools from the MCP server".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {}}),
-            output_schema: json!({"type": "object", "properties": {"tools": {"type": "array"}}}),
-            capability: CapabilityId::from_static("mcp.tools.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to discover what tools are available on the MCP server".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("mcp.tools.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("mcp.tools.call"),
-            summary: "Call a tool on the MCP server".into(),
-            description: None,
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "arguments": {"type": "object"},
-                },
-                "required": ["name", "arguments"],
-            }),
-            output_schema: json!({"type": "object", "properties": {"content": {"type": "array"}}}),
-            capability: CapabilityId::from_static("mcp.tools.write"),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use to invoke a specific tool on the MCP server by name".into(),
-                common_mistakes: vec![
-                    "Not providing the tool name".into(),
-                    "Passing non-object arguments".into(),
-                ],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("mcp.tools.write")],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Policy),
-        },
-        OperationInfo {
-            id: OperationId::from_static("mcp.resources.list"),
-            summary: "List available resources from the MCP server".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {}}),
-            output_schema: json!({"type": "object", "properties": {"resources": {"type": "array"}}}),
-            capability: CapabilityId::from_static("mcp.resources.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to discover available resources on the MCP server".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("mcp.resources.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("mcp.resources.read"),
-            summary: "Read a resource by URI from the MCP server".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"uri": {"type": "string"}}, "required": ["uri"]}),
-            output_schema: json!({"type": "object", "properties": {"contents": {"type": "array"}}}),
-            capability: CapabilityId::from_static("mcp.resources.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to read a specific resource by its URI".into(),
-                common_mistakes: vec!["Using an invalid resource URI".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("mcp.resources.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("mcp.prompts.list"),
-            summary: "List available prompts from the MCP server".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {}}),
-            output_schema: json!({"type": "object", "properties": {"prompts": {"type": "array"}}}),
-            capability: CapabilityId::from_static("mcp.prompts.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to discover available prompt templates on the MCP server".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("mcp.prompts.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("mcp.sampling.handle"),
-            summary: "Convert an MCP sampling/createMessage request into an FCP event fallback"
-                .into(),
-            description: None,
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "request": {"type": "object"},
-                    "params": {"type": "object"}
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "event": {"type": "string"},
-                    "dispatch": {"type": "string"},
-                    "request": {"type": "object"}
-                }
-            }),
-            capability: CapabilityId::from_static("mcp.sampling.handle"),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use when an MCP server returns a sampling/createMessage request and sampling is explicitly enabled".into(),
-                common_mistakes: vec![
-                    "Treating sampling as direct connector-to-connector dispatch; this operation returns an event fallback for host or agent orchestration".into(),
-                    "Logging prompt or response content from the sampling request".into(),
-                ],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("mcp.sampling.handle")],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Policy),
-        },
-        OperationInfo {
-            id: OperationId::from_static("mcp.server.metrics"),
-            summary: "Return MCP bridge security, retry, and sampling counters".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {}}),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "requests": {"type": "integer"},
-                    "errors": {"type": "integer"},
-                    "injection_scans": {"type": "integer"},
-                    "injection_findings": {"type": "integer"},
-                    "sampling_requests": {"type": "integer"},
-                    "auth_retries": {"type": "integer"},
-                    "session_expired_retries": {"type": "integer"}
-                }
-            }),
-            capability: CapabilityId::from_static("mcp.server.metrics"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to inspect MCP bridge retry, session, sampling, and description-scan counters".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("mcp.server.metrics")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-    ]
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded MCP Bridge manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 /// Build the operations info for introspection (JSON format for simulate).
@@ -1132,6 +1029,10 @@ fn is_local_test_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strict_mcp_bridge_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
 
     #[test]
     fn config_from_valid_params() {
@@ -1280,6 +1181,86 @@ mod tests {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 7);
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_mcp_bridge_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn operations_info_json_exposes_manifest_approval_modes() {
+        let ops = operations_info();
+        let tool_call_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_TOOLS_CALL))
+            .unwrap();
+        let sampling_handle_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_SAMPLING_HANDLE))
+            .unwrap();
+
+        assert_eq!(tool_call_op["requires_approval"], "policy");
+        assert_eq!(sampling_handle_op["requires_approval"], "policy");
     }
 
     #[test]

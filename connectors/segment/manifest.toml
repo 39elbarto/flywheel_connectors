@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:da57c87547312a614bf0b60535fafa124f275ef0baf43cf52ca2dc74c4269acd"
 
 [connector]
 id = "fcp.segment"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Segment CDP (sources, destinations, tracking)"
 archetypes = ["operational"]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "singleton_writer"
@@ -59,6 +60,13 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."segment.destinations.list".rate_limit]
+max = 200
+per_ms = 60000
+burst = 20
+pool_name = "segment.destinations.read"
 
 [provides.operations."segment.destinations.list".input_schema]
 required = ["source_id"]
@@ -110,6 +118,13 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."segment.sources.list".rate_limit]
+max = 200
+per_ms = 60000
+burst = 20
+pool_name = "segment.sources.read"
 
 [provides.operations."segment.sources.list".input_schema]
 required = []
@@ -160,6 +175,13 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."segment.track".rate_limit]
+max = 500
+per_ms = 60000
+burst = 50
+pool_name = "segment.track.write"
 
 [provides.operations."segment.track".input_schema]
 required = [
@@ -250,6 +272,6 @@ burst = 50
 scope = "instance"
 
 [rate_limits.operation_pools]
+"segment.destinations.list" = ["segment.destinations.read"]
 "segment.track" = ["segment.track.write"]
 "segment.sources.list" = ["segment.sources.read"]
-"segment.destinations.list" = ["segment.destinations.read"]

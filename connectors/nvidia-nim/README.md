@@ -5,6 +5,7 @@
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
 > **Primary upstream**: https://docs.nvidia.com/nim/large-language-models/latest/reference/api-reference.html
+> **Manifest interface hash**: `blake3-256:fcp.interface.v2:4dd9602867dd19214ebb4dbccc6385b65357296861d305f1f8a5db329aed2ddf`
 
 ## Purpose
 
@@ -52,6 +53,7 @@ Important runtime truths the contract preserves:
 - `nvidia_nim.models.list` uses `GET /v1/models` and supports `{"refresh": true}` to invalidate the in-memory cache.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `nvidia_nim.chat.completions_stream`.
 - Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+- Runtime introspection derives operation descriptions, schemas, capabilities, safety, risk, idempotency, approval mode, rate-limit metadata, and AI hints from the embedded manifest while preserving the six-operation dispatch order.
 
 ## First-Slice Scope
 
@@ -197,6 +199,7 @@ There is no dedicated tracked `scripts/e2e/nvidia_nim_connector_verification.sh`
 The verification surface captures:
 
 - manifest/runtime contract tests
+- manifest-derived runtime operation metadata parity
 - deterministic WireMock integration coverage
 - optional hosted NVIDIA smoke with structured skip if credentials are absent
 - base URL, deployment mode, auth, allowed-host, chat, streaming, embeddings, rerank, model-list, health, rate-limit, cancellation, and redaction tests

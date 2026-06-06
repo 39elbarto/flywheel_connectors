@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
-    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
-    StepId,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, Introspection,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, SelfCheckReport, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,23 @@ use crate::{
     client::{DEFAULT_BASE_URL, IntercomAuth, IntercomClient},
     error::IntercomError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+const OP_CONTACTS_LIST: &str = "intercom.contacts.list";
+const OP_CONTACTS_CREATE: &str = "intercom.contacts.create";
+const OP_CONTACTS_DELETE: &str = "intercom.contacts.delete";
+const OP_CONVERSATIONS_LIST: &str = "intercom.conversations.list";
+const OP_CONVERSATIONS_REPLY: &str = "intercom.conversations.reply";
+const OP_TAGS_LIST: &str = "intercom.tags.list";
+const OPERATION_ORDER: [&str; 6] = [
+    OP_CONTACTS_LIST,
+    OP_CONTACTS_CREATE,
+    OP_CONTACTS_DELETE,
+    OP_CONVERSATIONS_LIST,
+    OP_CONVERSATIONS_REPLY,
+    OP_TAGS_LIST,
+];
 
 /// Parsed and validated `Intercom` connector configuration.
 #[derive(Debug, Clone)]
@@ -363,203 +380,7 @@ impl IntercomConnector {
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations: vec![
-                OperationInfo {
-                    id: OperationId::from_static("intercom.contacts.list"),
-                    summary: "List or search contacts".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": [],
-                        "properties": {
-                            "per_page": {"type": "integer", "maximum": 150},
-                            "starting_after": {"type": "string", "description": "Cursor for the next page of results"},
-                            "query": {"type": "object", "description": "Search query object"}
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["data"],
-                        "properties": {"data": {"type": "array"}}
-                    }),
-                    capability: CapabilityId::from_static("intercom.contacts.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List or search Intercom contacts.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"per_page": 50}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("intercom.contacts.create"),
-                            CapabilityId::from_static("intercom.conversations.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("intercom.contacts.create"),
-                    summary: "Create a contact (lead or user)".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["role"],
-                        "properties": {
-                            "role": {"type": "string", "description": "lead or user"},
-                            "email": {"type": "string"},
-                            "name": {"type": "string"}
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["id"],
-                        "properties": {"id": {"type": "string"}}
-                    }),
-                    capability: CapabilityId::from_static("intercom.contacts.write"),
-                    risk_level: RiskLevel::Medium,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Risky,
-                    idempotency: IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "Create a new contact.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"role": "user", "email": "alice@example.com", "name": "Alice Smith"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("intercom.contacts.list"),
-                            CapabilityId::from_static("intercom.contacts.delete"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("intercom.contacts.delete"),
-                    summary: "Delete a contact".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["contact_id"],
-                        "properties": {"contact_id": {"type": "string"}}
-                    }),
-                    output_schema: json!({"type": "object"}),
-                    // br-5g8rj: split destructive contacts.delete behind
-                    // its own capability id. Pre-fix used the generic
-                    // intercom.contacts.write (same id as
-                    // contacts.create), so a token issued to a
-                    // create/update workflow could ALSO delete contacts —
-                    // RiskLevel::High + SafetyTier::Dangerous +
-                    // irreversible. Holders that legitimately need
-                    // delete semantics must request the dedicated
-                    // capability explicitly.
-                    capability: CapabilityId::from_static("intercom.contacts.delete"),
-                    risk_level: RiskLevel::High,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Dangerous,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "Delete a contact. Cannot be undone.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"contact_id": "abc123"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("intercom.contacts.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("intercom.conversations.list"),
-                    summary: "List conversations".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": [],
-                        "properties": {
-                            "per_page": {"type": "integer", "maximum": 150}
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["conversations"],
-                        "properties": {"conversations": {"type": "array"}}
-                    }),
-                    capability: CapabilityId::from_static("intercom.conversations.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List conversations.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"per_page": 50}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("intercom.conversations.reply"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("intercom.conversations.reply"),
-                    summary: "Reply to a conversation".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["conversation_id", "body", "message_type"],
-                        "properties": {
-                            "conversation_id": {"type": "string"},
-                            "body": {"type": "string"},
-                            "message_type": {"type": "string", "description": "comment or note"}
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["id"],
-                        "properties": {"id": {"type": "string"}}
-                    }),
-                    capability: CapabilityId::from_static("intercom.conversations.write"),
-                    risk_level: RiskLevel::Medium,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Risky,
-                    idempotency: IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "Reply to an existing conversation.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"conversation_id": "abc123", "body": "Thanks for reaching out!", "message_type": "comment"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("intercom.conversations.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("intercom.tags.list"),
-                    summary: "List all tags".into(),
-                    input_schema: json!({"type": "object", "required": []}),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["data"],
-                        "properties": {"data": {"type": "array"}}
-                    }),
-                    capability: CapabilityId::from_static("intercom.tags.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List available tags.".into(),
-                        common_mistakes: vec![],
-                        examples: vec!["{}".into()],
-                        related: vec![
-                            CapabilityId::from_static("intercom.contacts.list"),
-                        ],
-                    },
-                },
-            ],
+            operations: typed_operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -620,10 +441,9 @@ impl IntercomConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = typed_operations_info()
+            .iter()
+            .any(|known| known.id.as_str() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -861,59 +681,56 @@ fn is_local_test_host(host: &str) -> bool {
 }
 
 /// Build the operations info for introspection.
+fn typed_operations_info() -> Vec<OperationInfo> {
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
 fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "intercom.contacts.list",
-            "summary": "List or search contacts",
-            "capability": "intercom.contacts.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "intercom.contacts.create",
-            "summary": "Create a contact (lead or user)",
-            "capability": "intercom.contacts.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "intercom.contacts.delete",
-            "summary": "Delete a contact",
-            // br-5g8rj: dedicated capability for irreversible delete —
-            // mirrors the introspect-side OperationInfo at line ~441.
-            "capability": "intercom.contacts.delete",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-        {
-            "id": "intercom.conversations.list",
-            "summary": "List conversations",
-            "capability": "intercom.conversations.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "intercom.conversations.reply",
-            "summary": "Reply to a conversation",
-            "capability": "intercom.conversations.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "intercom.tags.list",
-            "summary": "List all tags",
-            "capability": "intercom.tags.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+    serde_json::to_value(typed_operations_info())
+        .expect("manifest-derived Intercom operations should serialize")
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Intercom manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: Some(ApprovalMode::from(operation.requires_approval)),
+    }
 }
 
 #[cfg(test)]
@@ -1033,6 +850,114 @@ mod tests {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 6);
+    }
+
+    #[test]
+    fn introspection_operations_preserve_runtime_order() {
+        let ops = typed_operations_info();
+        let ids: Vec<&str> = ops.iter().map(|operation| operation.id.as_str()).collect();
+        assert_eq!(ids, OPERATION_ORDER);
+    }
+
+    fn strict_intercom_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_intercom_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                Some(ApprovalMode::from(manifest_operation.requires_approval))
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn operations_info_json_exposes_manifest_approval_modes_and_rate_limits() {
+        let ops = operations_info();
+        let create = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["id"] == OP_CONTACTS_CREATE)
+            .unwrap();
+        let delete = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["id"] == OP_CONTACTS_DELETE)
+            .unwrap();
+        let list = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["id"] == OP_CONTACTS_LIST)
+            .unwrap();
+
+        assert_eq!(create["requires_approval"], "policy");
+        assert_eq!(delete["requires_approval"], "interactive");
+        assert_eq!(list["requires_approval"], "none");
+        assert_eq!(delete["capability"], "intercom.contacts.delete");
+        assert_eq!(create["rate_limit"]["max"], 100);
+        assert_eq!(delete["rate_limit"]["max"], 100);
+        assert_eq!(list["rate_limit"]["max"], 500);
+        assert_eq!(create["rate_limit"]["pool_name"], "intercom.contacts.write");
+        assert_eq!(
+            delete["rate_limit"]["pool_name"],
+            "intercom.contacts.delete"
+        );
+        assert_eq!(list["rate_limit"]["pool_name"], "intercom.contacts.read");
     }
 
     #[test]
@@ -1414,9 +1339,8 @@ mod tests {
 
     /// br-5g8rj: contacts.delete must require a DEDICATED capability,
     /// not the generic contacts.write shared with create/update.
-    /// Locks in the split across BOTH the introspection-side
-    /// `OperationInfo` and the `operations_info()` JSON metadata
-    /// builder so a future regression that re-conflates them is
+    /// Locks in the split through the manifest-derived operation
+    /// catalog so a future regression that re-conflates them is
     /// caught at test time.
     #[test]
     fn operations_contacts_delete_has_dedicated_capability() {
@@ -1436,7 +1360,7 @@ mod tests {
         assert_eq!(delete["risk_level"], "high");
         assert_eq!(delete["safety_tier"], "dangerous");
 
-        // create still routes through generic write — only delete
+        // create still routes through generic write; only delete
         // is split out.
         let create = arr
             .iter()

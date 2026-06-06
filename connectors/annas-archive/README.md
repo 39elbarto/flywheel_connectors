@@ -4,6 +4,7 @@
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
+> **Manifest interface hash**: `blake3-256:fcp.interface.v2:db7bf04b86cf5f71d645b32a0cda556c2093f6e4cae88e46f117bdb66dc79a68`
 > **Primary upstream**: https://annas-archive.org
 
 ## Purpose
@@ -33,6 +34,7 @@ Important runtime truths the contract preserves:
 - `annas.metadata` calls `GET /md5/{md5}`.
 - `annas.lookup.isbn` calls `GET /isbn/{isbn}`.
 - `annas.lookup.md5` calls `GET /md5/{md5}`.
+- Runtime introspection derives operation descriptions, schemas, capabilities, safety, risk, idempotency, approval mode, rate-limit metadata, and AI hints from the embedded manifest while preserving the four-operation order above.
 - Search input requires `query`; `lang`, `ext`, and `sort` are optional strings.
 - Metadata and MD5 lookup require `md5`.
 - ISBN lookup requires `isbn`.
@@ -120,7 +122,7 @@ These are excluded on purpose:
 - request and error counters
 - no-auth posture
 - connector ID and version
-- four operation descriptors with capability, risk, safety tier, idempotency, schemas, and AI hints
+- four manifest-derived operation descriptors with capability, risk, safety tier, idempotency, approval mode, rate-limit metadata, schemas, and AI hints
 - simulation denial for unsupported operation IDs
 
 The deterministic integration evidence is anchored on connector-local tests covering:
@@ -148,7 +150,7 @@ There is no dedicated tracked `scripts/e2e/annas_archive_connector_verification.
 
 The verification surface captures:
 
-- manifest/runtime operation agreement
+- manifest-derived runtime operation metadata agreement
 - deterministic HTTP coverage for all four operations
 - no-auth lifecycle behavior
 - input validation, provider error, lifecycle, and introspection tests

@@ -143,7 +143,11 @@ async fn live_customers_list() {
 
     let mut connector = fcp_stripe::connector::StripeConnector::new();
     let signing_key = setup_live_connector(&mut connector, &key).await;
-    let capability = generate_read_token(&signing_key, connector.instance_id(), "stripe.list_customers");
+    let capability = generate_read_token(
+        &signing_key,
+        connector.instance_id(),
+        "stripe.list_customers",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -206,7 +210,11 @@ async fn live_error_mapping_invalid_key() {
         .await
         .expect("handshake should succeed");
 
-    let capability = generate_read_token(&signing_key, connector.instance_id(), "stripe.list_customers");
+    let capability = generate_read_token(
+        &signing_key,
+        connector.instance_id(),
+        "stripe.list_customers",
+    );
 
     let err = connector
         .handle_invoke(json!({

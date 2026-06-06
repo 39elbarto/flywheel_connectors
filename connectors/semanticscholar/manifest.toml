@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:41ca4a7335120b027bb854512fe92aa0ff723a1d18f487771afb406300040086"
+interface_hash = "blake3-256:fcp.interface.v2:9855d04c8c3d3c6e42a12dc950c3c667e14f4d35db8f653fb0812cf2b5c2acbe"
 
 [connector]
 id = "fcp.semanticscholar"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Semantic Scholar academic paper search and citation graph"
 archetypes = ["knowledge"]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "stateless"
@@ -57,6 +58,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."semanticscholar.author.get".input_schema]
 required = ["author_id"]
@@ -112,6 +114,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."semanticscholar.author.papers".input_schema]
 required = ["author_id"]
@@ -165,6 +168,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."semanticscholar.paper.citations".input_schema]
 required = ["paper_id"]
@@ -221,6 +225,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."semanticscholar.paper.get".input_schema]
 required = ["paper_id"]
@@ -280,6 +285,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."semanticscholar.paper.recommendations".input_schema]
 required = ["paper_id"]
@@ -333,6 +339,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."semanticscholar.paper.references".input_schema]
 required = ["paper_id"]
@@ -389,6 +396,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."semanticscholar.paper.search".input_schema]
 required = ["query"]
@@ -474,10 +482,10 @@ burst = 10
 scope = "instance"
 
 [rate_limits.operation_pools]
-"semanticscholar.author.papers" = ["semanticscholar.authors.read"]
-"semanticscholar.paper.recommendations" = ["semanticscholar.papers.read"]
-"semanticscholar.paper.references" = ["semanticscholar.papers.read"]
-"semanticscholar.author.get" = ["semanticscholar.authors.read"]
-"semanticscholar.paper.get" = ["semanticscholar.papers.read"]
-"semanticscholar.paper.search" = ["semanticscholar.papers.read"]
 "semanticscholar.paper.citations" = ["semanticscholar.papers.read"]
+"semanticscholar.paper.recommendations" = ["semanticscholar.papers.read"]
+"semanticscholar.author.get" = ["semanticscholar.authors.read"]
+"semanticscholar.paper.references" = ["semanticscholar.papers.read"]
+"semanticscholar.paper.search" = ["semanticscholar.papers.read"]
+"semanticscholar.paper.get" = ["semanticscholar.papers.read"]
+"semanticscholar.author.papers" = ["semanticscholar.authors.read"]

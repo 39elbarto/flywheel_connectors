@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:9c27229d93e604f61542819d0a7e5ddac9609d79f2347184f08b3292e80dd3e5"
+interface_hash = "blake3-256:fcp.interface.v2:dc5a33ed3ff789e7f10cc4e60981751c813c63be823c0f60c855367158d17b3a"
 
 [connector]
 id = "fcp.cloudflare"
@@ -17,6 +17,7 @@ archetypes = [
     "storage",
 ]
 format = "native"
+status = "ready"
 
 [connector.state]
 model = "stateless"
@@ -42,7 +43,17 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "cloudflare.zones.read",
+    "cloudflare.dns.read",
+    "cloudflare.dns.write",
+    "cloudflare.workers.read",
+    "cloudflare.workers.write",
+    "cloudflare.pages.read",
+    "cloudflare.pages.write",
+    "cloudflare.kv.read",
+    "cloudflare.kv.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",
@@ -56,6 +67,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.dns.create_record".input_schema]
 required = [
@@ -169,6 +181,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.dns.delete_record".input_schema]
 required = [
@@ -232,6 +245,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.dns.list_records".input_schema]
 required = ["zone_id"]
@@ -340,6 +354,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.dns.update_record".input_schema]
 required = [
@@ -448,6 +463,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.health".input_schema]
 type = "object"
@@ -500,6 +516,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.kv.delete".input_schema]
 required = [
@@ -548,6 +565,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.kv.get".input_schema]
 required = [
@@ -603,6 +621,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.kv.put".input_schema]
 required = [
@@ -658,6 +677,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.pages.create_deployment".input_schema]
 required = [
@@ -737,6 +757,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.pages.list_projects".input_schema]
 type = "object"
@@ -806,6 +827,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.workers.delete".input_schema]
 required = ["script_name"]
@@ -860,6 +882,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.workers.deploy".input_schema]
 required = [
@@ -936,6 +959,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.workers.get".input_schema]
 required = ["script_name"]
@@ -1000,6 +1024,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.workers.list".input_schema]
 type = "object"
@@ -1063,6 +1088,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."cloudflare.zones.list".input_schema]
 type = "object"

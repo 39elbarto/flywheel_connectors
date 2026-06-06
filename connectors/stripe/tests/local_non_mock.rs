@@ -53,9 +53,7 @@ impl ObservedStripeRequest {
         body.split('&')
             .filter(|pair| !pair.is_empty())
             .map(|pair| {
-                let (key, value) = pair
-                    .split_once('=')
-                    .expect("form pair should contain '='");
+                let (key, value) = pair.split_once('=').expect("form pair should contain '='");
                 (
                     percent_encoding::percent_decode_str(key)
                         .decode_utf8()

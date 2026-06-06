@@ -2,12 +2,12 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::prelude::*;
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
@@ -26,6 +26,15 @@ const OP_DEPENDENCIES_GET: &str = "registry.dependencies.get";
 const OP_ARTIFACTS_LIST: &str = "registry.artifacts.list";
 const OP_DOWNLOADS_GET: &str = "registry.downloads.get";
 const OP_HEALTH: &str = "registry.health";
+const OPERATION_ORDER: [&str; 7] = [
+    OP_SEARCH,
+    OP_PACKAGES_GET,
+    OP_VERSIONS_LIST,
+    OP_DEPENDENCIES_GET,
+    OP_ARTIFACTS_LIST,
+    OP_DOWNLOADS_GET,
+    OP_HEALTH,
+];
 
 const CAP_SEARCH: &str = "registry.search";
 const CAP_PACKAGES_READ: &str = "registry.packages.read";
@@ -365,257 +374,58 @@ fn auth_mode_message(config: &PackageRegistryConfig) -> String {
     }
 }
 
-struct OperationSpec {
-    id: &'static str,
-    summary: &'static str,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    when_to_use: &'static str,
-}
-
 #[must_use]
 pub fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        operation_info(OperationSpec {
-            id: OP_SEARCH,
-            summary: "Search packages on the configured registry provider",
-            capability: CAP_SEARCH,
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            input_schema: json!({
-                "type": "object",
-                "required": ["query"],
-                "properties": {
-                    "query": { "type": "string" },
-                    "limit": { "type": "integer", "default": 20 },
-                    "page": { "type": "integer", "default": 1 }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "provider": { "type": "string" },
-                    "query": { "type": "string" },
-                    "results": { "type": "array" }
-                }
-            }),
-            when_to_use: "When you need to search npm or crates.io for packages matching a query",
-        }),
-        operation_info(OperationSpec {
-            id: OP_PACKAGES_GET,
-            summary: "Get package metadata",
-            capability: CAP_PACKAGES_READ,
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            input_schema: json!({
-                "type": "object",
-                "required": ["name"],
-                "properties": {
-                    "name": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "provider": { "type": "string" },
-                    "name": { "type": "string" },
-                    "latest_version": { "type": ["string", "null"] }
-                }
-            }),
-            when_to_use: "When you need package-level metadata, links, ownership hints, and release summary",
-        }),
-        operation_info(OperationSpec {
-            id: OP_VERSIONS_LIST,
-            summary: "List package versions or releases",
-            capability: CAP_VERSIONS_READ,
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            input_schema: json!({
-                "type": "object",
-                "required": ["name"],
-                "properties": {
-                    "name": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "provider": { "type": "string" },
-                    "name": { "type": "string" },
-                    "versions": { "type": "array" }
-                }
-            }),
-            when_to_use: "When you need release history, dist-tags, yanked state, or version metadata",
-        }),
-        operation_info(OperationSpec {
-            id: OP_DEPENDENCIES_GET,
-            summary: "Get dependency metadata for a version",
-            capability: CAP_DEPENDENCIES_READ,
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            input_schema: json!({
-                "type": "object",
-                "required": ["name"],
-                "properties": {
-                    "name": { "type": "string" },
-                    "version": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "provider": { "type": "string" },
-                    "name": { "type": "string" },
-                    "version": { "type": "string" },
-                    "dependencies": { "type": "array" }
-                }
-            }),
-            when_to_use: "When you need dependency declarations for a selected package version",
-        }),
-        operation_info(OperationSpec {
-            id: OP_ARTIFACTS_LIST,
-            summary: "List release files or artifact metadata",
-            capability: CAP_ARTIFACTS_READ,
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            input_schema: json!({
-                "type": "object",
-                "required": ["name"],
-                "properties": {
-                    "name": { "type": "string" },
-                    "version": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "provider": { "type": "string" },
-                    "name": { "type": "string" },
-                    "version": { "type": "string" },
-                    "artifacts": { "type": "array" }
-                }
-            }),
-            when_to_use: "When you need tarball, wheel, sdist, or crate metadata without downloading bodies",
-        }),
-        operation_info(OperationSpec {
-            id: OP_DOWNLOADS_GET,
-            summary: "Get package download statistics",
-            capability: CAP_DOWNLOADS_READ,
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            input_schema: json!({
-                "type": "object",
-                "required": ["name"],
-                "properties": {
-                    "name": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "provider": { "type": "string" },
-                    "name": { "type": "string" },
-                    "points": { "type": "array" }
-                }
-            }),
-            when_to_use: "When you need provider-native package download statistics where they are supported",
-        }),
-        operation_info(OperationSpec {
-            id: OP_HEALTH,
-            summary: "Check registry provider reachability",
-            capability: CAP_PACKAGES_READ,
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "status": { "type": "string" },
-                    "provider": { "type": "string" }
-                }
-            }),
-            when_to_use: "When you need to verify that the configured registry provider is reachable",
-        }),
-    ]
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
 }
 
-fn operation_info(spec: OperationSpec) -> OperationInfo {
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded package-registry manifest should parse");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
     OperationInfo {
-        id: OperationId::from_static(spec.id),
-        summary: spec.summary.into(),
-        description: None,
-        input_schema: spec.input_schema,
-        output_schema: spec.output_schema,
-        capability: CapabilityId::from_static(spec.capability),
-        risk_level: spec.risk_level,
-        safety_tier: spec.safety_tier,
-        idempotency: spec.idempotency,
-        ai_hints: AgentHint {
-            when_to_use: spec.when_to_use.into(),
-            common_mistakes: operation_common_mistakes(spec.id),
-            examples: operation_examples(spec.id),
-            related: Vec::new(),
-        },
-        rate_limit: None,
-        requires_approval: Some(ApprovalMode::None),
-    }
-}
-
-fn operation_common_mistakes(id: &str) -> Vec<String> {
-    match id {
-        OP_SEARCH => vec![
-            "PyPI search is intentionally unsupported in the first slice; use package lookup instead.".into(),
-            "Page is 1-based for npm/crates.io pagination in this connector.".into(),
-        ],
-        OP_DEPENDENCIES_GET | OP_ARTIFACTS_LIST => vec![
-            "If version is omitted, the connector falls back to the provider's latest or max version.".into(),
-            "Artifact metadata does not download tarball, wheel, sdist, or crate bodies.".into(),
-        ],
-        OP_DOWNLOADS_GET => vec![
-            "Download statistics are only supported for crates.io in the first slice.".into(),
-        ],
-        _ => vec![
-            "This connector is provider-bound; do not expect one instance to query npm, PyPI, and crates.io simultaneously.".into(),
-        ],
-    }
-}
-
-fn operation_examples(id: &str) -> Vec<String> {
-    match id {
-        OP_SEARCH => vec![
-            r#"registry.search({"query":"serde","limit":5,"page":1})"#.into(),
-            r#"registry.search({"query":"react","limit":10,"page":2})"#.into(),
-        ],
-        OP_PACKAGES_GET => vec![
-            r#"registry.packages.get({"name":"serde"})"#.into(),
-            r#"registry.packages.get({"name":"@types/node"})"#.into(),
-        ],
-        OP_VERSIONS_LIST => vec![
-            r#"registry.versions.list({"name":"pip"})"#.into(),
-            r#"registry.versions.list({"name":"tokio"})"#.into(),
-        ],
-        OP_DEPENDENCIES_GET => vec![
-            r#"registry.dependencies.get({"name":"requests","version":"2.32.0"})"#.into(),
-            r#"registry.dependencies.get({"name":"serde","version":"1.0.228"})"#.into(),
-        ],
-        OP_ARTIFACTS_LIST => vec![
-            r#"registry.artifacts.list({"name":"sampleproject","version":"4.0.0"})"#.into(),
-            r#"registry.artifacts.list({"name":"react","version":"19.2.0"})"#.into(),
-        ],
-        OP_DOWNLOADS_GET => vec![r#"registry.downloads.get({"name":"serde"})"#.into()],
-        OP_HEALTH => vec![r#"registry.health({})"#.into()],
-        _ => Vec::new(),
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
     }
 }
 
@@ -935,6 +745,13 @@ mod tests {
     use super::*;
     use crate::types::RegistryProvider;
 
+    fn strict_package_registry_manifest() -> Result<ConnectorManifest, String> {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())?;
+        manifest.validate().map_err(|error| error.to_string())?;
+        Ok(manifest)
+    }
+
     fn configured(provider: RegistryProvider) -> PackageRegistryConnector {
         let mut connector = PackageRegistryConnector::new();
         fcp_async_core::runtime::block_on_sync(async {
@@ -953,6 +770,66 @@ mod tests {
     #[test]
     fn operations_catalog_has_expected_count() {
         assert_eq!(operations_info().len(), 7);
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_package_registry_manifest()?;
+        let operations = operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).expect("serialize runtime hints"),
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .expect("serialize manifest hints")
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]

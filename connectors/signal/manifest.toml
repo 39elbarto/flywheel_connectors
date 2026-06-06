@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = ["signal.sse"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ceaba3bd0866ba41ebab7be25020b14b0a9aa3221dbb1c1d92e079827e461545"
+interface_hash = "blake3-256:fcp.interface.v2:e3a3fb24205758ef6c6199e8236737ac6b314cbf64d26475b37e138c78c4ba7c"
 
 [connector]
 id = "fcp.signal"
@@ -18,6 +18,7 @@ archetypes = [
     "bidirectional",
 ]
 format = "native"
+status = "ready"
 
 [connector.state]
 model = "stateless"
@@ -52,20 +53,6 @@ forbidden = [
     "system.privileged",
 ]
 
-# Operator setup:
-# - Run signal-cli REST API locally with its SSE endpoint enabled, for example
-#   `signal-cli-rest-api` exposing `/api/v1/events?account=<number>`.
-# - Keep daemon_url on loopback unless an explicit external trust boundary is
-#   configured outside this connector.
-# - Direct messages default to open for parity with polling receive.
-# - Groups default to deny; set inbound_policy.group_allow_from to raw group IDs,
-#   `group:<id>`, or `signal:group:<id>` before subscribing to group events.
-
-[event_caps]
-streaming = true
-replay = false
-min_buffer_events = 100
-
 [provides.operations."signal.get_group"]
 description = "Get detailed information about a specific Signal group"
 capability = "signal.read"
@@ -73,6 +60,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."signal.get_group".input_schema]
 required = ["group_id"]
@@ -138,6 +126,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."signal.get_identity".input_schema]
 required = ["number"]
@@ -194,6 +183,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."signal.list_groups".input_schema]
 type = "object"
@@ -243,6 +233,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."signal.receive_messages".input_schema]
 type = "object"
@@ -318,6 +309,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."signal.send_message".input_schema]
 required = [
@@ -349,11 +341,11 @@ type = "array"
 type = "string"
 
 [provides.operations."signal.send_message".output_schema]
-required = ["timestamp", "coordination"]
+required = [
+    "timestamp",
+    "coordination",
+]
 type = "object"
-
-[provides.operations."signal.send_message".output_schema.properties.timestamp]
-type = "integer"
 
 [provides.operations."signal.send_message".output_schema.properties.coordination]
 description = "Redaction-safe chat coordination audit records for the send attempt"
@@ -361,6 +353,9 @@ type = "array"
 
 [provides.operations."signal.send_message".output_schema.properties.coordination.items]
 type = "object"
+
+[provides.operations."signal.send_message".output_schema.properties.timestamp]
+type = "integer"
 
 [provides.operations."signal.send_message".network_constraints]
 host_allow = [
@@ -400,6 +395,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "safe"
 
 [provides.operations."signal.trust_identity".input_schema]
 required = ["number"]
@@ -458,31 +454,40 @@ streaming = true
 replay = false
 topic = "signal.message.received"
 requires_ack = false
-schema = { type = "object", required = ["kind", "sender"], properties = { kind = { const = "message" }, sender = { type = "string" }, sender_name = { type = "string" }, timestamp = { type = "integer" }, group_id = { type = "string" }, group_name = { type = "string" }, body = { type = "string" }, quote_text = { type = "string" }, quote_author = { type = "string" } } }
 
-[provides.events."signal.reaction.received"]
-description = "Authorized reaction-only Signal event accepted after the same sender/group policy checks as message events."
-streaming = true
-replay = false
-topic = "signal.reaction.received"
-requires_ack = false
-schema = { type = "object", required = ["kind", "sender", "reaction"], properties = { kind = { const = "reaction" }, sender = { type = "string" }, group_id = { type = "string" }, reaction = { type = "object" } } }
+[provides.events."signal.message.received".schema]
+required = [
+    "kind",
+    "sender",
+]
+type = "object"
 
-[provides.events."signal.receipt.read"]
-description = "Authorized Signal read/delivery receipt surfaced by signal-cli."
-streaming = true
-replay = false
-topic = "signal.receipt.read"
-requires_ack = false
-schema = { type = "object", required = ["kind", "sender", "receipt"], properties = { kind = { const = "read_receipt" }, sender = { type = "string" }, timestamp = { type = "integer" }, receipt = { type = "object" } } }
+[provides.events."signal.message.received".schema.properties.body]
+type = "string"
 
-[provides.events."signal.typing.received"]
-description = "Authorized Signal typing indicator surfaced by signal-cli."
-streaming = true
-replay = false
-topic = "signal.typing.received"
-requires_ack = false
-schema = { type = "object", required = ["kind", "sender", "typing"], properties = { kind = { const = "typing" }, sender = { type = "string" }, group_id = { type = "string" }, typing = { type = "object" } } }
+[provides.events."signal.message.received".schema.properties.group_id]
+type = "string"
+
+[provides.events."signal.message.received".schema.properties.group_name]
+type = "string"
+
+[provides.events."signal.message.received".schema.properties.kind]
+const = "message"
+
+[provides.events."signal.message.received".schema.properties.quote_author]
+type = "string"
+
+[provides.events."signal.message.received".schema.properties.quote_text]
+type = "string"
+
+[provides.events."signal.message.received".schema.properties.sender]
+type = "string"
+
+[provides.events."signal.message.received".schema.properties.sender_name]
+type = "string"
+
+[provides.events."signal.message.received".schema.properties.timestamp]
+type = "integer"
 
 [provides.events."signal.policy.denied"]
 description = "Structured Signal policy-denial event for audit logs without message body content."
@@ -490,7 +495,108 @@ streaming = true
 replay = false
 topic = "signal.policy.denied"
 requires_ack = false
-schema = { type = "object", required = ["reason"], properties = { reason = { type = "string" }, sender = { type = "string" }, group_id = { type = "string" }, kind = { type = "string" } } }
+
+[provides.events."signal.policy.denied".schema]
+required = ["reason"]
+type = "object"
+
+[provides.events."signal.policy.denied".schema.properties.group_id]
+type = "string"
+
+[provides.events."signal.policy.denied".schema.properties.kind]
+type = "string"
+
+[provides.events."signal.policy.denied".schema.properties.reason]
+type = "string"
+
+[provides.events."signal.policy.denied".schema.properties.sender]
+type = "string"
+
+[provides.events."signal.reaction.received"]
+description = "Authorized reaction-only Signal event accepted after the same sender/group policy checks as message events."
+streaming = true
+replay = false
+topic = "signal.reaction.received"
+requires_ack = false
+
+[provides.events."signal.reaction.received".schema]
+required = [
+    "kind",
+    "sender",
+    "reaction",
+]
+type = "object"
+
+[provides.events."signal.reaction.received".schema.properties.group_id]
+type = "string"
+
+[provides.events."signal.reaction.received".schema.properties.kind]
+const = "reaction"
+
+[provides.events."signal.reaction.received".schema.properties.reaction]
+type = "object"
+
+[provides.events."signal.reaction.received".schema.properties.sender]
+type = "string"
+
+[provides.events."signal.receipt.read"]
+description = "Authorized Signal read/delivery receipt surfaced by signal-cli."
+streaming = true
+replay = false
+topic = "signal.receipt.read"
+requires_ack = false
+
+[provides.events."signal.receipt.read".schema]
+required = [
+    "kind",
+    "sender",
+    "receipt",
+]
+type = "object"
+
+[provides.events."signal.receipt.read".schema.properties.kind]
+const = "read_receipt"
+
+[provides.events."signal.receipt.read".schema.properties.receipt]
+type = "object"
+
+[provides.events."signal.receipt.read".schema.properties.sender]
+type = "string"
+
+[provides.events."signal.receipt.read".schema.properties.timestamp]
+type = "integer"
+
+[provides.events."signal.typing.received"]
+description = "Authorized Signal typing indicator surfaced by signal-cli."
+streaming = true
+replay = false
+topic = "signal.typing.received"
+requires_ack = false
+
+[provides.events."signal.typing.received".schema]
+required = [
+    "kind",
+    "sender",
+    "typing",
+]
+type = "object"
+
+[provides.events."signal.typing.received".schema.properties.group_id]
+type = "string"
+
+[provides.events."signal.typing.received".schema.properties.kind]
+const = "typing"
+
+[provides.events."signal.typing.received".schema.properties.sender]
+type = "string"
+
+[provides.events."signal.typing.received".schema.properties.typing]
+type = "object"
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
 
 [sandbox]
 profile = "strict"

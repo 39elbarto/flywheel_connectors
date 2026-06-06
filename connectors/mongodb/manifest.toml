@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:774e98368d9f1013d860cbdf2e902c2a54b8f8db5badb3da0d4f777fbb551879"
+interface_hash = "blake3-256:fcp.interface.v2:f6b6c4c4eac726ab4e036726f16d02270eb209c0d0e38556c18807b093036f8c"
 
 [connector]
 id = "fcp.mongodb"
@@ -17,11 +17,12 @@ archetypes = [
     "storage",
 ]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "Stores connection string and database context."
+migration_hint = "Stores Atlas Data API endpoint context in process memory; host credential material is injected by reference."
 
 [zones]
 home = "z:work"
@@ -44,9 +45,8 @@ required = [
     "storage.state",
 ]
 optional = [
-    "mongodb.documents.read",
-    "mongodb.databases.read",
-    "mongodb.documents.write",
+    "mongodb.read",
+    "mongodb.write",
 ]
 forbidden = [
     "system.exec",
@@ -56,12 +56,13 @@ forbidden = [
 ]
 
 [provides.operations."mongodb.aggregate"]
-description = "Run an aggregation pipeline"
-capability = "mongodb.documents.read"
+description = "Run an aggregation pipeline on a collection"
+capability = "mongodb.read"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."mongodb.aggregate".input_schema]
 required = [
@@ -89,7 +90,11 @@ type = "object"
 type = "array"
 
 [provides.operations."mongodb.aggregate".network_constraints]
-host_allow = ["*.mongodb.net"]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
 port_allow = [
     443,
     27017,
@@ -111,120 +116,20 @@ max_response_bytes = 52428800
 
 [provides.operations."mongodb.aggregate".ai_hints]
 when_to_use = "Run a MongoDB aggregation pipeline."
-common_mistakes = ["Unbounded pipelines without $limit stage."]
+common_mistakes = ["Unbounded pipelines without a $limit stage can be expensive."]
 examples = ['{"database": "mydb", "collection": "orders", "pipeline": [{"$match": {"status": "completed"}}, {"$group": {"_id": "$product", "total": {"$sum": "$amount"}}}]}']
-related = ["mongodb.documents.find"]
+related = ["mongodb.find"]
 
-[provides.operations."mongodb.collections.list"]
-description = "List collections in a database"
-capability = "mongodb.databases.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-
-[provides.operations."mongodb.collections.list".input_schema]
-required = ["database"]
-type = "object"
-
-[provides.operations."mongodb.collections.list".input_schema.properties.database]
-type = "string"
-
-[provides.operations."mongodb.collections.list".output_schema]
-required = ["collections"]
-type = "object"
-
-[provides.operations."mongodb.collections.list".output_schema.properties.collections]
-type = "array"
-
-[provides.operations."mongodb.collections.list".network_constraints]
-host_allow = ["*.mongodb.net"]
-port_allow = [
-    443,
-    27017,
-]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 1048576
-
-[provides.operations."mongodb.collections.list".ai_hints]
-when_to_use = "List collections in a database."
-common_mistakes = ["Forgetting that system collections (e.g. system.views) are included in the listing."]
-examples = ['{"database": "mydb"}']
-related = [
-    "mongodb.databases.list",
-    "mongodb.documents.find",
-]
-
-[provides.operations."mongodb.databases.list"]
-description = "List databases"
-capability = "mongodb.databases.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-
-[provides.operations."mongodb.databases.list".input_schema]
-required = []
-type = "object"
-
-[provides.operations."mongodb.databases.list".output_schema]
-required = ["databases"]
-type = "object"
-
-[provides.operations."mongodb.databases.list".output_schema.properties.databases]
-type = "array"
-
-[provides.operations."mongodb.databases.list".network_constraints]
-host_allow = ["*.mongodb.net"]
-port_allow = [
-    443,
-    27017,
-]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 1048576
-
-[provides.operations."mongodb.databases.list".ai_hints]
-when_to_use = "List available MongoDB databases."
-common_mistakes = ["Assuming all databases are visible — the authenticated user may lack listDatabases permission on some."]
-examples = ["{}"]
-related = [
-    "mongodb.collections.list",
-    "mongodb.documents.find",
-]
-
-[provides.operations."mongodb.documents.delete"]
-description = "Delete documents from a collection"
-capability = "mongodb.documents.write"
+[provides.operations."mongodb.delete_many"]
+description = "Delete multiple documents from a collection"
+capability = "mongodb.write"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
-idempotency = "strict"
+idempotency = "none"
+revocation_freshness = "safe"
 
-[provides.operations."mongodb.documents.delete".input_schema]
+[provides.operations."mongodb.delete_many".input_schema]
 required = [
     "database",
     "collection",
@@ -232,25 +137,29 @@ required = [
 ]
 type = "object"
 
-[provides.operations."mongodb.documents.delete".input_schema.properties.collection]
+[provides.operations."mongodb.delete_many".input_schema.properties.collection]
 type = "string"
 
-[provides.operations."mongodb.documents.delete".input_schema.properties.database]
+[provides.operations."mongodb.delete_many".input_schema.properties.database]
 type = "string"
 
-[provides.operations."mongodb.documents.delete".input_schema.properties.filter]
+[provides.operations."mongodb.delete_many".input_schema.properties.filter]
 description = "MongoDB query filter for documents to delete"
 type = "object"
 
-[provides.operations."mongodb.documents.delete".output_schema]
+[provides.operations."mongodb.delete_many".output_schema]
 required = ["deletedCount"]
 type = "object"
 
-[provides.operations."mongodb.documents.delete".output_schema.properties.deletedCount]
+[provides.operations."mongodb.delete_many".output_schema.properties.deletedCount]
 type = "integer"
 
-[provides.operations."mongodb.documents.delete".network_constraints]
-host_allow = ["*.mongodb.net"]
+[provides.operations."mongodb.delete_many".network_constraints]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
 port_allow = [
     443,
     27017,
@@ -270,50 +179,120 @@ connect_timeout_ms = 10000
 total_timeout_ms = 60000
 max_response_bytes = 1048576
 
-[provides.operations."mongodb.documents.delete".ai_hints]
+[provides.operations."mongodb.delete_many".ai_hints]
 when_to_use = "Delete documents matching a filter. Cannot be undone."
-common_mistakes = ["Using an empty filter — this deletes all documents."]
+common_mistakes = ["Using an empty filter deletes all documents in the collection."]
 examples = ['{"database": "mydb", "collection": "users", "filter": {"status": "inactive"}}']
-related = ["mongodb.documents.find"]
+related = ["mongodb.find"]
 
-[provides.operations."mongodb.documents.find"]
+[provides.operations."mongodb.delete_one"]
+description = "Delete a single document from a collection"
+capability = "mongodb.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mongodb.delete_one".input_schema]
+required = [
+    "database",
+    "collection",
+    "filter",
+]
+type = "object"
+
+[provides.operations."mongodb.delete_one".input_schema.properties.collection]
+type = "string"
+
+[provides.operations."mongodb.delete_one".input_schema.properties.database]
+type = "string"
+
+[provides.operations."mongodb.delete_one".input_schema.properties.filter]
+description = "MongoDB query filter for document to delete"
+type = "object"
+
+[provides.operations."mongodb.delete_one".output_schema]
+required = ["deletedCount"]
+type = "object"
+
+[provides.operations."mongodb.delete_one".output_schema.properties.deletedCount]
+type = "integer"
+
+[provides.operations."mongodb.delete_one".network_constraints]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
+port_allow = [
+    443,
+    27017,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."mongodb.delete_one".ai_hints]
+when_to_use = "Delete a single document matching a filter. Cannot be undone."
+common_mistakes = ["Using an empty filter deletes an arbitrary matching document."]
+examples = ['{"database": "mydb", "collection": "users", "filter": {"_id": "abc"}}']
+related = ["mongodb.find"]
+
+[provides.operations."mongodb.find"]
 description = "Find documents in a collection"
-capability = "mongodb.documents.read"
+capability = "mongodb.read"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.operations."mongodb.documents.find".input_schema]
+[provides.operations."mongodb.find".input_schema]
 required = [
     "database",
     "collection",
 ]
 type = "object"
 
-[provides.operations."mongodb.documents.find".input_schema.properties.collection]
+[provides.operations."mongodb.find".input_schema.properties.collection]
 type = "string"
 
-[provides.operations."mongodb.documents.find".input_schema.properties.database]
+[provides.operations."mongodb.find".input_schema.properties.database]
 type = "string"
 
-[provides.operations."mongodb.documents.find".input_schema.properties.filter]
+[provides.operations."mongodb.find".input_schema.properties.filter]
 description = "MongoDB query filter"
 type = "object"
 
-[provides.operations."mongodb.documents.find".input_schema.properties.limit]
+[provides.operations."mongodb.find".input_schema.properties.limit]
 maximum = 1000
 type = "integer"
 
-[provides.operations."mongodb.documents.find".output_schema]
+[provides.operations."mongodb.find".output_schema]
 required = ["documents"]
 type = "object"
 
-[provides.operations."mongodb.documents.find".output_schema.properties.documents]
+[provides.operations."mongodb.find".output_schema.properties.documents]
 type = "array"
 
-[provides.operations."mongodb.documents.find".network_constraints]
-host_allow = ["*.mongodb.net"]
+[provides.operations."mongodb.find".network_constraints]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
 port_allow = [
     443,
     27017,
@@ -333,49 +312,54 @@ connect_timeout_ms = 10000
 total_timeout_ms = 60000
 max_response_bytes = 52428800
 
-[provides.operations."mongodb.documents.find".ai_hints]
+[provides.operations."mongodb.find".ai_hints]
 when_to_use = "Query documents from a collection."
-common_mistakes = ["Not specifying a limit — large collections may return too many docs."]
+common_mistakes = ["Not specifying a limit; large collections may return too many documents."]
 examples = ['{"database": "mydb", "collection": "users", "filter": {"status": "active"}, "limit": 100}']
 related = [
-    "mongodb.documents.insert",
-    "mongodb.documents.delete",
+    "mongodb.insert_one",
+    "mongodb.delete_many",
 ]
 
-[provides.operations."mongodb.documents.insert"]
-description = "Insert documents into a collection"
-capability = "mongodb.documents.write"
-risk_level = "medium"
-safety_tier = "risky"
-requires_approval = "policy"
-idempotency = "none"
+[provides.operations."mongodb.find_one"]
+description = "Find a single document in a collection"
+capability = "mongodb.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.operations."mongodb.documents.insert".input_schema]
+[provides.operations."mongodb.find_one".input_schema]
 required = [
     "database",
     "collection",
-    "documents",
 ]
 type = "object"
 
-[provides.operations."mongodb.documents.insert".input_schema.properties.collection]
+[provides.operations."mongodb.find_one".input_schema.properties.collection]
 type = "string"
 
-[provides.operations."mongodb.documents.insert".input_schema.properties.database]
+[provides.operations."mongodb.find_one".input_schema.properties.database]
 type = "string"
 
-[provides.operations."mongodb.documents.insert".input_schema.properties.documents]
-type = "array"
-
-[provides.operations."mongodb.documents.insert".output_schema]
-required = ["insertedIds"]
+[provides.operations."mongodb.find_one".input_schema.properties.filter]
+description = "MongoDB query filter"
 type = "object"
 
-[provides.operations."mongodb.documents.insert".output_schema.properties.insertedIds]
-type = "array"
+[provides.operations."mongodb.find_one".output_schema]
+required = ["document"]
+type = "object"
 
-[provides.operations."mongodb.documents.insert".network_constraints]
-host_allow = ["*.mongodb.net"]
+[provides.operations."mongodb.find_one".output_schema.properties.document]
+type = "object"
+
+[provides.operations."mongodb.find_one".network_constraints]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
 port_allow = [
     443,
     27017,
@@ -395,14 +379,297 @@ connect_timeout_ms = 10000
 total_timeout_ms = 60000
 max_response_bytes = 1048576
 
-[provides.operations."mongodb.documents.insert".ai_hints]
+[provides.operations."mongodb.find_one".ai_hints]
+when_to_use = "Find a single document matching a filter."
+common_mistakes = ["Expecting multiple results; only the first match is returned."]
+examples = ['{"database": "mydb", "collection": "users", "filter": {"email": "alice@example.com"}}']
+related = ["mongodb.find"]
+
+[provides.operations."mongodb.insert_many"]
+description = "Insert multiple documents into a collection"
+capability = "mongodb.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mongodb.insert_many".input_schema]
+required = [
+    "database",
+    "collection",
+    "documents",
+]
+type = "object"
+
+[provides.operations."mongodb.insert_many".input_schema.properties.collection]
+type = "string"
+
+[provides.operations."mongodb.insert_many".input_schema.properties.database]
+type = "string"
+
+[provides.operations."mongodb.insert_many".input_schema.properties.documents]
+type = "array"
+
+[provides.operations."mongodb.insert_many".output_schema]
+required = ["insertedIds"]
+type = "object"
+
+[provides.operations."mongodb.insert_many".output_schema.properties.insertedIds]
+type = "array"
+
+[provides.operations."mongodb.insert_many".network_constraints]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
+port_allow = [
+    443,
+    27017,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."mongodb.insert_many".ai_hints]
 when_to_use = "Insert one or more documents into a collection."
-common_mistakes = ["Inserting documents with duplicate _id values, which causes a duplicate key error."]
+common_mistakes = ["Inserting documents with duplicate _id values causes a duplicate key error."]
 examples = ['{"database": "mydb", "collection": "users", "documents": [{"name": "Alice", "email": "alice@example.com"}]}']
 related = [
-    "mongodb.documents.find",
-    "mongodb.documents.delete",
+    "mongodb.find",
+    "mongodb.delete_many",
 ]
+
+[provides.operations."mongodb.insert_one"]
+description = "Insert a single document into a collection"
+capability = "mongodb.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mongodb.insert_one".input_schema]
+required = [
+    "database",
+    "collection",
+    "document",
+]
+type = "object"
+
+[provides.operations."mongodb.insert_one".input_schema.properties.collection]
+type = "string"
+
+[provides.operations."mongodb.insert_one".input_schema.properties.database]
+type = "string"
+
+[provides.operations."mongodb.insert_one".input_schema.properties.document]
+type = "object"
+
+[provides.operations."mongodb.insert_one".output_schema]
+required = ["insertedId"]
+type = "object"
+
+[provides.operations."mongodb.insert_one".output_schema.properties.insertedId]
+type = "string"
+
+[provides.operations."mongodb.insert_one".network_constraints]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
+port_allow = [
+    443,
+    27017,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."mongodb.insert_one".ai_hints]
+when_to_use = "Insert a single document into a collection."
+common_mistakes = ["Inserting a document with a duplicate _id value causes a duplicate key error."]
+examples = ['{"database": "mydb", "collection": "users", "document": {"name": "Alice", "email": "alice@example.com"}}']
+related = [
+    "mongodb.find",
+    "mongodb.delete_one",
+]
+
+[provides.operations."mongodb.update_many"]
+description = "Update multiple documents in a collection"
+capability = "mongodb.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mongodb.update_many".input_schema]
+required = [
+    "database",
+    "collection",
+    "filter",
+    "update",
+]
+type = "object"
+
+[provides.operations."mongodb.update_many".input_schema.properties.collection]
+type = "string"
+
+[provides.operations."mongodb.update_many".input_schema.properties.database]
+type = "string"
+
+[provides.operations."mongodb.update_many".input_schema.properties.filter]
+description = "MongoDB query filter"
+type = "object"
+
+[provides.operations."mongodb.update_many".input_schema.properties.update]
+description = "MongoDB update expression"
+type = "object"
+
+[provides.operations."mongodb.update_many".output_schema]
+required = [
+    "matchedCount",
+    "modifiedCount",
+]
+type = "object"
+
+[provides.operations."mongodb.update_many".output_schema.properties.matchedCount]
+type = "integer"
+
+[provides.operations."mongodb.update_many".output_schema.properties.modifiedCount]
+type = "integer"
+
+[provides.operations."mongodb.update_many".network_constraints]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
+port_allow = [
+    443,
+    27017,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."mongodb.update_many".ai_hints]
+when_to_use = "Update multiple documents matching a filter."
+common_mistakes = ["Using an empty filter updates all documents in the collection."]
+examples = ['{"database": "mydb", "collection": "users", "filter": {"status": "inactive"}, "update": {"$set": {"archived": true}}}']
+related = ["mongodb.find"]
+
+[provides.operations."mongodb.update_one"]
+description = "Update a single document in a collection"
+capability = "mongodb.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mongodb.update_one".input_schema]
+required = [
+    "database",
+    "collection",
+    "filter",
+    "update",
+]
+type = "object"
+
+[provides.operations."mongodb.update_one".input_schema.properties.collection]
+type = "string"
+
+[provides.operations."mongodb.update_one".input_schema.properties.database]
+type = "string"
+
+[provides.operations."mongodb.update_one".input_schema.properties.filter]
+description = "MongoDB query filter"
+type = "object"
+
+[provides.operations."mongodb.update_one".input_schema.properties.update]
+description = "MongoDB update expression"
+type = "object"
+
+[provides.operations."mongodb.update_one".output_schema]
+required = [
+    "matchedCount",
+    "modifiedCount",
+]
+type = "object"
+
+[provides.operations."mongodb.update_one".output_schema.properties.matchedCount]
+type = "integer"
+
+[provides.operations."mongodb.update_one".output_schema.properties.modifiedCount]
+type = "integer"
+
+[provides.operations."mongodb.update_one".network_constraints]
+host_allow = [
+    "data.mongodb-api.com",
+    "*.mongodb.net",
+    "*.mongodb.com",
+]
+port_allow = [
+    443,
+    27017,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."mongodb.update_one".ai_hints]
+when_to_use = "Update a single document matching a filter."
+common_mistakes = ["Forgetting to use $set or other update operators; passing a plain object replaces the document."]
+examples = ['{"database": "mydb", "collection": "users", "filter": {"_id": "abc"}, "update": {"$set": {"name": "Bob"}}}']
+related = ["mongodb.find"]
 
 [sandbox]
 profile = "strict"
@@ -418,30 +685,26 @@ deny_exec = true
 deny_ptrace = true
 
 [[rate_limits.pools]]
-id = "mongodb.databases.read"
-requests = 100
-window_ms = 60000
-burst = 10
-scope = "instance"
-
-[[rate_limits.pools]]
-id = "mongodb.documents.read"
+id = "mongodb.read"
 requests = 200
 window_ms = 60000
 burst = 20
 scope = "instance"
 
 [[rate_limits.pools]]
-id = "mongodb.documents.write"
+id = "mongodb.write"
 requests = 50
 window_ms = 60000
 burst = 10
 scope = "instance"
 
 [rate_limits.operation_pools]
-"mongodb.documents.insert" = ["mongodb.documents.write"]
-"mongodb.collections.list" = ["mongodb.databases.read"]
-"mongodb.aggregate" = ["mongodb.documents.read"]
-"mongodb.documents.delete" = ["mongodb.documents.write"]
-"mongodb.databases.list" = ["mongodb.databases.read"]
-"mongodb.documents.find" = ["mongodb.documents.read"]
+"mongodb.delete_many" = ["mongodb.write"]
+"mongodb.update_many" = ["mongodb.write"]
+"mongodb.find_one" = ["mongodb.read"]
+"mongodb.insert_one" = ["mongodb.write"]
+"mongodb.find" = ["mongodb.read"]
+"mongodb.delete_one" = ["mongodb.write"]
+"mongodb.update_one" = ["mongodb.write"]
+"mongodb.aggregate" = ["mongodb.read"]
+"mongodb.insert_many" = ["mongodb.write"]

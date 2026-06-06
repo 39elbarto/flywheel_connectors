@@ -232,6 +232,25 @@ fn error_payload(case: CommandSchemaCase) -> Value {
     payload
 }
 
+fn resolver_internal_error_payload(case: CommandSchemaCase) -> Value {
+    let mut payload = envelope_payload(case, "error", case.error_schema_version, "unavailable");
+    payload["error"] = json!({
+        "type": "truth-resolver-internal-error",
+        "message": "`fwc` could not classify live truth because the resolver failed internally.",
+        "recoverable": false,
+        "redacted_cause": "best-available strategy exhausted 1 source(s): mesh:error",
+        "log_event": "fcp.truth_resolver.internal_error",
+        "correlation_id": "01234567-89ab-cdef-0123-456789abcdef",
+        "bead_reference": "flywheel_connectors-hr0rr.2.5",
+    });
+    payload["next_actions"] = json!([
+        "Inspect logs for `fcp.truth_resolver.internal_error` with the returned correlation_id.",
+        "Treat this response as non-authoritative until the resolver bug is fixed.",
+        "If the workflow cannot wait, use a lower-level host-backed command and record the weaker truth source.",
+    ]);
+    payload
+}
+
 fn assert_valid(validator: &Validator, payload: &Value, label: &str) {
     let errors = validator
         .iter_errors(payload)
@@ -253,6 +272,37 @@ fn fwc_command_truth_source_schemas_compile_and_validate_envelopes() {
         }
 
         assert_valid(&validator, &error_payload(*case), case.file);
+    }
+}
+
+#[test]
+fn fwc_command_truth_source_schemas_validate_resolver_internal_error_envelopes() {
+    for case in CASES {
+        let validator = validator(case.file);
+        let payload = resolver_internal_error_payload(*case);
+
+        assert_valid(&validator, &payload, case.file);
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["_truth_source"], "unavailable");
+        assert_eq!(payload["error"]["type"], "truth-resolver-internal-error");
+        assert_eq!(
+            payload["error"]["log_event"],
+            "fcp.truth_resolver.internal_error"
+        );
+        assert_eq!(
+            payload["error"]["bead_reference"],
+            "flywheel_connectors-hr0rr.2.5"
+        );
+        assert!(
+            payload["error"]["redacted_cause"]
+                .as_str()
+                .is_some_and(|cause| !cause.is_empty())
+        );
+        assert!(
+            payload["error"]["correlation_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
     }
 }
 

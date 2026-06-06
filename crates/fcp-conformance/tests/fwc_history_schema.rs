@@ -129,6 +129,28 @@ fn truth_source_unavailable_payload() -> Value {
     })
 }
 
+fn truth_resolver_internal_error_payload() -> Value {
+    json!({
+        "status": "error",
+        "command": "history",
+        "schema_version": HISTORY_SCHEMA_VERSION,
+        "_truth_source": "unavailable",
+        "error": {
+            "type": "truth-resolver-internal-error",
+            "message": "`fwc history` could not classify live truth because the resolver failed internally.",
+            "recoverable": false,
+            "redacted_cause": "best-available strategy exhausted 1 source(s): mesh:error",
+            "log_event": "fcp.truth_resolver.internal_error",
+            "correlation_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "bead_reference": "flywheel_connectors-hr0rr.2.5"
+        },
+        "next_actions": [
+            "Inspect logs for `fcp.truth_resolver.internal_error` with the returned correlation_id.",
+            "Treat this response as non-authoritative until the resolver bug is fixed."
+        ]
+    })
+}
+
 fn assert_valid(instance: &Value) {
     let validator = validator();
     let errors = validator
@@ -205,6 +227,19 @@ fn history_schema_validates_truth_source_unavailable_payload() {
 }
 
 #[test]
+fn history_schema_validates_truth_resolver_internal_error_payload() {
+    let payload = truth_resolver_internal_error_payload();
+
+    assert_valid(&payload);
+    assert_eq!(payload["_truth_source"], "unavailable");
+    assert_eq!(payload["error"]["type"], "truth-resolver-internal-error");
+    assert_eq!(
+        payload["error"]["log_event"],
+        "fcp.truth_resolver.internal_error"
+    );
+}
+
+#[test]
 fn history_schema_rejects_missing_schema_version() {
     let mut payload = history_list_payload();
     payload
@@ -237,4 +272,18 @@ fn history_schema_rejects_unknown_truth_source_requirement() {
     payload["error"]["required"] = json!("offline");
 
     assert_invalid(&payload, "require-source values are a closed enum");
+}
+
+#[test]
+fn history_schema_rejects_internal_error_without_redacted_cause() {
+    let mut payload = truth_resolver_internal_error_payload();
+    payload["error"]
+        .as_object_mut()
+        .expect("error payload must be an object")
+        .remove("redacted_cause");
+
+    assert_invalid(
+        &payload,
+        "internal resolver errors must carry redacted cause",
+    );
 }

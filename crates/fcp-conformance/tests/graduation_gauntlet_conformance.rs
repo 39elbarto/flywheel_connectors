@@ -41,8 +41,7 @@ const BATCH3_CONNECTORS: [&str; 4] = [
     "connectors/llm-router",
 ];
 
-const BATCH4_CONNECTORS: [&str; 23] = [
-    "connectors/amplitude",
+const BATCH4_CONNECTORS: [&str; 18] = [
     "connectors/anthropic-vertex",
     "connectors/azure-speech",
     "connectors/circleci",
@@ -50,18 +49,14 @@ const BATCH4_CONNECTORS: [&str; 23] = [
     "connectors/confluence",
     "connectors/feishu",
     "connectors/inworld",
-    "connectors/irc",
     "connectors/line",
     "connectors/microsoft-foundry",
     "connectors/microsoft365",
     "connectors/package-registry",
-    "connectors/paypal",
-    "connectors/plivo",
     "connectors/posthog",
     "connectors/qq",
     "connectors/roam",
     "connectors/synology-chat",
-    "connectors/telnyx",
     "connectors/tlon",
     "connectors/twitch",
     "connectors/wecom",
@@ -504,9 +499,9 @@ fn batch2_status_runner_writes_status_markdown() {
         fs::read_to_string(&status_path).expect("batch2 status markdown should be written");
     assert!(status_doc.contains("# Batch 2 Graduation Status"));
     assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch2"));
-    assert!(status_doc.contains("Summary: `2/9` Batch 2 connectors currently pass"));
-    assert!(status_doc.contains("Promotion status: `2/9` Batch 2 connectors are PROVEN"));
-    assert!(status_doc.contains("`7/9` still pass every check before `readme_status_match`"));
+    assert!(status_doc.contains("Summary: `4/9` Batch 2 connectors currently pass"));
+    assert!(status_doc.contains("Promotion status: `4/9` Batch 2 connectors are PROVEN"));
+    assert!(status_doc.contains("`5/9` still pass every check before `readme_status_match`"));
     for connector in BATCH2_CONNECTORS {
         assert!(
             status_doc.contains(connector),
@@ -519,10 +514,10 @@ fn batch2_status_runner_writes_status_markdown() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
         .collect::<Vec<_>>();
-    // Google Calendar and Google Drive are PROVEN and run all 12 checks; the
-    // remaining seven are blocked at `readme_status_match` (check 8):
-    // 2 * 12 + 7 * 8 = 80 records.
-    assert_eq!(records.len(), 2 * 12 + 7 * 8);
+    // Google Calendar, Google Drive, Google Docs, and Google Sheets are PROVEN
+    // and run all 12 checks; the remaining five are blocked at
+    // `readme_status_match` (check 8): 4 * 12 + 5 * 8 = 88 records.
+    assert_eq!(records.len(), 4 * 12 + 5 * 8);
     assert!(
         records
             .iter()
@@ -530,7 +525,12 @@ fn batch2_status_runner_writes_status_markdown() {
             .all(|record| record_str(record, "verdict") == Some("pass")),
         "Batch 2 connector paths should exist: {jsonl}"
     );
-    let proven_batch2 = BTreeSet::from(["connectors/google-calendar", "connectors/google-drive"]);
+    let proven_batch2 = BTreeSet::from([
+        "connectors/google-calendar",
+        "connectors/google-drive",
+        "connectors/google-docs",
+        "connectors/google-sheets",
+    ]);
     assert!(
         records
             .iter()
@@ -598,9 +598,7 @@ fn batch3_status_runner_writes_status_markdown() {
         fs::read_to_string(&status_path).expect("batch3 status markdown should be written");
     assert!(status_doc.contains("# Batch 3 Graduation Status"));
     assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch3"));
-    assert!(status_doc.contains("Summary: `2/4` Batch 3 connectors currently pass"));
-    assert!(status_doc.contains("Promotion status: `2/4` Batch 3 connectors are PROVEN"));
-    assert!(status_doc.contains("`2/4` still pass every check before `readme_status_match`"));
+    assert!(status_doc.contains("Summary: `4/4` Batch 3 connectors currently pass"));
     for connector in BATCH3_CONNECTORS {
         assert!(
             status_doc.contains(connector),
@@ -613,10 +611,8 @@ fn batch3_status_runner_writes_status_markdown() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
         .collect::<Vec<_>>();
-    // Two connectors (deepseek, huggingface) are PROVEN and run all 12 checks;
-    // the other two (google-ai, llm-router) stop at `readme_status_match`
-    // (check 8): 2 * 12 + 2 * 8 = 40 records.
-    assert_eq!(records.len(), 2 * 12 + 2 * 8);
+    // All four Batch 3 connectors are PROVEN and run the full 12-check ladder.
+    assert_eq!(records.len(), 4 * 12);
     assert!(
         records
             .iter()
@@ -624,7 +620,7 @@ fn batch3_status_runner_writes_status_markdown() {
             .all(|record| record_str(record, "verdict") == Some("pass")),
         "Batch 3 connector paths should exist: {jsonl}"
     );
-    let proven_batch3 = BTreeSet::from(["connectors/deepseek", "connectors/huggingface"]);
+    let proven_batch3 = BTreeSet::from(BATCH3_CONNECTORS);
     assert!(
         records
             .iter()
@@ -658,7 +654,7 @@ fn batch3_status_runner_writes_status_markdown() {
         .iter()
         .filter_map(|record| record_str(record, "check"))
         .collect::<BTreeSet<_>>();
-    // The two PROVEN connectors run the full 12-check ladder.
+    // All Batch 3 connectors run the full 12-check ladder.
     assert_eq!(
         checks,
         EXPECTED_CHECKS
@@ -682,7 +678,7 @@ fn batch4_inventory_scans_current_long_tail() {
         String::from_utf8_lossy(&count_output.stdout),
         String::from_utf8_lossy(&count_output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&count_output.stdout).trim(), "23");
+    assert_eq!(String::from_utf8_lossy(&count_output.stdout).trim(), "18");
 
     let list_output = Command::new("bash")
         .current_dir(workspace_root())
@@ -743,9 +739,9 @@ fn batch4_status_runner_writes_status_markdown() {
         fs::read_to_string(&status_path).expect("batch4 status markdown should be written");
     assert!(status_doc.contains("# Batch 4 Graduation Status"));
     assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch4"));
-    assert!(status_doc.contains("Summary: `0/23` Batch 4 connectors currently pass"));
+    assert!(status_doc.contains("Summary: `0/18` Batch 4 connectors currently pass"));
     assert!(status_doc.contains(
-        "Pre-promotion status: `23/23` Batch 4 connectors pass every check before \
+        "Pre-promotion status: `18/18` Batch 4 connectors pass every check before \
          `readme_status_match`"
     ));
     assert!(status_doc.contains("every connector is still blocked at `readme_status_match`"));
@@ -761,8 +757,8 @@ fn batch4_status_runner_writes_status_markdown() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
         .collect::<Vec<_>>();
-    // All 23 connectors now pass the seven pre-promotion checks and stop at
-    // `readme_status_match` (check 8): 23 * 8 = 184 records.
+    // All Batch 4 connectors now pass the seven pre-promotion checks and stop
+    // at `readme_status_match` (check 8).
     assert_eq!(records.len(), BATCH4_CONNECTORS.len() * 8);
     assert_eq!(
         records

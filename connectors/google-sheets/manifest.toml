@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:a7c1e8d034f6b9210c8e5d3a7f2b6e9c4d8a1f3e5b7c9d2a4e6f8b0c3d5a7e9"
+interface_hash = "blake3-256:fcp.interface.v2:4133a0434ed4b0b5867971b0db6c7611c766c5b7e2a9bf3deb264a5c388c4991"
 
 [connector]
 id = "fcp.google_sheets"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Google Sheets (spreadsheets, cell values, ranges)"
 archetypes = ["operational", "knowledge"]
 format = "wasi"
+status = "proven"
 
 [connector.state]
 model = "singleton_writer"

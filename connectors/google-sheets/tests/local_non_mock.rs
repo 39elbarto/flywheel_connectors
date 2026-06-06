@@ -343,8 +343,13 @@ async fn local_non_mock_get_values_uses_sheets_request_boundary() {
         "provider_class": "local_sufficient",
         "operation": OP_GET_VALUES,
         "method": "GET",
-        "path": EXPECTED_GET_PATH,
-        "request_line": observation.request_line,
+        "endpoint_shape": "/v4/spreadsheets/{spreadsheet_id}/values/{range}",
+        "path_segment_policy": {
+            "spreadsheet_id_validated": true,
+            "range_percent_encoded": true,
+            "spreadsheet_id_redacted": true,
+            "range_redacted": true
+        },
         "auth_gate": {
             "mode": "bearer",
             "authorization_header_verified": observation.authorization_seen(),
@@ -454,15 +459,20 @@ async fn local_non_mock_update_values_puts_value_range_body() {
         "provider_class": "local_sufficient",
         "operation": OP_UPDATE_VALUES,
         "method": "PUT",
-        "path": EXPECTED_UPDATE_PATH,
-        "request_line": observation.request_line,
+        "endpoint_shape": "/v4/spreadsheets/{spreadsheet_id}/values/{range}?valueInputOption=USER_ENTERED",
+        "path_segment_policy": {
+            "spreadsheet_id_validated": true,
+            "range_percent_encoded": true,
+            "spreadsheet_id_redacted": true,
+            "range_redacted": true
+        },
         "auth_gate": {
             "mode": "bearer",
             "authorization_header_verified": observation.authorization_seen(),
             "instance_bound_token_verified": true
         },
         "body_shape": {
-            "range": body["range"],
+            "range_redacted": true,
             "major_dimension": body["majorDimension"],
             "row_count": body["values"].as_array().map_or(0, Vec::len)
         },

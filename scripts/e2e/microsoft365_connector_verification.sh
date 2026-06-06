@@ -6,6 +6,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/microsoft365_connector/${RUN_ID}}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-verbose}"
+
+export RCH_REQUIRE_REMOTE
+export RCH_FORCE_REMOTE=1
+export RCH_VISIBILITY
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -174,10 +180,25 @@ rch_remote_summary_present() {
   return 1
 }
 
+command_is_source_state_step() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "cargo" && "${arg}" == "fmt" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
 require_rch_remote_proof() {
   local name="$1"
   local log_path="$2"
   shift 2
+
+  if command_is_source_state_step "$@"; then
+    return 0
+  fi
 
   if command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
     echo "[microsoft365-verification] ${name}: rch command did not produce remote proof" >&2
@@ -252,7 +273,7 @@ fi
 
 if run_logged \
   format_check \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt -p fcp-microsoft365 -- --check
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt -p fcp-microsoft365 -- --check
 then
   format_check_status="passed"
 else
@@ -351,9 +372,12 @@ jq -n \
   printf '%s\n' 'set -euo pipefail'
   printf '%s\n' ''
   printf '%s\n' "REPO_TOOLCHAIN=\"\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}\""
+  printf '%s\n' "export RCH_REQUIRE_REMOTE=\"\${RCH_REQUIRE_REMOTE:-1}\""
+  printf '%s\n' 'export RCH_FORCE_REMOTE=1'
+  printf '%s\n' "export RCH_VISIBILITY=\"\${RCH_VISIBILITY:-verbose}\""
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo run -q -p fwc -- manifest fix connectors/microsoft365/manifest.toml --check --json"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo check -p fcp-microsoft365 --all-targets"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo fmt -p fcp-microsoft365 -- --check"
+  printf '%s\n' "env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo fmt -p fcp-microsoft365 -- --check"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-microsoft365 test_list_messages_explicit_user_keeps_users_prefix -- --nocapture"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-microsoft365 configure_credential_id_mode -- --nocapture"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-microsoft365 test_self_check_classifies_invalid_token -- --nocapture"

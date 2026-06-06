@@ -9,8 +9,14 @@ OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/anthropic_vertex/${RUN_ID}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_ROOT}/anthropic_vertex_connector_verification.jsonl}"
 COMMAND_LINE="${COMMAND_LINE:-bash ${SCRIPT_PATH}}"
 RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-verbose}"
 REMOTE_TARGET_BASE="${REMOTE_TARGET_BASE:-/tmp/rch-fcp-anthropic-vertex-${RUN_ID}}"
 TARGET_DIR="${CARGO_TARGET_DIR:-${REMOTE_TARGET_BASE}-target}"
+
+export RCH_FORCE_REMOTE=1
+export RCH_REQUIRE_REMOTE
+export RCH_VISIBILITY
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 : >"${LOG_JSONL}"
@@ -33,6 +39,10 @@ emit_step() {
   local log_path="$3"
   local cargo_target_dir="$4"
   local command="$5"
+  local summary worker_class required_worker_class
+  summary="$(rch_summary_line "${log_path}")"
+  worker_class="$(worker_execution_class_for_log "${log_path}")"
+  required_worker_class="$(required_worker_execution_class_for_step "${scenario}")"
 
   jq -cn \
     --arg record_type "anthropic_vertex_connector_verification_step" \
@@ -45,6 +55,9 @@ emit_step() {
     --arg log_path "${log_path}" \
     --arg cargo_target_dir "${cargo_target_dir}" \
     --arg command "${command}" \
+    --arg worker_execution_class "${worker_class}" \
+    --arg required_worker_execution_class "${required_worker_class}" \
+    --argjson rch_summary "$(json_string_or_null "${summary}")" \
     '{
       record_type: $record_type,
       command_line: $command_line,
@@ -56,6 +69,9 @@ emit_step() {
       log_path: $log_path,
       cargo_target_dir: $cargo_target_dir,
       command: $command,
+      worker_execution_class: $worker_execution_class,
+      required_worker_execution_class: $required_worker_execution_class,
+      rch_summary: $rch_summary,
       redaction: {
         access_token_logged: false,
         quota_project_logged: false,
@@ -66,9 +82,86 @@ emit_step() {
     }' >>"${LOG_JSONL}"
 }
 
+json_string_or_null() {
+  local value="$1"
+  if [[ -n "${value}" ]]; then
+    jq -Rn --arg value "${value}" '$value'
+  else
+    printf 'null'
+  fi
+}
+
+rch_summary_line() {
+  local log_path="$1"
+  grep -aE '^\[RCH\] (remote|local|failed)' "${log_path}" | tail -n 1 || true
+}
+
+worker_execution_class_for_log() {
+  local log_path="$1"
+  local summary
+  summary="$(rch_summary_line "${log_path}")"
+
+  if [[ -z "${summary}" ]]; then
+    printf 'unknown'
+  elif printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'local_fallback_refused'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
+    if grep -aqE 'remote required; refusing local fallback|refus(ed|ing) local fallback' "${log_path}"; then
+      printf 'local_fallback_refused'
+    else
+      printf 'local'
+    fi
+  elif printf '%s' "${summary}" | grep -Fq 'failed'; then
+    printf 'remote_failed'
+  elif printf '%s' "${summary}" | grep -Eq '^\[RCH\] remote([[:space:]]|$)' &&
+    ! printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'remote'
+  else
+    printf 'unknown'
+  fi
+}
+
+required_worker_execution_class_for_step() {
+  case "$1" in
+    format_check)
+      printf 'source_state'
+      ;;
+    redaction_scan)
+      printf 'not_applicable'
+      ;;
+    *)
+      printf 'remote'
+      ;;
+  esac
+}
+
+classify_failure() {
+  local log_path="$1"
+  if grep -aE 'RCH-E|remote required; refusing local fallback|refus(ed|ing) local fallback|\[RCH\] local|no admissible workers|no worker assigned|no workers passed|all workers failed preflight|failed to execute process|timeout: failed to execute process|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|No space left on device|missing worker system package' "${log_path}" >/dev/null; then
+    printf 'infra_blocked'
+  else
+    printf 'failed'
+  fi
+}
+
+promote_status() {
+  local status="$1"
+  case "${status}" in
+    failed)
+      OVERALL_STATUS="failed"
+      EXIT_CODE=1
+      ;;
+    infra_blocked)
+      if [[ "${OVERALL_STATUS}" == "passed" ]]; then
+        OVERALL_STATUS="infra_blocked"
+        EXIT_CODE=2
+      fi
+      ;;
+  esac
+}
+
 promote_failure() {
-  OVERALL_STATUS="failed"
-  EXIT_CODE=1
+  promote_status "failed"
 }
 
 run_logged() {
@@ -77,17 +170,25 @@ run_logged() {
   shift 2
   local log_path="${OUT_ROOT}/logs/${name}.log"
   local command_text="$*"
+  local status="passed"
+  local required_worker_class
+  required_worker_class="$(required_worker_execution_class_for_step "${name}")"
 
   echo "[anthropic-vertex-verification] ${name}: ${command_text}"
   if (
     cd "${REPO_ROOT}"
     "$@"
   ) >"${log_path}" 2>&1; then
-    emit_step "${name}" "passed" "${log_path}" "${cargo_target_dir}" "${command_text}"
+    if [[ "${required_worker_class}" == "remote" ]] && [[ "$(worker_execution_class_for_log "${log_path}")" != "remote" ]]; then
+      printf '%s\n' "rch command did not produce accepted remote proof" >>"${log_path}"
+      status="infra_blocked"
+    fi
   else
-    emit_step "${name}" "failed" "${log_path}" "${cargo_target_dir}" "${command_text}"
-    promote_failure
+    status="$(classify_failure "${log_path}")"
   fi
+
+  emit_step "${name}" "${status}" "${log_path}" "${cargo_target_dir}" "${command_text}"
+  promote_status "${status}"
 }
 
 redaction_scan() {
@@ -114,6 +215,7 @@ redaction_scan() {
 }
 
 emit_summary() {
+  # shellcheck disable=SC2094 # LOG_JSONL is recorded as a path, not read while appending.
   jq -cn \
     --arg record_type "anthropic_vertex_connector_verification_summary" \
     --arg command_line "${COMMAND_LINE}" \
@@ -148,7 +250,7 @@ run_logged \
 run_logged \
   format_check \
   "${TARGET_DIR}" \
-  "${RCH_BIN}" exec -- env \
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE "${RCH_BIN}" exec -- env \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     CARGO_BUILD_JOBS=2 \

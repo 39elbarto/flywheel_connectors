@@ -101,6 +101,17 @@ worker_execution_class_for_log() {
   fi
 }
 
+required_worker_execution_class_for_step() {
+  case "$1" in
+    format_check)
+      printf 'source_state'
+      ;;
+    *)
+      printf 'remote'
+      ;;
+  esac
+}
+
 failure_class_for_log() {
   local log_path="$1"
   if grep -aE 'RCH-E|remote required; refusing local fallback|refus(ed|ing) local fallback|\[RCH\] local|no admissible workers|no worker assigned|no workers passed|all workers failed preflight|failed to execute process|timeout: failed to execute process|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|No space left on device|missing worker system package|failed to load manifest for dependency .tru.|failed to read .*/toon_rust/Cargo.toml' "${log_path}" >/dev/null; then
@@ -131,9 +142,10 @@ emit_step() {
   local status="$2"
   local log_path="$3"
   local command="$4"
-  local summary worker_class
+  local summary worker_class required_worker_class
   summary="$(rch_summary_line "${log_path}")"
   worker_class="$(worker_execution_class_for_log "${log_path}")"
+  required_worker_class="$(required_worker_execution_class_for_step "${step}")"
 
   jq -cn \
     --arg record_type "twitch_connector_verification_step" \
@@ -148,6 +160,7 @@ emit_step() {
     --arg target_dir_class "$(target_dir_class)" \
     --arg target_dir_hash "sha256:$(hash_text "${TARGET_DIR}")" \
     --arg worker_execution_class "${worker_class}" \
+    --arg required_worker_execution_class "${required_worker_class}" \
     --argjson rch_summary "$(json_string_or_null "${summary}")" \
     '{
       record_type: $record_type,
@@ -162,7 +175,7 @@ emit_step() {
       cargo_target_dir_class: $target_dir_class,
       cargo_target_dir_hash: $target_dir_hash,
       worker_execution_class: $worker_execution_class,
-      required_worker_execution_class: "remote",
+      required_worker_execution_class: $required_worker_execution_class,
       rch_summary: $rch_summary,
       redaction: {
         client_secret_logged: false,
@@ -179,13 +192,15 @@ run_logged() {
   local log_path="${OUT_ROOT}/logs/${step}.log"
   local command_text="$*"
   local status="passed"
+  local required_worker_class
+  required_worker_class="$(required_worker_execution_class_for_step "${step}")"
 
   echo "[twitch-verification] ${step}: ${command_text}"
   if (
     cd "${REPO_ROOT}"
     "$@"
   ) >"${log_path}" 2>&1; then
-    if [[ "$(worker_execution_class_for_log "${log_path}")" != "remote" ]]; then
+    if [[ "${required_worker_class}" == "remote" ]] && [[ "$(worker_execution_class_for_log "${log_path}")" != "remote" ]]; then
       printf '%s\n' "rch command did not produce accepted remote proof" >>"${log_path}"
       status="infra_blocked"
     fi
@@ -269,7 +284,7 @@ run_logged \
 
 run_logged \
   format_check \
-  "${RCH_BIN}" exec -- env \
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE "${RCH_BIN}" exec -- env \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     CARGO_BUILD_JOBS=2 \

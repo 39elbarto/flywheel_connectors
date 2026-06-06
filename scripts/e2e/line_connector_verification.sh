@@ -209,7 +209,7 @@ fi
 
 if run_logged \
   format_check \
-  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/line/Cargo.toml --check
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/line/Cargo.toml --check
 then
   format_check_status="passed"
 else

@@ -179,10 +179,25 @@ rch_remote_summary_present() {
   return 1
 }
 
+command_is_source_state_step() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "cargo" && "${arg}" == "fmt" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
 require_rch_remote_proof() {
   local name="$1"
   local log_path="$2"
   shift 2
+
+  if command_is_source_state_step "$@"; then
+    return 0
+  fi
 
   if command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
     echo "[feishu-verification] ${name}: rch command did not produce remote proof" >&2
@@ -259,7 +274,7 @@ fi
 
 if run_logged \
   format_check \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/feishu/Cargo.toml --check
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/feishu/Cargo.toml --check
 then
   format_check_status="passed"
 else
@@ -397,7 +412,7 @@ jq -n \
   printf '%s\n' 'export RCH_FORCE_REMOTE=1'
   printf '%s\n' ''
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-fwc\" cargo run -q -p fwc -- manifest fix connectors/feishu/manifest.toml --check --json"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-fmt\" cargo fmt --manifest-path connectors/feishu/Cargo.toml --check"
+  printf '%s\n' "env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-fmt\" cargo fmt --manifest-path connectors/feishu/Cargo.toml --check"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-check\" cargo check -p fcp-feishu --all-targets"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration health_unconfigured_includes_guidance -- --nocapture"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture"

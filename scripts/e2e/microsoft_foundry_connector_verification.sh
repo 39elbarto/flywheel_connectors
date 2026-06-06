@@ -10,9 +10,15 @@ LOG_JSONL="${LOG_JSONL:-${OUT_ROOT}/evidence/microsoft_foundry_connector_e2e.jso
 LOCAL_NON_MOCK_JSONL="${LOCAL_NON_MOCK_JSONL:-${OUT_ROOT}/evidence/local_non_mock.jsonl}"
 COMMAND_LINE="${COMMAND_LINE:-bash ${SCRIPT_PATH}}"
 RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-verbose}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
 TARGET_PREFIX="${CARGO_TARGET_PREFIX:-/tmp/fcp-microsoft-foundry-${RUN_ID}}"
 BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+
+export RCH_FORCE_REMOTE=1
+export RCH_REQUIRE_REMOTE
+export RCH_VISIBILITY
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 : >"${LOG_JSONL}"
@@ -87,6 +93,17 @@ observed_runner() {
   fi
 }
 
+required_worker_execution_class_for_step() {
+  case "$1" in
+    format_check)
+      echo "source_state"
+      ;;
+    *)
+      echo "remote"
+      ;;
+  esac
+}
+
 run_logged() {
   local name="$1"
   shift
@@ -104,10 +121,18 @@ run_logged() {
 
 run_step() {
   local name="$1"
+  local required_worker_class
   shift
+  required_worker_class="$(required_worker_execution_class_for_step "${name}")"
 
   if run_logged "${name}" "$@"; then
-    echo "passed"
+    if [[ "${required_worker_class}" == "remote" ]] && [[ "$(observed_runner "${OUT_ROOT}/logs/${name}.log")" != "rch_remote" ]]; then
+      printf '%s\n' "rch command did not produce accepted remote proof" >>"${OUT_ROOT}/logs/${name}.log"
+      promote_overall_status "infra_blocked"
+      echo "infra_blocked"
+    else
+      echo "passed"
+    fi
   else
     local status
     status="$(classify_failure "${OUT_ROOT}/logs/${name}.log")"
@@ -120,7 +145,11 @@ run_rch_step() {
   local name="$1"
   local target_suffix="$2"
   shift 2
-  run_step "${name}" env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-${target_suffix}" "$@"
+  if [[ "${name}" == "format_check" ]]; then
+    run_step "${name}" env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY="${RCH_VISIBILITY}" "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-${target_suffix}" "$@"
+  else
+    run_step "${name}" env RCH_VISIBILITY="${RCH_VISIBILITY}" "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-${target_suffix}" "$@"
+  fi
 }
 
 emit_json() {

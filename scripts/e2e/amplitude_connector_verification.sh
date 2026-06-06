@@ -6,6 +6,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/amplitude_connector/${RUN_ID}}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+BUILD_JOBS="${BUILD_JOBS:-2}"
+REMOTE_TARGET_BASE="${AMPLITUDE_CARGO_TARGET_DIR_PREFIX:-/tmp/rch-fcp-amplitude-${RUN_ID}}"
 REMOTE_RUNNER="rch:remote-required"
 export RCH_FORCE_REMOTE=1
 
@@ -176,10 +178,25 @@ rch_remote_summary_present() {
   return 1
 }
 
+command_is_source_state_step() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "cargo" && "${arg}" == "fmt" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
 require_rch_remote_proof() {
   local name="$1"
   local log_path="$2"
   shift 2
+
+  if command_is_source_state_step "$@"; then
+    return 0
+  fi
 
   if command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
     echo "[amplitude-verification] ${name}: rch command did not produce remote proof" >&2
@@ -200,6 +217,9 @@ manifest_check_cmd=(
   --
   env
   "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}"
+  CARGO_INCREMENTAL=0
+  "CARGO_BUILD_JOBS=${BUILD_JOBS}"
+  "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-fwc"
   cargo
   run
   -q
@@ -245,7 +265,7 @@ fi
 
 if run_logged \
   cargo_check \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo check -p fcp-amplitude --all-targets
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-check" cargo check -p fcp-amplitude --all-targets
 then
   cargo_check_status="passed"
 else
@@ -255,7 +275,7 @@ fi
 
 if run_logged \
   format_check \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt --manifest-path connectors/amplitude/Cargo.toml --check
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/amplitude/Cargo.toml --check
 then
   format_check_status="passed"
 else
@@ -265,7 +285,7 @@ fi
 
 if run_logged \
   health_guidance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-amplitude --test integration health_unconfigured_includes_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-amplitude --test integration health_unconfigured_includes_guidance -- --nocapture
 then
   health_guidance_status="passed"
 else
@@ -275,7 +295,7 @@ fi
 
 if run_logged \
   doctor_guidance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-amplitude --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-amplitude --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
 then
   doctor_guidance_status="passed"
 else
@@ -285,7 +305,7 @@ fi
 
 if run_logged \
   self_check_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-amplitude --test integration self_check_ready_with_mock_amplitude_api_and_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-amplitude --test integration self_check_ready_with_mock_amplitude_api_and_evidence -- --nocapture
 then
   self_check_status="passed"
 else
@@ -295,7 +315,7 @@ fi
 
 if run_logged \
   retryable_self_check_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-amplitude --test integration self_check_retryable_amplitude_failure_reports_degraded -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-amplitude --test integration self_check_retryable_amplitude_failure_reports_degraded -- --nocapture
 then
   retryable_self_check_status="passed"
 else
@@ -305,7 +325,7 @@ fi
 
 if run_logged \
   compliance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-amplitude --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-amplitude --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 then
   compliance_status="passed"
 else
@@ -315,7 +335,7 @@ fi
 
 if run_logged \
   integration_suite \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-amplitude --test integration -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-amplitude --test integration -- --nocapture
 then
   integration_suite_status="passed"
 else
@@ -325,7 +345,7 @@ fi
 
 if run_logged \
   crate_suite \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-amplitude -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-crate" cargo test -p fcp-amplitude -- --nocapture
 then
   crate_suite_status="passed"
 else
@@ -335,7 +355,7 @@ fi
 
 if run_logged \
   clippy \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo clippy -p fcp-amplitude --all-targets -- -D warnings
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 "CARGO_BUILD_JOBS=${BUILD_JOBS}" "CARGO_TARGET_DIR=${REMOTE_TARGET_BASE}-clippy" cargo clippy -p fcp-amplitude --all-targets -- -D warnings
 then
   clippy_status="passed"
 else
@@ -352,6 +372,8 @@ jq -n \
   --arg manifest_check_runner "${manifest_check_runner}" \
   --arg runner "${REMOTE_RUNNER}" \
   --arg toolchain "${REPO_TOOLCHAIN}" \
+  --arg target_prefix "${REMOTE_TARGET_BASE}" \
+  --arg build_jobs "${BUILD_JOBS}" \
   --arg scope_note "read-only Amplitude retrofit: chart query, cohort listing, event export, and readiness evidence" \
   '{
     run_id: $run_id,
@@ -362,6 +384,8 @@ jq -n \
     manifest_check_runner: $manifest_check_runner,
     runner: $runner,
     toolchain: $toolchain,
+    target_prefix: $target_prefix,
+    build_jobs: ($build_jobs | tonumber),
     scope_note: $scope_note
   }' > "${OUT_ROOT}/environment.json"
 
@@ -370,18 +394,20 @@ jq -n \
   printf '%s\n' 'set -euo pipefail'
   printf '%s\n' ''
   printf '%s\n' "REPO_TOOLCHAIN=\"\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}\""
+  printf '%s\n' "BUILD_JOBS=\"\${BUILD_JOBS:-${BUILD_JOBS}}\""
+  printf '%s\n' "REMOTE_TARGET_BASE=\"\${AMPLITUDE_CARGO_TARGET_DIR_PREFIX:-${REMOTE_TARGET_BASE}}\""
   printf '%s\n' 'export RCH_FORCE_REMOTE=1'
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo run -q -p fwc -- manifest fix connectors/amplitude/manifest.toml --check --json"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo fmt --manifest-path connectors/amplitude/Cargo.toml --check"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo check -p fcp-amplitude --all-targets"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-amplitude --test integration health_unconfigured_includes_guidance -- --nocapture"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-amplitude --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-amplitude --test integration self_check_ready_with_mock_amplitude_api_and_evidence -- --nocapture"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-amplitude --test integration self_check_retryable_amplitude_failure_reports_degraded -- --nocapture"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-amplitude --test integration introspection_emits_v3_compliance_evidence -- --nocapture"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-amplitude --test integration -- --nocapture"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-amplitude -- --nocapture"
-  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo clippy -p fcp-amplitude --all-targets -- -D warnings"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-fwc\" cargo run -q -p fwc -- manifest fix connectors/amplitude/manifest.toml --check --json"
+  printf '%s\n' "env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-fmt\" cargo fmt --manifest-path connectors/amplitude/Cargo.toml --check"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-check\" cargo check -p fcp-amplitude --all-targets"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-amplitude --test integration health_unconfigured_includes_guidance -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-amplitude --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-amplitude --test integration self_check_ready_with_mock_amplitude_api_and_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-amplitude --test integration self_check_retryable_amplitude_failure_reports_degraded -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-amplitude --test integration introspection_emits_v3_compliance_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-amplitude --test integration -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-crate\" cargo test -p fcp-amplitude -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_INCREMENTAL=0 \"CARGO_BUILD_JOBS=\${BUILD_JOBS}\" \"CARGO_TARGET_DIR=\${REMOTE_TARGET_BASE}-clippy\" cargo clippy -p fcp-amplitude --all-targets -- -D warnings"
 } > "${OUT_ROOT}/replay.sh"
 chmod +x "${OUT_ROOT}/replay.sh"
 

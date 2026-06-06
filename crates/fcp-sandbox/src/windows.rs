@@ -61,7 +61,9 @@ use crate::sandbox::{
     WindowsAppContainerCreateOutcome, WindowsAppContainerEvidence,
     WindowsAppContainerLifecycleAction, WindowsAppContainerLifecycleReport,
     WindowsAppContainerProcessLaunchEvidence, WindowsAppContainerProcessLaunchMechanism,
-    WindowsAppContainerProfile, WindowsAppContainerProfileApi,
+    WindowsAppContainerProfile, WindowsAppContainerProfileApi, WindowsFirewallLifecycleAction,
+    WindowsFirewallPlanStatus, WindowsFirewallPolicyEvidence, WindowsIntegrityOperationMode,
+    WindowsIntegrityPolicyEvidence, plan_windows_firewall_policy, plan_windows_integrity_policy,
     prepare_windows_appcontainer_lifecycle,
 };
 
@@ -278,6 +280,10 @@ impl WindowsSandbox {
         args: &[&OsStr],
         policy: &CompiledPolicy,
     ) -> Result<WindowsAppContainerChild, SandboxError> {
+        self.emit_integrity_policy_evidence(
+            policy,
+            WindowsIntegrityOperationMode::StartupInfoExChild,
+        );
         if !self.appcontainer_available {
             return Err(SandboxError::ApplyFailed(
                 "windows AppContainer process launch unavailable: \
@@ -645,23 +651,94 @@ impl WindowsSandbox {
         Ok(())
     }
 
-    /// Configure Windows Firewall rules for network isolation.
+    /// Emit Windows Firewall readiness evidence for network isolation.
     fn configure_firewall(policy: &CompiledPolicy) {
-        if !policy.block_direct_network {
-            return;
+        let connector_seed = windows_appcontainer_connector_seed(policy);
+        let application_path = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("current-process-unavailable"));
+        let plan = match plan_windows_firewall_policy(
+            &connector_seed,
+            &application_path,
+            policy.block_direct_network,
+            None,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Windows firewall policy planning failed; no firewall rules were installed"
+                );
+                return;
+            }
+        };
+        let action = match plan.status {
+            WindowsFirewallPlanStatus::DirectNetworkAllowed => {
+                WindowsFirewallLifecycleAction::SkippedDirectNetworkAllowed
+            }
+            WindowsFirewallPlanStatus::ConstraintsUnavailable => {
+                WindowsFirewallLifecycleAction::NotInstalledMissingNetworkConstraints
+            }
+            WindowsFirewallPlanStatus::NoEgress => WindowsFirewallLifecycleAction::PlannedNoEgress,
+            WindowsFirewallPlanStatus::HostAllowRequiresNetworkGuard => {
+                WindowsFirewallLifecycleAction::SkippedHostAllowRequiresNetworkGuard
+            }
+            WindowsFirewallPlanStatus::IpAllowRules
+            | WindowsFirewallPlanStatus::IpAllowRulesWithHostConstraints => {
+                WindowsFirewallLifecycleAction::PlannedOnly
+            }
+        };
+        let evidence =
+            WindowsFirewallPolicyEvidence::from_skipped_plan(plan, action, "not_attempted");
+        if let Ok(jsonl) = evidence.to_jsonl_line() {
+            debug!(evidence_jsonl = %jsonl, "Windows firewall policy evidence");
         }
 
-        // Windows Firewall configuration requires elevated privileges
-        // In production, this would be done by the host process before
-        // spawning the sandboxed connector.
-        //
-        // For now, we log a warning and rely on AppContainer network
-        // isolation which blocks network by default.
+        match evidence.plan_status {
+            WindowsFirewallPlanStatus::ConstraintsUnavailable => {
+                warn!(
+                    skip_reason = ?evidence.skip_reason,
+                    "Windows firewall rules not installed: operation-level network constraints are not available in the current sandbox apply path"
+                );
+            }
+            WindowsFirewallPlanStatus::HostAllowRequiresNetworkGuard => {
+                warn!(
+                    skip_reason = ?evidence.skip_reason,
+                    "Windows firewall hostname allowlists require Network Guard DNS/SNI enforcement before rules can be installed"
+                );
+            }
+            _ => {
+                debug!(
+                    plan_status = ?evidence.plan_status,
+                    action = ?evidence.lifecycle_action,
+                    "Windows firewall policy planning completed without OS rule installation"
+                );
+            }
+        }
+    }
 
-        warn!(
-            "Network isolation relies on AppContainer; \
-             explicit firewall rules require elevation"
+    /// Emit redaction-safe Windows integrity readiness evidence for the selected launch path.
+    fn emit_integrity_policy_evidence(
+        &self,
+        policy: &CompiledPolicy,
+        operation: WindowsIntegrityOperationMode,
+    ) {
+        let plan = plan_windows_integrity_policy(
+            &windows_appcontainer_connector_seed(policy),
+            policy.platform_flags.windows_low_integrity,
+            operation,
+            self.appcontainer_available,
         );
+        let evidence = WindowsIntegrityPolicyEvidence::planned_only(plan);
+        if let Ok(jsonl) = evidence.to_jsonl_line() {
+            debug!(evidence_jsonl = %jsonl, "Windows integrity policy evidence");
+        }
+        if let Some(skip_reason) = evidence.skip_reason {
+            warn!(
+                operation = ?evidence.operation,
+                skip_reason,
+                "Windows low-integrity token setup not active for this launch path"
+            );
+        }
     }
 }
 
@@ -748,6 +825,7 @@ impl Default for WindowsSandbox {
 impl Sandbox for WindowsSandbox {
     fn apply(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
         let integrity_level = WindowsIntegrityLevel::from_policy(policy);
+        self.emit_integrity_policy_evidence(policy, WindowsIntegrityOperationMode::InProcessApply);
         if integrity_level == WindowsIntegrityLevel::Low {
             return Err(SandboxError::ApplyFailed(
                 "windows low-integrity policy requires spawn_appcontainer_process; \
@@ -818,6 +896,10 @@ impl Sandbox for WindowsSandbox {
         _cmd: &mut std::process::Command,
         policy: &CompiledPolicy,
     ) -> Result<(), SandboxError> {
+        self.emit_integrity_policy_evidence(
+            policy,
+            WindowsIntegrityOperationMode::StdCommandMutation,
+        );
         let profile = Self::appcontainer_profile(policy)?;
         let (action, mechanism, skip_reason) = if self.appcontainer_available {
             (

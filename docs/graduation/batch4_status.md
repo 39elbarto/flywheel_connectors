@@ -17,7 +17,7 @@ Pre-promotion status: `19/19` Batch 4 connectors pass every check before `readme
 | `connectors/amplitude` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/posthog` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/circleci` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/irc` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
+| `connectors/package-registry` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/line` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/qq` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/synology-chat` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |

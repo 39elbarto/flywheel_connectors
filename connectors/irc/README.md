@@ -1,7 +1,10 @@
 # IRC Connector V3 Contract
 
-> **Status**: incubating first-slice contract
+> **Status**: PROVEN runtime contract documented with remote IRC local no-mock verifier proof
+> **Bead**: `flywheel_connectors-angoc.16.5`
 > **Verification script**: `scripts/e2e/irc_connector_verification.sh`
+> **Proof**: `/tmp/fcp-irc-proof3-20260606T125732Z/irc_connector_verification.jsonl`, sha256 `cbe8beec7c96449ac5385ed20c019815583a454c4858189d56b184583dddd0af`, 7 redaction-scanned records, rch remote `vmi1293453`
+> **Primary upstream**: https://modern.ircdocs.horse/
 
 ## Purpose
 
@@ -39,9 +42,9 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 ## Network And Server Policy
 
 - One connector instance is bound to one operator-configured IRC server and does not multiplex requests across multiple networks.
-- The manifest intentionally leaves `host_allow` open because IRC deployments may be public, self-hosted, tailnet-local, or deterministic localhost harnesses.
-- The execution boundary is still narrow: ports stay limited to `6667` and `6697`, requests are short-lived, and hostname canonicalization plus bounded timeouts remain required.
-- `localhost` and `127.0.0.1` are for deterministic harnesses; production operators should point the connector at an explicitly chosen IRC server.
+- The manifest uses runtime-injected `${irc_server_host}` host policy because operators choose the IRC network at deployment time.
+- The execution boundary is narrow: ports stay limited to `6667` and `6697`; localhost, private ranges, tailnet ranges, and IP literals are denied; SNI, hostname canonicalization, and bounded timeouts remain required.
+- `localhost` and `127.0.0.1` are limited to deterministic connector tests and are not part of the PROVEN provider egress contract.
 
 ## Operation Inventory
 
@@ -87,7 +90,7 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 - DCC, file transfer, CTCP expansion, or operator moderation tooling
 - Multi-network brokering or cross-server relaying
 
-## Operator Notes
+## Operator Guidance
 
 - Prefer dedicated bot or service identities for automation instead of a human nick.
 - Treat channel names, nicknames, message content, and sampled transcripts as potentially sensitive community data.
@@ -97,7 +100,9 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 
 The tracked verification entry point is `scripts/e2e/irc_connector_verification.sh`. It runs the IRC crate check, formatting check, explicit `local_non_mock` loopback target, full connector test suite, clippy, and a redaction scan over the generated evidence. The script requires remote `rch` proof for Cargo-backed lanes; if no admissible worker is available, it emits `infra_blocked` rather than treating local fallback as proof.
 
+Promotion proof `purple-irc-proof3-20260606T125732Z` passed the tracked verifier with accepted remote Cargo proof for `cargo_check`, `local_non_mock`, `connector_tests`, and `clippy`, plus source-state formatting and local redaction scan checks.
+
 Rerun commands:
 
-- `RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 bash scripts/e2e/irc_connector_verification.sh`
+- `env -u CARGO_TARGET_DIR RUN_ID=manual-irc bash scripts/e2e/irc_connector_verification.sh`
 - `scripts/graduation/run_gauntlet.sh connectors/irc`

@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "IRC connector for bounded connect, join, message send, transcript sampling, and health verification"
 archetypes = ["operational"]
 format = "native"
+status = "proven"
 
 [connector.state]
 model = "stateless"
@@ -24,9 +25,9 @@ migration_hint = "The connector keeps no durable local state. Each operation ope
 # - This first slice authenticates only with an optional PASS plus NICK/USER registration.
 # - Each operation opens one short-lived IRC session and then quits.
 # - Connector instances bind to one operator-configured IRC server plus one configured identity.
-# - IRC host policy is runtime-configured rather than hard-coded because real deployments may target
-#   public networks, self-hosted servers, or deterministic localhost test harnesses on standard
-#   IRC ports.
+# - IRC host policy is runtime-configured rather than hard-coded, but PROVEN runtime manifests deny
+#   localhost, private ranges, tailnet ranges, and IP literals; deterministic loopback harnesses live
+#   in tests rather than the declared provider egress boundary.
 # - Long-lived subscriptions, SASL negotiation, DCC, bouncer management, and operator-controlled
 #   channel moderation flows are explicit non-goals.
 
@@ -57,13 +58,30 @@ requires_approval = "none"
 idempotency = "none"
 input_schema = { type = "object", required = ["target", "message"] }
 output_schema = { type = "object", required = ["status", "target", "transcript"], properties = { coordination = { type = "array", description = "Redacted chat coordination audit records", items = { type = "object" } } } }
-network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.messages.send".ai_hints]
 when_to_use = "Use when a bounded IRC send to one nick or channel is intentionally desired."
 common_mistakes = ["This first slice opens a short-lived session per operation and does not keep a persistent connection.", "The connector only supports PASS plus NICK/USER registration; SASL is not included.", "Sending to the wrong target can create a visible side effect in a community channel."]
 examples = []
 related = ["irc.health", "irc.channels.join"]
+
+[provides.operations."irc.messages.send".network_constraints]
+host_allow = ["${irc_server_host}"]
+port_allow = [6667, 6697]
+ip_allow = []
+cidr_deny = []
+require_sni = true
+spki_pins = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."irc.channels.join"]
 description = "Join one IRC channel using a short-lived session and optional channel key."
@@ -74,13 +92,30 @@ requires_approval = "none"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["channel"] }
 output_schema = { type = "object", required = ["status", "channel", "transcript", "events", "identity"] }
-network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.channels.join".ai_hints]
 when_to_use = "Use when you need to verify channel access or join a channel intentionally with the configured IRC identity."
 common_mistakes = ["Join is a visible side effect to other IRC participants.", "This first slice does not keep a persistent joined presence after the operation completes.", "Use channel_key only for keyed channels."]
 examples = []
 related = ["irc.health", "irc.transcript.sample"]
+
+[provides.operations."irc.channels.join".network_constraints]
+host_allow = ["${irc_server_host}"]
+port_allow = [6667, 6697]
+ip_allow = []
+cidr_deny = []
+require_sni = true
+spki_pins = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."irc.transcript.sample"]
 description = "Join a channel and collect a bounded transcript sample without keeping a long-lived IRC session open."
@@ -91,13 +126,30 @@ requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object", required = ["channel"] }
 output_schema = { type = "object", required = ["channel", "lines", "events", "identity"] }
-network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.transcript.sample".ai_hints]
 when_to_use = "Use when you need a short bounded sample of IRC traffic from one channel plus normalized IRC event metadata."
 common_mistakes = ["This is a bounded sampling operation, not a subscription or backlog replay API.", "sample_lines is clamped and the connector quits after collecting the sample.", "Quiet channels can legitimately return fewer than sample_lines lines.", "The raw lines are preserved, but agents should prefer the normalized `events` list for numerics, routing, and source identity."]
 examples = []
 related = ["irc.health", "irc.channels.join"]
+
+[provides.operations."irc.transcript.sample".network_constraints]
+host_allow = ["${irc_server_host}"]
+port_allow = [6667, 6697]
+ip_allow = []
+cidr_deny = []
+require_sni = true
+spki_pins = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."irc.health"]
 description = "Verify IRC connectivity, optional PASS handling, and registration with the configured nick."
@@ -108,10 +160,27 @@ requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object" }
 output_schema = { type = "object", required = ["status", "server", "port", "tls", "nick", "transcript", "events", "identity", "manifest_hash"] }
-network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.health".ai_hints]
 when_to_use = "Use before join, send, or transcript sampling to verify that registration succeeds against the configured IRC server."
 common_mistakes = ["Health proves bounded registration/connectivity only; it does not establish a persistent subscribed session.", "TLS is optional in config but port defaults differ between TLS and plaintext."]
 examples = []
 related = ["irc.messages.send", "irc.channels.join", "irc.transcript.sample"]
+
+[provides.operations."irc.health".network_constraints]
+host_allow = ["${irc_server_host}"]
+port_allow = [6667, 6697]
+ip_allow = []
+cidr_deny = []
+require_sni = true
+spki_pins = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576

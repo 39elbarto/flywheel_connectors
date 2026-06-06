@@ -154,20 +154,20 @@ fn manifest_declares_runtime_scoped_per_operation_network_constraints() {
             operation_id,
         );
         assert_bool(network_constraints, "require_sni", true, operation_id);
-        assert_bool(network_constraints, "deny_localhost", false, operation_id);
+        assert_bool(network_constraints, "deny_localhost", true, operation_id);
         assert_bool(
             network_constraints,
             "deny_private_ranges",
-            false,
+            true,
             operation_id,
         );
         assert_bool(
             network_constraints,
             "deny_tailnet_ranges",
-            false,
+            true,
             operation_id,
         );
-        assert_bool(network_constraints, "deny_ip_literals", false, operation_id);
+        assert_bool(network_constraints, "deny_ip_literals", true, operation_id);
         assert_bool(
             network_constraints,
             "require_host_canonicalization",

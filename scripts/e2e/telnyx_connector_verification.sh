@@ -5,6 +5,7 @@ RCH_BIN="${RCH_BIN:-rch}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
 REMOTE_RUNNER="rch:remote-required"
 export RCH_FORCE_REMOTE=1
+export RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -22,6 +23,7 @@ run_remote_cargo() {
     "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
     "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" \
     "CARGO_INCREMENTAL=${CARGO_INCREMENTAL}" \
+    "TELNYX_E2E_LOG_DIR=${TELNYX_E2E_LOG_DIR}" \
     "$@" 2> >(tee "${log_path}" >&2)
   rc="$?"
   set -e
@@ -41,6 +43,7 @@ fi
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-telnyx-e2e-target}"
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+export TELNYX_E2E_LOG_DIR="${TELNYX_E2E_LOG_DIR:-target/fcp-telnyx/${RUN_ID:-manual}/e2e}"
 
 require_cmd "${RCH_BIN}"
 

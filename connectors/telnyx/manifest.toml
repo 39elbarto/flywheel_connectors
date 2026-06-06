@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP voice-call connector for Telnyx Call Control"
 archetypes = ["operational", "streaming", "bidirectional"]
 format = "wasi"
+status = "proven"
 
 [connector.state]
 model = "singleton_writer"

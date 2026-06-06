@@ -182,19 +182,27 @@ async fn recv_live_json(ws: &mut TestLiveServerWebSocket, context: &str) -> serd
 }
 
 async fn send_live_json(ws: &mut TestLiveServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&fcp_async_core::compatibility_cx(), Message::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        Message::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn send_live_text(ws: &mut TestLiveServerWebSocket, value: &str, context: &str) {
-    ws.send(&fcp_async_core::compatibility_cx(), Message::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        Message::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn close_live_websocket(ws: &mut TestLiveServerWebSocket) {
-    let _ = ws.close(&fcp_async_core::compatibility_cx(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
 }
 
 fn assert_realtime_report_has_steps(report: &GoogleLiveRealtimeRunReport, expected: &[&str]) {

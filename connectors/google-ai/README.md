@@ -1,6 +1,6 @@
 # Google AI Connector V3 Contract
 
-> **Status**: runtime contract documented; simulation and manifest drift documented
+> **Status**: PROVEN runtime contract documented with simulation and manifest drift
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/google_ai_connector_verification.sh`

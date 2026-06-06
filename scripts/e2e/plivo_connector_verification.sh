@@ -22,6 +22,7 @@ run_remote_cargo() {
     "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
     "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" \
     "CARGO_INCREMENTAL=${CARGO_INCREMENTAL}" \
+    "PLIVO_E2E_LOG_DIR=${PLIVO_E2E_LOG_DIR}" \
     "$@" 2> >(tee "${log_path}" >&2)
   rc="$?"
   set -e
@@ -41,6 +42,7 @@ fi
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-plivo-e2e-target}"
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+export PLIVO_E2E_LOG_DIR="${PLIVO_E2E_LOG_DIR:-target/fcp-plivo/${RUN_ID:-manual}/e2e}"
 
 require_cmd "${RCH_BIN}"
 

@@ -25,6 +25,7 @@ use fcp_voice_call::{
     stable_redacted_hash,
 };
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use url::form_urlencoded;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -213,7 +214,9 @@ fn open_plivo_e2e_log() -> (File, PathBuf) {
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     );
-    let dir = std::env::temp_dir().join(unique);
+    let base_dir =
+        std::env::var_os("PLIVO_E2E_LOG_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    let dir = base_dir.join(unique);
     std::fs::create_dir_all(&dir).expect("create plivo e2e log dir");
     let path = dir.join("plivo_voice_call_e2e.jsonl");
     let file = File::create(&path).expect("create plivo e2e log");
@@ -945,6 +948,12 @@ async fn plivo_loopback_e2e_jsonl_covers_provider_edges() {
     logs.flush().unwrap();
 
     let contents = std::fs::read_to_string(&log_path).unwrap();
+    let log_hash = Sha256::digest(contents.as_bytes());
+    println!("plivo_voice_call_e2e_sha256={}", hex::encode(log_hash));
+    println!(
+        "plivo_voice_call_e2e_record_count={}",
+        contents.lines().count()
+    );
     for scenario in [
         "signed_webhook_acceptance",
         "invalid_signature_denial",

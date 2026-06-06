@@ -565,6 +565,10 @@ pub struct WindowsAppContainerProcessLaunchEvidence {
     pub sid_present: bool,
     /// Launch mechanism selected by the Windows sandbox.
     pub launch_mechanism: WindowsAppContainerProcessLaunchMechanism,
+    /// Integrity level requested for the child process.
+    pub integrity_level: &'static str,
+    /// Redaction-safe integrity enforcement mechanism.
+    pub integrity_enforcement: &'static str,
     /// Whether a process was actually attached to a job object.
     pub job_object_attached: bool,
     /// Expected job-object attachment behavior.
@@ -620,6 +624,8 @@ impl WindowsAppContainerProcessLaunchEvidence {
             lifecycle_action: report.action,
             sid_present: report.sid_present,
             launch_mechanism,
+            integrity_level: "not_requested",
+            integrity_enforcement: "none",
             job_object_attached,
             job_object_attachment_intent: if report.sid_present {
                 WindowsJobObjectAttachmentIntent::AttachAfterLaunch
@@ -633,6 +639,29 @@ impl WindowsAppContainerProcessLaunchEvidence {
             cleanup: report.cleanup,
             skip_reason: report.skip_reason.clone(),
         }
+    }
+
+    /// Record child-process integrity enforcement after the lifecycle record is built.
+    #[must_use]
+    pub fn with_integrity_enforcement(
+        mut self,
+        integrity_level: &'static str,
+        integrity_enforcement: &'static str,
+    ) -> Self {
+        self.integrity_level = integrity_level;
+        self.integrity_enforcement = integrity_enforcement;
+
+        if integrity_enforcement != "none" {
+            let insert_at = self
+                .step_order
+                .iter()
+                .position(|step| *step == "job_object_attach")
+                .unwrap_or(self.step_order.len());
+            self.step_order
+                .insert(insert_at, "integrity_level_enforcement");
+        }
+
+        self
     }
 
     /// Render this record as a single JSONL line.
@@ -1928,6 +1957,8 @@ mod tests {
             value["launch_mechanism"],
             "startup_info_ex_security_capabilities"
         );
+        assert_eq!(value["integrity_level"], "not_requested");
+        assert_eq!(value["integrity_enforcement"], "none");
         assert_eq!(value["job_object_attachment_intent"], "attach_after_launch");
         assert_eq!(value["job_object_attached"].as_bool(), Some(true));
         assert_eq!(value["final_filter_strength"], "process_limit");
@@ -1941,6 +1972,39 @@ mod tests {
             ]
         );
         assert!(!line.contains("4242"));
+    }
+
+    #[test]
+    fn test_windows_appcontainer_process_launch_evidence_records_integrity_order() {
+        let profile = fake_windows_appcontainer_profile();
+        let report = WindowsAppContainerLifecycleReport::active(
+            profile,
+            WindowsAppContainerLifecycleAction::Created,
+        );
+        let evidence = WindowsAppContainerProcessLaunchEvidence::from_lifecycle(
+            "connector",
+            &report,
+            WindowsAppContainerProcessLaunchMechanism::StartupInfoExSecurityCapabilities,
+            true,
+            "launched",
+            Some(4242),
+        )
+        .with_integrity_enforcement("low", "low_primary_integrity");
+        let line = evidence.to_jsonl_line().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(value["integrity_level"], "low");
+        assert_eq!(value["integrity_enforcement"], "low_primary_integrity");
+        assert_eq!(
+            evidence.step_order,
+            vec![
+                "appcontainer_lifecycle",
+                "startupinfoex_security_capabilities",
+                "integrity_level_enforcement",
+                "job_object_attach"
+            ]
+        );
+        assert!(!line.contains("primary_token"));
     }
 
     #[test]

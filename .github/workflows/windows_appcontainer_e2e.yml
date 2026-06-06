@@ -62,7 +62,7 @@ jobs:
           @{
             schema_version = "1.0.0"
             event_type = "fcp.host.windows.appcontainer.workflow_started"
-            bead_id = "flywheel_connectors-r4qcg.1.1"
+            bead_id = "flywheel_connectors-r4qcg.2"
             actor = "github-actions"
             redaction_scope = "public"
             correlation_id = "windows-appcontainer-${{ github.run_id }}"
@@ -92,7 +92,7 @@ jobs:
           RCH_BIN: direct
           RUN_ID: ${{ github.run_id }}
           OUT_ROOT: ${{ env.WINDOWS_APPCONTAINER_ARTIFACT_DIR }}/process-launch
-          WINDOWS_APPCONTAINER_BEAD_ID: flywheel_connectors-r4qcg.1.1
+          WINDOWS_APPCONTAINER_BEAD_ID: flywheel_connectors-r4qcg.2
           WINDOWS_APPCONTAINER_CARGO_TARGET: x86_64-pc-windows-msvc
           WINDOWS_APPCONTAINER_CARGO_FEATURES: windows-appcontainer
           FCP_SANDBOX_WINDOWS_APPCONTAINER: ${{ (github.event_name == 'workflow_dispatch' && inputs.live_e2e == 'true') && '1' || '' }}

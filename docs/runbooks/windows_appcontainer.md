@@ -1,11 +1,12 @@
 # Windows AppContainer Runbook
 
-**Bead:** `flywheel_connectors-r4qcg.1.1`
+**Bead:** `flywheel_connectors-r4qcg.2`
 **Audience:** Operators and agents validating the Windows sandbox path.
 
 Windows remains `ProcessLimit` unless a connector process is launched through
 the AppContainer process-launch path and the run emits evidence showing the
-profile SID, capability decision, launch mechanism, and Job Object attachment.
+profile SID, capability decision, launch mechanism, low-integrity enforcement,
+and Job Object attachment.
 
 ## Verify AppContainer Is Functioning
 
@@ -25,8 +26,10 @@ artifacts/e2e/windows_appcontainer/<run-id>/
 {
   "schema_version": "1.0.0",
   "record_type": "windows_appcontainer_process_launch_e2e",
-  "bead_id": "flywheel_connectors-r4qcg.1.1",
+  "bead_id": "flywheel_connectors-r4qcg.2",
   "launch_mechanism": "startup_info_ex_security_capabilities",
+  "integrity_level": "low",
+  "integrity_enforcement": "low_primary_integrity",
   "sid_present": true,
   "job_object_attached": true,
   "allowed_process_startup": true,
@@ -70,9 +73,11 @@ When AppContainer launch fails in production or CI:
 1. Preserve the JSONL artifact and command output.
 2. Check whether `FCP_SANDBOX_WINDOWS_APPCONTAINER=1` was set for the process.
 3. Check whether the profile SID was resolved.
-4. Confirm Job Object attachment happened after process creation and before the
+4. Confirm the record shows `integrity_level:"low"` and
+   `integrity_enforcement:"low_primary_integrity"` for a real launch.
+5. Confirm Job Object attachment happened after process creation and before the
    child was resumed.
-5. Confirm capability names match
+6. Confirm capability names match
    `docs/architecture/windows_appcontainer_capability_map.md`.
 
 Do not promote Windows readiness to `ProfileLevel` after a failed launch.
@@ -83,6 +88,7 @@ Do not promote Windows readiness to `ProfileLevel` after a failed launch.
 |---|---|---|
 | `windows_appcontainer_not_active_createprocessasuser_path_unwired` | Operator did not opt in to the AppContainer launch path. | Set `FCP_SANDBOX_WINDOWS_APPCONTAINER=1` only for the Windows validation lane. |
 | `CreateAppContainerProfile failed` | Windows rejected profile creation or the profile API is unavailable. | Keep the failure artifact and check OS edition, account policy, and profile name validity. |
+| `CreateProcessWithTokenW AppContainer launch failed` | Low-integrity child identity creation or launch failed after profile setup. | Treat as fail-closed; preserve the artifact and rerun on a worker with the required Windows process privileges. |
 | `DeriveCapabilitySidsFromName(...) failed` | Capability name is invalid for Windows. | Update the capability map and policy compiler together, or deny the FCP capability. |
 | `AssignProcessToJobObject(child) failed` | Child process launched but could not receive resource limits. | Treat as fail-closed; do not claim AppContainer enforcement for that run. |
 | `rch_remote_prerequisite_unavailable` | The script required remote `rch` execution, but no admissible worker was available. | Keep the structured skip artifact and rerun after the worker fleet recovers or on the Windows Actions lane. |
@@ -92,19 +98,19 @@ Do not promote Windows readiness to `ProfileLevel` after a failed launch.
 Successful launch:
 
 ```json
-{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","cargo_runner":"direct","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startup_info_ex_security_capabilities","job_object_attached":true,"allowed_process_startup":true,"denied_user_profile_write":true,"denied_user_profile_write_error_mapping":"user_profile_write_denied","test_status":"passed","worker_execution_class":"not_applicable","fallback_decision":"not_needed","rch_summary":null,"action_result":"launched","final_readiness_layer":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.2","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","cargo_runner":"direct","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startup_info_ex_security_capabilities","integrity_level":"low","integrity_enforcement":"low_primary_integrity","job_object_attached":true,"allowed_process_startup":true,"denied_user_profile_write":true,"denied_user_profile_write_error_mapping":"user_profile_write_denied","test_status":"passed","worker_execution_class":"not_applicable","fallback_decision":"not_needed","rch_summary":null,"action_result":"launched","final_readiness_layer":"process_limit"}
 ```
 
 Skipped lane:
 
 ```json
-{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","test_status":"skipped","allowed_process_startup":false,"denied_user_profile_write":false,"denied_user_profile_write_error_mapping":null,"worker_execution_class":"local_fallback_refused","fallback_decision":"rch_local_fallback_refused","skip_reason":"rch_remote_prerequisite_unavailable","action_result":"structured_skip","final_readiness_layer":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.2","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","test_status":"skipped","integrity_level":"none","integrity_enforcement":"none","allowed_process_startup":false,"denied_user_profile_write":false,"denied_user_profile_write_error_mapping":null,"worker_execution_class":"local_fallback_refused","fallback_decision":"rch_local_fallback_refused","skip_reason":"rch_remote_prerequisite_unavailable","action_result":"structured_skip","final_readiness_layer":"process_limit"}
 ```
 
 Denied capability:
 
 ```json
-{"schema_version":"1.0.0","event_type":"fcp.host.windows.appcontainer.capability_denied","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","capability_decision":"denied","error_class":"capability_unsupported"}
+{"schema_version":"1.0.0","event_type":"fcp.host.windows.appcontainer.capability_denied","bead_id":"flywheel_connectors-r4qcg.2","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","capability_decision":"denied","error_class":"capability_unsupported"}
 ```
 
 ## Manual Profile Cleanup
@@ -144,5 +150,5 @@ and timestamp in the bead or incident record. Never run broad profile cleanup.
 | Windows | Job Object limits plus AppContainer launch evidence | `process_limit` until launch proof is active |
 
 Windows AppContainer support is an additional launch path, not evidence that
-all Windows sandbox features are complete. Integrity-level and firewall egress
-hardening remain separate beads.
+all Windows sandbox features are complete. Low-integrity child launch evidence
+is covered by this bead; firewall egress hardening remains separate.

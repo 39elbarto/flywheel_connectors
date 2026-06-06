@@ -1,9 +1,9 @@
 # Google Docs Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: PROVEN runtime contract documented with manifest/runtime drift called out
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/google_docs_connector_verification.sh`
 > **Docs API upstream**: https://developers.google.com/docs/api/reference/rest/v1/documents
 > **Documents create upstream**: https://developers.google.com/docs/api/reference/rest/v1/documents/create
 > **Documents get upstream**: https://developers.google.com/docs/api/reference/rest/v1/documents/get
@@ -51,12 +51,11 @@ This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google_docs`, while runtime `BaseConnector` ID is `google-docs`.
 - Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
-- Manifest `interface_hash` is `blake3-256:fcp.interface.v2:google_docs_v1`, which is a named placeholder-style string rather than a concrete digest.
 - Runtime `handle_shutdown` shuts down the client runtime and sets `client = None`, but it leaves verifier, session, and other lifecycle state in place.
 - `doctor()` and `self_check()` report configured/local readiness only, not provider reachability or credential validity.
-- There is no dedicated tracked verification shell script for this connector.
+- The dedicated tracked verification shell script is `scripts/e2e/google_docs_connector_verification.sh`.
 
-A follow-up parity bead should align connector ID spelling, replace placeholder interface proof, add provider-backed readiness when desired, reset lifecycle state consistently on shutdown, and decide whether Docs-specific Drive export, placement, permission, comment, or suggestion surfaces belong in this connector.
+A follow-up parity bead should align connector ID spelling, add provider-backed readiness when desired, reset lifecycle state consistently on shutdown, and decide whether Docs-specific Drive export, placement, permission, comment, or suggestion surfaces belong in this connector.
 
 ## First-Slice Scope
 
@@ -69,6 +68,7 @@ The current Google Docs README slice documents the existing runtime surface:
 - provider error mapping, retry behavior, redaction posture, and health behavior
 - lifecycle, doctor, health, self-check, introspection, simulation, invoke, and shutdown surfaces
 - deterministic WireMock tests and direct proof commands
+- the tracked verifier bundle that ties gauntlet, manifest, Cargo, local non-mock JSONL, redaction, and replay evidence together
 
 ## Auth And Scope Boundary
 
@@ -170,7 +170,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/google_docs_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked `scripts/e2e/google_docs_connector_verification.sh` bundle is the closeout surface for this connector, alongside the crate-local test suite and direct `rch` proof commands.
 
 The verification surface captures:
 
@@ -209,6 +209,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `scripts/e2e/google_docs_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo check -p fcp-google-docs --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo test -p fcp-google-docs --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo clippy -p fcp-google-docs --all-targets --no-deps -- -D warnings`

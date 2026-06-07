@@ -423,7 +423,10 @@ max_response_bytes = 1048576
 [provides.operations."registry.search".ai_hints]
 when_to_use = "Use when you need npm or crates.io package discovery for a text query."
 common_mistakes = ["PyPI search is intentionally unsupported in the first slice."]
-examples = ['{"query":"serde","limit":5,"page":1}']
+examples = [
+    '{"query":"serde","limit":5,"page":1}',
+    '{"query":"react","limit":10,"page":2}',
+]
 related = ["registry.packages.get"]
 
 [provides.operations."registry.versions.list"]

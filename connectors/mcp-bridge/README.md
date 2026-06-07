@@ -1,6 +1,6 @@
 # MCP Bridge Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: runtime contract documented; operation metadata is manifest-derived
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -57,16 +57,18 @@ Important runtime truths the contract preserves:
 - `health()` and `doctor()` consider a handshake complete only when a `session_id` was provided.
 - `self_check()` is a local readiness check only; it does not issue a live MCP probe.
 
-## Drift Visible In This Checkout
+## Remaining Drift Visible In This Checkout
 
-This README documents the runtime truth and keeps current drift visible:
+This README documents the runtime truth and keeps the remaining drift visible:
 
+- Manifest and runtime introspection share the same seven-operation catalog.
+- Runtime operation metadata is derived from `manifest.toml`, including policy approval for `mcp.tools.call` and `mcp.sampling.handle`.
 - Manifest marks the connector `ready`, while the runtime remains a first-slice bridge with no capability-token enforcement, no approval-token enforcement, no live self-check probe, and no SSE response handling.
 - Manifest network constraints allow `localhost.localdomain` on selected ports. Runtime URL readiness accepts any parseable HTTP or HTTPS URL with a non-empty host.
 - Manifest state hint says endpoint and transport config are stored. Runtime keeps configuration in memory and does not persist connector state.
 - Runtime exposes API-key bearer auth only; there is no host `credential_id` or secretless injection mode.
 - Runtime `introspect()` returns only `connector_id`, `version`, and `operations`, not the full `Introspection` shape with events, resource types, auth caps, or event caps.
-- Runtime metadata marks `mcp.tools.call` and `mcp.sampling.handle` as policy-approval operations, but runtime checks no approval token.
+- Manifest-derived runtime metadata marks `mcp.tools.call` and `mcp.sampling.handle` as policy-approval operations, but runtime checks no approval token.
 - Runtime `simulate()` can return allowed before the connector is configured or handshaken because it only checks the operation inventory.
 - `handle_configure()` can leave the connector handshaken after reconfiguration because it does not reset handshake state.
 - `handle_shutdown()` can leave `session_id` present, so health/doctor semantics can be misleading after shutdown.
@@ -74,7 +76,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Description scanning annotates catalogs and can block in `block` mode, but it is heuristic and does not make remote MCP descriptions trusted.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should implement capability-token and approval-token verification, align manifest/runtime network policy, add a real live MCP self-check probe, support actual Streamable HTTP/SSE response handling where needed, reset handshake/session state consistently on reconfigure and shutdown, add secretless credential support if desired, and add a tracked verification bundle.
+A follow-up enforcement bead should implement capability-token and approval-token verification, align manifest/runtime network policy, add a real live MCP self-check probe, support actual Streamable HTTP/SSE response handling where needed, reset handshake/session state consistently on reconfigure and shutdown, add secretless credential support if desired, and add a tracked verification bundle.
 
 ## First-Slice Scope
 

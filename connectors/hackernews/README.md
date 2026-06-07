@@ -1,6 +1,6 @@
 # Hacker News Connector V3 Contract
 
-> **Status**: readiness and verification closeout
+> **Status**: readiness and verification closeout; manifest metadata aligned
 > **Bead**: `flywheel_connectors-j05nu.8.2.3`
 > **Verification**: `scripts/e2e/hackernews_connector_verification.sh`
 > **Primary upstream**: Hacker News Firebase API at `https://github.com/HackerNews/API`
@@ -38,6 +38,7 @@ Important runtime truths that the contract must preserve:
 - The optional `limit` parameter is applied locally after the feed response is fetched.
 - `health` uses the top-stories endpoint as a reachability probe.
 - `health`, `doctor`, and `self_check` all emit operator guidance, artifact hints, and verification-script metadata.
+- Runtime operation metadata is derived from `manifest.toml` for capability, risk, safety, idempotency, schemas, approval mode, and AI hints.
 - The connector exposes no streaming, replay, or write surface.
 
 ## First-Slice Scope
@@ -175,7 +176,7 @@ It captures:
 This contract is grounded in the current connector implementation and manifest:
 
 - `connectors/hackernews/src/client.rs` defines the Firebase endpoint paths, retry behavior, username sanitization, `null` item handling, and health probe behavior.
-- `connectors/hackernews/src/connector.rs` defines the public config surface, the single read-capability boundary, and the runtime `OperationInfo` metadata.
+- `connectors/hackernews/src/connector.rs` defines the public config surface, the single read-capability boundary, and the manifest-derived runtime `OperationInfo` metadata.
 - `connectors/hackernews/tests/integration.rs` captures readiness, operator-guidance, self-check, invoke, and introspection evidence.
 - `scripts/e2e/hackernews_connector_verification.sh` is the replayable `rch` verification bundle for this connector.
 - `connectors/hackernews/manifest.toml` defines the public-zone network policy and read-only connector posture.

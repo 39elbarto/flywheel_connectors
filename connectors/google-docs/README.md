@@ -1,9 +1,9 @@
 # Google Docs Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: runtime contract documented; tracked verifier proof blocked on manifest-check infrastructure
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/google_docs_connector_verification.sh`
 > **Docs API upstream**: https://developers.google.com/docs/api/reference/rest/v1/documents
 > **Documents create upstream**: https://developers.google.com/docs/api/reference/rest/v1/documents/create
 > **Documents get upstream**: https://developers.google.com/docs/api/reference/rest/v1/documents/get
@@ -51,10 +51,11 @@ This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google_docs`, while runtime `BaseConnector` ID is `google-docs`.
 - Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
-- Manifest `interface_hash` is `blake3-256:fcp.interface.v2:google_docs_v1`, which is a named placeholder-style string rather than a concrete digest.
+- Manifest `interface_hash` is the parseable all-zero placeholder `blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000`, not a concrete interface digest.
 - Runtime `handle_shutdown` shuts down the client runtime and sets `client = None`, but it leaves verifier, session, and other lifecycle state in place.
 - `doctor()` and `self_check()` report configured/local readiness only, not provider reachability or credential validity.
-- There is no dedicated tracked verification shell script for this connector.
+- The dedicated tracked verification shell script is `scripts/e2e/google_docs_connector_verification.sh`.
+- A pre-promotion verifier run on `2026-06-06` passed the connector-specific `cargo_check`, `format_check`, `connector_suite`, `local_non_mock`, local non-mock JSONL/redaction, and `clippy` lanes through `rch`, but the `fwc manifest fix --check --json` lane was `infra_blocked` by `RCH-E104` after the remote `fwc` build hit the 1800 second SSH timeout. Do not mark this connector PROVEN until that manifest lane passes and the manifest status/hash are updated in the same change.
 
 A follow-up parity bead should align connector ID spelling, replace placeholder interface proof, add provider-backed readiness when desired, reset lifecycle state consistently on shutdown, and decide whether Docs-specific Drive export, placement, permission, comment, or suggestion surfaces belong in this connector.
 
@@ -170,7 +171,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/google_docs_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked verification bundle is `scripts/e2e/google_docs_connector_verification.sh`. It writes a redaction-safe artifact tree under `artifacts/e2e/google-docs/<run-id>` by default and records the gauntlet output, manifest check, connector-local Cargo proof logs, extracted `local_non_mock` JSONL, environment metadata, replay command, and summary status.
 
 The verification surface captures:
 
@@ -179,6 +180,14 @@ The verification surface captures:
 - auth, endpoint policy, provider error, lifecycle, simulation, and introspection tests
 - formatting, check, test, and clippy proof through `rch`
 - UBS on changed files before commit
+
+Latest pre-promotion evidence:
+
+- `scripts/e2e/google_docs_connector_verification.sh` wrote summary `/tmp/fcp-google-docs-e2e/maroon-google-docs-pre-20260606T023809Z/summary.json` (`sha256:f513a7c72ef517666a6b1c5002048d2384d2efffb534863d3493eb090a1595ff`) with `overall_status=infra_blocked`.
+- The same run passed `cargo_check`, `format_check`, `connector_suite`, `local_non_mock`, `local_non_mock_jsonl`, and `clippy`; `graduation_gauntlet` remained `pre_promotion_pending` because `readme_status_match` still requires a PROVEN README plus `status = "proven"` manifest update.
+- Local non-mock evidence is `/tmp/fcp-google-docs-e2e/maroon-google-docs-pre-20260606T023809Z/evidence/local_non_mock.jsonl` (`sha256:184e5978b953d1383a917cb374ab2a4c0d7090a3b5cd2f49414f3cd8670a95ee`), with three redaction-safe `loopback_http` records for `docs.get` authorization, wrong-capability pre-egress denial, and unauthorized provider mapping.
+- Gauntlet JSONL is `/tmp/fcp-google-docs-e2e/maroon-google-docs-pre-20260606T023809Z/evidence/graduation_gauntlet.jsonl` (`sha256:c3add566a863e664b5e2d879082834eba36ec232d99fc77afe109c7ce4bf7d5b`) and failed only `readme_status_match`.
+- Manifest check evidence is `/tmp/fcp-google-docs-e2e/maroon-google-docs-pre-20260606T023809Z/evidence/manifest_check.json` (`sha256:a5844849f7cc1dda2bc6a3660f572e6204b469ae92d9d25d153a6a38b8bf0584`) and records `manifest_check=infra_blocked`; the log shows `RCH-E104` after the remote `fwc` build timed out.
 
 ## Operator Guidance
 
@@ -209,6 +218,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID="google-docs-pre-$(date -u +%Y%m%dT%H%M%SZ)"; OUT_ROOT="/tmp/fcp-google-docs-e2e/${RUN_ID}"; CARGO_TARGET_PREFIX="/tmp/fcp-google-docs-${RUN_ID}"; export RUN_ID OUT_ROOT CARGO_TARGET_PREFIX; scripts/e2e/google_docs_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo check -p fcp-google-docs --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo test -p fcp-google-docs --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo clippy -p fcp-google-docs --all-targets --no-deps -- -D warnings`

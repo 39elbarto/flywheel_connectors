@@ -2,14 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_openai_compat::{ChatChunk, OpenAiError, RateLimitPolicy};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError,
-    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
+    InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
@@ -35,6 +36,7 @@ const OP_CHAT_STREAM: &str = "moonshot.chat.completions_stream";
 const OP_MODELS: &str = "moonshot.models.list";
 const OP_HEALTH: &str = "moonshot.health";
 const OP_EMBEDDINGS: &str = "moonshot.embeddings.create";
+const OPERATION_ORDER: &[&str] = &[OP_CHAT, OP_CHAT_STREAM, OP_MODELS, OP_HEALTH, OP_EMBEDDINGS];
 
 const CAP_CHAT: &str = "moonshot.chat";
 const CAP_MODELS: &str = "moonshot.models.read";
@@ -615,147 +617,55 @@ impl FcpConnector for MoonshotConnector {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT),
-            summary: "Create a Moonshot chat completion".into(),
-            description: Some(
-                "Uses Moonshot/Kimi's OpenAI-compatible POST /v1/chat/completions endpoint."
-                    .into(),
-            ),
-            input_schema: chat_schema(false),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use direct Moonshot/Kimi for long-context Chinese/English chat, coding, and multimodal-capable model access.".into(),
-                common_mistakes: vec![
-                    "Do not log prompts, completions, tool-call arguments, API keys, or long-context document text.".into(),
-                    "Pass estimated_input_tokens when the caller has a token estimate; the connector rejects over-window requests instead of truncating.".into(),
-                    "The current first-party Kimi API docs do not expose embeddings; use another embeddings connector.".into(),
-                ],
-                examples: vec![r#"{"model":"kimi-k2.6","messages":[{"role":"user","content":"Summarize FCP in 3 bullets."}],"max_completion_tokens":256}"#.into()],
-                related: vec![
-                    CapabilityId::from_static(CAP_CHAT),
-                    CapabilityId::from_static(CAP_MODELS),
-                ],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT_STREAM),
-            summary: "Create a Moonshot streaming chat completion".into(),
-            description: Some(
-                "Uses Moonshot/Kimi's SSE stream and returns chunk metadata plus assembled content."
-                    .into(),
-            ),
-            input_schema: chat_schema(true),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use for latency-sensitive Kimi responses when the caller can consume chunk metadata.".into(),
-                common_mistakes: vec![
-                    "Handle finish_reason, reasoning_content, and tool-call deltas.".into(),
-                    "Do not log streamed content from private long-context inputs.".into(),
-                ],
-                examples: vec![r#"{"messages":[{"role":"user","content":"Stream a sentence."}],"max_completion_tokens":64}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_MODELS),
-            summary: "List Moonshot models".into(),
-            description: Some("Reads and caches GET /v1/models.".into()),
-            input_schema: json!({ "type": "object", "properties": { "refresh": { "type": "boolean" } } }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_MODELS),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use before choosing a Kimi model id or checking model context windows.".into(),
-                common_mistakes: Vec::new(),
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_HEALTH),
-            summary: "Probe Moonshot health".into(),
-            description: Some("Performs a bounded models.list probe.".into()),
-            input_schema: json!({ "type": "object", "properties": {} }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_HEALTH),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to confirm Moonshot credentials and network path.".into(),
-                common_mistakes: vec![
-                    "Do not treat .ai and .cn API keys as interchangeable; the official docs describe them as independent platforms.".into(),
-                ],
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_EMBEDDINGS),
-            summary: "Moonshot embeddings unavailable".into(),
-            description: Some("Declared for introspection honesty; current Kimi API docs do not expose /v1/embeddings.".into()),
-            input_schema: json!({ "type": "object", "properties": { "availability": { "const": "not_supported" } } }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_EMBEDDINGS),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Do not invoke; use this metadata to explain that Moonshot embeddings are intentionally unsupported.".into(),
-                common_mistakes: vec!["Do not proxy embeddings through another provider from this connector.".into()],
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-    ]
+    typed_operations_info()
 }
 
-fn chat_schema(streaming: bool) -> Value {
-    json!({
-        "type": "object",
-        "required": ["messages"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_MODEL },
-            "messages": { "type": "array", "minItems": 1 },
-            "max_tokens": { "type": "integer", "minimum": 1, "deprecated": true },
-            "max_completion_tokens": { "type": "integer", "minimum": 1 },
-            "estimated_input_tokens": { "type": "integer", "minimum": 0 },
-            "context_window_tokens": { "type": "integer", "minimum": 1 },
-            "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-            "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
-            "stop": {},
-            "response_format": { "type": "object" },
-            "tools": { "type": "array" },
-            "tool_choice": {},
-            "thinking": {},
-            "streaming_response": { "const": streaming },
-            "provider_extensions": { "type": "object" }
-        }
-    })
+fn typed_operations_info() -> Vec<OperationInfo> {
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Moonshot manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: Some(ApprovalMode::from(operation.requires_approval)),
+    }
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
@@ -972,5 +882,96 @@ mod tests {
             MoonshotConnector::manifest_hash(),
             "sha256:moonshot-connector-v1"
         );
+    }
+
+    #[test]
+    fn introspection_operations_preserve_runtime_order() {
+        let operations = typed_operations_info();
+        let ids = operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, OPERATION_ORDER);
+    }
+
+    fn strict_moonshot_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_moonshot_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                Some(ApprovalMode::from(manifest_operation.requires_approval))
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_schema_is_the_runtime_introspection_schema() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should exist in manifest");
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+        }
     }
 }

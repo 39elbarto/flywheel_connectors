@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = ["websocket", "http-json"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:9b5da4d55eb471473c3f62df1bb694601e64af4ac7fc871341c2d2a5a5c72c75"
+interface_hash = "blake3-256:fcp.interface.v2:4d069076fab4ef08a8245bac1815899c5718fbc2906ab34e859a61e31f407bd2"
 
 [connector]
 id = "fcp.inworld"
 name = "Inworld"
 version = "0.1.0"
 description = "Inworld Realtime character and voice-agent connector with TTS WebSocket and Router chat support"
-archetypes = ["request-response", "streaming", "bidirectional"]
+archetypes = ["operational", "streaming", "bidirectional"]
 format = "native"
 
 [connector.state]
@@ -41,6 +41,8 @@ profile = "strict"
 memory_mb = 256
 cpu_percent = 50
 wall_clock_timeout_ms = 120000
+deny_exec = true
+deny_ptrace = true
 
 [provides.operations."inworld.realtime.text_turn"]
 description = "Run an Inworld Realtime text turn over the current WebSocket event protocol"

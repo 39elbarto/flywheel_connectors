@@ -1,6 +1,6 @@
 # Cloudflare Connector V3 Contract
 
-> **Status**: runtime contract documented with known manifest/capability metadata drift
+> **Status**: runtime contract documented; operation metadata is manifest-derived
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/cloudflare_connector_verification.sh`
@@ -63,11 +63,11 @@ Important runtime truths the contract preserves:
 - `self_check` calls `/user/tokens/verify` when credential material is configured.
 - `introspect` exposes no streaming support.
 
-## Known Contract Gaps
+## Remaining Contract Gaps
 
-The runtime, manifest, and policy metadata are not fully aligned in this checkout:
+The manifest operation catalog and runtime introspection metadata are aligned in this checkout. Remaining gaps are in simulation strictness and provider surface depth:
 
-- `manifest.toml` has `capabilities.optional = []`, while manifest operation entries and runtime introspection use operation-specific capabilities such as `cloudflare.dns.read`, `cloudflare.dns.write`, `cloudflare.workers.write`, and `cloudflare.kv.write`.
+- `manifest.toml` now declares the operation-specific capabilities in `capabilities.optional`, and runtime introspection derives operation metadata from the manifest instead of duplicating it in Rust.
 - `simulate` is less strict than `invoke`; it does not exercise the bound capability verifier.
 - `cloudflare.workers.deploy` accepts raw JavaScript source only. It does not support module metadata, assets, bindings, compatibility dates, secrets, routes, or Wrangler-style upload bundles.
 - `cloudflare.pages.create_deployment` sends only `{ "branch": <branch> }` to the deployment endpoint.
@@ -75,7 +75,7 @@ The runtime, manifest, and policy metadata are not fully aligned in this checkou
 - `cloudflare.kv.get` returns the raw value as a string and does not decode JSON.
 - DNS update is a full `PUT` style replacement using the runtime fields, not a partial patch operation.
 
-Operators should treat this README as the current truthfulness snapshot. A follow-up should align manifest optional capabilities, tighten simulation, and expand operation-specific provider payload support before this connector is described as complete Cloudflare coverage.
+Operators should treat this README as the current truthfulness snapshot. A follow-up should tighten simulation and expand operation-specific provider payload support before this connector is described as complete Cloudflare coverage.
 
 ## First-Slice Scope
 

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:48f691d44e3f40a8149c73fa3ed94d6c7307b3723618718535de11b06be38129"
+interface_hash = "blake3-256:fcp.interface.v2:d96e63cd4dfb17a9db8720e0facd4bc34592a108867bd9fb0b0587368a308407"
 
 [connector]
 id = "fcp.hackernews"
@@ -14,124 +14,34 @@ version = "0.1.0"
 description = "Public read-only Hacker News Firebase connector for item lookup, user lookup, feed snapshots, and health probing"
 archetypes = ["knowledge"]
 format = "native"
+status = "ready"
 
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
 migration_hint = "The connector keeps no durable local state. Configuration is limited to an optional base_url override, retry policy, and request_timeout_ms for the public Firebase API surface."
 
-# Auth and scope model:
-# - The first slice is a public Firebase API reader with no external auth flow.
-# - All operations are gated only by the `hackernews.read` capability plus the
-#   public-zone network policy.
-# - `hackernews.item.get` is the expansion primitive for stories, comments, jobs,
-#   polls, and poll options.
-# - Feed operations return numeric item IDs only; they do not auto-expand items.
-# - Algolia search, HTML scraping, authenticated account actions, moderation,
-#   recursive thread expansion, and streaming delivery are explicit non-goals.
-
 [zones]
 home = "z:public"
-allowed_sources = ["z:public", "z:work"]
+allowed_sources = [
+    "z:public",
+    "z:work",
+]
 allowed_targets = ["z:public"]
+forbidden = []
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
-forbidden = ["system.exec", "system.privileged", "network.listen"]
-
-[sandbox]
-profile = "strict"
-memory_mb = 64
-cpu_percent = 25
-wall_clock_timeout_ms = 30000
-deny_exec = true
-deny_ptrace = true
-
-[provides.operations."hackernews.item.get"]
-description = "Retrieves one public Firebase item by numeric ID. Covers stories, comments, jobs, polls, and poll options, but does not recursively expand comment trees or enrich feed snapshots."
-capability = "hackernews.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["id"], additionalProperties = false, properties = { id = { type = "integer", minimum = 0, description = "Public Hacker News item ID" } } }
-output_schema = { type = "object", required = ["id", "type", "by", "time", "text", "dead", "parent", "poll", "kids", "url", "score", "title", "parts", "descendants", "deleted"], additionalProperties = false, properties = { id = { type = "integer", minimum = 0 }, type = { type = ["string", "null"] }, by = { type = ["string", "null"] }, time = { type = ["integer", "null"], minimum = 0 }, text = { type = ["string", "null"] }, dead = { type = "boolean" }, parent = { type = ["integer", "null"], minimum = 0 }, poll = { type = ["integer", "null"], minimum = 0 }, kids = { type = "array", items = { type = "integer", minimum = 0 } }, url = { type = ["string", "null"] }, score = { type = ["integer", "null"] }, title = { type = ["string", "null"] }, parts = { type = "array", items = { type = "integer", minimum = 0 } }, descendants = { type = ["integer", "null"], minimum = 0 }, deleted = { type = "boolean" } } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
-
-[provides.operations."hackernews.item.get".ai_hints]
-when_to_use = "Use when you need a specific public Hacker News story, comment, job, or poll by numeric ID."
-common_mistakes = ["Item IDs are numeric, not usernames.", "Deleted or dead items may return partial data.", "Search, batching, and recursive thread expansion are explicit non-goals for this first slice."]
-examples = []
-related = ["hackernews.user.get"]
-
-[provides.operations."hackernews.user.get"]
-description = "Retrieves one public Hacker News user profile by case-sensitive username. No login, private account state, or authenticated actor context is exposed."
-capability = "hackernews.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["username"], additionalProperties = false, properties = { username = { type = "string", minLength = 1, description = "Case-sensitive Hacker News username" } } }
-output_schema = { type = "object", required = ["id", "created", "karma", "about", "submitted"], additionalProperties = false, properties = { id = { type = "string", minLength = 1 }, created = { type = "integer", minimum = 0 }, karma = { type = "integer" }, about = { type = ["string", "null"] }, submitted = { type = "array", items = { type = "integer", minimum = 0 } } } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
-
-[provides.operations."hackernews.user.get".ai_hints]
-when_to_use = "Use when you need a public Hacker News user profile by username."
-common_mistakes = ["Usernames are case-sensitive.", "This connector does not expose authenticated user actions or private profile data."]
-examples = []
-related = ["hackernews.item.get"]
-
-[provides.operations."hackernews.top_stories"]
-description = "Returns a top-stories snapshot as numeric item IDs only. Use item.get to expand stories; there is no automatic hydration or search surface."
-capability = "hackernews.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "none"
-input_schema = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 0, description = "Optional maximum number of item IDs to return" } } }
-output_schema = { type = "array", items = { type = "integer", minimum = 0 } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
-
-[provides.operations."hackernews.top_stories".ai_hints]
-when_to_use = "Use when you need the current top/front-page stories on Hacker News."
-common_mistakes = ["Returns only numeric IDs; use hackernews.item.get for full story details.", "This connector is limited to the public Firebase API surface."]
-examples = []
-related = ["hackernews.new_stories", "hackernews.best_stories"]
-
-[provides.operations."hackernews.new_stories"]
-description = "Returns a newest-stories snapshot as numeric item IDs only. This is a feed snapshot, not a write, search, or live-streaming API."
-capability = "hackernews.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "none"
-input_schema = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 0, description = "Optional maximum number of item IDs to return" } } }
-output_schema = { type = "array", items = { type = "integer", minimum = 0 } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
-
-[provides.operations."hackernews.new_stories".ai_hints]
-when_to_use = "Use when you need the most recently submitted stories."
-common_mistakes = ["Returns only numeric IDs; use hackernews.item.get for full story details.", "This connector does not expose live subscriptions or polling cursors."]
-examples = []
-related = ["hackernews.top_stories"]
-
-[provides.operations."hackernews.best_stories"]
-description = "Returns a best-stories snapshot as numeric item IDs only. Upstream ranking semantics come from Hacker News; the connector does not re-rank or search."
-capability = "hackernews.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "none"
-input_schema = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 0, description = "Optional maximum number of item IDs to return" } } }
-output_schema = { type = "array", items = { type = "integer", minimum = 0 } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
-
-[provides.operations."hackernews.best_stories".ai_hints]
-when_to_use = "Use when you need the highest-ranked stories over time."
-common_mistakes = ["Returns only numeric IDs; use hackernews.item.get for full story details.", "This is not an Algolia relevance-search endpoint."]
-examples = []
-related = ["hackernews.top_stories"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = ["hackernews.read"]
+forbidden = [
+    "system.exec",
+    "system.privileged",
+    "network.listen",
+]
 
 [provides.operations."hackernews.ask_stories"]
 description = "Returns an Ask HN feed snapshot as numeric item IDs only. There is no thread expansion or reply/write surface."
@@ -140,49 +50,102 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 0, description = "Optional maximum number of item IDs to return" } } }
-output_schema = { type = "array", items = { type = "integer", minimum = 0 } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+revocation_freshness = "safe"
+
+[provides.operations."hackernews.ask_stories".input_schema]
+additionalProperties = false
+type = "object"
+
+[provides.operations."hackernews.ask_stories".input_schema.properties.limit]
+description = "Optional maximum number of item IDs to return"
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.ask_stories".output_schema]
+type = "array"
+
+[provides.operations."hackernews.ask_stories".output_schema.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.ask_stories".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."hackernews.ask_stories".ai_hints]
 when_to_use = "Use when you need Ask HN discussion threads."
-common_mistakes = ["Returns only numeric IDs; use hackernews.item.get for full story details.", "The connector does not recursively expand Ask HN comment trees."]
+common_mistakes = [
+    "Returns only numeric IDs; use hackernews.item.get for full story details.",
+    "The connector does not recursively expand Ask HN comment trees.",
+]
 examples = []
 related = ["hackernews.show_stories"]
 
-[provides.operations."hackernews.show_stories"]
-description = "Returns a Show HN feed snapshot as numeric item IDs only. The connector does not auto-expand items or scrape extra metadata from news.ycombinator.com."
+[provides.operations."hackernews.best_stories"]
+description = "Returns a best-stories snapshot as numeric item IDs only. Upstream ranking semantics come from Hacker News; the connector does not re-rank or search."
 capability = "hackernews.read"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 0, description = "Optional maximum number of item IDs to return" } } }
-output_schema = { type = "array", items = { type = "integer", minimum = 0 } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+revocation_freshness = "safe"
 
-[provides.operations."hackernews.show_stories".ai_hints]
-when_to_use = "Use when you need Show HN project showcase threads."
-common_mistakes = ["Returns only numeric IDs; use hackernews.item.get for full story details.", "This connector does not scrape HTML pages for richer project metadata."]
+[provides.operations."hackernews.best_stories".input_schema]
+additionalProperties = false
+type = "object"
+
+[provides.operations."hackernews.best_stories".input_schema.properties.limit]
+description = "Optional maximum number of item IDs to return"
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.best_stories".output_schema]
+type = "array"
+
+[provides.operations."hackernews.best_stories".output_schema.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.best_stories".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hackernews.best_stories".ai_hints]
+when_to_use = "Use when you need the highest-ranked stories over time."
+common_mistakes = [
+    "Returns only numeric IDs; use hackernews.item.get for full story details.",
+    "This is not an Algolia relevance-search endpoint.",
+]
 examples = []
-related = ["hackernews.ask_stories"]
-
-[provides.operations."hackernews.job_stories"]
-description = "Returns a Jobs feed snapshot as numeric item IDs only. The connector does not submit jobs, favorite posts, or perform authenticated actions."
-capability = "hackernews.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "none"
-input_schema = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 0, description = "Optional maximum number of item IDs to return" } } }
-output_schema = { type = "array", items = { type = "integer", minimum = 0 } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
-
-[provides.operations."hackernews.job_stories".ai_hints]
-when_to_use = "Use when you need current YC/Hacker News job postings."
-common_mistakes = ["Returns only numeric IDs; use hackernews.item.get for full story details.", "There is no authenticated submit or moderation surface in this connector."]
-examples = []
-related = []
+related = ["hackernews.top_stories"]
 
 [provides.operations."hackernews.health"]
 description = "Verifies the public Firebase Hacker News API is reachable. This does not validate search, writes, or any authenticated surface because those are not in scope."
@@ -191,12 +154,499 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
-input_schema = { type = "object", additionalProperties = false }
-output_schema = { type = "object", required = ["status"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] } } }
-network_constraints = { host_allow = ["hacker-news.firebaseio.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 2, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+revocation_freshness = "safe"
+
+[provides.operations."hackernews.health".input_schema]
+additionalProperties = false
+type = "object"
+
+[provides.operations."hackernews.health".output_schema]
+additionalProperties = false
+required = ["status"]
+type = "object"
+
+[provides.operations."hackernews.health".output_schema.properties.status]
+enum = ["ok"]
+type = "string"
+
+[provides.operations."hackernews.health".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."hackernews.health".ai_hints]
 when_to_use = "Use when you need a lightweight reachability and rate-limit probe for the public Hacker News Firebase API."
 common_mistakes = ["Health only validates the public Firebase API surface; search, writes, and authenticated workflows remain out of scope."]
 examples = []
 related = ["hackernews.top_stories"]
+
+[provides.operations."hackernews.item.get"]
+description = "Retrieves one public Firebase item by numeric ID. Covers stories, comments, jobs, polls, and poll options, but does not recursively expand comment trees or enrich feed snapshots."
+capability = "hackernews.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."hackernews.item.get".input_schema]
+additionalProperties = false
+required = ["id"]
+type = "object"
+
+[provides.operations."hackernews.item.get".input_schema.properties.id]
+description = "Public Hacker News item ID"
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.item.get".output_schema]
+additionalProperties = false
+required = [
+    "id",
+    "type",
+    "by",
+    "time",
+    "text",
+    "dead",
+    "parent",
+    "poll",
+    "kids",
+    "url",
+    "score",
+    "title",
+    "parts",
+    "descendants",
+    "deleted",
+]
+type = "object"
+
+[provides.operations."hackernews.item.get".output_schema.properties.by]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.dead]
+type = "boolean"
+
+[provides.operations."hackernews.item.get".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."hackernews.item.get".output_schema.properties.descendants]
+minimum = 0
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.id]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.item.get".output_schema.properties.kids]
+type = "array"
+
+[provides.operations."hackernews.item.get".output_schema.properties.kids.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.item.get".output_schema.properties.parent]
+minimum = 0
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.parts]
+type = "array"
+
+[provides.operations."hackernews.item.get".output_schema.properties.parts.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.item.get".output_schema.properties.poll]
+minimum = 0
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.score]
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.text]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.time]
+minimum = 0
+type = [
+    "integer",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.title]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.type]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".output_schema.properties.url]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."hackernews.item.get".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hackernews.item.get".ai_hints]
+when_to_use = "Use when you need a specific public Hacker News story, comment, job, or poll by numeric ID."
+common_mistakes = [
+    "Item IDs are numeric, not usernames.",
+    "Deleted or dead items may return partial data.",
+    "Search, batching, and recursive thread expansion are explicit non-goals for this first slice.",
+]
+examples = []
+related = ["hackernews.user.get"]
+
+[provides.operations."hackernews.job_stories"]
+description = "Returns a Jobs feed snapshot as numeric item IDs only. The connector does not submit jobs, favorite posts, or perform authenticated actions."
+capability = "hackernews.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."hackernews.job_stories".input_schema]
+additionalProperties = false
+type = "object"
+
+[provides.operations."hackernews.job_stories".input_schema.properties.limit]
+description = "Optional maximum number of item IDs to return"
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.job_stories".output_schema]
+type = "array"
+
+[provides.operations."hackernews.job_stories".output_schema.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.job_stories".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hackernews.job_stories".ai_hints]
+when_to_use = "Use when you need current YC/Hacker News job postings."
+common_mistakes = [
+    "Returns only numeric IDs; use hackernews.item.get for full story details.",
+    "There is no authenticated submit or moderation surface in this connector.",
+]
+examples = []
+related = []
+
+[provides.operations."hackernews.new_stories"]
+description = "Returns a newest-stories snapshot as numeric item IDs only. This is a feed snapshot, not a write, search, or live-streaming API."
+capability = "hackernews.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."hackernews.new_stories".input_schema]
+additionalProperties = false
+type = "object"
+
+[provides.operations."hackernews.new_stories".input_schema.properties.limit]
+description = "Optional maximum number of item IDs to return"
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.new_stories".output_schema]
+type = "array"
+
+[provides.operations."hackernews.new_stories".output_schema.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.new_stories".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hackernews.new_stories".ai_hints]
+when_to_use = "Use when you need the most recently submitted stories."
+common_mistakes = [
+    "Returns only numeric IDs; use hackernews.item.get for full story details.",
+    "This connector does not expose live subscriptions or polling cursors.",
+]
+examples = []
+related = ["hackernews.top_stories"]
+
+[provides.operations."hackernews.show_stories"]
+description = "Returns a Show HN feed snapshot as numeric item IDs only. The connector does not auto-expand items or scrape extra metadata from news.ycombinator.com."
+capability = "hackernews.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."hackernews.show_stories".input_schema]
+additionalProperties = false
+type = "object"
+
+[provides.operations."hackernews.show_stories".input_schema.properties.limit]
+description = "Optional maximum number of item IDs to return"
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.show_stories".output_schema]
+type = "array"
+
+[provides.operations."hackernews.show_stories".output_schema.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.show_stories".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hackernews.show_stories".ai_hints]
+when_to_use = "Use when you need Show HN project showcase threads."
+common_mistakes = [
+    "Returns only numeric IDs; use hackernews.item.get for full story details.",
+    "This connector does not scrape HTML pages for richer project metadata.",
+]
+examples = []
+related = ["hackernews.ask_stories"]
+
+[provides.operations."hackernews.top_stories"]
+description = "Returns a top-stories snapshot as numeric item IDs only. Use item.get to expand stories; there is no automatic hydration or search surface."
+capability = "hackernews.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."hackernews.top_stories".input_schema]
+additionalProperties = false
+type = "object"
+
+[provides.operations."hackernews.top_stories".input_schema.properties.limit]
+description = "Optional maximum number of item IDs to return"
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.top_stories".output_schema]
+type = "array"
+
+[provides.operations."hackernews.top_stories".output_schema.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.top_stories".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hackernews.top_stories".ai_hints]
+when_to_use = "Use when you need the current top/front-page stories on Hacker News."
+common_mistakes = [
+    "Returns only numeric IDs; use hackernews.item.get for full story details.",
+    "This connector is limited to the public Firebase API surface.",
+]
+examples = []
+related = [
+    "hackernews.new_stories",
+    "hackernews.best_stories",
+]
+
+[provides.operations."hackernews.user.get"]
+description = "Retrieves one public Hacker News user profile by case-sensitive username. No login, private account state, or authenticated actor context is exposed."
+capability = "hackernews.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."hackernews.user.get".input_schema]
+additionalProperties = false
+required = ["username"]
+type = "object"
+
+[provides.operations."hackernews.user.get".input_schema.properties.username]
+description = "Case-sensitive Hacker News username"
+minLength = 1
+type = "string"
+
+[provides.operations."hackernews.user.get".output_schema]
+additionalProperties = false
+required = [
+    "id",
+    "created",
+    "karma",
+    "about",
+    "submitted",
+]
+type = "object"
+
+[provides.operations."hackernews.user.get".output_schema.properties.about]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."hackernews.user.get".output_schema.properties.created]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.user.get".output_schema.properties.id]
+minLength = 1
+type = "string"
+
+[provides.operations."hackernews.user.get".output_schema.properties.karma]
+type = "integer"
+
+[provides.operations."hackernews.user.get".output_schema.properties.submitted]
+type = "array"
+
+[provides.operations."hackernews.user.get".output_schema.properties.submitted.items]
+minimum = 0
+type = "integer"
+
+[provides.operations."hackernews.user.get".network_constraints]
+host_allow = ["hacker-news.firebaseio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hackernews.user.get".ai_hints]
+when_to_use = "Use when you need a public Hacker News user profile by username."
+common_mistakes = [
+    "Usernames are case-sensitive.",
+    "This connector does not expose authenticated user actions or private profile data.",
+]
+examples = []
+related = ["hackernews.item.get"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

@@ -3,15 +3,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError,
-    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
+    InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -34,6 +35,14 @@ pub const CAP_REALTIME: &str = "inworld.realtime.invoke";
 pub const CAP_TTS: &str = "inworld.tts";
 pub const CAP_ROUTER: &str = "inworld.router.chat";
 pub const CAP_HEALTH: &str = "inworld.health.read";
+
+const OPERATION_ORDER: &[&str] = &[
+    OP_REALTIME_TEXT,
+    OP_REALTIME_AUDIO,
+    OP_TTS_CONTEXT,
+    OP_ROUTER_CHAT,
+    OP_HEALTH,
+];
 
 #[derive(Debug, Clone)]
 struct InworldConfig {
@@ -496,232 +505,56 @@ impl FcpConnector for InworldConnector {
 }
 
 fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        operation(
-            OP_REALTIME_TEXT,
-            "Run an Inworld Realtime text turn",
-            "Connects to the current Inworld Realtime WebSocket, sends session.update, conversation.item.create, response.create, and returns redaction-safe stream metadata.",
-            CAP_REALTIME,
-            realtime_text_schema(),
-            realtime_output_schema(),
-            RiskLevel::Medium,
-            IdempotencyClass::None,
-            "Use for character/NPC voice-agent turns where text input drives a Realtime session.",
-            vec![
-                "Do not use older openSession/sendText/list-scenes REST names; they are not the current public surface.".into(),
-                "Do not log user text, transcripts, provider bodies, API keys, or JWTs.".into(),
-            ],
-        ),
-        operation(
-            OP_REALTIME_AUDIO,
-            "Run an Inworld Realtime audio turn",
-            "Connects to the current Realtime WebSocket, sends session.update, audio buffer append/commit events, response.create, and returns byte-count metadata.",
-            CAP_REALTIME,
-            realtime_audio_schema(),
-            realtime_output_schema(),
-            RiskLevel::Medium,
-            IdempotencyClass::None,
-            "Use when the caller has already encoded small non-PII audio chunks for a voice-agent turn.",
-            vec![
-                "Do not log raw audio bytes or transcripts.".into(),
-                "Keep chunks bounded; this connector validates base64 and byte totals before sending.".into(),
-            ],
-        ),
-        operation(
-            OP_TTS_CONTEXT,
-            "Exercise an Inworld TTS WebSocket context",
-            "Creates a TTS context, sends bounded text, optionally closes the context, and returns audio byte counts without raw audio.",
-            CAP_TTS,
-            tts_schema(),
-            realtime_output_schema(),
-            RiskLevel::Medium,
-            IdempotencyClass::None,
-            "Use when a voice-agent flow needs Inworld TTS context behavior rather than a generic chat response.",
-            vec![
-                "Do not send more than 1000 characters in one send_text event.".into(),
-                "Do not log synthesized audio or source text.".into(),
-            ],
-        ),
-        operation(
-            OP_ROUTER_CHAT,
-            "Call Inworld Router chat completions",
-            "Posts to /v1/chat/completions for Router or direct model fallback while returning metadata instead of provider text.",
-            CAP_ROUTER,
-            router_schema(),
-            json!({ "type": "object" }),
-            RiskLevel::Medium,
-            IdempotencyClass::None,
-            "Use for explicit Router fallback decisions that belong near the Realtime character workflow.",
-            vec![
-                "Do not collapse this connector into a generic OpenAI-compatible chat connector.".into(),
-                "Do not log prompts, completions, provider reasoning, or router metadata bodies.".into(),
-            ],
-        ),
-        operation(
-            OP_HEALTH,
-            "Report Inworld connector health",
-            "Returns local configuration and current-doc surface decisions without contacting Inworld.",
-            CAP_HEALTH,
-            json!({ "type": "object", "additionalProperties": false }),
-            json!({ "type": "object" }),
-            RiskLevel::Low,
-            IdempotencyClass::Strict,
-            "Use before live operations to confirm auth mode, URL policy, and surface scope.",
-            Vec::new(),
-        ),
-    ]
+    typed_operations_info().expect("embedded Inworld manifest should validate for introspection")
 }
 
-#[allow(clippy::too_many_arguments)]
-fn operation(
-    id: &'static str,
-    summary: &str,
-    description: &str,
-    capability: &'static str,
-    input_schema: Value,
-    output_schema: Value,
-    risk_level: RiskLevel,
-    idempotency: IdempotencyClass,
-    when_to_use: &str,
-    common_mistakes: Vec<String>,
-) -> OperationInfo {
+fn typed_operations_info() -> FcpResult<Vec<OperationInfo>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect())
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, OperationSection)>> {
+    let manifest =
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Inworld manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
     OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        description: Some(description.into()),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        safety_tier: SafetyTier::Safe,
-        idempotency,
-        ai_hints: AgentHint {
-            when_to_use: when_to_use.into(),
-            common_mistakes,
-            examples: vec!["{}".into()],
-            related: vec![CapabilityId::from_static(capability)],
-        },
-        rate_limit: None,
-        requires_approval: Some(ApprovalMode::None),
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: Some(ApprovalMode::from(operation.requires_approval)),
     }
-}
-
-fn realtime_text_schema() -> Value {
-    realtime_schema_with(
-        &["session_id", "text"],
-        [(
-            "text",
-            json!({ "type": "string", "minLength": 1, "maxLength": 4000 }),
-        )],
-    )
-}
-
-fn realtime_audio_schema() -> Value {
-    realtime_schema_with(
-        &["session_id", "audio_chunks_base64"],
-        [(
-            "audio_chunks_base64",
-            json!({
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 64,
-                "items": { "type": "string", "contentEncoding": "base64" }
-            }),
-        )],
-    )
-}
-
-fn realtime_schema_with<const N: usize>(
-    required: &[&str],
-    extra_properties: [(&str, Value); N],
-) -> Value {
-    let mut properties = realtime_common_properties();
-    for (name, schema) in extra_properties {
-        properties.insert(name.into(), schema);
-    }
-    json!({
-        "type": "object",
-        "required": required,
-        "properties": properties
-    })
-}
-
-fn realtime_common_properties() -> Map<String, Value> {
-    Map::from_iter([
-        (
-            "session_id".into(),
-            json!({ "type": "string", "minLength": 1 }),
-        ),
-        ("model".into(), json!({ "type": "string" })),
-        ("voice_id".into(), json!({ "type": "string" })),
-        ("tts_model_id".into(), json!({ "type": "string" })),
-        ("stt_model_id".into(), json!({ "type": "string" })),
-        ("character_id".into(), json!({ "type": "string" })),
-        ("profile_id".into(), json!({ "type": "string" })),
-        ("event_history_id".into(), json!({ "type": "string" })),
-        ("conversation_state_id".into(), json!({ "type": "string" })),
-        (
-            "output_modalities".into(),
-            json!({ "type": "array", "items": { "enum": ["audio", "text"] } }),
-        ),
-        (
-            "instructions".into(),
-            json!({ "type": "string", "maxLength": 4000 }),
-        ),
-        ("session_extra".into(), json!({ "type": "object" })),
-        (
-            "max_events".into(),
-            json!({ "type": "integer", "minimum": 1, "maximum": 32 }),
-        ),
-    ])
-}
-
-fn tts_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["text"],
-        "properties": {
-            "context_id": { "type": "string" },
-            "voice_id": { "type": "string" },
-            "model_id": { "type": "string" },
-            "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
-            "flush": { "type": "boolean" },
-            "close": { "type": "boolean" },
-            "max_events": { "type": "integer", "minimum": 1, "maximum": 32 }
-        }
-    })
-}
-
-fn router_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["model", "messages"],
-        "properties": {
-            "model": { "type": "string" },
-            "messages": { "type": "array", "minItems": 1 },
-            "stream": { "const": false },
-            "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-            "top_p": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
-            "max_tokens": { "type": "integer", "minimum": 1 },
-            "max_completion_tokens": { "type": "integer", "minimum": 1 },
-            "extra_body": { "type": "object" }
-        }
-    })
-}
-
-fn realtime_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "mode": { "type": "string" },
-            "operation_result": { "type": "string" },
-            "events": { "type": "object" },
-            "input_text_bytes": { "type": "integer" },
-            "input_audio_bytes": { "type": "integer" },
-            "latency_ms": { "type": "integer" },
-            "cleanup_result": { "type": "string" }
-        }
-    })
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
@@ -864,10 +697,7 @@ mod tests {
             .iter()
             .map(|operation| operation.id.as_str())
             .collect::<Vec<_>>();
-        assert!(ids.contains(&OP_REALTIME_TEXT));
-        assert!(ids.contains(&OP_REALTIME_AUDIO));
-        assert!(ids.contains(&OP_TTS_CONTEXT));
-        assert!(ids.contains(&OP_ROUTER_CHAT));
+        assert_eq!(ids, OPERATION_ORDER);
         assert!(!ids.iter().any(|id| id.contains("openSession")));
         assert!(!ids.iter().any(|id| id.contains("sendText")));
         assert!(!ids.iter().any(|id| id.contains("characters.list")));
@@ -895,5 +725,88 @@ mod tests {
 
         assert_eq!(actual, expected);
         assert_ne!(actual, "sha256:inworld-connector-v1");
+    }
+
+    fn strict_inworld_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_inworld_manifest()?;
+        let operations = typed_operations_info().map_err(|error| error.to_string())?;
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                Some(ApprovalMode::from(manifest_operation.requires_approval))
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_schema_is_the_runtime_introspection_schema() -> Result<(), String> {
+        let manifest = strict_inworld_manifest()?;
+        let operations = typed_operations_info().map_err(|error| error.to_string())?;
+
+        for operation in operations {
+            let operation_id = operation.id.as_str();
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+        }
+
+        Ok(())
     }
 }

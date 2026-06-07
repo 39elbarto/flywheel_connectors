@@ -33,13 +33,13 @@ The connector exposes these operations:
 - `circleci.jobs.get`
 - `circleci.health`
 
-This operation inventory is the authoritative first-slice surface.
+The current implementation derives runtime operation metadata from `manifest.toml`, so this operation inventory is the authoritative first-slice surface.
 
 ## First-Slice Scope
 
 The first CircleCI slice is intentionally narrow:
 
-- Read the authenticated user’s accessible projects through `GET /me/collaborations`.
+- Read the authenticated user's accessible projects through `GET /me/collaborations`.
 - List and inspect pipelines.
 - Trigger a pipeline run for a known project slug.
 - List and inspect workflows associated with a pipeline.
@@ -71,7 +71,7 @@ The connector is `operational` and effectively stateless aside from configuratio
 - `deny_private_ranges = true`
 - No cross-host redirects
 - API v2 responses may return `429` with `Retry-After`; the runtime must honor that header.
-- The connector’s default request timeout is `30_000 ms`.
+- The connector's default request timeout is `30_000 ms`.
 - `project_slug` is the only path input that legitimately contains `/`; all other IDs are single path segments and should remain sanitized accordingly.
 
 ## Capability Families
@@ -138,7 +138,7 @@ These are excluded on purpose:
 
 ## Implementation Notes For `flywheel_connectors-j05nu.4.2.2`
 
-- Reconcile manifest and runtime so every exposed operation is declared truthfully with typed schemas.
+- Keep manifest and runtime metadata aligned through manifest-derived introspection and parity tests.
 - Fix the current drift between runtime idempotency semantics and actual provider behavior, especially for pipeline trigger and workflow rerun.
 - Decide whether the recommended `pipeline/run` trigger endpoint should replace or supplement the current `POST /project/{project_slug}/pipeline` path for supported project types.
 - Make the auth contract explicit: either keep pure `api_token` mode or formalize secretless credential injection as a first-class config surface.
@@ -191,7 +191,7 @@ trigger, cancel, or rerun pipelines.
 
 ## Source Notes
 
-This contract is grounded in CircleCI’s official docs:
+This contract is grounded in CircleCI's official docs:
 
 - API v2 is personal-token based and uses the `Circle-Token` header.
 - The provider documents user, pipeline, job, workflow, project, trigger, schedule, insights, and other categories beyond the current connector slice.

@@ -59,12 +59,12 @@ This README documents the runtime truth and keeps current drift visible:
 
 - Runtime `invoke` does not parse or verify capability tokens; it only requires configured and handshaken connector state before dispatching known operation IDs.
 - Runtime `simulate` only checks whether the operation ID exists in the operation inventory.
-- Runtime `OperationInfo` sets `requires_approval = None` for every operation, while the manifest marks envelope creation, recipient updates, tab writes, resend, send, void, and template-send paths as policy or interactive approval.
+- Runtime `OperationInfo` is now manifest-derived for approval metadata; capability-token enforcement still does not happen in `invoke`.
 - Runtime `stream_connect_events` returns a local empty result; the manifest describes a streaming Connect webhook event operation with a large response budget.
 - Runtime output for `stream_connect_events` is `{events: [], streaming: true}` while the manifest output schema still describes a singular `event` object.
 - The client has a retry config field but currently does not route requests through `RetryLoop`.
 
-A follow-up parity bead should wire capability-token enforcement, approval metadata, retry-loop use, and real Connect handling before treating this connector as policy-complete.
+A follow-up parity bead should wire capability-token enforcement, retry-loop use, and real Connect handling before treating this connector as policy-complete.
 
 ## First-Slice Scope
 

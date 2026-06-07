@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
-    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
-    StepId,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, Introspection,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, SelfCheckReport, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,30 @@ use crate::{
     client::{DEFAULT_BASE_URL, SendGridAuth, SendGridClient},
     error::SendGridError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OP_MAIL_SEND: &str = "sendgrid.mail.send";
+const OP_CONTACTS_LIST: &str = "sendgrid.contacts.list";
+const OP_CONTACTS_SEARCH: &str = "sendgrid.contacts.search";
+const OP_CONTACTS_GET: &str = "sendgrid.contacts.get";
+const OP_LISTS_LIST: &str = "sendgrid.lists.list";
+const OP_LISTS_CREATE: &str = "sendgrid.lists.create";
+const OP_LISTS_DELETE: &str = "sendgrid.lists.delete";
+const OP_TEMPLATES_LIST: &str = "sendgrid.templates.list";
+const OP_TEMPLATES_GET: &str = "sendgrid.templates.get";
+const OP_STATS_GET: &str = "sendgrid.stats.get";
+const OPERATION_ORDER: &[&str] = &[
+    OP_MAIL_SEND,
+    OP_CONTACTS_LIST,
+    OP_CONTACTS_SEARCH,
+    OP_CONTACTS_GET,
+    OP_LISTS_LIST,
+    OP_LISTS_CREATE,
+    OP_LISTS_DELETE,
+    OP_TEMPLATES_LIST,
+    OP_TEMPLATES_GET,
+    OP_STATS_GET,
+];
 
 /// Parsed and validated `SendGrid` connector configuration.
 #[derive(Debug, Clone)]
@@ -184,371 +208,7 @@ impl SendGridConnector {
     #[must_use]
     pub fn introspection() -> Introspection {
         Introspection {
-            operations: vec![
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.mail.send"),
-                    summary: "Send a transactional email".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["personalizations", "from", "subject", "content"],
-                        "properties": {
-                            "personalizations": {
-                                "type": "array",
-                                "description": "Array of recipient groups"
-                            },
-                            "from": {
-                                "type": "object",
-                                "description": "Sender email object {email, name}"
-                            },
-                            "subject": { "type": "string" },
-                            "content": {
-                                "type": "array",
-                                "description": "Array of content objects [{type, value}]"
-                            },
-                            "template_id": { "type": "string" }
-                        }
-                    }),
-                    output_schema: json!({ "type": "object" }),
-                    capability: CapabilityId::from_static("sendgrid.mail.write"),
-                    risk_level: RiskLevel::High,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Risky,
-                    idempotency: IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "Send an email via SendGrid.".into(),
-                        common_mistakes: vec![
-                            "Not verifying sender identity first.".into(),
-                            "Sending to too many recipients in one call.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"personalizations": [{"to": [{"email": "bob@example.com"}]}], "from": {"email": "noreply@myapp.com"}, "subject": "Hello", "content": [{"type": "text/plain", "value": "Hi Bob!"}]}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.templates.read"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.contacts.list"),
-                    summary: "List marketing contacts".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": [],
-                        "properties": {}
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["result"],
-                        "properties": { "result": { "type": "array" } }
-                    }),
-                    capability: CapabilityId::from_static("sendgrid.contacts.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List marketing contacts.".into(),
-                        common_mistakes: vec![],
-                        examples: vec!["{}".into()],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.contacts.read"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.contacts.search"),
-                    summary: "Search marketing contacts by query".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["query"],
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "SGQL search query"
-                            }
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["contacts"],
-                        "properties": { "contacts": { "type": "array" } }
-                    }),
-                    capability: CapabilityId::from_static("sendgrid.contacts.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "Search contacts using SGQL query syntax.".into(),
-                        common_mistakes: vec![
-                            "Using SQL syntax instead of SGQL.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"query": "email LIKE '%@example.com'"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.contacts.read"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.contacts.get"),
-                    summary: "Get a single contact by ID".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["contact_id"],
-                        "properties": {
-                            "contact_id": {
-                                "type": "string",
-                                "description": "Contact UUID"
-                            }
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "email": { "type": "string" }
-                        }
-                    }),
-                    capability: CapabilityId::from_static("sendgrid.contacts.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "Retrieve a single contact by its UUID.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"contact_id": "abc123-def456"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.contacts.read"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.lists.list"),
-                    summary: "List marketing lists".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": [],
-                        "properties": {}
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["lists"],
-                        "properties": { "lists": { "type": "array" } }
-                    }),
-                    capability: CapabilityId::from_static("sendgrid.lists.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List all marketing contact lists.".into(),
-                        common_mistakes: vec![],
-                        examples: vec!["{}".into()],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.lists.write"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.lists.create"),
-                    summary: "Create a marketing list".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["name"],
-                        "properties": {
-                            "name": {
-                                "type": "string",
-                                "description": "Name for the new list"
-                            }
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" }
-                        }
-                    }),
-                    capability: CapabilityId::from_static("sendgrid.lists.write"),
-                    risk_level: RiskLevel::Medium,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Risky,
-                    idempotency: IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "Create a new marketing contact list.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"name": "Newsletter Subscribers"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.lists.read"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.lists.delete"),
-                    summary: "Delete a marketing list".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["list_id"],
-                        "properties": {
-                            "list_id": {
-                                "type": "string",
-                                "description": "List UUID to delete"
-                            }
-                        }
-                    }),
-                    output_schema: json!({ "type": "object" }),
-                    capability: CapabilityId::from_static("sendgrid.lists.delete"),
-                    risk_level: RiskLevel::High,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Dangerous,
-                    idempotency: IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "Delete a marketing list. Cannot be undone.".into(),
-                        common_mistakes: vec![
-                            "Deleting a list does not delete the contacts in it.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"list_id": "abc123-def456"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.lists.read"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.templates.list"),
-                    summary: "List dynamic email templates".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": [],
-                        "properties": {
-                            "generations": {
-                                "type": "string",
-                                "description": "legacy or dynamic"
-                            }
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["templates"],
-                        "properties": { "templates": { "type": "array" } }
-                    }),
-                    capability: CapabilityId::from_static("sendgrid.templates.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List available email templates.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"generations": "dynamic"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.mail.write"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.templates.get"),
-                    summary: "Get a single template by ID".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["template_id"],
-                        "properties": {
-                            "template_id": {
-                                "type": "string",
-                                "description": "Template UUID"
-                            }
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" },
-                            "versions": { "type": "array" }
-                        }
-                    }),
-                    capability: CapabilityId::from_static("sendgrid.templates.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "Get a specific email template by its ID.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"template_id": "d-abc123"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.templates.read"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("sendgrid.stats.get"),
-                    summary: "Get email delivery statistics".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["start_date"],
-                        "properties": {
-                            "start_date": {
-                                "type": "string",
-                                "description": "Start date (YYYY-MM-DD)"
-                            },
-                            "end_date": { "type": "string" }
-                        }
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["stats"],
-                        "properties": { "stats": { "type": "array" } }
-                    }),
-                    capability: CapabilityId::from_static("sendgrid.stats.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "Get email delivery statistics for a date range.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"start_date": "2026-01-01", "end_date": "2026-01-31"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("sendgrid.mail.write"),
-                        ],
-                    },
-                },
-            ],
+            operations: typed_operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -1045,88 +705,54 @@ fn is_local_test_host(host: &str) -> bool {
 
 /// Build the operations info for introspection.
 fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "sendgrid.mail.send",
-            "summary": "Send a transactional email",
-            "capability": "sendgrid.mail.write",
-            "risk_level": "high",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "sendgrid.contacts.list",
-            "summary": "List marketing contacts",
-            "capability": "sendgrid.contacts.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sendgrid.contacts.search",
-            "summary": "Search marketing contacts by query",
-            "capability": "sendgrid.contacts.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sendgrid.contacts.get",
-            "summary": "Get a single contact by ID",
-            "capability": "sendgrid.contacts.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sendgrid.lists.list",
-            "summary": "List marketing lists",
-            "capability": "sendgrid.lists.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sendgrid.lists.create",
-            "summary": "Create a marketing list",
-            "capability": "sendgrid.lists.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "sendgrid.lists.delete",
-            "summary": "Delete a marketing list",
-            "capability": "sendgrid.lists.delete",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "none",
-        },
-        {
-            "id": "sendgrid.templates.list",
-            "summary": "List dynamic email templates",
-            "capability": "sendgrid.templates.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sendgrid.templates.get",
-            "summary": "Get a single template by ID",
-            "capability": "sendgrid.templates.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "sendgrid.stats.get",
-            "summary": "Get email delivery statistics",
-            "capability": "sendgrid.stats.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+    serde_json::to_value(typed_operations_info()).unwrap_or_else(|_| json!([]))
+}
+
+fn typed_operations_info() -> Vec<OperationInfo> {
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded SendGrid manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: Some(ApprovalMode::from(operation.requires_approval)),
+    }
 }
 
 #[cfg(test)]
@@ -2060,5 +1686,86 @@ mod tests {
         let recipe = provisioning_recipe();
         assert!(!recipe.description.is_empty());
         assert!(recipe.description.contains("SendGrid"));
+    }
+
+    #[test]
+    fn strict_sendgrid_manifest() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        assert_eq!(manifest.connector.id.as_ref(), "fcp.sendgrid");
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+        assert_eq!(
+            manifest.manifest.interface_hash,
+            manifest.compute_interface_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            assert_eq!(operation.id.as_ref(), OPERATION_ORDER[index]);
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should come from manifest");
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_ref(),
+                Some(&manifest_operation.description)
+            );
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.ai_hints.when_to_use.as_str(),
+                manifest_operation.ai_hints.when_to_use.as_str()
+            );
+            assert_eq!(
+                &operation.ai_hints.common_mistakes,
+                &manifest_operation.ai_hints.common_mistakes
+            );
+            assert_eq!(
+                &operation.ai_hints.examples,
+                &manifest_operation.ai_hints.examples
+            );
+            let actual_related: Vec<&str> = operation
+                .ai_hints
+                .related
+                .iter()
+                .map(|capability| capability.as_ref())
+                .collect();
+            let expected_related: Vec<&str> = manifest_operation
+                .ai_hints
+                .related
+                .iter()
+                .map(|capability| capability.as_ref())
+                .collect();
+            assert_eq!(actual_related, expected_related);
+            assert_eq!(
+                operation.requires_approval,
+                Some(ApprovalMode::from(manifest_operation.requires_approval))
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_schema_is_the_runtime_introspection_schema() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should come from manifest");
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+        }
     }
 }

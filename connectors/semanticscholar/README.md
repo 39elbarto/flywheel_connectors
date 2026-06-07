@@ -1,6 +1,6 @@
 # Semantic Scholar Connector V3 Contract
 
-> **Status**: manifest/runtime contract documented
+> **Status**: manifest-derived runtime metadata aligned
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -53,6 +53,8 @@ Important runtime truths the contract preserves:
 - Author paper list `limit` values are bounded to 1 through 1000.
 - Default field lists are supplied per operation when callers omit `fields`.
 - 401, 403, 404, 429, and generic API errors are mapped into connector error classes.
+- Runtime `OperationInfo` metadata is derived from `manifest.toml` for
+  capability, risk, safety, idempotency, schemas, approval mode, and AI hints.
 
 ## First-Slice Scope
 
@@ -162,7 +164,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Source Notes
 
-- `connectors/semanticscholar/src/connector.rs` defines configuration parsing, auth mode selection, base URL policy, operation validation, lifecycle handlers, diagnostics, simulation, and manifest-backed introspection.
+- `connectors/semanticscholar/src/connector.rs` defines configuration parsing, auth mode selection, base URL policy, operation validation, lifecycle handlers, diagnostics, simulation, and manifest-derived introspection.
 - `connectors/semanticscholar/src/client.rs` defines Academic Graph REST calls, headers, field defaults, retry/timeout settings, path-segment validation, health probe, and provider error mapping.
 - `connectors/semanticscholar/src/types.rs` defines request argument parsing and normalized response types.
 - `connectors/semanticscholar/manifest.toml` defines the operation catalog, rate-limit pools, network constraints, sandbox boundary, zone policy, and operation AI hints.

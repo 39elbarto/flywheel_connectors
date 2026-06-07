@@ -2,14 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_openai_compat::{ChatChunk, OpenAiError, RateLimitPolicy};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError,
-    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
+    InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
@@ -38,6 +39,14 @@ const OP_EMBEDDINGS: &str = "nvidia_nim.embeddings.create";
 const OP_RERANK: &str = "nvidia_nim.rerank";
 const OP_MODELS: &str = "nvidia_nim.models.list";
 const OP_HEALTH: &str = "nvidia_nim.health";
+const OPERATION_ORDER: &[&str] = &[
+    OP_CHAT,
+    OP_CHAT_STREAM,
+    OP_EMBEDDINGS,
+    OP_RERANK,
+    OP_MODELS,
+    OP_HEALTH,
+];
 
 const CAP_CHAT: &str = "nvidia_nim.chat";
 const CAP_EMBEDDINGS: &str = "nvidia_nim.embeddings";
@@ -671,176 +680,54 @@ impl FcpConnector for NvidiaNimConnector {
 }
 
 fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT),
-            summary: "Create a NVIDIA NIM chat completion".into(),
-            description: Some("Uses the OpenAI-compatible POST /v1/chat/completions endpoint on NVIDIA-hosted or operator-configured self-hosted NIM.".into()),
-            input_schema: chat_schema(false),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use for enterprise NIM-hosted chat inference when NVIDIA-hosted or self-hosted GPU deployment is the desired boundary.".into(),
-                common_mistakes: vec![
-                    "Do not log prompts, completions, tool-call arguments, nvext contents, or API keys.".into(),
-                    "Use deployment_mode=self_hosted with explicit allowed_hosts for operator NIM containers.".into(),
-                ],
-                examples: vec![r#"{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"Hello"}]}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_CHAT_STREAM),
-            summary: "Create a NVIDIA NIM streaming chat completion".into(),
-            description: Some("Uses the OpenAI-compatible SSE chat stream and returns assembled content with redaction-safe chunk metadata.".into()),
-            input_schema: chat_schema(true),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_CHAT),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use when first-token latency matters for NIM inference.".into(),
-                common_mistakes: vec!["Handle finish_reason and chunk counts; provider-specific deltas are surfaced as metadata.".into()],
-                examples: vec![r#"{"messages":[{"role":"user","content":"Stream one sentence."}],"max_tokens":64}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_EMBEDDINGS),
-            summary: "Create NVIDIA NIM text embeddings".into(),
-            description: Some("Uses the OpenAI-compatible POST /v1/embeddings endpoint when the configured NIM deployment serves an embedding model.".into()),
-            input_schema: embeddings_schema(),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_EMBEDDINGS),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use for NIM-hosted embedding models.".into(),
-                common_mistakes: vec!["Do not log input text or embedding vectors.".into()],
-                examples: vec![r#"{"model":"nvidia/nv-embedqa-e5-v5","input":"hello"}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_RERANK),
-            summary: "Rerank passages with NVIDIA NIM".into(),
-            description: Some("Uses hosted NVIDIA retrieval reranking or self-hosted NeMo Retriever /v1/ranking based on deployment_mode.".into()),
-            input_schema: rerank_schema(),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_RERANK),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to reorder retrieved passages before RAG answer generation.".into(),
-                common_mistakes: vec![
-                    "Do not log query or passage text; evidence should use byte counts and result counts.".into(),
-                    "Hosted and self-hosted rerank paths differ; do not override deployment_mode accidentally.".into(),
-                ],
-                examples: vec![r#"{"query":"where should I go?","passages":["first passage","second passage"],"truncate":"END"}"#.into()],
-                related: vec![CapabilityId::from_static(CAP_EMBEDDINGS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_MODELS),
-            summary: "List NVIDIA NIM models".into(),
-            description: Some("Reads and caches GET /v1/models for the configured inference endpoint.".into()),
-            input_schema: json!({ "type": "object", "properties": { "refresh": { "type": "boolean" } } }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_MODELS),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use before choosing a NIM model id.".into(),
-                common_mistakes: vec!["Hosted model catalogs and self-hosted model ids differ.".into()],
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_CHAT), CapabilityId::from_static(CAP_EMBEDDINGS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_HEALTH),
-            summary: "Probe NVIDIA NIM health".into(),
-            description: Some("Performs a bounded models.list probe.".into()),
-            input_schema: json!({ "type": "object", "properties": {} }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_HEALTH),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to confirm the configured NVIDIA NIM endpoint is reachable.".into(),
-                common_mistakes: Vec::new(),
-                examples: vec!["{}".into()],
-                related: vec![CapabilityId::from_static(CAP_MODELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-    ]
+    typed_operations_info()
 }
 
-fn chat_schema(streaming: bool) -> Value {
-    json!({
-        "type": "object",
-        "required": ["messages"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_MODEL },
-            "messages": { "type": "array", "minItems": 1 },
-            "max_tokens": { "type": "integer", "minimum": 1 },
-            "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-            "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
-            "stop": {},
-            "response_format": { "type": "object" },
-            "tools": { "type": "array" },
-            "tool_choice": {},
-            "nvext": { "type": "object" },
-            "streaming_response": { "const": streaming },
-            "provider_extensions": { "type": "object" }
-        }
-    })
+fn typed_operations_info() -> Vec<OperationInfo> {
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
 }
 
-fn embeddings_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["input"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_EMBEDDING_MODEL },
-            "input": {},
-            "encoding_format": { "type": "string" },
-            "dimensions": { "type": "integer", "minimum": 1 },
-            "provider_extensions": { "type": "object" }
-        }
-    })
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded NVIDIA NIM manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
 }
 
-fn rerank_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["query", "passages"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_RERANK_MODEL },
-            "query": {},
-            "passages": { "type": "array", "minItems": 1, "maxItems": 512 },
-            "truncate": { "enum": ["START", "END", "NONE"] }
-        }
-    })
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: Some(ApprovalMode::from(operation.requires_approval)),
+    }
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
@@ -1252,16 +1139,110 @@ mod tests {
                 (OP_HEALTH, CAP_HEALTH),
             ]
         );
+    }
+
+    #[test]
+    fn introspection_operations_preserve_runtime_order() {
+        let operations = typed_operations_info();
+        let ids = operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, OPERATION_ORDER);
+    }
+
+    fn strict_nvidia_nim_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_nvidia_nim_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                Some(ApprovalMode::from(manifest_operation.requires_approval))
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_schema_is_the_runtime_introspection_schema() {
+        let operations = typed_operations_info();
+        let chat_stream = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_CHAT_STREAM)
+            .expect("streaming chat operation should exist");
+        let embeddings = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_EMBEDDINGS)
+            .expect("embeddings operation should exist");
+        let rerank = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == OP_RERANK)
+            .expect("rerank operation should exist");
+
         assert_eq!(
-            rerank_schema()["properties"]["passages"]["maxItems"],
+            rerank.input_schema["properties"]["passages"]["maxItems"],
             json!(512)
         );
-        assert_eq!(
-            chat_schema(true)["properties"]["streaming_response"],
-            json!({"const": true})
+        assert!(
+            chat_stream.input_schema["properties"]
+                .as_object()
+                .is_some_and(|properties| !properties.contains_key("streaming_response"))
         );
         assert_eq!(
-            embeddings_schema()["properties"]["dimensions"],
+            embeddings.input_schema["properties"]["dimensions"],
             json!({"type": "integer", "minimum": 1})
         );
     }

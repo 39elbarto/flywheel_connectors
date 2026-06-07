@@ -1,6 +1,6 @@
 # ClickUp Connector V3 Contract
 
-> **Status**: runtime contract documented with known handler/manifest drift
+> **Status**: runtime contract documented; operation metadata is manifest-derived
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -53,11 +53,11 @@ The current implementation has several intentional truthfulness notes:
 - `BaseConnector` is initialized with connector ID `clickup`, while the manifest and handshake payload use `fcp.clickup`.
 - `invoke` checks generic configured/handshaken readiness, but it does not verify a bound capability token for the requested operation.
 - `simulate` only checks whether an operation ID is known; it does not validate readiness, input schema, approval state, or capability tokens.
-- The manifest marks `clickup.tasks.create` as policy-approved and `clickup.tasks.delete` as interactive, but runtime `OperationInfo` currently sets `requires_approval` to `None` for all operations.
+- Runtime operation metadata is derived from `manifest.toml`, so `clickup.tasks.create` reports policy approval and `clickup.tasks.delete` reports interactive approval in introspection and simulation catalogs.
 - The manifest declares `storage.state` and says the connector stores a personal API token. The runtime keeps the active config and client in process memory; the provisioning recipe is the path that asks the host to store `api_token` under `connector:fcp.clickup`.
 - Retryability is represented in `ClickUpError`, but the live HTTP helpers do not currently use the configured retry loop.
 
-Operators should treat this README as the current truthfulness snapshot. A follow-up should align the handler surface, connector ID, capability-token enforcement, approval metadata, and retry dispatch before this connector is described as a fully modern FCP connector.
+Operators should treat this README as the current truthfulness snapshot. A follow-up should align the handler surface, connector ID, capability-token enforcement, approval dispatch enforcement, and retry dispatch before this connector is described as a fully modern FCP connector.
 
 ## First-Slice Scope
 
@@ -143,6 +143,7 @@ These are excluded on purpose:
 - credential-injection requirement for credential-id mode
 - base URL policy and loopback verification allowance
 - known operation metadata, schemas, capability IDs, risk levels, safety tiers, idempotency, and AI hints
+- manifest-derived approval modes for task creation and task deletion metadata
 - simulation allow/deny based only on known operation ID
 - self-check degradation for unconfigured, missing client, invalid network policy, or credential-injection mode
 

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:77eb7ba7fcdc04e28b3d5d016ef71aa5c2e3f4392514750645a3d4e1902766ca"
+interface_hash = "blake3-256:fcp.interface.v2:f0594a2469c855f955781153d7eb0472df25ec30269a3a19c1f48821827d5c8d"
 
 [connector]
 id = "fcp.monday"
@@ -47,6 +47,8 @@ optional = [
     "monday.boards.read",
     "monday.items.write",
     "monday.items.read",
+    "monday.updates.read",
+    "monday.updates.write",
 ]
 forbidden = [
     "system.exec",
@@ -103,6 +105,58 @@ examples = ["{}"]
 related = [
     "monday.items.list",
     "monday.items.create",
+]
+
+[provides.operations."monday.boards.get"]
+description = "Get a board by ID"
+capability = "monday.boards.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."monday.boards.get".input_schema]
+required = ["board_id"]
+type = "object"
+
+[provides.operations."monday.boards.get".input_schema.properties.board_id]
+type = "string"
+
+[provides.operations."monday.boards.get".output_schema]
+required = ["board"]
+type = "object"
+
+[provides.operations."monday.boards.get".output_schema.properties.board]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."monday.boards.get".network_constraints]
+host_allow = ["api.monday.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."monday.boards.get".ai_hints]
+when_to_use = "Retrieve a single Monday.com board by its ID."
+common_mistakes = ["Using the board name instead of its numeric ID."]
+examples = ['{"board_id": "123456789"}']
+related = [
+    "monday.boards.list",
+    "monday.items.list",
 ]
 
 [provides.operations."monday.items.create"]
@@ -255,6 +309,106 @@ related = [
     "monday.items.create",
 ]
 
+[provides.operations."monday.updates.list"]
+description = "List updates on an item"
+capability = "monday.updates.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."monday.updates.list".input_schema]
+required = ["item_id"]
+type = "object"
+
+[provides.operations."monday.updates.list".input_schema.properties.item_id]
+type = "string"
+
+[provides.operations."monday.updates.list".output_schema]
+required = ["updates"]
+type = "object"
+
+[provides.operations."monday.updates.list".output_schema.properties.updates]
+type = "array"
+
+[provides.operations."monday.updates.list".network_constraints]
+host_allow = ["api.monday.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."monday.updates.list".ai_hints]
+when_to_use = "Retrieve the update/comment thread on a Monday.com item."
+common_mistakes = ["Expecting updates to be ordered newest-first by default; verify the sort order matches your use case."]
+examples = ['{"item_id": "987654321"}']
+related = [
+    "monday.items.list",
+    "monday.updates.create",
+]
+
+[provides.operations."monday.updates.create"]
+description = "Create an update on an item"
+capability = "monday.updates.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."monday.updates.create".input_schema]
+required = [
+    "item_id",
+    "body",
+]
+type = "object"
+
+[provides.operations."monday.updates.create".input_schema.properties.body]
+type = "string"
+
+[provides.operations."monday.updates.create".input_schema.properties.item_id]
+type = "string"
+
+[provides.operations."monday.updates.create".output_schema]
+type = "object"
+
+[provides.operations."monday.updates.create".network_constraints]
+host_allow = ["api.monday.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."monday.updates.create".ai_hints]
+when_to_use = "Post a new update/comment on a Monday.com item."
+common_mistakes = ["Using HTML markup in the body without checking Monday.com's supported formatting; use plain text or Monday.com's supported HTML subset."]
+examples = ['{"item_id": "987654321", "body": "Fixed the login issue."}']
+related = [
+    "monday.updates.list",
+    "monday.items.list",
+]
+
 [sandbox]
 profile = "strict"
 memory_mb = 256
@@ -289,8 +443,25 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "monday.updates.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "monday.updates.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "monday.items.create" = ["monday.items.write"]
 "monday.items.delete" = ["monday.items.write"]
+"monday.updates.create" = ["monday.updates.write"]
 "monday.boards.list" = ["monday.boards.read"]
+"monday.boards.get" = ["monday.boards.read"]
 "monday.items.list" = ["monday.items.read"]
+"monday.updates.list" = ["monday.updates.read"]

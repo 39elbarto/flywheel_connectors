@@ -17,7 +17,7 @@ COMMAND_LINE="${COMMAND_LINE:-bash ${SCRIPT_PATH}}"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 RCH_VISIBILITY="${RCH_VISIBILITY:-verbose}"
-BEAD_ID="${WINDOWS_APPCONTAINER_BEAD_ID:-flywheel_connectors-r4qcg.1.1}"
+BEAD_ID="${WINDOWS_APPCONTAINER_BEAD_ID:-flywheel_connectors-r4qcg.2}"
 
 export RCH_FORCE_REMOTE=1
 
@@ -256,6 +256,8 @@ process_id_hash=""
 allowed_process_startup="false"
 denied_user_profile_write="false"
 denied_user_profile_write_error_mapping=""
+integrity_level="none"
+integrity_enforcement="none"
 if [[ "${real_launch}" == "true" ]]; then
   process_id="$(sed -n 's/^WINDOWS_APPCONTAINER_E2E_PROCESS_ID=//p' "${RAW_LOG}" | tail -n 1)"
   if [[ -z "${process_id}" ]]; then
@@ -269,6 +271,18 @@ if [[ "${real_launch}" == "true" ]]; then
     exit 1
   fi
   allowed_process_startup="true"
+
+  integrity_level="$(sed -n 's/^WINDOWS_APPCONTAINER_E2E_INTEGRITY_LEVEL=//p' "${RAW_LOG}" | tail -n 1)"
+  if [[ "${integrity_level}" != "low" ]]; then
+    echo "Windows AppContainer real launch proof did not emit low-integrity evidence" >&2
+    exit 1
+  fi
+
+  integrity_enforcement="$(sed -n 's/^WINDOWS_APPCONTAINER_E2E_INTEGRITY_ENFORCEMENT=//p' "${RAW_LOG}" | tail -n 1)"
+  if [[ "${integrity_enforcement}" != "low_primary_integrity" ]]; then
+    echo "Windows AppContainer real launch proof did not emit low-integrity enforcement evidence" >&2
+    exit 1
+  fi
 
   if ! grep -aq '^WINDOWS_APPCONTAINER_E2E_DENIED_USER_PROFILE_WRITE=true$' "${RAW_LOG}"; then
     echo "Windows AppContainer real launch proof did not emit denied user-profile write evidence" >&2
@@ -306,6 +320,8 @@ jq -cn \
   --arg allowed_process_startup "${allowed_process_startup}" \
   --arg denied_user_profile_write "${denied_user_profile_write}" \
   --arg denied_user_profile_write_error_mapping "${denied_user_profile_write_error_mapping}" \
+  --arg integrity_level "${integrity_level}" \
+  --arg integrity_enforcement "${integrity_enforcement}" \
   --arg test_status "${test_status}" \
   --arg fallback_decision "${fallback_decision}" \
   --arg worker_execution_class "${worker_execution_class}" \
@@ -331,6 +347,8 @@ jq -cn \
     capability_decision: "mapped",
     sid_present: ($real_launch == "true"),
     launch_mechanism: (if $real_launch == "true" then "startup_info_ex_security_capabilities" elif $test_status == "failed" then "verification_failed" else "skipped_inactive" end),
+    integrity_level: $integrity_level,
+    integrity_enforcement: $integrity_enforcement,
     process_id_hash: (if $process_id_hash == "" then null else $process_id_hash end),
     allowed_process_startup: ($allowed_process_startup == "true"),
     denied_user_profile_write: ($denied_user_profile_write == "true"),
@@ -375,6 +393,8 @@ jq -e '
       $record.capability_decision,
       $record.sid_present,
       $record.launch_mechanism,
+      $record.integrity_level,
+      $record.integrity_enforcement,
       $record.allowed_process_startup,
       $record.denied_user_profile_write,
       $record.job_object_id_hash,
@@ -411,6 +431,8 @@ jq -e '
       and $record.job_object_attachment_intent == "attach_after_launch"
       and $record.process_id_hash != null
       and $record.allowed_process_startup == true
+      and $record.integrity_level == "low"
+      and $record.integrity_enforcement == "low_primary_integrity"
       and $record.denied_user_profile_write == true
       and $record.denied_user_profile_write_error_mapping == "user_profile_write_denied"
       and $record.skip_reason == null
@@ -449,6 +471,8 @@ jq -cn \
   --arg allowed_process_startup "${allowed_process_startup}" \
   --arg denied_user_profile_write "${denied_user_profile_write}" \
   --arg denied_user_profile_write_error_mapping "${denied_user_profile_write_error_mapping}" \
+  --arg integrity_level "${integrity_level}" \
+  --arg integrity_enforcement "${integrity_enforcement}" \
   --arg test_status "${test_status}" \
   --arg fallback_decision "${fallback_decision}" \
   --arg worker_execution_class "${worker_execution_class}" \
@@ -460,6 +484,8 @@ jq -cn \
     result: $result,
     real_launch: ($real_launch == "true"),
     allowed_process_startup: ($allowed_process_startup == "true"),
+    integrity_level: $integrity_level,
+    integrity_enforcement: $integrity_enforcement,
     denied_user_profile_write: ($denied_user_profile_write == "true"),
     denied_user_profile_write_error_mapping: (if $denied_user_profile_write_error_mapping == "" then null else $denied_user_profile_write_error_mapping end),
     action_result: (if $real_launch == "true" then "launched" elif $test_status == "failed" then "verification_failed" else "structured_skip" end),

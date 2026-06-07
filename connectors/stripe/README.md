@@ -1,6 +1,6 @@
 # Stripe Connector V3 Contract
 
-> **Status**: runtime contract documented with approval, webhook, form-encoding, and runtime/manifest drift
+> **Status**: runtime contract documented; operation metadata is manifest-derived
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/stripe_connector_verification.sh`
@@ -70,12 +70,12 @@ Important runtime truths the contract preserves:
 - `self_check()` calls `GET /balance` only in direct-secret mode and degrades in `credential_id` mode.
 - `handle_shutdown()` shuts down the client runtime but does not clear connector configuration.
 
-## Drift Visible In This Checkout
+## Remaining Drift Visible In This Checkout
 
 This README documents runtime truth and keeps current drift visible:
 
 - Runtime handshake advertises streaming/replay event caps, while introspection exposes no events and no event caps.
-- Manifest marks mutating payment/customer operations as `policy` or `interactive`, but runtime introspection sets `requires_approval = None` for every operation and invoke checks no approval token.
+- Manifest marks mutating payment/customer operations as `policy` or `interactive`, and runtime introspection now reports those manifest approval modes. The invoke path still checks no approval token.
 - Official Stripe examples use form-style request parameters for API calls; this runtime currently sends JSON bodies for create/update/confirm/capture/cancel/refund/subscription operations.
 - Official Stripe idempotency guidance says all `POST` requests accept idempotency keys and `GET`/`DELETE` idempotency keys have no effect. Runtime derives or forwards idempotency keys for some delete operations as well.
 - `stripe.ingest_webhook_event` validates Stripe signatures inside the connector, but the connector does not open an HTTP listener, register Stripe webhook endpoints, or persist delivery state.
@@ -84,7 +84,7 @@ This README documents runtime truth and keeps current drift visible:
 - Manifest says connector format is `wasi`; the current Rust crate is a normal package/bin using reqwest and the FCP runtime helpers.
 - `connectors/stripe/tests/local_non_mock.rs` exercises the production connector invoke path against a deterministic loopback Stripe fixture for read, write, and payment/refund operations.
 
-A follow-up parity bead should align approval metadata and runtime enforcement, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and decide whether the loopback acceptance fixture should grow into Stripe CLI replay.
+A follow-up enforcement bead should add approval-token checks, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and decide whether the loopback acceptance fixture should grow into Stripe CLI replay.
 
 ## First-Slice Scope
 

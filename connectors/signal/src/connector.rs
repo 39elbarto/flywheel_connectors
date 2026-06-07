@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use fcp_async_core::channel::{broadcast, mpsc, watch};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
-    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
-    Principal, ReplayBufferInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeResponse, SubscribeResult,
-    TrustLevel, ZoneId,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, HealthState, InstanceId, Introspection, InvokeRequest,
+    InvokeResponse, OperationId, OperationInfo, OrderingPolicy, Principal, ReplayBufferInfo,
+    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeResponse, SubscribeResult, TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::prelude::*;
@@ -52,6 +52,14 @@ const OP_LIST_GROUPS: &str = "signal.list_groups";
 const OP_GET_GROUP: &str = "signal.get_group";
 const OP_GET_IDENTITY: &str = "signal.get_identity";
 const OP_TRUST_IDENTITY: &str = "signal.trust_identity";
+const OPERATION_ORDER: [&str; 6] = [
+    OP_SEND_MESSAGE,
+    OP_RECEIVE_MESSAGES,
+    OP_LIST_GROUPS,
+    OP_GET_GROUP,
+    OP_GET_IDENTITY,
+    OP_TRUST_IDENTITY,
+];
 
 // Event topics
 const EVENT_MESSAGE_RECEIVED: &str = "signal.message.received";
@@ -734,257 +742,61 @@ impl Default for SignalConnector {
 
 /// Build the typed operations catalog.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_SEND_MESSAGE),
-            summary: "Send a Signal message".into(),
-            description: Some(
-                "Sends a message to one or more Signal recipients using E.164 numbers, usernames, or group IDs"
-                    .into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["recipients", "message"],
-                "properties": {
-                    "recipients": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Signal recipients as E.164 numbers, usernames, or group IDs"
-                    },
-                    "message": { "type": "string", "description": "Message text" },
-                    "attachments": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Base64-encoded attachment data"
-                    },
-                    "quote_timestamp": {
-                        "type": "integer",
-                        "description": "Timestamp of message to reply to"
-                    }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "timestamp": { "type": "integer" },
-                    "coordination": {
-                        "type": "array",
-                        "description": "Redaction-safe chat coordination audit records for the send attempt",
-                        "items": { "type": "object" }
-                    }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_SEND),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to send a Signal message to contacts, usernames, or groups".into(),
-                common_mistakes: vec![
-                    "Use E.164 format for phone-number recipients (for example, +15551234567)".into(),
-                    "Do not mix phone numbers, usernames, and group IDs in the same request".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_RECEIVE_MESSAGES),
-            summary: "Receive pending Signal messages".into(),
-            description: Some("Polls the signal-cli daemon for new incoming messages".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": "Long-poll timeout in seconds (defaults to the connector config)",
-                        "minimum": 1
-                    }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "messages": {
-                        "type": "array",
-                        "items": { "type": "object" }
-                    },
-                    "count": { "type": "integer" },
-                    "receive_cursor": {
-                        "type": ["string", "null"],
-                        "description": "Highest observed message timestamp cached as the next receive cursor"
-                    },
-                    "cached_group_count": {
-                        "type": "integer",
-                        "description": "Number of Signal groups cached after the receive poll"
-                    }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to check for new incoming Signal messages".into(),
-                common_mistakes: vec![
-                    "Messages are consumed on read; re-calling will not return the same messages".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_SEND)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_LIST_GROUPS),
-            summary: "List Signal groups".into(),
-            description: Some("Lists all groups the registered number is a member of".into()),
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "groups": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string" },
-                                "name": { "type": "string" },
-                                "members": { "type": "array", "items": { "type": "string" } }
-                            }
-                        }
-                    }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to see what Signal groups are available".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_GET_GROUP),
-            summary: "Get Signal group details".into(),
-            description: Some("Gets detailed information about a specific Signal group".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["group_id"],
-                "properties": {
-                    "group_id": { "type": "string", "description": "Base64-encoded group ID" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string" },
-                    "name": { "type": "string" },
-                    "members": { "type": "array", "items": { "type": "string" } },
-                    "admins": { "type": "array", "items": { "type": "string" } }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need details about a specific Signal group".into(),
-                common_mistakes: vec![
-                    "Group ID must be the base64-encoded group identifier".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_GET_IDENTITY),
-            summary: "Get Signal identity info".into(),
-            description: Some("Gets identity and trust information for a Signal number".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["number"],
-                "properties": {
-                    "number": { "type": "string", "description": "Phone number (E.164)" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "number": { "type": "string" },
-                    "uuid": { "type": "string" },
-                    "trust_level": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to check trust status of a Signal contact".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_ADMIN)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_TRUST_IDENTITY),
-            summary: "Trust a Signal identity".into(),
-            description: Some("Marks a Signal contact's identity key as trusted/verified".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["number"],
-                "properties": {
-                    "number": { "type": "string", "description": "Phone number (E.164)" },
-                    "verified_safety_number": {
-                        "type": "string",
-                        "description": "Preferred explicit safety number to trust"
-                    },
-                    "trust_all_known_keys": {
-                        "type": "boolean",
-                        "description": "Trust every known key for the recipient; only appropriate for test environments"
-                    }
-                },
-                "oneOf": [
-                    { "required": ["verified_safety_number"] },
-                    { "required": ["trust_all_known_keys"] }
-                ]
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "status": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_ADMIN),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to mark a Signal contact as trusted after verifying their identity".into(),
-                common_mistakes: vec![
-                    "Prefer verified_safety_number over trust_all_known_keys=true; the latter is only recommended for testing".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_ADMIN)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Interactive),
-        },
-    ]
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, fcp_manifest::OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Signal manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 #[must_use]
@@ -1786,6 +1598,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::{IdempotencyClass, SafetyTier};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -2256,12 +2069,87 @@ mod tests {
         assert_eq!(ops.len(), 6);
     }
 
+    fn strict_signal_manifest() -> Result<ConnectorManifest, String> {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())?;
+        manifest.validate().map_err(|error| error.to_string())?;
+        Ok(manifest)
+    }
+
     #[test]
     fn test_operations_have_ai_hints() {
         let ops = operations_info();
         for op in &ops {
             assert!(!op.ai_hints.when_to_use.is_empty());
         }
+    }
+
+    #[test]
+    fn operations_contain_expected_ids() {
+        let operations = operations_info();
+        let ids: Vec<&str> = operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect();
+        assert_eq!(ids, OPERATION_ORDER.to_vec());
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_signal_manifest()?;
+        let operation_catalog = operations_info();
+        let catalog_ids: Vec<&str> = operation_catalog
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect();
+
+        assert_eq!(catalog_ids, OPERATION_ORDER.to_vec());
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+
+        for operation in &operation_catalog {
+            let id = operation.id.as_str();
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(id)
+                .ok_or_else(|| format!("missing manifest operation {id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+
+            let expected_rate_limit = manifest_operation
+                .rate_limit
+                .as_ref()
+                .map(|rate_limit| rate_limit.0.clone());
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(&expected_rate_limit).map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{id} should keep manifest network constraints for host enforcement"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]

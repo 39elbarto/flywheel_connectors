@@ -15,10 +15,11 @@
 //! - **Windows (Tier 2)**: `AppContainer` + job objects
 
 use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use fcp_manifest::{SandboxProfile, SandboxSection};
+use fcp_manifest::{NetworkConstraints, SandboxProfile, SandboxSection};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -123,6 +124,9 @@ pub const WINDOWS_APPCONTAINER_PRIVATE_NETWORK_CLIENT_SERVER: &str = "privateNet
 const WINDOWS_APPCONTAINER_PROFILE_PREFIX: &str = "fcp";
 const WINDOWS_APPCONTAINER_PROFILE_NAME_MAX_LEN: usize = 64;
 const WINDOWS_APPCONTAINER_PROFILE_HASH_LEN: usize = 16;
+const WINDOWS_FIREWALL_RULE_PREFIX: &str = "fcp-fw";
+const WINDOWS_MANDATORY_LOW_RID: u32 = 0x1000;
+const WINDOWS_MANDATORY_MEDIUM_RID: u32 = 0x2000;
 const WINDOWS_NETWORK_APPCONTAINER_CAPABILITIES: [&str; 3] = [
     WINDOWS_APPCONTAINER_INTERNET_CLIENT,
     WINDOWS_APPCONTAINER_INTERNET_CLIENT_SERVER,
@@ -565,6 +569,10 @@ pub struct WindowsAppContainerProcessLaunchEvidence {
     pub sid_present: bool,
     /// Launch mechanism selected by the Windows sandbox.
     pub launch_mechanism: WindowsAppContainerProcessLaunchMechanism,
+    /// Integrity level requested for the child process.
+    pub integrity_level: &'static str,
+    /// Redaction-safe integrity enforcement mechanism.
+    pub integrity_enforcement: &'static str,
     /// Whether a process was actually attached to a job object.
     pub job_object_attached: bool,
     /// Expected job-object attachment behavior.
@@ -620,6 +628,8 @@ impl WindowsAppContainerProcessLaunchEvidence {
             lifecycle_action: report.action,
             sid_present: report.sid_present,
             launch_mechanism,
+            integrity_level: "not_requested",
+            integrity_enforcement: "none",
             job_object_attached,
             job_object_attachment_intent: if report.sid_present {
                 WindowsJobObjectAttachmentIntent::AttachAfterLaunch
@@ -633,6 +643,1203 @@ impl WindowsAppContainerProcessLaunchEvidence {
             cleanup: report.cleanup,
             skip_reason: report.skip_reason.clone(),
         }
+    }
+
+    /// Record child-process integrity enforcement after the lifecycle record is built.
+    #[must_use]
+    pub fn with_integrity_enforcement(
+        mut self,
+        integrity_level: &'static str,
+        integrity_enforcement: &'static str,
+    ) -> Self {
+        self.integrity_level = integrity_level;
+        self.integrity_enforcement = integrity_enforcement;
+
+        if integrity_enforcement != "none" {
+            let insert_at = self
+                .step_order
+                .iter()
+                .position(|step| *step == "job_object_attach")
+                .unwrap_or(self.step_order.len());
+            self.step_order
+                .insert(insert_at, "integrity_level_enforcement");
+        }
+
+        self
+    }
+
+    /// Render this record as a single JSONL line.
+    pub fn to_jsonl_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+/// Requested Windows token integrity level for a connector process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsIntegrityLevelRequest {
+    /// Inherit the caller's normal medium-integrity process token.
+    Medium,
+    /// Create a low-integrity primary token for the child process.
+    Low,
+}
+
+impl WindowsIntegrityLevelRequest {
+    const fn from_low_integrity_requested(low_integrity_requested: bool) -> Self {
+        if low_integrity_requested {
+            Self::Low
+        } else {
+            Self::Medium
+        }
+    }
+
+    /// Stable text label for evidence and Windows logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+
+    const fn mandatory_rid(self) -> u32 {
+        match self {
+            Self::Medium => WINDOWS_MANDATORY_MEDIUM_RID,
+            Self::Low => WINDOWS_MANDATORY_LOW_RID,
+        }
+    }
+}
+
+/// Windows launch surface that determines whether low-integrity token setup is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsIntegrityOperationMode {
+    /// Legacy in-process `Sandbox::apply` path.
+    InProcessApply,
+    /// `std::process::Command` mutation path, which cannot carry `STARTUPINFOEX`.
+    StdCommandMutation,
+    /// Dedicated `STARTUPINFOEX` child-process launch path.
+    StartupInfoExChild,
+}
+
+/// Readiness status for Windows integrity-level enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsIntegrityPlanStatus {
+    /// Medium integrity inherits the current process token; no token mutation is required.
+    InheritedProcess,
+    /// Low integrity can be enforced through a duplicated primary child token.
+    LowPrimaryTokenRequired,
+    /// Low integrity was requested on a launch surface that cannot safely enforce it.
+    LowIntegrityRequiresChildLaunch,
+    /// Low integrity was requested, but the `AppContainer` child-launch path is inactive.
+    AppContainerInactive,
+}
+
+impl WindowsIntegrityPlanStatus {
+    const fn skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::InheritedProcess | Self::LowPrimaryTokenRequired => None,
+            Self::LowIntegrityRequiresChildLaunch => {
+                Some("windows_low_integrity_requires_startupinfoex_child_launch")
+            }
+            Self::AppContainerInactive => {
+                Some("windows_appcontainer_not_active_createprocessasuser_path_unwired")
+            }
+        }
+    }
+}
+
+/// Lifecycle action recorded for Windows integrity-level setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsIntegrityLifecycleAction {
+    /// Medium integrity inherited the process token.
+    SkippedMediumIntegrity,
+    /// Low-integrity child token setup was planned but not performed by this evidence path.
+    PlannedLowIntegrityChildToken,
+    /// Low-integrity child token setup completed.
+    AppliedLowIntegrityChildToken,
+    /// Low integrity was rejected before token APIs because the launch path is unsafe.
+    RejectedUnsafeLaunchPath,
+    /// Low integrity was rejected because the dedicated child-launch path is inactive.
+    RejectedAppContainerInactive,
+    /// A token API step failed deterministically.
+    TokenSetupFailed,
+}
+
+/// Deterministic result for fakeable Windows token-integrity API calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsIntegrityTokenApiResult {
+    /// Token APIs were not called.
+    NotAttempted,
+    /// Source token, primary child token, integrity SID, and token label were prepared.
+    TokenPrepared,
+    /// Required token API is unavailable on this Windows build.
+    ApiUnavailable,
+    /// The caller lacks the privilege required for the requested token operation.
+    PrivilegeDenied,
+    /// Opening the current process token failed.
+    SourceTokenOpenFailed,
+    /// Duplicating a primary child token failed.
+    PrimaryTokenDuplicateFailed,
+    /// Constructing the mandatory integrity SID failed.
+    IntegritySidAllocationFailed,
+    /// Applying `TokenIntegrityLevel` failed.
+    TokenIntegritySetFailed,
+}
+
+impl WindowsIntegrityTokenApiResult {
+    const fn skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::NotAttempted | Self::TokenPrepared => None,
+            Self::ApiUnavailable => Some("windows_integrity_token_api_unavailable"),
+            Self::PrivilegeDenied => Some("windows_integrity_token_privilege_denied"),
+            Self::SourceTokenOpenFailed => Some("windows_integrity_source_token_open_failed"),
+            Self::PrimaryTokenDuplicateFailed => {
+                Some("windows_integrity_primary_token_duplicate_failed")
+            }
+            Self::IntegritySidAllocationFailed => Some("windows_integrity_sid_allocation_failed"),
+            Self::TokenIntegritySetFailed => Some("windows_integrity_token_integrity_set_failed"),
+        }
+    }
+}
+
+/// Cleanup expectation for token handles touched during integrity setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsIntegrityTokenCleanupDecision {
+    /// No token handles were opened.
+    None,
+    /// Only the source process token needs to be dropped.
+    DropSourceToken,
+    /// Source and child primary-token handles need to be dropped.
+    DropSourceAndChildTokens,
+}
+
+/// Redaction-safe plan for Windows integrity-level token setup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowsIntegrityPolicyPlan {
+    /// Hashed connector id or connector seed.
+    pub connector_id_hash: String,
+    /// Requested token integrity level.
+    pub requested_level: WindowsIntegrityLevelRequest,
+    /// Launch operation that will carry the token decision.
+    pub operation: WindowsIntegrityOperationMode,
+    /// Plan status.
+    pub status: WindowsIntegrityPlanStatus,
+    /// Mandatory integrity RID used to build the Windows SID.
+    pub integrity_sid_rid: u32,
+    /// CreateProcess-family API required by the plan.
+    pub required_process_api: &'static str,
+    /// Whether a primary child token must be duplicated and labeled.
+    pub requires_primary_token: bool,
+    /// Structured unsupported reason when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_reason: Option<&'static str>,
+}
+
+/// Report from applying or skipping a Windows integrity policy plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsIntegrityPolicyReport {
+    /// Original plan.
+    pub plan: WindowsIntegrityPolicyPlan,
+    /// Lifecycle action observed.
+    pub action: WindowsIntegrityLifecycleAction,
+    /// Token API result.
+    pub token_api_result: WindowsIntegrityTokenApiResult,
+    /// Stable order of token setup steps.
+    pub step_order: Vec<&'static str>,
+    /// Cleanup decision for token handles.
+    pub cleanup: WindowsIntegrityTokenCleanupDecision,
+    /// Structured skip or failure reason when applicable.
+    pub skip_reason: Option<&'static str>,
+}
+
+impl WindowsIntegrityPolicyReport {
+    fn skipped(
+        plan: WindowsIntegrityPolicyPlan,
+        action: WindowsIntegrityLifecycleAction,
+        token_api_result: WindowsIntegrityTokenApiResult,
+    ) -> Self {
+        let skip_reason = plan
+            .status
+            .skip_reason()
+            .or_else(|| token_api_result.skip_reason());
+        Self {
+            plan,
+            action,
+            token_api_result,
+            step_order: vec!["integrity_level_decision"],
+            cleanup: WindowsIntegrityTokenCleanupDecision::None,
+            skip_reason,
+        }
+    }
+
+    #[cfg(any(test, target_os = "windows"))]
+    const fn token_failure(
+        plan: WindowsIntegrityPolicyPlan,
+        token_api_result: WindowsIntegrityTokenApiResult,
+        step_order: Vec<&'static str>,
+        cleanup: WindowsIntegrityTokenCleanupDecision,
+    ) -> Self {
+        Self {
+            plan,
+            action: WindowsIntegrityLifecycleAction::TokenSetupFailed,
+            token_api_result,
+            step_order,
+            cleanup,
+            skip_reason: token_api_result.skip_reason(),
+        }
+    }
+}
+
+/// Fakeable Windows token-integrity API used by readiness and failure tests.
+#[cfg(any(test, target_os = "windows"))]
+#[allow(clippy::redundant_pub_crate)]
+pub(super) trait WindowsIntegrityTokenApi {
+    /// Open the current process token as the source identity.
+    fn open_source_token(&mut self) -> Result<(), WindowsIntegrityTokenApiResult>;
+
+    /// Duplicate the source token as a primary child token.
+    fn duplicate_primary_token(&mut self) -> Result<(), WindowsIntegrityTokenApiResult>;
+
+    /// Allocate a mandatory integrity SID for the requested RID.
+    fn allocate_integrity_sid(
+        &mut self,
+        mandatory_rid: u32,
+    ) -> Result<(), WindowsIntegrityTokenApiResult>;
+
+    /// Apply the mandatory label to the child token.
+    fn set_token_integrity_level(
+        &mut self,
+        mandatory_rid: u32,
+    ) -> Result<(), WindowsIntegrityTokenApiResult>;
+}
+
+/// Build a Windows integrity-level token setup plan.
+#[must_use]
+pub fn plan_windows_integrity_policy(
+    connector_id: &str,
+    low_integrity_requested: bool,
+    operation: WindowsIntegrityOperationMode,
+    appcontainer_active: bool,
+) -> WindowsIntegrityPolicyPlan {
+    let requested_level =
+        WindowsIntegrityLevelRequest::from_low_integrity_requested(low_integrity_requested);
+    let status = match (requested_level, operation, appcontainer_active) {
+        (WindowsIntegrityLevelRequest::Medium, _, _) => {
+            WindowsIntegrityPlanStatus::InheritedProcess
+        }
+        (
+            WindowsIntegrityLevelRequest::Low,
+            WindowsIntegrityOperationMode::StartupInfoExChild,
+            true,
+        ) => WindowsIntegrityPlanStatus::LowPrimaryTokenRequired,
+        (
+            WindowsIntegrityLevelRequest::Low,
+            WindowsIntegrityOperationMode::StartupInfoExChild,
+            false,
+        ) => WindowsIntegrityPlanStatus::AppContainerInactive,
+        (WindowsIntegrityLevelRequest::Low, _, _) => {
+            WindowsIntegrityPlanStatus::LowIntegrityRequiresChildLaunch
+        }
+    };
+    let requires_primary_token = status == WindowsIntegrityPlanStatus::LowPrimaryTokenRequired;
+
+    WindowsIntegrityPolicyPlan {
+        connector_id_hash: stable_fnv1a64_hex(connector_id),
+        requested_level,
+        operation,
+        status,
+        integrity_sid_rid: requested_level.mandatory_rid(),
+        required_process_api: if requires_primary_token {
+            "CreateProcessAsUserW"
+        } else {
+            "CreateProcessW"
+        },
+        requires_primary_token,
+        unsupported_reason: status.skip_reason(),
+    }
+}
+
+/// Apply a Windows integrity plan through a fakeable token API.
+#[cfg(any(test, target_os = "windows"))]
+#[allow(clippy::redundant_pub_crate)]
+pub(super) fn apply_windows_integrity_policy<A>(
+    plan: WindowsIntegrityPolicyPlan,
+    api: &mut A,
+) -> WindowsIntegrityPolicyReport
+where
+    A: WindowsIntegrityTokenApi,
+{
+    match plan.status {
+        WindowsIntegrityPlanStatus::InheritedProcess => {
+            return WindowsIntegrityPolicyReport::skipped(
+                plan,
+                WindowsIntegrityLifecycleAction::SkippedMediumIntegrity,
+                WindowsIntegrityTokenApiResult::NotAttempted,
+            );
+        }
+        WindowsIntegrityPlanStatus::LowIntegrityRequiresChildLaunch => {
+            return WindowsIntegrityPolicyReport::skipped(
+                plan,
+                WindowsIntegrityLifecycleAction::RejectedUnsafeLaunchPath,
+                WindowsIntegrityTokenApiResult::NotAttempted,
+            );
+        }
+        WindowsIntegrityPlanStatus::AppContainerInactive => {
+            return WindowsIntegrityPolicyReport::skipped(
+                plan,
+                WindowsIntegrityLifecycleAction::RejectedAppContainerInactive,
+                WindowsIntegrityTokenApiResult::NotAttempted,
+            );
+        }
+        WindowsIntegrityPlanStatus::LowPrimaryTokenRequired => {}
+    }
+
+    let mut step_order = vec!["integrity_level_decision"];
+    if let Err(result) = api.open_source_token() {
+        return WindowsIntegrityPolicyReport::token_failure(
+            plan,
+            result,
+            step_order,
+            WindowsIntegrityTokenCleanupDecision::None,
+        );
+    }
+    step_order.push("open_process_token");
+
+    if let Err(result) = api.duplicate_primary_token() {
+        return WindowsIntegrityPolicyReport::token_failure(
+            plan,
+            result,
+            step_order,
+            WindowsIntegrityTokenCleanupDecision::DropSourceToken,
+        );
+    }
+    step_order.push("duplicate_primary_token");
+
+    if let Err(result) = api.allocate_integrity_sid(plan.integrity_sid_rid) {
+        return WindowsIntegrityPolicyReport::token_failure(
+            plan,
+            result,
+            step_order,
+            WindowsIntegrityTokenCleanupDecision::DropSourceAndChildTokens,
+        );
+    }
+    step_order.push("allocate_integrity_sid");
+
+    if let Err(result) = api.set_token_integrity_level(plan.integrity_sid_rid) {
+        return WindowsIntegrityPolicyReport::token_failure(
+            plan,
+            result,
+            step_order,
+            WindowsIntegrityTokenCleanupDecision::DropSourceAndChildTokens,
+        );
+    }
+    step_order.push("set_token_integrity_level");
+
+    WindowsIntegrityPolicyReport {
+        plan,
+        action: WindowsIntegrityLifecycleAction::AppliedLowIntegrityChildToken,
+        token_api_result: WindowsIntegrityTokenApiResult::TokenPrepared,
+        step_order,
+        cleanup: WindowsIntegrityTokenCleanupDecision::DropSourceAndChildTokens,
+        skip_reason: None,
+    }
+}
+
+/// Redaction-safe JSONL evidence for Windows integrity-level token setup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowsIntegrityPolicyEvidence {
+    /// Schema marker for downstream evidence validators.
+    pub schema: &'static str,
+    /// Operating-system family for this evidence record.
+    pub os: &'static str,
+    /// Hashed connector id or connector seed.
+    pub connector_id_hash: String,
+    /// Requested token integrity level.
+    pub requested_level: WindowsIntegrityLevelRequest,
+    /// Launch operation that carried the decision.
+    pub operation: WindowsIntegrityOperationMode,
+    /// Readiness status.
+    pub plan_status: WindowsIntegrityPlanStatus,
+    /// Lifecycle action result.
+    pub lifecycle_action: WindowsIntegrityLifecycleAction,
+    /// Deterministic token API result.
+    pub token_api_result: WindowsIntegrityTokenApiResult,
+    /// Mandatory integrity RID used for SID construction.
+    pub integrity_sid_rid: u32,
+    /// CreateProcess-family API required by the plan.
+    pub required_process_api: &'static str,
+    /// Whether a primary child token was required.
+    pub requires_primary_token: bool,
+    /// Stable step ordering for readiness and token setup.
+    pub step_order: Vec<&'static str>,
+    /// Final readiness layer this evidence is allowed to claim today.
+    pub final_filter_strength: FilterStrength,
+    /// Cleanup decision for token handles.
+    pub cleanup: WindowsIntegrityTokenCleanupDecision,
+    /// Structured skip or failure reason when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<&'static str>,
+}
+
+impl WindowsIntegrityPolicyEvidence {
+    /// Build redaction-safe evidence from an integrity policy report.
+    #[must_use]
+    pub fn from_report(report: &WindowsIntegrityPolicyReport) -> Self {
+        Self {
+            schema: "fcp.windows_integrity_policy.v1",
+            os: "windows",
+            connector_id_hash: report.plan.connector_id_hash.clone(),
+            requested_level: report.plan.requested_level,
+            operation: report.plan.operation,
+            plan_status: report.plan.status,
+            lifecycle_action: report.action,
+            token_api_result: report.token_api_result,
+            integrity_sid_rid: report.plan.integrity_sid_rid,
+            required_process_api: report.plan.required_process_api,
+            requires_primary_token: report.plan.requires_primary_token,
+            step_order: report.step_order.clone(),
+            final_filter_strength: FilterStrength::ProcessLimit,
+            cleanup: report.cleanup,
+            skip_reason: report
+                .skip_reason
+                .or(report.plan.unsupported_reason)
+                .or_else(|| report.token_api_result.skip_reason()),
+        }
+    }
+
+    /// Build redaction-safe evidence from a plan that has not called token APIs.
+    #[must_use]
+    pub fn planned_only(plan: WindowsIntegrityPolicyPlan) -> Self {
+        let action = match plan.status {
+            WindowsIntegrityPlanStatus::InheritedProcess => {
+                WindowsIntegrityLifecycleAction::SkippedMediumIntegrity
+            }
+            WindowsIntegrityPlanStatus::LowPrimaryTokenRequired => {
+                WindowsIntegrityLifecycleAction::PlannedLowIntegrityChildToken
+            }
+            WindowsIntegrityPlanStatus::LowIntegrityRequiresChildLaunch => {
+                WindowsIntegrityLifecycleAction::RejectedUnsafeLaunchPath
+            }
+            WindowsIntegrityPlanStatus::AppContainerInactive => {
+                WindowsIntegrityLifecycleAction::RejectedAppContainerInactive
+            }
+        };
+        let report = WindowsIntegrityPolicyReport::skipped(
+            plan,
+            action,
+            WindowsIntegrityTokenApiResult::NotAttempted,
+        );
+        Self::from_report(&report)
+    }
+
+    /// Render this record as a single JSONL line.
+    pub fn to_jsonl_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+/// Default Windows firewall posture for a connector process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallDefaultDecision {
+    /// Deny egress unless a more specific, policy-derived allow mechanism exists.
+    Deny,
+    /// Direct egress is allowed by the sandbox profile.
+    Allow,
+}
+
+/// Direction for a Windows firewall rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallRuleDirection {
+    /// Outbound connector egress.
+    Outbound,
+}
+
+/// Action for a Windows firewall rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallRuleAction {
+    /// Allow a specific outbound flow.
+    Allow,
+}
+
+/// IP protocol for a Windows firewall rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallRuleProtocol {
+    /// TCP, represented as protocol number 6 in Windows Firewall.
+    Tcp,
+}
+
+impl WindowsFirewallRuleProtocol {
+    /// Stable protocol label for deterministic rule names and evidence.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+        }
+    }
+
+    /// Windows Firewall numeric protocol identifier.
+    #[must_use]
+    pub const fn windows_protocol_number(self) -> u16 {
+        match self {
+            Self::Tcp => 6,
+        }
+    }
+}
+
+/// Planning outcome for Windows firewall policy synthesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallPlanStatus {
+    /// The sandbox profile allows direct network access, so no deny posture is installed.
+    DirectNetworkAllowed,
+    /// The current policy lacks operation-level `NetworkConstraints`.
+    ConstraintsUnavailable,
+    /// The manifest declares an explicit no-egress sentinel.
+    NoEgress,
+    /// Hostname allow rules cannot be installed directly as Windows Firewall remote addresses.
+    HostAllowRequiresNetworkGuard,
+    /// The plan contains IP/port/program-scoped allow rules.
+    IpAllowRules,
+    /// The plan contains IP rules, but hostname allow entries still need Network Guard.
+    IpAllowRulesWithHostConstraints,
+}
+
+impl WindowsFirewallPlanStatus {
+    const fn skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::DirectNetworkAllowed => Some("direct_network_allowed_by_sandbox_profile"),
+            Self::ConstraintsUnavailable => {
+                Some("operation_network_constraints_unavailable_to_windows_sandbox")
+            }
+            Self::NoEgress | Self::IpAllowRules => None,
+            Self::HostAllowRequiresNetworkGuard | Self::IpAllowRulesWithHostConstraints => {
+                Some("host_allow_requires_network_guard_dns_resolution")
+            }
+        }
+    }
+}
+
+/// High-level lifecycle action for a Windows firewall policy attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallLifecycleAction {
+    /// No rule was installed because direct network is allowed.
+    SkippedDirectNetworkAllowed,
+    /// No rule was installed because operation-level constraints were unavailable.
+    NotInstalledMissingNetworkConstraints,
+    /// No rule was installed because the manifest requested no egress.
+    PlannedNoEgress,
+    /// No rule was installed because the allowlist is hostname-only.
+    SkippedHostAllowRequiresNetworkGuard,
+    /// Rule specs were planned but not applied through an OS API.
+    PlannedOnly,
+    /// Stale deterministic rules could not be removed, so current rules were not applied.
+    StaleCleanupFailed,
+    /// Rule specs were applied through the firewall API.
+    Applied,
+    /// Rule specs were removed through the firewall API.
+    Removed,
+}
+
+/// Cleanup decision for Windows firewall policy state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallCleanupDecision {
+    /// No firewall rule exists for this plan.
+    None,
+    /// Rules remain installed for connector reuse.
+    RetainRules,
+    /// Stale rules were removed while retaining current rules for connector reuse.
+    RemoveStaleRules,
+    /// Rules were removed by an explicit cleanup pass.
+    RemoveRules,
+}
+
+/// Result from creating or updating a Windows firewall rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallRuleApplyOutcome {
+    /// A new rule was created.
+    Created,
+    /// An existing rule was updated to match the current policy.
+    Updated,
+    /// The existing rule already matched the current policy.
+    AlreadyCurrent,
+}
+
+/// Result from removing a Windows firewall rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallRuleCleanupOutcome {
+    /// The rule was removed.
+    Removed,
+    /// The rule did not exist.
+    Missing,
+}
+
+/// Result from a stale-rule cleanup attempt during policy apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsFirewallStaleRuleCleanupOutcome {
+    /// A stale rule was removed.
+    Removed,
+    /// A stale rule was already absent by the time cleanup ran.
+    Missing,
+    /// Stale cleanup failed; no current rules were applied.
+    Failed,
+}
+
+/// A single Windows firewall rule spec derived from manifest network constraints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsFirewallRuleSpec {
+    /// Deterministic rule name. The name contains hashes, not connector IDs or hostnames.
+    pub name: String,
+    /// Connector executable path to scope the rule to.
+    pub application_path: PathBuf,
+    /// Rule direction.
+    pub direction: WindowsFirewallRuleDirection,
+    /// Rule action.
+    pub action: WindowsFirewallRuleAction,
+    /// Network protocol.
+    pub protocol: WindowsFirewallRuleProtocol,
+    /// Remote IP address string. Hostname constraints are not represented here.
+    pub remote_address: String,
+    /// Remote TCP port.
+    pub remote_port: u16,
+    /// Redaction-safe class for the remote address.
+    pub remote_address_class: &'static str,
+}
+
+/// Windows firewall policy plan derived from a connector executable and operation constraints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsFirewallPolicyPlan {
+    /// Hashed connector id or connector seed.
+    pub connector_id_hash: String,
+    /// Hashed connector executable path.
+    pub application_path_hash: String,
+    /// Default egress posture.
+    pub default_decision: WindowsFirewallDefaultDecision,
+    /// Planning status.
+    pub status: WindowsFirewallPlanStatus,
+    /// IP/port/program-scoped allow rules that a Windows API backend can install.
+    pub rules: Vec<WindowsFirewallRuleSpec>,
+    /// Hashed hostname allow entries from the manifest.
+    pub host_allow_hashes: Vec<String>,
+    /// Hashed IP allow entries from the manifest.
+    pub ip_allow_hashes: Vec<String>,
+    /// Redaction-safe target address classes represented in this plan.
+    pub target_address_classes: Vec<String>,
+    /// Count of unique positive allowed ports.
+    pub allowed_port_count: usize,
+    /// Structured reason for non-installable or partial plans.
+    pub unsupported_reason: Option<&'static str>,
+}
+
+/// Report from applying or skipping a Windows firewall policy plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsFirewallPolicyReport {
+    /// Planned policy.
+    pub plan: WindowsFirewallPolicyPlan,
+    /// Lifecycle action taken.
+    pub action: WindowsFirewallLifecycleAction,
+    /// Rule outcomes returned by the firewall API.
+    pub rule_outcomes: Vec<WindowsFirewallRuleApplyOutcome>,
+    /// Cleanup choice made by the lifecycle controller.
+    pub cleanup: WindowsFirewallCleanupDecision,
+    /// Redaction-safe API result.
+    pub firewall_api_result: &'static str,
+    /// Structured skip reason when no rule was installed.
+    pub skip_reason: Option<&'static str>,
+    /// Stale rule names detected for this connector, hashed by evidence conversion.
+    pub stale_rule_names: Vec<String>,
+    /// Outcomes from stale-rule cleanup attempts.
+    pub stale_rule_cleanup_outcomes: Vec<WindowsFirewallStaleRuleCleanupOutcome>,
+}
+
+impl WindowsFirewallPolicyReport {
+    const fn skipped(
+        plan: WindowsFirewallPolicyPlan,
+        action: WindowsFirewallLifecycleAction,
+        firewall_api_result: &'static str,
+    ) -> Self {
+        let skip_reason = plan.status.skip_reason();
+        Self {
+            plan,
+            action,
+            rule_outcomes: Vec::new(),
+            cleanup: WindowsFirewallCleanupDecision::None,
+            firewall_api_result,
+            skip_reason,
+            stale_rule_names: Vec::new(),
+            stale_rule_cleanup_outcomes: Vec::new(),
+        }
+    }
+}
+
+/// Fakeable Windows firewall API used by the policy lifecycle controller.
+#[cfg(any(test, target_os = "windows"))]
+#[allow(clippy::redundant_pub_crate)]
+pub(super) trait WindowsFirewallPolicyApi {
+    /// List deterministic FCP firewall rule names scoped to the connector hash.
+    fn rule_names_for_connector(
+        &mut self,
+        connector_id_hash: &str,
+    ) -> Result<Vec<String>, SandboxError>;
+
+    /// Create, update, or verify a firewall rule.
+    fn upsert_rule(
+        &mut self,
+        rule: &WindowsFirewallRuleSpec,
+    ) -> Result<WindowsFirewallRuleApplyOutcome, SandboxError>;
+
+    /// Remove a firewall rule by deterministic name.
+    fn remove_rule(
+        &mut self,
+        rule_name: &str,
+    ) -> Result<WindowsFirewallRuleCleanupOutcome, SandboxError>;
+}
+
+/// Build a Windows firewall policy plan from operation-level network constraints.
+///
+/// Hostname allowlists are retained only as redacted hashes because Windows
+/// Firewall remote-address rules cannot directly express DNS names. Those
+/// entries still require Network Guard DNS/SNI enforcement or a later WFP-based
+/// resolver layer.
+///
+/// # Errors
+///
+/// Returns an error when a normal egress plan contains port `0`, which is only
+/// accepted for the explicit `none.invalid` no-egress sentinel.
+pub fn plan_windows_firewall_policy(
+    connector_id: &str,
+    application_path: &Path,
+    block_direct_network: bool,
+    constraints: Option<&NetworkConstraints>,
+) -> Result<WindowsFirewallPolicyPlan, SandboxError> {
+    let connector_id_hash = stable_fnv1a64_hex(connector_id);
+    let application_path_hash = stable_fnv1a64_hex(&application_path.display().to_string());
+
+    if !block_direct_network {
+        return Ok(WindowsFirewallPolicyPlan {
+            connector_id_hash,
+            application_path_hash,
+            default_decision: WindowsFirewallDefaultDecision::Allow,
+            status: WindowsFirewallPlanStatus::DirectNetworkAllowed,
+            rules: Vec::new(),
+            host_allow_hashes: Vec::new(),
+            ip_allow_hashes: Vec::new(),
+            target_address_classes: Vec::new(),
+            allowed_port_count: 0,
+            unsupported_reason: WindowsFirewallPlanStatus::DirectNetworkAllowed.skip_reason(),
+        });
+    }
+
+    let Some(constraints) = constraints else {
+        return Ok(WindowsFirewallPolicyPlan {
+            connector_id_hash,
+            application_path_hash,
+            default_decision: WindowsFirewallDefaultDecision::Deny,
+            status: WindowsFirewallPlanStatus::ConstraintsUnavailable,
+            rules: Vec::new(),
+            host_allow_hashes: Vec::new(),
+            ip_allow_hashes: Vec::new(),
+            target_address_classes: Vec::new(),
+            allowed_port_count: 0,
+            unsupported_reason: WindowsFirewallPlanStatus::ConstraintsUnavailable.skip_reason(),
+        });
+    };
+
+    let host_allow_hashes = hashed_sorted_strings(&constraints.host_allow);
+    let ip_allow_hashes = hashed_sorted_ips(&constraints.ip_allow);
+    let target_address_classes = sorted_ip_classes(&constraints.ip_allow);
+
+    if is_windows_firewall_no_egress_sentinel(constraints) {
+        return Ok(WindowsFirewallPolicyPlan {
+            connector_id_hash,
+            application_path_hash,
+            default_decision: WindowsFirewallDefaultDecision::Deny,
+            status: WindowsFirewallPlanStatus::NoEgress,
+            rules: Vec::new(),
+            host_allow_hashes,
+            ip_allow_hashes,
+            target_address_classes,
+            allowed_port_count: 0,
+            unsupported_reason: None,
+        });
+    }
+
+    let mut ports = BTreeSet::new();
+    for port in &constraints.port_allow {
+        if *port == 0 {
+            return Err(SandboxError::InvalidConfig(
+                "windows firewall egress rules cannot use port 0 outside the none.invalid no-egress sentinel"
+                    .into(),
+            ));
+        }
+        ports.insert(*port);
+    }
+
+    if constraints.ip_allow.is_empty() {
+        return Ok(WindowsFirewallPolicyPlan {
+            connector_id_hash,
+            application_path_hash,
+            default_decision: WindowsFirewallDefaultDecision::Deny,
+            status: WindowsFirewallPlanStatus::HostAllowRequiresNetworkGuard,
+            rules: Vec::new(),
+            host_allow_hashes,
+            ip_allow_hashes,
+            target_address_classes,
+            allowed_port_count: ports.len(),
+            unsupported_reason: WindowsFirewallPlanStatus::HostAllowRequiresNetworkGuard
+                .skip_reason(),
+        });
+    }
+
+    let rules =
+        windows_firewall_ip_allow_rules(&connector_id_hash, application_path, constraints, &ports)?;
+
+    let status = if constraints.host_allow.is_empty() {
+        WindowsFirewallPlanStatus::IpAllowRules
+    } else {
+        WindowsFirewallPlanStatus::IpAllowRulesWithHostConstraints
+    };
+
+    Ok(WindowsFirewallPolicyPlan {
+        connector_id_hash,
+        application_path_hash,
+        default_decision: WindowsFirewallDefaultDecision::Deny,
+        status,
+        rules,
+        host_allow_hashes,
+        ip_allow_hashes,
+        target_address_classes,
+        allowed_port_count: ports.len(),
+        unsupported_reason: status.skip_reason(),
+    })
+}
+
+fn windows_firewall_ip_allow_rules(
+    connector_id_hash: &str,
+    application_path: &Path,
+    constraints: &NetworkConstraints,
+    ports: &BTreeSet<u16>,
+) -> Result<Vec<WindowsFirewallRuleSpec>, SandboxError> {
+    let mut ips = BTreeSet::new();
+    for ip in &constraints.ip_allow {
+        ips.insert(*ip);
+    }
+
+    let mut rules = Vec::with_capacity(ips.len() * ports.len());
+    for ip in ips {
+        let remote_address = ip.to_string();
+        for port in ports {
+            rules.push(WindowsFirewallRuleSpec {
+                name: windows_firewall_rule_name(
+                    connector_id_hash,
+                    WindowsFirewallRuleProtocol::Tcp,
+                    *port,
+                    &remote_address,
+                )?,
+                application_path: application_path.to_path_buf(),
+                direction: WindowsFirewallRuleDirection::Outbound,
+                action: WindowsFirewallRuleAction::Allow,
+                protocol: WindowsFirewallRuleProtocol::Tcp,
+                remote_address: remote_address.clone(),
+                remote_port: *port,
+                remote_address_class: classify_ip_address(ip),
+            });
+        }
+    }
+
+    Ok(rules)
+}
+
+/// Apply a Windows firewall policy plan through a fakeable API.
+///
+/// # Errors
+///
+/// Returns an error if the API fails to create or update any planned rule.
+#[cfg(any(test, target_os = "windows"))]
+#[allow(clippy::redundant_pub_crate)]
+pub(super) fn apply_windows_firewall_policy<A>(
+    plan: WindowsFirewallPolicyPlan,
+    api: &mut A,
+) -> Result<WindowsFirewallPolicyReport, SandboxError>
+where
+    A: WindowsFirewallPolicyApi,
+{
+    match plan.status {
+        WindowsFirewallPlanStatus::DirectNetworkAllowed => {
+            return Ok(WindowsFirewallPolicyReport::skipped(
+                plan,
+                WindowsFirewallLifecycleAction::SkippedDirectNetworkAllowed,
+                "not_attempted",
+            ));
+        }
+        WindowsFirewallPlanStatus::ConstraintsUnavailable => {
+            return Ok(WindowsFirewallPolicyReport::skipped(
+                plan,
+                WindowsFirewallLifecycleAction::NotInstalledMissingNetworkConstraints,
+                "not_attempted",
+            ));
+        }
+        WindowsFirewallPlanStatus::NoEgress => {
+            return Ok(WindowsFirewallPolicyReport::skipped(
+                plan,
+                WindowsFirewallLifecycleAction::PlannedNoEgress,
+                "not_attempted",
+            ));
+        }
+        WindowsFirewallPlanStatus::HostAllowRequiresNetworkGuard => {
+            return Ok(WindowsFirewallPolicyReport::skipped(
+                plan,
+                WindowsFirewallLifecycleAction::SkippedHostAllowRequiresNetworkGuard,
+                "not_attempted",
+            ));
+        }
+        WindowsFirewallPlanStatus::IpAllowRules
+        | WindowsFirewallPlanStatus::IpAllowRulesWithHostConstraints => {}
+    }
+
+    let mut stale_rule_names = windows_firewall_stale_rule_names(&plan, api)?;
+    let mut stale_rule_cleanup_outcomes = Vec::with_capacity(stale_rule_names.len());
+    for stale_rule_name in &stale_rule_names {
+        let outcome = match api.remove_rule(stale_rule_name) {
+            Ok(WindowsFirewallRuleCleanupOutcome::Removed) => {
+                WindowsFirewallStaleRuleCleanupOutcome::Removed
+            }
+            Ok(WindowsFirewallRuleCleanupOutcome::Missing) => {
+                WindowsFirewallStaleRuleCleanupOutcome::Missing
+            }
+            Err(_) => WindowsFirewallStaleRuleCleanupOutcome::Failed,
+        };
+        stale_rule_cleanup_outcomes.push(outcome);
+    }
+
+    if stale_rule_cleanup_outcomes.contains(&WindowsFirewallStaleRuleCleanupOutcome::Failed) {
+        stale_rule_names.sort();
+        return Ok(WindowsFirewallPolicyReport {
+            plan,
+            action: WindowsFirewallLifecycleAction::StaleCleanupFailed,
+            rule_outcomes: Vec::new(),
+            cleanup: WindowsFirewallCleanupDecision::RemoveStaleRules,
+            firewall_api_result: "stale_rule_cleanup_failed",
+            skip_reason: Some("stale_rule_cleanup_failed"),
+            stale_rule_names,
+            stale_rule_cleanup_outcomes,
+        });
+    }
+
+    let mut rule_outcomes = Vec::with_capacity(plan.rules.len());
+    for rule in &plan.rules {
+        rule_outcomes.push(api.upsert_rule(rule)?);
+    }
+
+    stale_rule_names.sort();
+    let cleanup = if stale_rule_names.is_empty() {
+        WindowsFirewallCleanupDecision::RetainRules
+    } else {
+        WindowsFirewallCleanupDecision::RemoveStaleRules
+    };
+    let firewall_api_result = if stale_rule_names.is_empty() {
+        "rules_upserted"
+    } else {
+        "stale_rules_removed_rules_upserted"
+    };
+
+    Ok(WindowsFirewallPolicyReport {
+        plan,
+        action: WindowsFirewallLifecycleAction::Applied,
+        rule_outcomes,
+        cleanup,
+        firewall_api_result,
+        skip_reason: None,
+        stale_rule_names,
+        stale_rule_cleanup_outcomes,
+    })
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_firewall_stale_rule_names<A>(
+    plan: &WindowsFirewallPolicyPlan,
+    api: &mut A,
+) -> Result<Vec<String>, SandboxError>
+where
+    A: WindowsFirewallPolicyApi,
+{
+    let current_names = plan
+        .rules
+        .iter()
+        .map(|rule| rule.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut stale_rule_names = api
+        .rule_names_for_connector(&plan.connector_id_hash)?
+        .into_iter()
+        .filter(|name| windows_firewall_rule_name_matches_connector(name, &plan.connector_id_hash))
+        .filter(|name| !current_names.contains(name.as_str()))
+        .collect::<Vec<_>>();
+    stale_rule_names.sort();
+    stale_rule_names.dedup();
+    Ok(stale_rule_names)
+}
+
+/// Remove rules from a Windows firewall policy plan through a fakeable API.
+///
+/// # Errors
+///
+/// Returns an error if the API fails to remove any planned rule.
+#[cfg(any(test, target_os = "windows"))]
+#[allow(clippy::redundant_pub_crate)]
+pub(super) fn cleanup_windows_firewall_policy<A>(
+    plan: WindowsFirewallPolicyPlan,
+    api: &mut A,
+) -> Result<WindowsFirewallPolicyReport, SandboxError>
+where
+    A: WindowsFirewallPolicyApi,
+{
+    if plan.rules.is_empty() {
+        return Ok(WindowsFirewallPolicyReport::skipped(
+            plan,
+            WindowsFirewallLifecycleAction::Removed,
+            "not_attempted_no_rules",
+        ));
+    }
+
+    for rule in &plan.rules {
+        let _ = api.remove_rule(&rule.name)?;
+    }
+
+    Ok(WindowsFirewallPolicyReport {
+        plan,
+        action: WindowsFirewallLifecycleAction::Removed,
+        rule_outcomes: Vec::new(),
+        cleanup: WindowsFirewallCleanupDecision::RemoveRules,
+        firewall_api_result: "rules_removed",
+        skip_reason: None,
+        stale_rule_names: Vec::new(),
+        stale_rule_cleanup_outcomes: Vec::new(),
+    })
+}
+
+/// Redaction-safe JSONL evidence for Windows firewall policy planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowsFirewallPolicyEvidence {
+    /// Schema marker for downstream evidence validators.
+    pub schema: &'static str,
+    /// Operating-system family for this evidence record.
+    pub os: &'static str,
+    /// Hashed connector id or connector seed.
+    pub connector_id_hash: String,
+    /// Hashed connector executable path.
+    pub application_path_hash: String,
+    /// Default egress posture.
+    pub default_decision: WindowsFirewallDefaultDecision,
+    /// Planning status.
+    pub plan_status: WindowsFirewallPlanStatus,
+    /// Lifecycle action result.
+    pub lifecycle_action: WindowsFirewallLifecycleAction,
+    /// Firewall API result without raw OS error text.
+    pub firewall_api_result: &'static str,
+    /// Count of IP/port/program allow rules.
+    pub allow_rule_count: usize,
+    /// Hashed rule names.
+    pub rule_name_hashes: Vec<String>,
+    /// Hashed hostname allow entries.
+    pub host_allow_hashes: Vec<String>,
+    /// Hashed IP allow entries.
+    pub ip_allow_hashes: Vec<String>,
+    /// Redaction-safe target address classes.
+    pub target_address_classes: Vec<String>,
+    /// Count of unique positive ports represented by the plan.
+    pub allowed_port_count: usize,
+    /// Final readiness layer this evidence is allowed to claim today.
+    pub final_filter_strength: FilterStrength,
+    /// Cleanup decision.
+    pub cleanup: WindowsFirewallCleanupDecision,
+    /// Hashed stale rule names detected during apply.
+    pub stale_rule_name_hashes: Vec<String>,
+    /// Stale rule cleanup outcomes.
+    pub stale_rule_cleanup_outcomes: Vec<WindowsFirewallStaleRuleCleanupOutcome>,
+    /// Structured skip or partial-support reason when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<&'static str>,
+}
+
+impl WindowsFirewallPolicyEvidence {
+    /// Build redaction-safe evidence from a firewall policy report.
+    #[must_use]
+    pub fn from_report(report: &WindowsFirewallPolicyReport) -> Self {
+        let mut rule_name_hashes = report
+            .plan
+            .rules
+            .iter()
+            .map(|rule| stable_fnv1a64_hex(&rule.name))
+            .collect::<Vec<_>>();
+        rule_name_hashes.sort();
+        let mut stale_rule_name_hashes = report
+            .stale_rule_names
+            .iter()
+            .map(|name| stable_fnv1a64_hex(name))
+            .collect::<Vec<_>>();
+        stale_rule_name_hashes.sort();
+
+        Self {
+            schema: "fcp.windows_firewall_policy.v1",
+            os: "windows",
+            connector_id_hash: report.plan.connector_id_hash.clone(),
+            application_path_hash: report.plan.application_path_hash.clone(),
+            default_decision: report.plan.default_decision,
+            plan_status: report.plan.status,
+            lifecycle_action: report.action,
+            firewall_api_result: report.firewall_api_result,
+            allow_rule_count: report.plan.rules.len(),
+            rule_name_hashes,
+            host_allow_hashes: report.plan.host_allow_hashes.clone(),
+            ip_allow_hashes: report.plan.ip_allow_hashes.clone(),
+            target_address_classes: report.plan.target_address_classes.clone(),
+            allowed_port_count: report.plan.allowed_port_count,
+            final_filter_strength: FilterStrength::ProcessLimit,
+            cleanup: report.cleanup,
+            stale_rule_name_hashes,
+            stale_rule_cleanup_outcomes: report.stale_rule_cleanup_outcomes.clone(),
+            skip_reason: report.skip_reason.or(report.plan.unsupported_reason),
+        }
+    }
+
+    /// Build redaction-safe evidence from a firewall policy plan that was explicitly skipped.
+    #[must_use]
+    pub fn from_skipped_plan(
+        plan: WindowsFirewallPolicyPlan,
+        action: WindowsFirewallLifecycleAction,
+        firewall_api_result: &'static str,
+    ) -> Self {
+        let report = WindowsFirewallPolicyReport::skipped(plan, action, firewall_api_result);
+        Self::from_report(&report)
+    }
+
+    /// Build redaction-safe evidence from a firewall policy plan that has not been applied.
+    #[must_use]
+    pub fn planned_only(plan: WindowsFirewallPolicyPlan) -> Self {
+        let report = WindowsFirewallPolicyReport {
+            plan,
+            action: WindowsFirewallLifecycleAction::PlannedOnly,
+            rule_outcomes: Vec::new(),
+            cleanup: WindowsFirewallCleanupDecision::None,
+            firewall_api_result: "not_attempted",
+            skip_reason: None,
+            stale_rule_names: Vec::new(),
+            stale_rule_cleanup_outcomes: Vec::new(),
+        };
+        Self::from_report(&report)
     }
 
     /// Render this record as a single JSONL line.
@@ -701,6 +1908,132 @@ fn stable_fnv1a64_hex(value: &str) -> String {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     format!("{hash:016x}")
+}
+
+fn hashed_sorted_strings(values: &[String]) -> Vec<String> {
+    let mut hashes = values
+        .iter()
+        .map(|value| stable_fnv1a64_hex(value))
+        .collect::<Vec<_>>();
+    hashes.sort();
+    hashes
+}
+
+fn hashed_sorted_ips(values: &[IpAddr]) -> Vec<String> {
+    let mut hashes = values
+        .iter()
+        .map(|value| stable_fnv1a64_hex(&value.to_string()))
+        .collect::<Vec<_>>();
+    hashes.sort();
+    hashes
+}
+
+fn sorted_ip_classes(values: &[IpAddr]) -> Vec<String> {
+    let mut classes = BTreeSet::new();
+    for value in values {
+        classes.insert(classify_ip_address(*value).to_owned());
+    }
+    classes.into_iter().collect()
+}
+
+fn is_windows_firewall_no_egress_sentinel(constraints: &NetworkConstraints) -> bool {
+    constraints.host_allow.len() == 1
+        && constraints.host_allow[0] == "none.invalid"
+        && constraints.port_allow.len() == 1
+        && constraints.port_allow[0] == 0
+        && constraints.ip_allow.is_empty()
+}
+
+fn windows_firewall_rule_name(
+    connector_id_hash: &str,
+    protocol: WindowsFirewallRuleProtocol,
+    remote_port: u16,
+    remote_address: &str,
+) -> Result<String, SandboxError> {
+    let remote_address_hash = stable_fnv1a64_hex(remote_address);
+    let name = format!(
+        "{WINDOWS_FIREWALL_RULE_PREFIX}-{connector_id_hash}-{}-{remote_port}-{remote_address_hash}",
+        protocol.as_str()
+    );
+    validate_windows_firewall_rule_name(&name)?;
+    Ok(name)
+}
+
+fn validate_windows_firewall_rule_name(name: &str) -> Result<(), SandboxError> {
+    if name.is_empty() || name.len() > 128 {
+        return Err(SandboxError::InvalidConfig(format!(
+            "windows firewall rule name must be 1..=128 bytes, got {}",
+            name.len()
+        )));
+    }
+
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(SandboxError::InvalidConfig(format!(
+            "windows firewall rule name `{name}` contains unsupported characters"
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_firewall_rule_name_matches_connector(name: &str, connector_id_hash: &str) -> bool {
+    validate_windows_firewall_rule_name(name).is_ok()
+        && name.starts_with(&format!(
+            "{WINDOWS_FIREWALL_RULE_PREFIX}-{connector_id_hash}-"
+        ))
+}
+
+fn classify_ip_address(address: IpAddr) -> &'static str {
+    match address {
+        IpAddr::V4(address) => classify_ipv4_address(address),
+        IpAddr::V6(address) => classify_ipv6_address(address),
+    }
+}
+
+fn classify_ipv4_address(address: Ipv4Addr) -> &'static str {
+    if address.is_loopback() {
+        "loopback_ip"
+    } else if is_tailnet_ipv4(address) {
+        "tailnet_ip"
+    } else if address.is_private() {
+        "private_ip"
+    } else if address.is_link_local() {
+        "link_local_ip"
+    } else if address.is_unspecified() {
+        "unspecified_ip"
+    } else {
+        "public_ip"
+    }
+}
+
+const fn classify_ipv6_address(address: Ipv6Addr) -> &'static str {
+    if address.is_loopback() {
+        "loopback_ip"
+    } else if is_tailnet_ipv6(address) {
+        "tailnet_ip"
+    } else if address.is_unique_local() {
+        "private_ip"
+    } else if address.is_unicast_link_local() {
+        "link_local_ip"
+    } else if address.is_unspecified() {
+        "unspecified_ip"
+    } else {
+        "public_ip"
+    }
+}
+
+fn is_tailnet_ipv4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+const fn is_tailnet_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
 }
 
 fn validate_windows_appcontainer_profile_name(name: &str) -> Result<(), SandboxError> {
@@ -1928,6 +3261,8 @@ mod tests {
             value["launch_mechanism"],
             "startup_info_ex_security_capabilities"
         );
+        assert_eq!(value["integrity_level"], "not_requested");
+        assert_eq!(value["integrity_enforcement"], "none");
         assert_eq!(value["job_object_attachment_intent"], "attach_after_launch");
         assert_eq!(value["job_object_attached"].as_bool(), Some(true));
         assert_eq!(value["final_filter_strength"], "process_limit");
@@ -1941,6 +3276,39 @@ mod tests {
             ]
         );
         assert!(!line.contains("4242"));
+    }
+
+    #[test]
+    fn test_windows_appcontainer_process_launch_evidence_records_integrity_order() {
+        let profile = fake_windows_appcontainer_profile();
+        let report = WindowsAppContainerLifecycleReport::active(
+            profile,
+            WindowsAppContainerLifecycleAction::Created,
+        );
+        let evidence = WindowsAppContainerProcessLaunchEvidence::from_lifecycle(
+            "connector",
+            &report,
+            WindowsAppContainerProcessLaunchMechanism::StartupInfoExSecurityCapabilities,
+            true,
+            "launched",
+            Some(4242),
+        )
+        .with_integrity_enforcement("low", "low_primary_integrity");
+        let line = evidence.to_jsonl_line().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(value["integrity_level"], "low");
+        assert_eq!(value["integrity_enforcement"], "low_primary_integrity");
+        assert_eq!(
+            evidence.step_order,
+            vec![
+                "appcontainer_lifecycle",
+                "startupinfoex_security_capabilities",
+                "integrity_level_enforcement",
+                "job_object_attach"
+            ]
+        );
+        assert!(!line.contains("primary_token"));
     }
 
     #[test]
@@ -1970,6 +3338,675 @@ mod tests {
         );
         assert!(evidence.process_id_hash.is_none());
         assert_eq!(evidence.final_filter_strength, FilterStrength::ProcessLimit);
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeWindowsIntegrityTokenApi {
+        fail_at: Option<WindowsIntegrityTokenApiResult>,
+        calls: Vec<String>,
+        sid_rids: Vec<u32>,
+    }
+
+    impl FakeWindowsIntegrityTokenApi {
+        fn with_failure(fail_at: WindowsIntegrityTokenApiResult) -> Self {
+            Self {
+                fail_at: Some(fail_at),
+                calls: Vec::new(),
+                sid_rids: Vec::new(),
+            }
+        }
+
+        fn maybe_fail(
+            &self,
+            failure: WindowsIntegrityTokenApiResult,
+        ) -> Result<(), WindowsIntegrityTokenApiResult> {
+            if self.fail_at == Some(failure) {
+                Err(failure)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl WindowsIntegrityTokenApi for FakeWindowsIntegrityTokenApi {
+        fn open_source_token(&mut self) -> Result<(), WindowsIntegrityTokenApiResult> {
+            self.calls.push("open_source_token".to_owned());
+            self.maybe_fail(WindowsIntegrityTokenApiResult::SourceTokenOpenFailed)?;
+            self.maybe_fail(WindowsIntegrityTokenApiResult::ApiUnavailable)
+        }
+
+        fn duplicate_primary_token(&mut self) -> Result<(), WindowsIntegrityTokenApiResult> {
+            self.calls.push("duplicate_primary_token".to_owned());
+            self.maybe_fail(WindowsIntegrityTokenApiResult::PrimaryTokenDuplicateFailed)?;
+            self.maybe_fail(WindowsIntegrityTokenApiResult::PrivilegeDenied)
+        }
+
+        fn allocate_integrity_sid(
+            &mut self,
+            mandatory_rid: u32,
+        ) -> Result<(), WindowsIntegrityTokenApiResult> {
+            self.calls
+                .push(format!("allocate_integrity_sid:{mandatory_rid}"));
+            self.sid_rids.push(mandatory_rid);
+            self.maybe_fail(WindowsIntegrityTokenApiResult::IntegritySidAllocationFailed)
+        }
+
+        fn set_token_integrity_level(
+            &mut self,
+            mandatory_rid: u32,
+        ) -> Result<(), WindowsIntegrityTokenApiResult> {
+            self.calls
+                .push(format!("set_token_integrity_level:{mandatory_rid}"));
+            self.sid_rids.push(mandatory_rid);
+            self.maybe_fail(WindowsIntegrityTokenApiResult::TokenIntegritySetFailed)
+        }
+    }
+
+    #[test]
+    fn test_windows_integrity_policy_medium_inherits_process_token() {
+        let plan = plan_windows_integrity_policy(
+            "tenant-secret@example.com",
+            false,
+            WindowsIntegrityOperationMode::InProcessApply,
+            false,
+        );
+        let mut api = FakeWindowsIntegrityTokenApi::default();
+        let report = apply_windows_integrity_policy(plan.clone(), &mut api);
+        let evidence = WindowsIntegrityPolicyEvidence::from_report(&report);
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert_eq!(plan.status, WindowsIntegrityPlanStatus::InheritedProcess);
+        assert_eq!(
+            report.action,
+            WindowsIntegrityLifecycleAction::SkippedMediumIntegrity
+        );
+        assert_eq!(
+            report.token_api_result,
+            WindowsIntegrityTokenApiResult::NotAttempted
+        );
+        assert!(api.calls.is_empty());
+        assert_eq!(
+            evidence.requested_level,
+            WindowsIntegrityLevelRequest::Medium
+        );
+        assert_eq!(evidence.integrity_sid_rid, WINDOWS_MANDATORY_MEDIUM_RID);
+        assert!(!evidence.requires_primary_token);
+        assert_eq!(evidence.final_filter_strength, FilterStrength::ProcessLimit);
+        assert!(!line.contains("tenant-secret@example.com"));
+    }
+
+    #[test]
+    fn test_windows_integrity_policy_low_child_token_order_and_cleanup() {
+        let plan = plan_windows_integrity_policy(
+            "connector",
+            true,
+            WindowsIntegrityOperationMode::StartupInfoExChild,
+            true,
+        );
+        let mut api = FakeWindowsIntegrityTokenApi::default();
+        let report = apply_windows_integrity_policy(plan.clone(), &mut api);
+        let evidence = WindowsIntegrityPolicyEvidence::from_report(&report);
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert_eq!(
+            plan.status,
+            WindowsIntegrityPlanStatus::LowPrimaryTokenRequired
+        );
+        assert_eq!(
+            report.action,
+            WindowsIntegrityLifecycleAction::AppliedLowIntegrityChildToken
+        );
+        assert_eq!(
+            report.token_api_result,
+            WindowsIntegrityTokenApiResult::TokenPrepared
+        );
+        assert_eq!(
+            report.step_order,
+            vec![
+                "integrity_level_decision",
+                "open_process_token",
+                "duplicate_primary_token",
+                "allocate_integrity_sid",
+                "set_token_integrity_level"
+            ]
+        );
+        assert_eq!(
+            api.calls,
+            vec![
+                "open_source_token".to_owned(),
+                "duplicate_primary_token".to_owned(),
+                format!("allocate_integrity_sid:{WINDOWS_MANDATORY_LOW_RID}"),
+                format!("set_token_integrity_level:{WINDOWS_MANDATORY_LOW_RID}")
+            ]
+        );
+        assert_eq!(
+            report.cleanup,
+            WindowsIntegrityTokenCleanupDecision::DropSourceAndChildTokens
+        );
+        assert_eq!(
+            api.sid_rids,
+            vec![WINDOWS_MANDATORY_LOW_RID, WINDOWS_MANDATORY_LOW_RID]
+        );
+        assert_eq!(evidence.requested_level, WindowsIntegrityLevelRequest::Low);
+        assert_eq!(evidence.required_process_api, "CreateProcessAsUserW");
+        assert!(evidence.requires_primary_token);
+        assert!(line.contains("low_primary_token_required"));
+        assert!(!line.contains("connector.exe"));
+        assert!(!line.contains("primary_token_handle"));
+    }
+
+    #[test]
+    fn test_windows_integrity_policy_low_in_process_apply_rejected_without_api_calls() {
+        let plan = plan_windows_integrity_policy(
+            "connector",
+            true,
+            WindowsIntegrityOperationMode::InProcessApply,
+            true,
+        );
+        let mut api = FakeWindowsIntegrityTokenApi::default();
+        let report = apply_windows_integrity_policy(plan, &mut api);
+        let evidence = WindowsIntegrityPolicyEvidence::from_report(&report);
+
+        assert_eq!(
+            report.action,
+            WindowsIntegrityLifecycleAction::RejectedUnsafeLaunchPath
+        );
+        assert_eq!(
+            evidence.plan_status,
+            WindowsIntegrityPlanStatus::LowIntegrityRequiresChildLaunch
+        );
+        assert_eq!(
+            evidence.skip_reason,
+            Some("windows_low_integrity_requires_startupinfoex_child_launch")
+        );
+        assert!(api.calls.is_empty());
+        assert_eq!(evidence.final_filter_strength, FilterStrength::ProcessLimit);
+    }
+
+    #[test]
+    fn test_windows_integrity_policy_appcontainer_inactive_is_not_profile_level() {
+        let plan = plan_windows_integrity_policy(
+            "connector",
+            true,
+            WindowsIntegrityOperationMode::StartupInfoExChild,
+            false,
+        );
+        let evidence = WindowsIntegrityPolicyEvidence::planned_only(plan);
+
+        assert_eq!(
+            evidence.lifecycle_action,
+            WindowsIntegrityLifecycleAction::RejectedAppContainerInactive
+        );
+        assert_eq!(
+            evidence.skip_reason,
+            Some("windows_appcontainer_not_active_createprocessasuser_path_unwired")
+        );
+        assert_eq!(evidence.final_filter_strength, FilterStrength::ProcessLimit);
+        assert_eq!(
+            evidence.token_api_result,
+            WindowsIntegrityTokenApiResult::NotAttempted
+        );
+    }
+
+    #[test]
+    fn test_windows_integrity_policy_privilege_denied_mapping_and_cleanup() {
+        let plan = plan_windows_integrity_policy(
+            "connector",
+            true,
+            WindowsIntegrityOperationMode::StartupInfoExChild,
+            true,
+        );
+        let mut api = FakeWindowsIntegrityTokenApi::with_failure(
+            WindowsIntegrityTokenApiResult::PrivilegeDenied,
+        );
+        let report = apply_windows_integrity_policy(plan, &mut api);
+        let evidence = WindowsIntegrityPolicyEvidence::from_report(&report);
+
+        assert_eq!(
+            report.action,
+            WindowsIntegrityLifecycleAction::TokenSetupFailed
+        );
+        assert_eq!(
+            report.token_api_result,
+            WindowsIntegrityTokenApiResult::PrivilegeDenied
+        );
+        assert_eq!(
+            report.cleanup,
+            WindowsIntegrityTokenCleanupDecision::DropSourceToken
+        );
+        assert_eq!(
+            api.calls,
+            vec!["open_source_token", "duplicate_primary_token"]
+        );
+        assert_eq!(
+            evidence.skip_reason,
+            Some("windows_integrity_token_privilege_denied")
+        );
+        assert_eq!(evidence.final_filter_strength, FilterStrength::ProcessLimit);
+    }
+
+    #[test]
+    fn test_windows_integrity_policy_api_unavailable_mapping() {
+        let plan = plan_windows_integrity_policy(
+            "connector",
+            true,
+            WindowsIntegrityOperationMode::StartupInfoExChild,
+            true,
+        );
+        let mut api = FakeWindowsIntegrityTokenApi::with_failure(
+            WindowsIntegrityTokenApiResult::ApiUnavailable,
+        );
+        let report = apply_windows_integrity_policy(plan, &mut api);
+        let evidence = WindowsIntegrityPolicyEvidence::from_report(&report);
+
+        assert_eq!(
+            report.action,
+            WindowsIntegrityLifecycleAction::TokenSetupFailed
+        );
+        assert_eq!(
+            report.token_api_result,
+            WindowsIntegrityTokenApiResult::ApiUnavailable
+        );
+        assert_eq!(report.cleanup, WindowsIntegrityTokenCleanupDecision::None);
+        assert_eq!(api.calls, vec!["open_source_token"]);
+        assert_eq!(
+            evidence.skip_reason,
+            Some("windows_integrity_token_api_unavailable")
+        );
+    }
+
+    #[test]
+    fn test_windows_integrity_policy_redacts_connector_identity() {
+        let plan = plan_windows_integrity_policy(
+            "tenant-secret@example.com",
+            true,
+            WindowsIntegrityOperationMode::StartupInfoExChild,
+            true,
+        );
+        let evidence = WindowsIntegrityPolicyEvidence::planned_only(plan);
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert!(line.contains("fcp.windows_integrity_policy.v1"));
+        assert!(line.contains("planned_low_integrity_child_token"));
+        assert!(!line.contains("tenant-secret@example.com"));
+        assert!(!line.contains("token_handle"));
+        assert_eq!(evidence.integrity_sid_rid, WINDOWS_MANDATORY_LOW_RID);
+        assert_eq!(evidence.final_filter_strength, FilterStrength::ProcessLimit);
+    }
+
+    fn windows_firewall_constraints(
+        hosts: &[&str],
+        ports: &[u16],
+        ips: &[&str],
+    ) -> NetworkConstraints {
+        NetworkConstraints {
+            host_allow: hosts.iter().map(|host| (*host).to_owned()).collect(),
+            port_allow: ports.to_vec(),
+            ip_allow: ips.iter().map(|ip| ip.parse::<IpAddr>().unwrap()).collect(),
+            cidr_deny: Vec::new(),
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: Vec::new(),
+            deny_ip_literals: true,
+            require_host_canonicalization: true,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        }
+    }
+
+    #[test]
+    fn test_windows_firewall_policy_plans_ip_allow_rules() {
+        let constraints =
+            windows_firewall_constraints(&["api.example.com"], &[443], &["203.0.113.10"]);
+        let plan = plan_windows_firewall_policy(
+            "tenant-secret@example.com",
+            Path::new(r"C:\Users\secret\connector.exe"),
+            true,
+            Some(&constraints),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.status,
+            WindowsFirewallPlanStatus::IpAllowRulesWithHostConstraints
+        );
+        assert_eq!(plan.default_decision, WindowsFirewallDefaultDecision::Deny);
+        assert_eq!(plan.rules.len(), 1);
+        assert_eq!(plan.allowed_port_count, 1);
+        assert_eq!(
+            plan.unsupported_reason,
+            Some("host_allow_requires_network_guard_dns_resolution")
+        );
+
+        let rule = &plan.rules[0];
+        assert!(rule.name.starts_with("fcp-fw-"));
+        assert!(!rule.name.contains("tenant-secret"));
+        assert!(!rule.name.contains("203.0.113.10"));
+        assert_eq!(rule.direction, WindowsFirewallRuleDirection::Outbound);
+        assert_eq!(rule.action, WindowsFirewallRuleAction::Allow);
+        assert_eq!(rule.protocol, WindowsFirewallRuleProtocol::Tcp);
+        assert_eq!(rule.protocol.windows_protocol_number(), 6);
+        assert_eq!(rule.remote_address, "203.0.113.10");
+        assert_eq!(rule.remote_port, 443);
+        assert_eq!(rule.remote_address_class, "public_ip");
+    }
+
+    #[test]
+    fn test_windows_firewall_policy_no_egress_sentinel() {
+        let constraints = windows_firewall_constraints(&["none.invalid"], &[0], &[]);
+        let plan = plan_windows_firewall_policy(
+            "connector",
+            Path::new(r"C:\fcp\connector.exe"),
+            true,
+            Some(&constraints),
+        )
+        .unwrap();
+
+        assert_eq!(plan.status, WindowsFirewallPlanStatus::NoEgress);
+        assert_eq!(plan.default_decision, WindowsFirewallDefaultDecision::Deny);
+        assert!(plan.rules.is_empty());
+        assert_eq!(plan.allowed_port_count, 0);
+        assert!(plan.unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn test_windows_firewall_policy_host_only_requires_network_guard() {
+        let constraints = windows_firewall_constraints(&["api.example.com"], &[443], &[]);
+        let plan = plan_windows_firewall_policy(
+            "connector",
+            Path::new(r"C:\fcp\connector.exe"),
+            true,
+            Some(&constraints),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.status,
+            WindowsFirewallPlanStatus::HostAllowRequiresNetworkGuard
+        );
+        assert!(plan.rules.is_empty());
+        assert_eq!(plan.host_allow_hashes.len(), 1);
+        assert_eq!(
+            plan.unsupported_reason,
+            Some("host_allow_requires_network_guard_dns_resolution")
+        );
+    }
+
+    #[test]
+    fn test_windows_firewall_policy_rejects_zero_port_outside_no_egress() {
+        let constraints = windows_firewall_constraints(&["api.example.com"], &[0], &[]);
+        let err = plan_windows_firewall_policy(
+            "connector",
+            Path::new(r"C:\fcp\connector.exe"),
+            true,
+            Some(&constraints),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("port 0"));
+    }
+
+    #[test]
+    fn test_windows_firewall_policy_records_missing_constraints() {
+        let plan = plan_windows_firewall_policy(
+            "connector",
+            Path::new(r"C:\fcp\connector.exe"),
+            true,
+            None,
+        )
+        .unwrap();
+        let evidence = WindowsFirewallPolicyEvidence::from_skipped_plan(
+            plan,
+            WindowsFirewallLifecycleAction::NotInstalledMissingNetworkConstraints,
+            "not_attempted",
+        );
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert_eq!(evidence.schema, "fcp.windows_firewall_policy.v1");
+        assert_eq!(
+            evidence.plan_status,
+            WindowsFirewallPlanStatus::ConstraintsUnavailable
+        );
+        assert_eq!(
+            evidence.skip_reason,
+            Some("operation_network_constraints_unavailable_to_windows_sandbox")
+        );
+        assert_eq!(evidence.allow_rule_count, 0);
+        assert_eq!(evidence.final_filter_strength, FilterStrength::ProcessLimit);
+        assert!(line.contains("not_installed_missing_network_constraints"));
+    }
+
+    #[derive(Debug)]
+    struct FakeWindowsFirewallApi {
+        apply_outcome: WindowsFirewallRuleApplyOutcome,
+        cleanup_outcome: WindowsFirewallRuleCleanupOutcome,
+        stale_rule_names: Vec<String>,
+        cleanup_fail_for: BTreeSet<String>,
+        calls: Vec<String>,
+    }
+
+    impl Default for FakeWindowsFirewallApi {
+        fn default() -> Self {
+            Self {
+                apply_outcome: WindowsFirewallRuleApplyOutcome::Created,
+                cleanup_outcome: WindowsFirewallRuleCleanupOutcome::Removed,
+                stale_rule_names: Vec::new(),
+                cleanup_fail_for: BTreeSet::new(),
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl WindowsFirewallPolicyApi for FakeWindowsFirewallApi {
+        fn rule_names_for_connector(
+            &mut self,
+            connector_id_hash: &str,
+        ) -> Result<Vec<String>, SandboxError> {
+            self.calls.push(format!("list:{connector_id_hash}"));
+            Ok(self.stale_rule_names.clone())
+        }
+
+        fn upsert_rule(
+            &mut self,
+            rule: &WindowsFirewallRuleSpec,
+        ) -> Result<WindowsFirewallRuleApplyOutcome, SandboxError> {
+            self.calls.push(format!("upsert:{}", rule.name));
+            Ok(self.apply_outcome)
+        }
+
+        fn remove_rule(
+            &mut self,
+            rule_name: &str,
+        ) -> Result<WindowsFirewallRuleCleanupOutcome, SandboxError> {
+            self.calls.push(format!("remove:{rule_name}"));
+            if self.cleanup_fail_for.contains(rule_name) {
+                return Err(SandboxError::ApplyFailed(
+                    "simulated stale firewall cleanup failure".into(),
+                ));
+            }
+            Ok(self.cleanup_outcome)
+        }
+    }
+
+    #[test]
+    fn test_windows_firewall_policy_fake_api_apply_and_cleanup() {
+        let constraints = windows_firewall_constraints(&[], &[443], &["198.51.100.7"]);
+        let plan = plan_windows_firewall_policy(
+            "connector",
+            Path::new(r"C:\fcp\connector.exe"),
+            true,
+            Some(&constraints),
+        )
+        .unwrap();
+        let rule_name = plan.rules[0].name.clone();
+        let mut api = FakeWindowsFirewallApi::default();
+
+        let report = apply_windows_firewall_policy(plan.clone(), &mut api).unwrap();
+        assert_eq!(report.action, WindowsFirewallLifecycleAction::Applied);
+        assert_eq!(report.firewall_api_result, "rules_upserted");
+        assert_eq!(
+            report.rule_outcomes,
+            vec![WindowsFirewallRuleApplyOutcome::Created]
+        );
+        assert_eq!(
+            api.calls,
+            vec![
+                format!("list:{}", plan.connector_id_hash),
+                format!("upsert:{rule_name}")
+            ]
+        );
+
+        let cleanup = cleanup_windows_firewall_policy(plan, &mut api).unwrap();
+        assert_eq!(cleanup.action, WindowsFirewallLifecycleAction::Removed);
+        assert_eq!(cleanup.cleanup, WindowsFirewallCleanupDecision::RemoveRules);
+        assert_eq!(
+            api.calls,
+            vec![
+                format!("list:{}", cleanup.plan.connector_id_hash),
+                format!("upsert:{rule_name}"),
+                format!("remove:{rule_name}")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_windows_firewall_policy_removes_stale_rules_before_upsert() {
+        let constraints = windows_firewall_constraints(&[], &[443], &["198.51.100.7"]);
+        let plan = plan_windows_firewall_policy(
+            "connector",
+            Path::new(r"C:\fcp\connector.exe"),
+            true,
+            Some(&constraints),
+        )
+        .unwrap();
+        let current_rule_name = plan.rules[0].name.clone();
+        let stale_rule_name = windows_firewall_rule_name(
+            &plan.connector_id_hash,
+            WindowsFirewallRuleProtocol::Tcp,
+            8443,
+            "198.51.100.8",
+        )
+        .unwrap();
+        let mut api = FakeWindowsFirewallApi {
+            stale_rule_names: vec![
+                current_rule_name.clone(),
+                stale_rule_name.clone(),
+                "not-fcp-owned".to_owned(),
+            ],
+            ..FakeWindowsFirewallApi::default()
+        };
+
+        let report = apply_windows_firewall_policy(plan.clone(), &mut api).unwrap();
+        let evidence = WindowsFirewallPolicyEvidence::from_report(&report);
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert_eq!(report.action, WindowsFirewallLifecycleAction::Applied);
+        assert_eq!(
+            report.firewall_api_result,
+            "stale_rules_removed_rules_upserted"
+        );
+        assert_eq!(
+            report.cleanup,
+            WindowsFirewallCleanupDecision::RemoveStaleRules
+        );
+        assert_eq!(report.stale_rule_names, vec![stale_rule_name.clone()]);
+        assert_eq!(
+            report.stale_rule_cleanup_outcomes,
+            vec![WindowsFirewallStaleRuleCleanupOutcome::Removed]
+        );
+        assert_eq!(
+            api.calls,
+            vec![
+                format!("list:{}", plan.connector_id_hash),
+                format!("remove:{stale_rule_name}"),
+                format!("upsert:{current_rule_name}")
+            ]
+        );
+        assert_eq!(evidence.stale_rule_name_hashes.len(), 1);
+        assert!(!line.contains(&stale_rule_name));
+        assert!(!line.contains(&current_rule_name));
+    }
+
+    #[test]
+    fn test_windows_firewall_policy_reports_stale_cleanup_failure_without_upsert() {
+        let constraints = windows_firewall_constraints(&[], &[443], &["198.51.100.7"]);
+        let plan = plan_windows_firewall_policy(
+            "connector",
+            Path::new(r"C:\fcp\connector.exe"),
+            true,
+            Some(&constraints),
+        )
+        .unwrap();
+        let current_rule_name = plan.rules[0].name.clone();
+        let stale_rule_name = windows_firewall_rule_name(
+            &plan.connector_id_hash,
+            WindowsFirewallRuleProtocol::Tcp,
+            8443,
+            "198.51.100.8",
+        )
+        .unwrap();
+        let mut cleanup_fail_for = BTreeSet::new();
+        cleanup_fail_for.insert(stale_rule_name.clone());
+        let mut api = FakeWindowsFirewallApi {
+            stale_rule_names: vec![stale_rule_name.clone()],
+            cleanup_fail_for,
+            ..FakeWindowsFirewallApi::default()
+        };
+
+        let report = apply_windows_firewall_policy(plan.clone(), &mut api).unwrap();
+        let evidence = WindowsFirewallPolicyEvidence::from_report(&report);
+
+        assert_eq!(
+            report.action,
+            WindowsFirewallLifecycleAction::StaleCleanupFailed
+        );
+        assert_eq!(report.firewall_api_result, "stale_rule_cleanup_failed");
+        assert_eq!(report.skip_reason, Some("stale_rule_cleanup_failed"));
+        assert_eq!(
+            report.stale_rule_cleanup_outcomes,
+            vec![WindowsFirewallStaleRuleCleanupOutcome::Failed]
+        );
+        assert_eq!(
+            api.calls,
+            vec![
+                format!("list:{}", plan.connector_id_hash),
+                format!("remove:{stale_rule_name}")
+            ]
+        );
+        assert!(!api.calls.contains(&format!("upsert:{current_rule_name}")));
+        assert_eq!(evidence.skip_reason, Some("stale_rule_cleanup_failed"));
+        assert_eq!(evidence.stale_rule_name_hashes.len(), 1);
+    }
+
+    #[test]
+    fn test_windows_firewall_evidence_redacts_connector_path_host_and_rule_names() {
+        let constraints =
+            windows_firewall_constraints(&["tenant-secret.example.com"], &[443], &["203.0.113.10"]);
+        let plan = plan_windows_firewall_policy(
+            "tenant-secret@example.com",
+            Path::new(r"C:\Users\secret\connector.exe"),
+            true,
+            Some(&constraints),
+        )
+        .unwrap();
+        let evidence = WindowsFirewallPolicyEvidence::planned_only(plan);
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert!(line.contains("fcp.windows_firewall_policy.v1"));
+        assert!(!line.contains("tenant-secret@example.com"));
+        assert!(!line.contains("tenant-secret.example.com"));
+        assert!(!line.contains(r"C:\Users\secret\connector.exe"));
+        assert!(!line.contains("203.0.113.10"));
+        assert!(!line.contains("fcp-fw-"));
+        assert_eq!(evidence.host_allow_hashes.len(), 1);
+        assert_eq!(evidence.ip_allow_hashes.len(), 1);
+        assert_eq!(evidence.rule_name_hashes.len(), 1);
+        assert_eq!(evidence.target_address_classes, vec!["public_ip"]);
     }
 
     #[test]

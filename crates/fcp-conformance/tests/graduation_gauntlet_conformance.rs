@@ -499,9 +499,9 @@ fn batch2_status_runner_writes_status_markdown() {
         fs::read_to_string(&status_path).expect("batch2 status markdown should be written");
     assert!(status_doc.contains("# Batch 2 Graduation Status"));
     assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch2"));
-    assert!(status_doc.contains("Summary: `4/9` Batch 2 connectors currently pass"));
-    assert!(status_doc.contains("Promotion status: `4/9` Batch 2 connectors are PROVEN"));
-    assert!(status_doc.contains("`5/9` still pass every check before `readme_status_match`"));
+    assert!(status_doc.contains("Summary: `5/9` Batch 2 connectors currently pass"));
+    assert!(status_doc.contains("Promotion status: `5/9` Batch 2 connectors are PROVEN"));
+    assert!(status_doc.contains("`4/9` still pass every check before `readme_status_match`"));
     for connector in BATCH2_CONNECTORS {
         assert!(
             status_doc.contains(connector),
@@ -514,10 +514,10 @@ fn batch2_status_runner_writes_status_markdown() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
         .collect::<Vec<_>>();
-    // Google Calendar, Google Drive, Google Docs, and Google Sheets are PROVEN
-    // and run all 12 checks; the remaining five are blocked at
-    // `readme_status_match` (check 8): 4 * 12 + 5 * 8 = 88 records.
-    assert_eq!(records.len(), 4 * 12 + 5 * 8);
+    // Google Calendar, Google Drive, Google Docs, Google People, and Google
+    // Sheets are PROVEN and run all 12 checks; the remaining four are blocked
+    // at `readme_status_match` (check 8): 5 * 12 + 4 * 8 = 92 records.
+    assert_eq!(records.len(), 5 * 12 + 4 * 8);
     assert!(
         records
             .iter()
@@ -529,6 +529,7 @@ fn batch2_status_runner_writes_status_markdown() {
         "connectors/google-calendar",
         "connectors/google-drive",
         "connectors/google-docs",
+        "connectors/google-people",
         "connectors/google-sheets",
     ]);
     assert!(

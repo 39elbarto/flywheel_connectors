@@ -153,6 +153,29 @@ requires_rch_remote_proof() {
   esac
 }
 
+derive_integration_evidence_status() {
+  local name="$1"
+  local test_name="$2"
+  local integration_log="${OUT_ROOT}/logs/integration_suite.log"
+  local evidence_log="${OUT_ROOT}/logs/${name}.log"
+
+  mkdir -p "${OUT_ROOT}/logs"
+  if [[ -f "${integration_log}" ]]; then
+    cp "${integration_log}" "${evidence_log}"
+  fi
+
+  if [[ "${integration_suite_status}" != "passed" ]]; then
+    echo "${integration_suite_status}"
+    return
+  fi
+
+  if [[ -f "${integration_log}" ]] && grep -Fq "test ${test_name} ... ok" "${integration_log}"; then
+    echo "passed"
+  else
+    echo "failed"
+  fi
+}
+
 require_cmd rch
 
 manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
@@ -228,66 +251,6 @@ else
 fi
 
 if run_logged \
-  health_guidance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry --test integration health_unconfigured_includes_guidance -- --nocapture
-then
-  health_guidance_status="passed"
-else
-  health_guidance_status="$(classify_step_failure "${OUT_ROOT}/logs/health_guidance_evidence.log")"
-  promote_overall_status "${health_guidance_status}"
-fi
-
-if run_logged \
-  doctor_guidance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-then
-  doctor_guidance_status="passed"
-else
-  doctor_guidance_status="$(classify_step_failure "${OUT_ROOT}/logs/doctor_guidance_evidence.log")"
-  promote_overall_status "${doctor_guidance_status}"
-fi
-
-if run_logged \
-  self_check_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry --test integration self_check_ready_with_crates_override_and_evidence -- --nocapture
-then
-  self_check_status="passed"
-else
-  self_check_status="$(classify_step_failure "${OUT_ROOT}/logs/self_check_evidence.log")"
-  promote_overall_status "${self_check_status}"
-fi
-
-if run_logged \
-  retryable_self_check_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry --test integration self_check_retryable_registry_failure_reports_degraded -- --nocapture
-then
-  retryable_self_check_status="passed"
-else
-  retryable_self_check_status="$(classify_step_failure "${OUT_ROOT}/logs/retryable_self_check_evidence.log")"
-  promote_overall_status "${retryable_self_check_status}"
-fi
-
-if run_logged \
-  pagination_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry --test integration invoke_search_uses_npm_pagination_offset -- --nocapture
-then
-  pagination_evidence_status="passed"
-else
-  pagination_evidence_status="$(classify_step_failure "${OUT_ROOT}/logs/pagination_evidence.log")"
-  promote_overall_status "${pagination_evidence_status}"
-fi
-
-if run_logged \
-  compliance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry --test integration introspection_emits_v3_compliance_evidence -- --nocapture
-then
-  compliance_status="passed"
-else
-  compliance_status="$(classify_step_failure "${OUT_ROOT}/logs/compliance_evidence.log")"
-  promote_overall_status "${compliance_status}"
-fi
-
-if run_logged \
   integration_suite \
   env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry --test integration -- --nocapture
 then
@@ -295,6 +258,36 @@ then
 else
   integration_suite_status="$(classify_step_failure "${OUT_ROOT}/logs/integration_suite.log")"
   promote_overall_status "${integration_suite_status}"
+fi
+
+health_guidance_status="$(derive_integration_evidence_status health_guidance_evidence health_unconfigured_includes_guidance)"
+if [[ "${health_guidance_status}" != "passed" ]]; then
+  promote_overall_status "${health_guidance_status}"
+fi
+
+doctor_guidance_status="$(derive_integration_evidence_status doctor_guidance_evidence doctor_unconfigured_reports_operator_guidance)"
+if [[ "${doctor_guidance_status}" != "passed" ]]; then
+  promote_overall_status "${doctor_guidance_status}"
+fi
+
+self_check_status="$(derive_integration_evidence_status self_check_evidence self_check_ready_with_crates_override_and_evidence)"
+if [[ "${self_check_status}" != "passed" ]]; then
+  promote_overall_status "${self_check_status}"
+fi
+
+retryable_self_check_status="$(derive_integration_evidence_status retryable_self_check_evidence self_check_retryable_registry_failure_reports_degraded)"
+if [[ "${retryable_self_check_status}" != "passed" ]]; then
+  promote_overall_status "${retryable_self_check_status}"
+fi
+
+pagination_evidence_status="$(derive_integration_evidence_status pagination_evidence invoke_search_uses_npm_pagination_offset)"
+if [[ "${pagination_evidence_status}" != "passed" ]]; then
+  promote_overall_status "${pagination_evidence_status}"
+fi
+
+compliance_status="$(derive_integration_evidence_status compliance_evidence introspection_emits_v3_compliance_evidence)"
+if [[ "${compliance_status}" != "passed" ]]; then
+  promote_overall_status "${compliance_status}"
 fi
 
 if run_logged \
@@ -345,12 +338,6 @@ export RCH_FORCE_REMOTE=1
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/package-registry/manifest.toml --check --json
 env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-package-registry --all-targets
-env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration health_unconfigured_includes_guidance -- --nocapture
-env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration self_check_ready_with_crates_override_and_evidence -- --nocapture
-env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration self_check_retryable_registry_failure_reports_degraded -- --nocapture
-env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration invoke_search_uses_npm_pagination_offset -- --nocapture
-env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration -- --nocapture
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry -- --nocapture
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-package-registry --all-targets -- -D warnings

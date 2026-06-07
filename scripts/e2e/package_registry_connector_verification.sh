@@ -4,7 +4,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/package_registry_connector/${RUN_ID}}"
+OUT_BASE="${OUT_BASE:-${REPO_ROOT}/.codex-targets/package-registry-verification}"
+OUT_ROOT="${OUT_ROOT:-${OUT_BASE}/${RUN_ID}}"
 TARGET_DIR="${FCP_PACKAGE_REGISTRY_TARGET_DIR:-/tmp/fcp-package-registry-e2e-target}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
 REMOTE_RUNNER="rch:remote-required"
@@ -44,6 +45,7 @@ run_logged() {
   local log_path="${OUT_ROOT}/logs/${name}.log"
   local rc
 
+  mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
   echo "[package-registry-verification] ${name}: $*"
   (
     cd "${REPO_ROOT}" || exit
@@ -63,6 +65,7 @@ run_capture_stdout() {
   local log_path="${OUT_ROOT}/logs/${name}.log"
   local rc
 
+  mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
   echo "[package-registry-verification] ${name}: $*"
   (
     cd "${REPO_ROOT}" || exit
@@ -93,6 +96,11 @@ promote_overall_status() {
 
 classify_manifest_failure() {
   local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+
   # shellcheck disable=SC2016
   if grep -Eq 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
     echo "infra_blocked"
@@ -103,6 +111,11 @@ classify_manifest_failure() {
 
 classify_step_failure() {
   local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+
   if grep -Eq 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process' "${log_path}"; then
     echo "infra_blocked"
   else
@@ -114,11 +127,17 @@ require_rch_remote_proof() {
   local name="$1"
   local log_path="$2"
 
+  if [[ ! -f "${log_path}" ]]; then
+    echo "[package-registry-verification] ${name}: log file missing before rch proof check" >&2
+    return 1
+  fi
+
   if grep -Fq "[RCH] remote" "${log_path}"; then
     return 0
   fi
 
   echo "[package-registry-verification] ${name}: rch command did not produce remote proof" >&2
+  mkdir -p "$(dirname "${log_path}")"
   echo "rch command did not produce remote proof" >>"${log_path}"
   return 1
 }
@@ -297,6 +316,8 @@ else
   clippy_status="$(classify_step_failure "${OUT_ROOT}/logs/clippy.log")"
   promote_overall_status "${clippy_status}"
 fi
+
+mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
 cat > "${OUT_ROOT}/environment.json" <<EOF
 {

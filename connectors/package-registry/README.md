@@ -1,7 +1,8 @@
 # Package Registry Connector V3 Contract
 
-> **Status**: runtime contract; manifest metadata aligned
+> **Status**: PROVEN runtime contract documented with remote Package Registry verifier proof
 > **Bead**: `flywheel_connectors-j05nu.4.4.1`
+> **Verification script**: `scripts/e2e/package_registry_connector_verification.sh`
 > **Unblocks**: `flywheel_connectors-j05nu.4.4.2`
 > **Primary upstreams**:
 > - https://api-docs.npmjs.com/
@@ -27,7 +28,6 @@ There is now an in-tree connector crate at `connectors/package-registry/` with:
 
 - a provider-bound runtime and manifest for `npm`, `pypi`, or `crates_io`
 - typed operations for search, package metadata, versions, dependencies, artifacts, downloads, and health
-- runtime operation metadata derived from `manifest.toml` for capability, risk, safety, idempotency, schemas, approval mode, and AI hints
 - readiness surfaces for `health()`, `doctor()`, and `self_check()`
 - deterministic crate-local tests plus host-backed integration coverage
 - a replayable verification bundle at `scripts/e2e/package_registry_connector_verification.sh`

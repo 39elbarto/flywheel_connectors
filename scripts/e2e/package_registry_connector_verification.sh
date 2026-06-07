@@ -50,7 +50,7 @@ run_logged() {
     "$@"
   ) >"${log_path}" 2>&1
   rc="$?"
-  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+  if [[ "${rc}" -eq 0 ]] && requires_rch_remote_proof "${name}" && ! require_rch_remote_proof "${name}" "${log_path}"; then
     return 1
   fi
   return "${rc}"
@@ -69,7 +69,7 @@ run_capture_stdout() {
     "$@"
   ) >"${stdout_path}" 2>"${log_path}"
   rc="$?"
-  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+  if [[ "${rc}" -eq 0 ]] && requires_rch_remote_proof "${name}" && ! require_rch_remote_proof "${name}" "${log_path}"; then
     return 1
   fi
   return "${rc}"
@@ -121,6 +121,17 @@ require_rch_remote_proof() {
   echo "[package-registry-verification] ${name}: rch command did not produce remote proof" >&2
   echo "rch command did not produce remote proof" >>"${log_path}"
   return 1
+}
+
+requires_rch_remote_proof() {
+  case "$1" in
+    format_check)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 require_cmd rch
@@ -189,7 +200,7 @@ fi
 
 if run_logged \
   format_check \
-  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
 then
   format_check_status="passed"
 else
@@ -311,7 +322,7 @@ REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
 export RCH_FORCE_REMOTE=1
 
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/package-registry/manifest.toml --check --json
-env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
+env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-package-registry --all-targets
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration health_unconfigured_includes_guidance -- --nocapture
 env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture

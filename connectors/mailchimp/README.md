@@ -1,6 +1,6 @@
 # Mailchimp Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: runtime contract documented; manifest-derived operation metadata
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -28,7 +28,8 @@ Important runtime truths the contract preserves:
 - Package and binary name are `fcp-mailchimp`.
 - Runtime `BaseConnector` ID is `mailchimp`.
 - Manifest and reported connector ID are `fcp.mailchimp`.
-- Manifest interface hash is `blake3-256:fcp.interface.v2:d01b5c19607f90aee1f48af0b0324f799b1cae4be8c94d244febb1f71a5cd338`.
+- Manifest interface hash is `blake3-256:fcp.interface.v2:b1b2f499942e8bb726768146ff8ee9f6df101e087ea74f8f6b8c23ae1768c431`.
+- Runtime operation introspection derives operation descriptions, schemas, capabilities, safety, risk, idempotency, approval mode, and AI hints from the embedded strict manifest.
 - Configuration requires exactly one auth source: direct `api_key` or `credential_id`.
 - Direct API-key mode sends HTTP Basic auth as `anyuser:{api_key}`.
 - `credential_id` mode sends `X-FCP-Credential-Id` and expects host egress policy to inject real secret material.
@@ -52,9 +53,10 @@ Important runtime truths the contract preserves:
 
 This README documents the runtime truth and keeps current drift visible:
 
-- Manifest marks `mailchimp.campaigns.send` as `safety_tier = "risky"`, `requires_approval = "policy"`, and `idempotency = "strict"`; runtime introspection marks it `Dangerous`, `requires_approval = None`, and `idempotency = None`.
-- Manifest marks `mailchimp.members.delete` as interactive approval, but runtime introspection reports no approval requirement and runtime checks no approval token.
+- Runtime introspection now reflects the manifest approval metadata: `mailchimp.members.delete` reports interactive approval and `mailchimp.campaigns.send` reports policy approval.
+- Runtime introspection now reflects the manifest safety/idempotency metadata: `mailchimp.campaigns.send` reports `Risky` and `Strict`.
 - Runtime does not verify capability tokens or bind operations to resource URIs.
+- Runtime still does not verify approval tokens before member deletion or campaign sending.
 - Manifest optional capability `mailchimp.members.write` is returned by handshake, but no current runtime operation uses it.
 - Manifest state hint says API key and data-center prefix are stored; runtime keeps configuration in memory and does not persist connector state.
 - Configure rejects URL userinfo, query, and fragment, but does not hard-stop unknown HTTPS hosts. Unknown hosts surface through `self_check` readiness.
@@ -62,7 +64,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Runtime introspection has no event catalog, resource types, auth capabilities, or event capabilities.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align approval and idempotency metadata, implement capability-token and approval-token verification, remove unused `mailchimp.members.write` from handshake or add a real write operation, tighten API-key data-center validation, make provider host policy a configure-time hard stop where appropriate, and add a tracked verification bundle.
+A follow-up parity bead should implement capability-token and approval-token verification, remove unused `mailchimp.members.write` from handshake or add a real write operation, tighten API-key data-center validation, make provider host policy a configure-time hard stop where appropriate, and add a tracked verification bundle.
 
 ## First-Slice Scope
 
@@ -129,7 +131,7 @@ The current Mailchimp README slice documents the existing runtime surface:
 | `mailchimp.members.list` | `GET /lists/{list_id}/members` | `mailchimp.members.read` | `Safe` | `Low` | `Strict` | Lists members for one audience and returns `members`, defaulting missing members to an empty array. |
 | `mailchimp.members.delete` | `DELETE /lists/{list_id}/members/{subscriber_hash}` | `mailchimp.members.delete` | `Dangerous` | `High` | `Strict` | Deletes one member by MD5 hash of lowercase email address. |
 | `mailchimp.campaigns.list` | `GET /campaigns` | `mailchimp.campaigns.read` | `Safe` | `Low` | `Strict` | Lists campaigns and returns `campaigns`, defaulting missing campaigns to an empty array. |
-| `mailchimp.campaigns.send` | `POST /campaigns/{campaign_id}/actions/send` | `mailchimp.campaigns.write` | `Dangerous` | `High` | `None` | Sends an existing campaign to its configured recipients. |
+| `mailchimp.campaigns.send` | `POST /campaigns/{campaign_id}/actions/send` | `mailchimp.campaigns.write` | `Risky` | `High` | `Strict` | Sends an existing campaign to its configured recipients. |
 
 ## Resource URIs
 

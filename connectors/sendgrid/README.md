@@ -1,6 +1,6 @@
 # SendGrid Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: strict manifest hash and manifest-derived runtime contract documented; capability/approval enforcement drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -36,7 +36,8 @@ Important runtime truths the contract preserves:
 - Package and binary name are `fcp-sendgrid`.
 - Runtime `BaseConnector` ID is `sendgrid`.
 - Manifest and reported connector ID are `fcp.sendgrid`.
-- Manifest interface hash is `blake3-256:fcp.interface.v2:a70876e5fbdeb908a5567993f3085faf382c2282c9bd167ff54a3d026af3a650`.
+- Manifest interface hash is `blake3-256:fcp.interface.v2:ef7c899e275bc60969e8228d003285294eee1dfd21628a119b59d25122ef9f19`.
+- Runtime operation introspection derives operation descriptions, schemas, capabilities, safety, risk, idempotency, approval mode, and AI hints from the embedded strict manifest.
 - Configuration requires exactly one auth source: direct `api_key` or `credential_id`.
 - Direct API-key mode sends `Authorization: Bearer {api_key}`.
 - `credential_id` mode sends `X-FCP-Credential-Id` and expects host egress policy to inject real secret material.
@@ -63,21 +64,18 @@ Important runtime truths the contract preserves:
 
 This README documents the runtime truth and keeps current drift visible:
 
-- Manifest exposes only five operations: `sendgrid.lists.delete`, `sendgrid.contacts.list`, `sendgrid.mail.send`, `sendgrid.stats.get`, and `sendgrid.templates.list`.
-- Runtime also exposes `sendgrid.contacts.search`, `sendgrid.contacts.get`, `sendgrid.lists.list`, `sendgrid.lists.create`, and `sendgrid.templates.get`.
+- Manifest and runtime introspection now expose the same ten operations.
+- Runtime operation metadata is derived from the embedded strict manifest instead of a separate hand-built catalog.
 - Manifest optional capabilities include `sendgrid.contacts.write`, but runtime has no contact write operation.
-- Manifest omits `sendgrid.lists.read`, `sendgrid.lists.write`, and `sendgrid.templates.get` operation entries even though runtime uses those capabilities/operations.
-- Manifest marks `sendgrid.mail.send` as policy-approved and `sendgrid.lists.delete` as interactive approval; runtime operation metadata sets `requires_approval = None` for every operation and invoke checks no approval token.
-- Manifest marks `sendgrid.lists.delete` as `idempotency = "strict"`, while runtime metadata marks it `None`.
+- Manifest marks `sendgrid.mail.send` as policy-approved and `sendgrid.lists.create` plus `sendgrid.lists.delete` as interactive approval; runtime invoke checks no approval token.
 - Runtime `sendgrid.mail.send` only checks that either `personalizations` or top-level `to` exists. It does not locally require manifest-listed `from`, `subject`, or `content`.
-- Runtime `contacts.list` wraps the provider `result` array as `contacts`, while manifest output schema advertises `result`.
 - Runtime `lists.list` wraps the provider `result` array as `lists`.
 - Manifest says API key and sender identity are stored under singleton-writer state. Runtime keeps config in process memory and does not persist connector state itself.
 - Runtime `self_check()` validates local URL policy and credential mode, but does not call SendGrid.
 - Manifest rate-limit pools are documented intent only; runtime does not enforce connector-local rate limits.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align manifest/runtime operation catalogs, add capability-token and approval-token verification, decide whether `to` is a supported mail-send convenience field or should be rejected, align output schemas, reset session and handshake state on reconfigure and shutdown, add live readiness where desired, and add a tracked verification bundle.
+A follow-up parity bead should add capability-token and approval-token verification, decide whether `to` is a supported mail-send convenience field or should be rejected, align runtime request validation with manifest mail-send schemas, reset session and handshake state on reconfigure and shutdown, add live readiness where desired, and add a tracked verification bundle.
 
 ## First-Slice Scope
 
@@ -177,7 +175,7 @@ These are excluded on purpose:
 - local configuration, client, session ID, request, and error counter state
 - local URL readiness and credential-injection warning state
 - degraded self-check for unconfigured and `credential_id` modes
-- typed introspection with operations, no events, no resource types, no auth caps, and no event caps
+- manifest-derived typed introspection with operations, no events, no resource types, no auth caps, and no event caps
 - simulation allow/deny for known versus unknown operation IDs only
 - typed provider/FCP error mapping
 
@@ -205,6 +203,7 @@ Run these after changing this connector contract:
 
 ```bash
 git diff --check -- connectors/sendgrid/README.md
+cargo run -p fwc -- manifest fix --check --json connectors/sendgrid/manifest.toml
 ubs connectors/sendgrid/README.md
 LC_ALL=C rg -n '[^ -~]' connectors/sendgrid/README.md
 rg -n '\bmaster\b' connectors/sendgrid/README.md

@@ -32,7 +32,10 @@ Optional:
 
 ## Runtime Contract
 
+- Manifest interface hash is `blake3-256:fcp.interface.v2:dd5f28d4d0643e6695f6e38d8b835a760350b4d64dcd07ea1cb65ddba2182193`.
+- Runtime operation introspection derives operation descriptions, schemas, capabilities, safety, risk, idempotency, approval mode, and AI hints from the embedded strict manifest.
 - Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+- Invoke capability verification still uses a connector-local operation-to-capability mapping before checking the host-issued capability token.
 
 ## Security Boundaries
 

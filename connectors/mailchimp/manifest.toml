@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:d01b5c19607f90aee1f48af0b0324f799b1cae4be8c94d244febb1f71a5cd338"
+interface_hash = "blake3-256:fcp.interface.v2:b1b2f499942e8bb726768146ff8ee9f6df101e087ea74f8f6b8c23ae1768c431"
 
 [connector]
 id = "fcp.mailchimp"

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:sqlite-first-slice-placeholder"
+interface_hash = "blake3-256:fcp.interface.v2:0133b7c75dee87ffe347dcda9891710ebc43f66092c02c42d72b2b1dfcb5e4ae"
 
 [connector]
 id = "fcp.sqlite"
@@ -28,7 +28,7 @@ forbidden = ["z:public", "z:community", "z:work"]
 
 [capabilities]
 required = ["storage.state"]
-optional = []
+optional = ["sqlite.read", "sqlite.write", "sqlite.admin"]
 forbidden = [
     "system.exec",
     "network.listen",

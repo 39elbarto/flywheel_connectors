@@ -29,6 +29,7 @@ fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 fcp-cbor = { path = "../../crates/fcp-cbor" }
+fcp-manifest = { path = "../../crates/fcp-manifest" }
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -52,7 +53,6 @@ ciborium.workspace = true
 wiremock.workspace = true
 futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
-fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
 jsonschema.workspace = true
 toml.workspace = true

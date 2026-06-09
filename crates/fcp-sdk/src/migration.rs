@@ -610,8 +610,10 @@ impl RetryLoop {
 
                     // Sleep under context (respects deadline + cancellation)
                     if let Err(async_err) = ctx.sleep(delay).await {
-                        // Context expired or cancelled during sleep
-                        return Err(E::from_async_error(async_err));
+                        return match async_err {
+                            AsyncError::Timeout { .. } => Err(error),
+                            other => Err(E::from_async_error(other)),
+                        };
                     }
 
                     let Some(next_attempt) = attempt.checked_add(1) else {
@@ -993,6 +995,31 @@ mod tests {
             assert!(result.is_err());
         })
         .expect("runtime should execute max-attempts retry test");
+    }
+
+    #[test]
+    fn retry_loop_preserves_retryable_error_when_deadline_expires_during_backoff() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_millis(5));
+            let policy = RetryPolicy::new()
+                .with_max_attempts(Some(3))
+                .with_jitter_enabled(false);
+
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |_attempt| async {
+                    AttemptOutcome::Retryable {
+                        error: TestError::Transient("service overloaded".into()),
+                        retry_after: Some(Duration::from_millis(50)),
+                    }
+                })
+                .await;
+
+            match result.unwrap_err() {
+                TestError::Transient(message) => assert_eq!(message, "service overloaded"),
+                other => panic!("expected original retryable error, got {other:?}"),
+            }
+        })
+        .expect("runtime should preserve retryable error on backoff deadline expiry");
     }
 
     #[test]
@@ -1660,18 +1687,6 @@ mod tests {
         .expect("runtime should execute success-on-last test");
     }
 
-    // asupersync-uwp88: 0.3.2 reactor floors timer wakes at ~250ms AND a
-    // `timeout` under a deadline budget blocks ~the full budget. This test needs
-    // 5 successive retries whose backoff runs `ctx.sleep`, i.e.
-    // `timeout(remaining_10s_budget, sleep(delay))`; under the defect the first
-    // backoff blocks the entire 10s budget and the loop returns `Timeout` before
-    // reaching attempt 5, so it never observes the success. The pathology scales
-    // with the request budget, not the delay, so retiming cannot recover the
-    // intent (unlimited-attempt loop eventually succeeds). Ignored until
-    // asupersync 0.3.3 lands. Note: `retry_loop_unlimited_attempts_stop_at_u32_max`
-    // still covers the unlimited-attempt ceiling via a deadline-free background
-    // context with 0ms backoff.
-    #[ignore = "asupersync-uwp88: 0.3.2 reactor floors timer wakes at 250ms"]
     #[test]
     fn retry_loop_unlimited_attempts_succeeds() {
         fcp_async_core::runtime::block_on_sync(async {

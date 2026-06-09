@@ -430,9 +430,11 @@ pub mod runtime {
 pub mod time {
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::task::{Context, Poll};
-    use std::time::Duration;
+    use std::thread::{self, JoinHandle, Thread};
+    use std::time::{Duration, Instant};
 
     use asupersync::types::Time;
 
@@ -452,15 +454,95 @@ pub mod time {
     }
 
     /// Sleep future abstraction owned by async-core.
+    struct SleepState {
+        ready: AtomicBool,
+        cancelled: AtomicBool,
+        waker: Mutex<Option<std::task::Waker>>,
+    }
+
     pub struct Sleep {
-        inner: Pin<Box<asupersync::time::Sleep>>,
+        duration: Duration,
+        state: Arc<SleepState>,
+        thread: Option<Thread>,
+        join: Option<JoinHandle<()>>,
+        started: bool,
+    }
+
+    impl Sleep {
+        fn start(&mut self) {
+            if self.started {
+                return;
+            }
+            self.started = true;
+
+            if self.duration.is_zero() {
+                self.state.ready.store(true, Ordering::Release);
+                return;
+            }
+
+            let state = Arc::clone(&self.state);
+            let duration = self.duration;
+            let join = thread::spawn(move || {
+                let deadline = super::saturating_instant_add(Instant::now(), duration);
+                loop {
+                    if state.cancelled.load(Ordering::Acquire) {
+                        return;
+                    }
+
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+
+                    thread::park_timeout(remaining);
+                }
+
+                state.ready.store(true, Ordering::Release);
+                let waker = state
+                    .waker
+                    .lock()
+                    .expect("sleep waker mutex poisoned")
+                    .take();
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            });
+            self.thread = Some(join.thread().clone());
+            self.join = Some(join);
+        }
     }
 
     impl Future for Sleep {
         type Output = ();
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            self.inner.as_mut().poll(cx)
+            self.start();
+            if self.state.ready.load(Ordering::Acquire) {
+                return Poll::Ready(());
+            }
+
+            {
+                let mut waker = self.state.waker.lock().expect("sleep waker mutex poisoned");
+                if !waker.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+                    *waker = Some(cx.waker().clone());
+                }
+            }
+
+            if self.state.ready.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for Sleep {
+        fn drop(&mut self) {
+            self.state.cancelled.store(true, Ordering::Release);
+            if let Some(thread) = &self.thread {
+                thread.unpark();
+            }
+            let _ = self.join.take();
         }
     }
 
@@ -478,16 +560,31 @@ pub mod time {
                     return instant_from_time(self.inner.tick(now));
                 }
 
-                asupersync::time::sleep_until(self.inner.deadline()).await;
+                let delay = self
+                    .inner
+                    .deadline()
+                    .as_nanos()
+                    .saturating_sub(now.as_nanos());
+                sleep(Duration::from_nanos(delay)).await;
             }
         }
     }
 
     /// Sleep for a duration.
+    // Arc::new is not const on the active toolchain despite clippy's suggestion.
+    #[allow(clippy::missing_const_for_fn)]
     #[must_use]
     pub fn sleep(duration: Duration) -> Sleep {
         Sleep {
-            inner: Box::pin(asupersync::time::sleep(wall_now(), duration)),
+            duration,
+            state: Arc::new(SleepState {
+                ready: AtomicBool::new(false),
+                cancelled: AtomicBool::new(false),
+                waker: Mutex::new(None),
+            }),
+            thread: None,
+            join: None,
+            started: false,
         }
     }
 
@@ -508,11 +605,13 @@ pub mod time {
     where
         F: Future<Output = T>,
     {
-        asupersync::time::timeout(asupersync::time::wall_now(), duration, future)
-            .await
-            .map_err(|_| AsyncError::Timeout {
-                timeout_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
-            })
+        let timeout_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+
+        crate::select! {
+            biased;
+            () = sleep(duration) => Err(AsyncError::Timeout { timeout_ms }),
+            output = future => Ok(output),
+        }
     }
 }
 
@@ -1806,12 +1905,24 @@ pub mod sync {
             self.inner.try_lock().map_err(|_| TryLockError(()))
         }
 
+        /// Returns a mutable reference to the protected value.
+        ///
+        /// # Panics
+        /// Panics if the underlying mutex has been cancelled or poisoned.
         pub fn get_mut(&mut self) -> &mut T {
-            self.inner.get_mut()
+            self.inner
+                .get_mut()
+                .expect("fcp_async_core::sync::Mutex get_mut cancelled or poisoned")
         }
 
+        /// Consumes the mutex and returns the protected value.
+        ///
+        /// # Panics
+        /// Panics if the underlying mutex has been cancelled or poisoned.
         pub fn into_inner(self) -> T {
-            self.inner.into_inner()
+            self.inner
+                .into_inner()
+                .expect("fcp_async_core::sync::Mutex into_inner cancelled or poisoned")
         }
     }
 
@@ -1877,12 +1988,24 @@ pub mod sync {
             self.inner.try_write().map_err(|_| TryLockError(()))
         }
 
+        /// Returns a mutable reference to the protected value.
+        ///
+        /// # Panics
+        /// Panics if the underlying lock has been cancelled or poisoned.
         pub fn get_mut(&mut self) -> &mut T {
-            self.inner.get_mut()
+            self.inner
+                .get_mut()
+                .expect("fcp_async_core::sync::RwLock get_mut cancelled or poisoned")
         }
 
+        /// Consumes the lock and returns the protected value.
+        ///
+        /// # Panics
+        /// Panics if the underlying lock has been cancelled or poisoned.
         pub fn into_inner(self) -> T {
-            self.inner.into_inner()
+            self.inner
+                .into_inner()
+                .expect("fcp_async_core::sync::RwLock into_inner cancelled or poisoned")
         }
     }
 
@@ -2878,17 +3001,12 @@ mod tests {
         assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
-    // asupersync-uwp88: 0.3.2 reactor floors timer wakes at ~250ms. This test
-    // verifies SEMANTICS (a deadline shorter than the work times out and the
-    // scope is Request), which survives a coarser timer once the deadline and
-    // the work are spread apart: deadline 300ms < sleep 2s (>600ms gap, both
-    // >300ms). Original was deadline 10ms / sleep 50ms.
     #[runtime::test]
     async fn request_context_deadline_times_out() {
-        let context = ExecutionContext::request_scoped(Duration::from_millis(300));
+        let context = ExecutionContext::request_scoped(Duration::from_millis(10));
         let err = context
             .run(async {
-                time::sleep(Duration::from_secs(2)).await;
+                time::sleep(Duration::from_millis(50)).await;
             })
             .await
             .expect_err("deadline should timeout");
@@ -4809,6 +4927,22 @@ mod tests {
             .await
             .expect_err("should timeout");
         assert!(matches!(err, AsyncError::Timeout { .. }));
+    }
+
+    #[runtime::test]
+    async fn execution_context_sleep_uses_requested_duration_not_deadline() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+        let start = Instant::now();
+
+        ctx.sleep(Duration::from_millis(10))
+            .await
+            .expect("short sleep should finish before request deadline");
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "short sleep waited too long: {elapsed:?}"
+        );
     }
 
     #[runtime::test]

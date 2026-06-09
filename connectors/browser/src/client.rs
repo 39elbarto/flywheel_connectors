@@ -6,7 +6,7 @@
 //! available.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     future::Future,
     net::IpAddr,
     path::{Path, PathBuf},
@@ -1922,6 +1922,13 @@ enum CdpNavigationWait {
 #[derive(Debug, Clone, PartialEq)]
 struct CdpNavigationCompletion {
     status: Option<u16>,
+    loader_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CdpNavigationResponseEvent {
+    status: u16,
+    loader_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1988,10 +1995,10 @@ impl CdpNavigationWait {
         match event.method.as_str() {
             "Page.domContentEventFired" => {
                 self == Self::DomContentLoaded
-                    && cdp_event_matches_navigation_frame(&event.params, navigation)
+                    && cdp_event_matches_navigation_for_wait(event, navigation)
             }
             "Page.loadEventFired" => {
-                self == Self::Load && cdp_event_matches_navigation_frame(&event.params, navigation)
+                self == Self::Load && cdp_event_matches_navigation_for_wait(event, navigation)
             }
             "Page.lifecycleEvent" => {
                 cdp_event_matches_navigation_frame(&event.params, navigation)
@@ -2013,6 +2020,24 @@ impl CdpNavigationWait {
 #[derive(Debug, Clone, PartialEq)]
 struct CdpEvaluateResponse {
     result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+struct CdpLocationReadiness {
+    href: String,
+    ready_state: String,
+    #[serde(default)]
+    navigation_entry_name: Option<String>,
+    #[serde(default)]
+    time_origin: Option<f64>,
+    matched: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+struct CdpDocumentSnapshot {
+    href: String,
+    #[serde(default)]
+    time_origin: Option<f64>,
 }
 
 impl CdpEvaluateResponse {
@@ -2397,6 +2422,164 @@ fn cdp_remote_value_to_result_string(value: &serde_json::Value) -> BrowserResult
         serde_json::Value::Null => Ok("null".to_string()),
         other => Ok(serde_json::to_string(other)?),
     }
+}
+
+fn cdp_wait_for_location_expression(
+    expected_url: &str,
+    wait_until: Option<&str>,
+    require_new_document: bool,
+    previous_time_origin: Option<f64>,
+) -> BrowserResult<String> {
+    let expected_url = serde_json::to_string(expected_url)?;
+    let required_ready_state =
+        serde_json::to_string(cdp_required_ready_state_for_navigation(wait_until)?)?;
+    let previous_time_origin = serde_json::to_string(&previous_time_origin)?;
+    Ok(format!(
+        r#"(function() {{
+  const expectedUrl = {expected_url};
+  const requiredReadyState = {required_ready_state};
+  const requireNewDocument = {require_new_document};
+  const previousTimeOrigin = {previous_time_origin};
+  const isDocumentReady = () => {{
+    if (requiredReadyState === "interactive") {{
+      return document.readyState === "interactive" || document.readyState === "complete";
+    }}
+    return document.readyState === "complete";
+  }};
+  const navigationEntryName = () => {{
+    const entries = performance.getEntriesByType("navigation");
+    if (!entries || entries.length === 0) {{
+      return null;
+    }}
+    const entry = entries[entries.length - 1];
+    return typeof entry.name === "string" ? entry.name : null;
+  }};
+  const timeOriginChanged = () => typeof previousTimeOrigin !== "number" || performance.timeOrigin !== previousTimeOrigin;
+  const isExpectedDocument = () => !requireNewDocument || (
+    navigationEntryName() === expectedUrl && timeOriginChanged()
+  );
+  const snapshot = (matched) => ({{
+    href: window.location.href,
+    ready_state: document.readyState,
+    navigation_entry_name: navigationEntryName(),
+    time_origin: Number.isFinite(performance.timeOrigin) ? performance.timeOrigin : null,
+    matched,
+  }});
+  const matched = window.location.href === expectedUrl && isExpectedDocument() && isDocumentReady();
+  return snapshot(matched);
+}})()"#
+    ))
+}
+
+fn cdp_required_ready_state_for_navigation(
+    wait_until: Option<&str>,
+) -> BrowserResult<&'static str> {
+    match CdpNavigationWait::from_wait_until(wait_until)? {
+        CdpNavigationWait::DomContentLoaded => Ok("interactive"),
+        CdpNavigationWait::Load | CdpNavigationWait::NetworkIdle => Ok("complete"),
+    }
+}
+
+fn redact_browser_url(raw_url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(raw_url) else {
+        return "[redacted-url]".to_string();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
+fn cdp_parse_location_readiness_snapshot(
+    response: &CdpEvaluateResponse,
+) -> BrowserResult<CdpLocationReadiness> {
+    serde_json::from_str::<CdpLocationReadiness>(&response.result).map_err(|err| {
+        BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol Runtime.evaluate returned invalid navigation readiness payload: {err}"
+            ),
+            status_code: None,
+        }
+    })
+}
+
+fn cdp_parse_document_snapshot(
+    response: &CdpEvaluateResponse,
+) -> BrowserResult<CdpDocumentSnapshot> {
+    serde_json::from_str::<CdpDocumentSnapshot>(&response.result).map_err(|err| {
+        BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol Runtime.evaluate returned invalid document snapshot payload: {err}"
+            ),
+            status_code: None,
+        }
+    })
+}
+
+fn cdp_navigation_readiness_timeout_error(
+    expected_url: &str,
+    readiness: Option<&CdpLocationReadiness>,
+) -> BrowserError {
+    let (observed_url, ready_state, navigation_entry_name, time_origin) = readiness.map_or_else(
+        || {
+            (
+                "[unobserved]".to_string(),
+                "unknown".to_string(),
+                "missing".to_string(),
+                "missing".to_string(),
+            )
+        },
+        |readiness| {
+            (
+                redact_browser_url(&readiness.href),
+                readiness.ready_state.clone(),
+                readiness
+                    .navigation_entry_name
+                    .as_deref()
+                    .map_or_else(|| "missing".to_string(), redact_browser_url),
+                readiness
+                    .time_origin
+                    .map_or_else(|| "missing".to_string(), |value| value.to_string()),
+            )
+        },
+    );
+    BrowserError::Api {
+        message: format!(
+            "Chrome DevTools Protocol navigation did not reach expected active document before timeout: expected {}, observed {} with readyState {}, navigation entry {}, and timeOrigin {}",
+            redact_browser_url(expected_url),
+            observed_url,
+            ready_state,
+            navigation_entry_name,
+            time_origin
+        ),
+        status_code: Some(408),
+    }
+}
+
+fn cdp_location_readiness_error_is_retryable(error: &BrowserError) -> bool {
+    let BrowserError::Api { message, .. } = error else {
+        return false;
+    };
+    message.contains("Execution context was destroyed")
+        || message.contains("Cannot find context with specified id")
+        || message.contains("Inspected target navigated or closed")
+}
+
+fn cdp_requires_new_document_for_navigation(previous_url: Option<&str>, next_url: &str) -> bool {
+    previous_url.is_none_or(|previous_url| {
+        let (Ok(mut previous), Ok(mut next)) = (
+            reqwest::Url::parse(previous_url),
+            reqwest::Url::parse(next_url),
+        ) else {
+            return true;
+        };
+        let previous_fragment = previous.fragment().map(str::to_string);
+        let next_fragment = next.fragment().map(str::to_string);
+        previous.set_fragment(None);
+        next.set_fragment(None);
+        previous != next || previous_fragment == next_fragment
+    })
 }
 
 fn cdp_extract_text_expression(
@@ -2982,24 +3165,41 @@ fn cdp_event_matches_navigation_frame(
     params: &serde_json::Value,
     navigation: &CdpNavigateResponse,
 ) -> bool {
-    if let Some(frame_id) = params.get("frameId").and_then(serde_json::Value::as_str)
-        && frame_id != navigation.frame_id
-    {
+    let Some(frame_id) = params.get("frameId").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if frame_id != navigation.frame_id {
         return false;
     }
-    if let Some(expected_loader_id) = navigation.loader_id.as_deref()
-        && let Some(loader_id) = params.get("loaderId").and_then(serde_json::Value::as_str)
-        && loader_id != expected_loader_id
-    {
-        return false;
+
+    if let Some(expected_loader_id) = navigation.loader_id.as_deref() {
+        let Some(loader_id) = params.get("loaderId").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        if loader_id != expected_loader_id {
+            return false;
+        }
     }
+
     true
 }
 
-fn cdp_navigation_response_status(
+fn cdp_event_matches_navigation_for_wait(
     event: &CdpEvent,
     navigation: &CdpNavigateResponse,
-) -> BrowserResult<Option<u16>> {
+) -> bool {
+    if event.params.get("frameId").is_some() {
+        return cdp_event_matches_navigation_frame(&event.params, navigation);
+    }
+
+    false
+}
+
+fn cdp_navigation_response_event(
+    event: &CdpEvent,
+    navigation: &CdpNavigateResponse,
+    expected_url: &str,
+) -> BrowserResult<Option<CdpNavigationResponseEvent>> {
     if event.method != "Network.responseReceived" {
         return Ok(None);
     }
@@ -3008,6 +3208,18 @@ fn cdp_navigation_response_status(
     }
     if event.params.get("type").and_then(serde_json::Value::as_str) != Some("Document") {
         return Ok(None);
+    }
+    if navigation.loader_id.is_none() {
+        let Some(response_url) = event
+            .params
+            .pointer("/response/url")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Ok(None);
+        };
+        if response_url != expected_url {
+            return Ok(None);
+        }
     }
 
     let Some(status) = event
@@ -3027,8 +3239,14 @@ fn cdp_navigation_response_status(
         ),
         status_code: None,
     })?;
+    let loader_id = event
+        .params
+        .get("loaderId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
-    Ok(Some(status))
+    Ok(Some(CdpNavigationResponseEvent { status, loader_id }))
 }
 
 #[async_trait::async_trait]
@@ -3153,6 +3371,7 @@ async fn connect_direct_cdp_session(
 struct CdpSession<T> {
     transport: T,
     next_command_id: u64,
+    pending_events: VecDeque<CdpEvent>,
 }
 
 impl<T> CdpSession<T>
@@ -3163,6 +3382,7 @@ where
         Self {
             transport,
             next_command_id: 1,
+            pending_events: VecDeque::new(),
         }
     }
 
@@ -3184,7 +3404,57 @@ where
         params: Option<serde_json::Value>,
     ) -> BrowserResult<serde_json::Value> {
         let command = self.next_command(method, params)?;
-        execute_cdp_command(cx, &mut self.transport, command).await
+        let expected_command_id = command.id;
+        cx.checkpoint().map_err(|err| BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol command {expected_command_id} cancelled before send: {err}"
+            ),
+            status_code: None,
+        })?;
+        self.transport
+            .send_cdp_message(cx, command.to_websocket_message()?)
+            .await?;
+
+        loop {
+            cx.checkpoint().map_err(|err| BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol command {expected_command_id} cancelled before response: {err}"
+                ),
+                status_code: None,
+            })?;
+
+            let Some(message) = self.transport.recv_cdp_message(cx).await? else {
+                return Err(BrowserError::Api {
+                    message: format!(
+                        "Chrome DevTools Protocol connection closed before command {expected_command_id} response"
+                    ),
+                    status_code: None,
+                });
+            };
+
+            if let Some(result) = decode_cdp_response_message(message.clone(), expected_command_id)?
+            {
+                return Ok(result);
+            }
+            if let Some(event) = decode_cdp_event_message(message)? {
+                self.pending_events.push_back(event);
+            }
+        }
+    }
+
+    async fn next_event(&mut self, cx: &Cx) -> BrowserResult<Option<CdpEvent>> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(Some(event));
+        }
+
+        loop {
+            let Some(message) = self.transport.recv_cdp_message(cx).await? else {
+                return Ok(None);
+            };
+            if let Some(event) = decode_cdp_event_message(message)? {
+                return Ok(Some(event));
+            }
+        }
     }
 
     async fn navigate_page(
@@ -3222,9 +3492,12 @@ where
         cx: &Cx,
         navigation: &CdpNavigateResponse,
         wait_until: Option<&str>,
+        require_new_document: bool,
+        expected_url: &str,
     ) -> BrowserResult<CdpNavigationCompletion> {
         let wait = CdpNavigationWait::from_wait_until(wait_until)?;
         let mut status = None;
+        let mut effective_navigation = navigation.clone();
 
         loop {
             cx.checkpoint().map_err(|err| BrowserError::Api {
@@ -3235,7 +3508,7 @@ where
                 status_code: None,
             })?;
 
-            let Some(message) = self.transport.recv_cdp_message(cx).await? else {
+            let Some(event) = self.next_event(cx).await? else {
                 return Err(BrowserError::Api {
                     message: format!(
                         "Chrome DevTools Protocol connection closed before navigation completed for frame {}",
@@ -3244,17 +3517,91 @@ where
                     status_code: None,
                 });
             };
-
-            let Some(event) = decode_cdp_event_message(message)? else {
-                continue;
-            };
-            if let Some(response_status) = cdp_navigation_response_status(&event, navigation)? {
-                status = Some(response_status);
+            if let Some(response) =
+                cdp_navigation_response_event(&event, &effective_navigation, expected_url)?
+            {
+                status = Some(response.status);
+                if effective_navigation.loader_id.is_none() {
+                    effective_navigation.loader_id = response.loader_id;
+                }
             }
-            if wait.matches_event(&event, navigation) {
-                return Ok(CdpNavigationCompletion { status });
+            if wait.matches_event(&event, &effective_navigation)
+                && (!require_new_document || effective_navigation.loader_id.is_some())
+            {
+                return Ok(CdpNavigationCompletion {
+                    status,
+                    loader_id: effective_navigation.loader_id,
+                });
             }
         }
+    }
+
+    async fn wait_for_location(
+        &mut self,
+        cx: &Cx,
+        expected_url: &str,
+        wait_until: Option<&str>,
+        timeout_ms: Option<u64>,
+        require_new_document: bool,
+        previous_time_origin: Option<f64>,
+    ) -> BrowserResult<String> {
+        let expression = cdp_wait_for_location_expression(
+            expected_url,
+            wait_until,
+            require_new_document,
+            previous_time_origin,
+        )?;
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
+        let deadline = Instant::now() + timeout;
+        let mut last_readiness = None;
+
+        loop {
+            cx.checkpoint().map_err(|err| BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol navigation readiness wait cancelled for {}: {err}",
+                    redact_browser_url(expected_url)
+                ),
+                status_code: None,
+            })?;
+
+            match self.evaluate_expression(cx, &expression).await {
+                Ok(response) => {
+                    let readiness = cdp_parse_location_readiness_snapshot(&response)?;
+                    if readiness.matched {
+                        return Ok(readiness.href);
+                    }
+                    last_readiness = Some(readiness);
+                }
+                Err(error)
+                    if Instant::now() < deadline
+                        && cdp_location_readiness_error_is_retryable(&error) => {}
+                Err(error) => return Err(error),
+            }
+
+            if Instant::now() >= deadline {
+                return Err(cdp_navigation_readiness_timeout_error(
+                    expected_url,
+                    last_readiness.as_ref(),
+                ));
+            }
+
+            fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn current_document_snapshot(&mut self, cx: &Cx) -> BrowserResult<CdpDocumentSnapshot> {
+        let response = self
+            .evaluate_expression(
+                cx,
+                r"(function() {
+  return {
+    href: window.location.href,
+    time_origin: Number.isFinite(performance.timeOrigin) ? performance.timeOrigin : null,
+  };
+})()",
+            )
+            .await?;
+        cdp_parse_document_snapshot(&response)
     }
 
     async fn evaluate_expression(
@@ -4301,18 +4648,41 @@ impl BrowserClient {
             CONTROL_RESPONSE_BYTES_STANDARD,
             |cx, session| {
                 Box::pin(async move {
+                    let previous_document = session.current_document_snapshot(cx).await.ok();
+                    let require_new_document = cdp_requires_new_document_for_navigation(
+                        previous_document
+                            .as_ref()
+                            .map(|document| document.href.as_str()),
+                        &url,
+                    );
                     let navigation = session
                         .navigate_page(cx, &url, user_agent.as_deref())
                         .await?;
                     let completion = session
-                        .wait_for_navigation(cx, &navigation, wait_until.as_deref())
+                        .wait_for_navigation(
+                            cx,
+                            &navigation,
+                            wait_until.as_deref(),
+                            require_new_document,
+                            &url,
+                        )
+                        .await?;
+                    let current_url = session
+                        .wait_for_location(
+                            cx,
+                            &url,
+                            wait_until.as_deref(),
+                            timeout_ms,
+                            require_new_document,
+                            previous_document.and_then(|document| document.time_origin),
+                        )
                         .await?;
                     let title = session
                         .evaluate_expression(cx, "document.title")
                         .await?
                         .result;
                     Ok(NavigateResult {
-                        url,
+                        url: current_url,
                         status: completion.status.unwrap_or(0),
                         title: (!title.is_empty()).then_some(title),
                     })
@@ -7349,6 +7719,270 @@ while :; do sleep 1; done
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_wait_for_navigation_ignores_global_load_for_loader_bound_navigation()
+    {
+        let cx = fcp_async_core::compatibility_cx();
+        let navigation = CdpNavigateResponse {
+            frame_id: "frame-1".to_string(),
+            loader_id: Some("loader-1".to_string()),
+        };
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
+                r#"{"method":"Page.loadEventFired","params":{"timestamp":1}}"#.into(),
+            ),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "method": "Network.requestWillBeSent",
+                    "params": {
+                        "frameId": "frame-1",
+                        "loaderId": "loader-1",
+                        "type": "Document",
+                        "request": { "url": "https://example.com" }
+                    }
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "method": "Page.lifecycleEvent",
+                    "params": {
+                        "frameId": "frame-1",
+                        "loaderId": "loader-1",
+                        "name": "load"
+                    }
+                })
+                .to_string(),
+            ),
+        ]));
+
+        let completion = session
+            .wait_for_navigation(&cx, &navigation, Some("load"), true, "https://example.com")
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(
+            completion,
+            CdpNavigationCompletion {
+                status: None,
+                loader_id: Some("loader-1".to_string())
+            }
+        );
+        assert!(transport.sent.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_wait_for_navigation_ignores_global_load_without_loader_id() {
+        let cx = fcp_async_core::compatibility_cx();
+        let navigation = CdpNavigateResponse {
+            frame_id: "frame-1".to_string(),
+            loader_id: None,
+        };
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
+                r#"{"method":"Page.loadEventFired","params":{"timestamp":1}}"#.into(),
+            ),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "method": "Network.responseReceived",
+                    "params": {
+                        "frameId": "frame-1",
+                        "loaderId": "stale-loader",
+                        "type": "Document",
+                        "response": {
+                            "status": 200,
+                            "url": "https://stale.example/"
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "method": "Page.lifecycleEvent",
+                    "params": {
+                        "frameId": "frame-1",
+                        "loaderId": "stale-loader",
+                        "name": "load"
+                    }
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "method": "Network.responseReceived",
+                    "params": {
+                        "frameId": "frame-1",
+                        "loaderId": "loader-2",
+                        "type": "Document",
+                        "response": {
+                            "status": 202,
+                            "url": "https://example.com"
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "method": "Page.lifecycleEvent",
+                    "params": {
+                        "frameId": "frame-1",
+                        "loaderId": "loader-2",
+                        "name": "load"
+                    }
+                })
+                .to_string(),
+            ),
+        ]));
+
+        let completion = session
+            .wait_for_navigation(&cx, &navigation, Some("load"), true, "https://example.com")
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(
+            completion,
+            CdpNavigationCompletion {
+                status: Some(202),
+                loader_id: Some("loader-2".to_string())
+            }
+        );
+        assert!(transport.sent.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_wait_for_location_accepts_ready_expected_url() {
+        let cx = fcp_async_core::compatibility_cx();
+        let expected_url = "http://127.0.0.1:9999/readable-fixture";
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": {
+                                "href": expected_url,
+                                "ready_state": "complete",
+                                "matched": true
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+        ]));
+
+        let href = session
+            .wait_for_location(&cx, expected_url, Some("load"), Some(1_000), false, None)
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(href, expected_url);
+        assert_eq!(transport.sent.len(), 1);
+        assert!(matches!(
+            &transport.sent[0],
+            WebSocketMessage::Text(text) if text.contains("\"method\":\"Runtime.evaluate\"")
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_wait_for_location_rejects_stale_url() {
+        let cx = fcp_async_core::compatibility_cx();
+        let expected_url = "http://127.0.0.1:9999/readable-fixture";
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": {
+                                "href": "http://127.0.0.1:9999/",
+                                "ready_state": "complete",
+                                "matched": false
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+        ]));
+
+        let error = session
+            .wait_for_location(&cx, expected_url, Some("load"), Some(0), false, None)
+            .await
+            .unwrap_err();
+        let message = format!("{error}");
+
+        assert!(message.contains("did not reach expected active document"));
+        assert!(message.contains("readable-fixture"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_wait_for_location_rejects_stale_document_for_loader_navigation() {
+        let cx = fcp_async_core::compatibility_cx();
+        let expected_url = "http://127.0.0.1:9999/readable-fixture";
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": {
+                                "href": expected_url,
+                                "ready_state": "complete",
+                                "navigation_entry_name": expected_url,
+                                "time_origin": 42.0,
+                                "matched": false
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+        ]));
+
+        let error = session
+            .wait_for_location(&cx, expected_url, Some("load"), Some(0), true, Some(42.0))
+            .await
+            .unwrap_err();
+        let message = format!("{error}");
+
+        assert!(message.contains("did not reach expected active document"));
+        assert!(message.contains("readable-fixture"));
+        assert!(message.contains("navigation entry"));
+    }
+
+    #[test]
+    fn test_cdp_requires_new_document_for_path_and_query_changes() {
+        assert!(cdp_requires_new_document_for_navigation(
+            Some("http://127.0.0.1:9999/"),
+            "http://127.0.0.1:9999/readable-fixture"
+        ));
+        assert!(cdp_requires_new_document_for_navigation(
+            Some("http://127.0.0.1:9999/?page=1"),
+            "http://127.0.0.1:9999/?page=2"
+        ));
+        assert!(cdp_requires_new_document_for_navigation(
+            Some("http://127.0.0.1:9999/readable-fixture"),
+            "http://127.0.0.1:9999/readable-fixture"
+        ));
+    }
+
+    #[test]
+    fn test_cdp_requires_new_document_allows_fragment_only_navigation() {
+        assert!(!cdp_requires_new_document_for_navigation(
+            Some("http://127.0.0.1:9999/page#top"),
+            "http://127.0.0.1:9999/page#details"
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_cdp_session_wait_for_navigation_captures_document_status() {
         let cx = fcp_async_core::compatibility_cx();
         let navigation = CdpNavigateResponse {
@@ -7363,7 +7997,10 @@ while :; do sleep 1; done
                         "frameId": "frame-1",
                         "loaderId": "loader-1",
                         "type": "Document",
-                        "response": { "status": 201 }
+                        "response": {
+                            "status": 201,
+                            "url": "https://example.com"
+                        }
                     }
                 })
                 .to_string(),
@@ -7382,12 +8019,24 @@ while :; do sleep 1; done
         ]));
 
         let completion = session
-            .wait_for_navigation(&cx, &navigation, Some("networkidle"))
+            .wait_for_navigation(
+                &cx,
+                &navigation,
+                Some("networkidle"),
+                true,
+                "https://example.com",
+            )
             .await
             .unwrap();
         let transport = session.into_transport();
 
-        assert_eq!(completion, CdpNavigationCompletion { status: Some(201) });
+        assert_eq!(
+            completion,
+            CdpNavigationCompletion {
+                status: Some(201),
+                loader_id: Some("loader-1".to_string())
+            }
+        );
         assert!(transport.sent.is_empty());
     }
 
@@ -8382,6 +9031,7 @@ while :; do sleep 1; done
         let mut session = CdpSession {
             transport: ScriptedCdpTransport::default(),
             next_command_id: u64::MAX,
+            pending_events: VecDeque::new(),
         };
 
         let err = session.next_command("Page.enable", None).unwrap_err();

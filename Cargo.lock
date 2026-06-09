@@ -833,7 +833,7 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "br-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -2407,7 +2407,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fcp-adversarial"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2424,7 +2424,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-airtable"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-algolia"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-amplitude"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2497,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-annas-archive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-anthropic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2548,7 +2548,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-anthropic-vertex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2579,7 +2579,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-apple-notes"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-apple-reminders"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-arxiv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-asana"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-async-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "fcp-async-core-macros",
@@ -2687,7 +2687,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-async-core-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2696,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-audit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-auth-schema"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ciborium",
@@ -2724,7 +2724,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-aws"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-aws-bedrock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-azure"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2810,7 +2810,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-azure-speech"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2840,7 +2840,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -2850,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-bigquery"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-bitbucket"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-bitwarden"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2916,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-bluebubbles"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-bootstrap"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2983,7 +2983,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-box"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-brave-search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3024,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-browser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-calendly"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3083,7 +3083,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-cbor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "ciborium",
@@ -3098,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-cerebras"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-chaos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -3136,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-circleci"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3164,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-clickup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-cloudflare"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-coda"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3237,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-comfyui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-confluence"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3291,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-conformance"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -3351,7 +3351,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3385,7 +3385,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-cron"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3405,7 +3405,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -3453,7 +3453,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-crypto-hw"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -3465,7 +3465,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-crypto-pq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "criterion",
@@ -3483,7 +3483,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-datadog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3508,7 +3508,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-deepgram"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -3536,7 +3536,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-deepseek"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3564,7 +3564,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-dingtalk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3594,7 +3594,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-discord"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -3625,7 +3625,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-dockerhub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3652,7 +3652,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-docusign"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3676,7 +3676,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-dropbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3695,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-duckdb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3715,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-duckduckgo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3739,7 +3739,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-e2e"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -3888,7 +3888,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-elasticsearch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3913,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-elevenlabs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -3941,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-email-generic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3969,7 +3969,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-evernote"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3988,7 +3988,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-evidence"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "ciborium",
@@ -4005,7 +4005,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-exa"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "fcp-async-core",
@@ -4026,7 +4026,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-fal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4048,7 +4048,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-feishu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4074,7 +4074,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-figma"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4103,7 +4103,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-firebase"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "fcp-async-core",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-firecrawl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4148,7 +4148,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-fireworks"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-gcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4207,7 +4207,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-github"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4239,7 +4239,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-gitlab"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4265,7 +4265,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-glm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4294,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-gmail"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4327,7 +4327,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-admin-reports"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4355,7 +4355,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-ai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-calendar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4421,7 +4421,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-chat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4450,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-discovery"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -4468,7 +4468,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-docs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4496,7 +4496,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-drive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4524,7 +4524,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-meet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4549,7 +4549,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-people"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4576,7 +4576,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-places"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4604,7 +4604,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-sheets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4633,7 +4633,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-google-workspace-events"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4662,7 +4662,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-grafana"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4687,7 +4687,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-graphql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "chrono",
@@ -4711,7 +4711,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-groq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4739,7 +4739,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-hackernews"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4767,7 +4767,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-homeassistant"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -4792,7 +4792,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -4852,7 +4852,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-hubspot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4879,7 +4879,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-hue"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4908,7 +4908,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-huggingface"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4929,7 +4929,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-imessage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4961,7 +4961,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-intercom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4982,7 +4982,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-inworld"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -5012,7 +5012,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-irc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5038,7 +5038,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-jira"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5067,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -5079,7 +5079,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-kubernetes"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5099,7 +5099,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-line"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5124,7 +5124,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-linear"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5153,7 +5153,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-linkedin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5173,7 +5173,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-llm-router"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5201,7 +5201,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-lm-studio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5228,7 +5228,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-logseq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5248,7 +5248,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mailchimp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5269,7 +5269,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-make"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5288,7 +5288,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-manifest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -5313,7 +5313,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mastodon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5340,7 +5340,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-matrix"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5369,7 +5369,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mattermost"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5400,7 +5400,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mcp-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5421,7 +5421,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mesh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -5460,7 +5460,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-metabase"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5480,7 +5480,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-microsoft-foundry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5509,7 +5509,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-microsoft365"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5543,7 +5543,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-migrate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "serde",
@@ -5554,7 +5554,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mistral"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -5581,7 +5581,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mixpanel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5602,7 +5602,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-monday"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5627,7 +5627,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mongodb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5648,7 +5648,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-moonshot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5676,7 +5676,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-mysql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5697,7 +5697,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-n8n"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5716,7 +5716,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-netlify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5744,7 +5744,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-nextcloud-talk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5772,7 +5772,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-nostr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -5809,7 +5809,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-notion"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5839,7 +5839,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-nvidia-nim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5867,7 +5867,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-oauth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5894,7 +5894,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-obsidian"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5919,7 +5919,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-ollama"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5946,7 +5946,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-onepassword"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5966,7 +5966,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-openai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -6000,7 +6000,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-openai-compat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -6018,7 +6018,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-openrouter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6043,7 +6043,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-outlook"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6072,7 +6072,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-package-registry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6099,7 +6099,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-pandadoc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6118,7 +6118,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-paypal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6143,7 +6143,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-perplexity-search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6171,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-pinecone"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6200,7 +6200,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-plaid"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6229,7 +6229,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-plivo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6256,7 +6256,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "fcp-async-core",
@@ -6278,7 +6278,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-postgresql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6303,7 +6303,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-posthog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6325,7 +6325,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-prelude"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6336,7 +6336,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags 2.11.1",
  "blake3",
@@ -6365,7 +6365,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-provider-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6383,7 +6383,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-pulumi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6405,7 +6405,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-qdrant"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6436,7 +6436,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-qq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6466,7 +6466,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-qwen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6494,7 +6494,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-raptorq"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -6517,7 +6517,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-ratelimit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6537,7 +6537,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-reddit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6563,7 +6563,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-redis"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6583,7 +6583,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-registry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -6620,7 +6620,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-retool"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6639,7 +6639,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-roam"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6662,7 +6662,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-runway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6683,7 +6683,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-s3"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6716,7 +6716,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-salesforce"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6740,7 +6740,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6769,7 +6769,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "async-trait",
@@ -6804,7 +6804,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-searxng"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -6826,7 +6826,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-segment"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6846,7 +6846,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-semanticscholar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6866,7 +6866,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-sendgrid"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6886,7 +6886,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-sentry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6913,7 +6913,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-shopify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6939,7 +6939,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-signal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6971,7 +6971,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-slack"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "asupersync",
@@ -7003,7 +7003,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-snowflake"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7024,7 +7024,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-sonos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7054,7 +7054,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-spotify"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7073,7 +7073,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-sqlite"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7096,7 +7096,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-square"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7122,7 +7122,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -7156,7 +7156,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-streaming"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7178,7 +7178,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-stripe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7210,7 +7210,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-supabase"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7237,7 +7237,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-synology-chat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7266,7 +7266,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-tailscale"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "base64 0.22.1",
@@ -7287,7 +7287,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-tavily"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "fcp-async-core",
@@ -7309,7 +7309,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-teams"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7337,7 +7337,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-telegram"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7369,7 +7369,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-telemetry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "asupersync",
  "chrono",
@@ -7402,7 +7402,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-telnyx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7432,7 +7432,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-terraform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7453,7 +7453,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-testkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7492,7 +7492,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-tlon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7519,7 +7519,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-todoist"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7538,7 +7538,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-together"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -7568,7 +7568,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-trello"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7587,7 +7587,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-twilio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7620,7 +7620,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-twitch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7647,7 +7647,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-twitter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7681,7 +7681,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-vectordb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7709,7 +7709,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-vercel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7734,7 +7734,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-voice-call"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -7756,7 +7756,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-voyage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7783,7 +7783,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-webhook"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7811,7 +7811,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-webhook-receiver"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7838,7 +7838,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-wecom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -7872,7 +7872,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-whatsapp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7902,7 +7902,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-whisper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7926,7 +7926,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-wolfram"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7956,7 +7956,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-xai"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7983,7 +7983,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-youtube"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8013,7 +8013,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-zalo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "fcp-async-core",
@@ -8035,7 +8035,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-zalouser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "fcp-async-core",
@@ -8054,7 +8054,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-zapier"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8073,7 +8073,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-zendesk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8103,7 +8103,7 @@ dependencies = [
 
 [[package]]
 name = "fcp-zoom"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8476,7 +8476,7 @@ dependencies = [
 
 [[package]]
 name = "fwc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

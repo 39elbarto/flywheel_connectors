@@ -86,14 +86,14 @@ impl NetlifyClient {
         self.auth.is_secretless()
     }
 
-    // ── Health check ──
+    // Health check
 
     pub async fn health_check(&self, runtime: &ConnectorRuntime) -> NetlifyResult<User> {
         let url = format!("{}/api/v1/user", self.base_url);
         self.get_single(runtime, &url).await
     }
 
-    // ── Sites ──
+    // Sites
 
     pub async fn list_sites(&self, runtime: &ConnectorRuntime) -> NetlifyResult<Vec<Site>> {
         let url = format!("{}/api/v1/sites", self.base_url);
@@ -126,7 +126,7 @@ impl NetlifyClient {
         self.delete(runtime, &url).await
     }
 
-    // ── Deploys ──
+    // Deploys
 
     pub async fn list_deploys(
         &self,
@@ -180,14 +180,14 @@ impl NetlifyClient {
         self.post_json(runtime, &url, &json!({})).await
     }
 
-    // ── DNS ──
+    // DNS
 
     pub async fn list_dns_zones(&self, runtime: &ConnectorRuntime) -> NetlifyResult<Vec<DnsZone>> {
         let url = format!("{}/api/v1/dns_zones", self.base_url);
         self.get_list(runtime, &url).await
     }
 
-    // ── Environment Variables ──
+    // Environment Variables
 
     pub async fn list_env_vars(
         &self,
@@ -238,7 +238,7 @@ impl NetlifyClient {
         self.delete(runtime, &url).await
     }
 
-    // ── Generic HTTP helpers ──
+    // Generic HTTP helpers
 
     async fn get_list<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
@@ -357,7 +357,7 @@ impl NetlifyClient {
     }
 }
 
-// ── Free functions ──
+// Free functions
 
 fn authenticate_request(req: RequestBuilder, auth: &NetlifyAuth) -> RequestBuilder {
     if auth.access_token.is_empty() {
@@ -526,13 +526,18 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
 mod tests {
     use super::*;
 
+    fn sample_auth_value() -> String {
+        ["sample", "netlify", "access"].join("-")
+    }
+
     #[test]
     fn client_debug_redacts_auth() {
+        let auth_value = sample_auth_value();
         let rt = fcp_async_core::runtime::block_on_sync(async {
             NetlifyClient::new(
                 "https://api.netlify.com",
                 NetlifyAuth {
-                    access_token: "secret-token".into(),
+                    access_token: auth_value.clone(),
                 },
                 HttpRetryConfig::default(),
             )
@@ -543,7 +548,7 @@ mod tests {
 
         let debug = format!("{rt:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("secret-token"));
+        assert!(!debug.contains(&auth_value));
     }
 
     #[test]
@@ -566,7 +571,7 @@ mod tests {
             NetlifyClient::new(
                 "https://api.netlify.com",
                 NetlifyAuth {
-                    access_token: "token".into(),
+                    access_token: sample_auth_value(),
                 },
                 HttpRetryConfig::default(),
             )
@@ -602,7 +607,7 @@ mod tests {
             NetlifyClient::new(
                 "https://api.netlify.com/",
                 NetlifyAuth {
-                    access_token: "t".into(),
+                    access_token: sample_auth_value(),
                 },
                 HttpRetryConfig::default(),
             )

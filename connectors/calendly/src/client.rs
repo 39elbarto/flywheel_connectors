@@ -174,16 +174,22 @@ impl CalendlyClient {
         page_token: Option<&str>,
     ) -> CalendlyResult<InviteeListResponse> {
         let uuid = sanitize_path_segment(event_uuid)?;
-        let mut url = format!("{}/scheduled_events/{}/invitees", self.base_url, uuid);
-        if let Some(c) = count {
-            url.push_str(&format!("?count={c}"));
-            if let Some(pt) = page_token {
-                url.push_str(&format!("&page_token={pt}"));
+        let base = format!("{}/scheduled_events/{}/invitees", self.base_url, uuid);
+        let mut url = Url::parse(&base).map_err(|e| CalendlyError::Api {
+            status: 0,
+            message: format!("invalid base URL: {e}"),
+            title: None,
+        })?;
+        if count.is_some() || page_token.is_some() {
+            let mut q = url.query_pairs_mut();
+            if let Some(c) = count {
+                q.append_pair("count", &c.to_string());
             }
-        } else if let Some(pt) = page_token {
-            url.push_str(&format!("?page_token={pt}"));
+            if let Some(pt) = page_token {
+                q.append_pair("page_token", pt);
+            }
         }
-        self.get_json(runtime, &url).await
+        self.get_json(runtime, url.as_str()).await
     }
 
     /// Create a scheduling link.

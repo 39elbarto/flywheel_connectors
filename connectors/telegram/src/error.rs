@@ -163,7 +163,18 @@ impl TelegramError {
 }
 
 fn redacted_http_error(error: &reqwest::Error) -> String {
-    redact_telegram_bot_token_segments(&error.to_string())
+    // reqwest's `Display` omits the source chain, which hides the actual
+    // failure class (connection refused vs reset vs resource exhaustion).
+    // Walk the chain and append each cause; the token redaction below
+    // covers the joined text.
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    redact_telegram_bot_token_segments(&message)
 }
 
 fn redact_telegram_bot_token_segments(message: &str) -> String {

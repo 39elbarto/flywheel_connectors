@@ -1,6 +1,7 @@
 //! FCP `HubSpot` Connector implementation.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
@@ -1116,8 +1117,13 @@ fn is_local_test_host(host: &str) -> bool {
 
 /// Build the operations info for introspection.
 fn operations_info() -> serde_json::Value {
-    serde_json::to_value(typed_operations_info())
-        .expect("manifest-derived HubSpot operations should serialize")
+    static OPERATIONS: OnceLock<serde_json::Value> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            serde_json::to_value(typed_operations_info())
+                .expect("manifest-derived HubSpot operations should serialize")
+        })
+        .clone()
 }
 
 fn typed_operations_info() -> Vec<OperationInfo> {

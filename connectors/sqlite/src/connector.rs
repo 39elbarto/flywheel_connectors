@@ -4,6 +4,7 @@
 
 use std::path::{Component, Path};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
@@ -956,7 +957,8 @@ fn validate_database_path(database_path: &str) -> Result<(), String> {
 }
 
 fn operations_info() -> Vec<OperationInfo> {
-    typed_operations_info()
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS.get_or_init(typed_operations_info).clone()
 }
 
 fn typed_operations_info() -> Vec<OperationInfo> {

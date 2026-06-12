@@ -1,5 +1,6 @@
 //! `Apple Reminders` connector implementation.
 
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -105,7 +106,8 @@ impl AppleRemindersConnector {
 
     #[must_use]
     pub fn operations_info() -> Vec<OperationInfo> {
-        typed_operations_info()
+        static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+        OPERATIONS.get_or_init(typed_operations_info).clone()
     }
 
     fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {

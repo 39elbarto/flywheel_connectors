@@ -1032,10 +1032,7 @@ impl TwilioClient {
         self.execute(|| {
             self.http
                 .post(url)
-                .header(
-                    header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(encoded.clone())
         })
         .await

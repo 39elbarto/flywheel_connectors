@@ -457,7 +457,11 @@ async fn list_transitions_happy_path() {
     let mut connector = JiraConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["jira.list_transitions"]).await;
-    let token = generate_valid_token(&signing_key, "jira.list_transitions", connector.instance_id());
+    let token = generate_valid_token(
+        &signing_key,
+        "jira.list_transitions",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -489,7 +493,11 @@ async fn transition_issue_happy_path() {
     let mut connector = JiraConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["jira.transition_issue"]).await;
-    let token = generate_valid_token(&signing_key, "jira.transition_issue", connector.instance_id());
+    let token = generate_valid_token(
+        &signing_key,
+        "jira.transition_issue",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1048,7 +1056,8 @@ async fn capability_wrong_operation_fails() {
         setup_handshake(&mut connector, &["jira.get_issue", "jira.create_issue"]).await;
 
     // Token signed for create_issue, used on get_issue
-    let wrong_token = generate_valid_token(&signing_key, "jira.create_issue", connector.instance_id());
+    let wrong_token =
+        generate_valid_token(&signing_key, "jira.create_issue", connector.instance_id());
 
     let err = connector
         .handle_invoke(json!({
@@ -1130,7 +1139,8 @@ async fn simulate_wrong_capability_is_denied() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["jira.get_issue", "jira.create_issue"]).await;
-    let wrong_token = generate_valid_token(&signing_key, "jira.create_issue", connector.instance_id());
+    let wrong_token =
+        generate_valid_token(&signing_key, "jira.create_issue", connector.instance_id());
 
     let result = connector
         .handle_simulate(simulate_request(
@@ -1420,7 +1430,11 @@ async fn validation_transition_issue_missing_id() {
     let mut connector = JiraConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["jira.transition_issue"]).await;
-    let token = generate_valid_token(&signing_key, "jira.transition_issue", connector.instance_id());
+    let token = generate_valid_token(
+        &signing_key,
+        "jira.transition_issue",
+        connector.instance_id(),
+    );
 
     let err = connector
         .handle_invoke(json!({
@@ -1478,7 +1492,11 @@ async fn sync_operations_require_zone_dir() {
     let mut connector = JiraConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["jira.sync.pull_issue"]).await;
-    let token = generate_valid_token(&signing_key, "jira.sync.pull_issue", connector.instance_id());
+    let token = generate_valid_token(
+        &signing_key,
+        "jira.sync.pull_issue",
+        connector.instance_id(),
+    );
 
     let err = connector
         .handle_invoke(json!({
@@ -1701,7 +1719,8 @@ async fn sync_pull_issue_replay_is_noop_after_push() {
     )
     .await;
 
-    let push_token = generate_valid_token(&signing_key, "jira.sync.push_bead", connector.instance_id());
+    let push_token =
+        generate_valid_token(&signing_key, "jira.sync.push_bead", connector.instance_id());
     connector
         .handle_invoke(json!({
             "operation": "jira.sync.push_bead",
@@ -1726,7 +1745,11 @@ async fn sync_pull_issue_replay_is_noop_after_push() {
         .await
         .expect("push should succeed");
 
-    let pull_token = generate_valid_token(&signing_key, "jira.sync.pull_issue", connector.instance_id());
+    let pull_token = generate_valid_token(
+        &signing_key,
+        "jira.sync.pull_issue",
+        connector.instance_id(),
+    );
     let pull_result = connector
         .handle_invoke(json!({
             "operation": "jira.sync.pull_issue",
@@ -1814,8 +1837,11 @@ async fn sync_reconcile_conflict_is_explicit_and_persisted() {
         Some(&zone_dir),
     )
     .await;
-    let push_token =
-        generate_valid_token(&push_key, "jira.sync.push_bead", push_connector.instance_id());
+    let push_token = generate_valid_token(
+        &push_key,
+        "jira.sync.push_bead",
+        push_connector.instance_id(),
+    );
     push_connector
         .handle_invoke(json!({
             "operation": "jira.sync.push_bead",

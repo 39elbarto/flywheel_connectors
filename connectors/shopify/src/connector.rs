@@ -1932,7 +1932,12 @@ mod tests {
             let signing_key = Ed25519SigningKey::generate();
             c.configure(tc()).await.unwrap();
             c.handshake(handshake_req_for(&signing_key)).await.unwrap();
-            let token = signed_token(&signing_key, c.instance_id(), CAP_PRODUCTS_READ, OP_PRODUCTS_LIST);
+            let token = signed_token(
+                &signing_key,
+                c.instance_id(),
+                CAP_PRODUCTS_READ,
+                OP_PRODUCTS_LIST,
+            );
             c.simulate(simulate_req(OP_PRODUCTS_LIST, json!({}), token))
                 .await
         })
@@ -1983,7 +1988,12 @@ mod tests {
             let signing_key = Ed25519SigningKey::generate();
             c.configure(tc()).await.unwrap();
             c.handshake(handshake_req_for(&signing_key)).await.unwrap();
-            let token = signed_token(&signing_key, c.instance_id(), CAP_PRODUCTS_READ, OP_PRODUCTS_GET);
+            let token = signed_token(
+                &signing_key,
+                c.instance_id(),
+                CAP_PRODUCTS_READ,
+                OP_PRODUCTS_GET,
+            );
             c.simulate(simulate_req(OP_PRODUCTS_GET, json!({}), token))
                 .await
         })
@@ -2004,7 +2014,12 @@ mod tests {
             let signing_key = Ed25519SigningKey::generate();
             c.configure(tc()).await.unwrap();
             c.handshake(handshake_req_for(&signing_key)).await.unwrap();
-            let token = signed_token(&signing_key, c.instance_id(), CAP_PRODUCTS_READ, OP_PRODUCTS_LIST);
+            let token = signed_token(
+                &signing_key,
+                c.instance_id(),
+                CAP_PRODUCTS_READ,
+                OP_PRODUCTS_LIST,
+            );
             c.simulate(simulate_req(
                 OP_PRODUCTS_CREATE,
                 json!({"title": "New product"}),

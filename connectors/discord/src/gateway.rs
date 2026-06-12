@@ -289,11 +289,15 @@ mod tests {
     }
 
     async fn send_message(ws: &mut TestServerWebSocket, message: ServerWsMessage, context: &str) {
-        ws.send(&fcp_async_core::compatibility_cx(), message).await.expect(context);
+        ws.send(&fcp_async_core::compatibility_cx(), message)
+            .await
+            .expect(context);
     }
 
     async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-        let _ = ws.close(&fcp_async_core::compatibility_cx(), CloseReason::normal()).await;
+        let _ = ws
+            .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+            .await;
     }
 
     fn parse_payload(msg: ServerWsMessage) -> GatewayPayload {

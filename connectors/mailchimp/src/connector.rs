@@ -553,9 +553,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
 fn operations_info() -> serde_json::Value {
     static OPERATIONS: OnceLock<serde_json::Value> = OnceLock::new();
     OPERATIONS
-        .get_or_init(|| {
-            serde_json::to_value(typed_operations_info()).unwrap_or_else(|_| json!([]))
-        })
+        .get_or_init(|| serde_json::to_value(typed_operations_info()).unwrap_or_else(|_| json!([])))
         .clone()
 }
 

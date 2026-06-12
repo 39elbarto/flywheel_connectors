@@ -3956,7 +3956,13 @@ mod tests {
         );
 
         let mut openai_request = AuthRequest::new();
-        run(async { openai.method.build_request_auth(&cx(), &mut openai_request).await }).unwrap();
+        run(async {
+            openai
+                .method
+                .build_request_auth(&cx(), &mut openai_request)
+                .await
+        })
+        .unwrap();
         assert_eq!(
             openai_request.value_for("Authorization"),
             Some("Bearer fixture-openai-key")
@@ -4152,10 +4158,9 @@ mod tests {
             OAuthDeviceCodeProviderResponse::SlowDown,
             OAuthDeviceCodeProviderResponse::Authorized(expected_tokens.clone()),
         ]);
-        let mut flow = run(async {
-            OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &transport).await
-        })
-        .unwrap();
+        let mut flow =
+            run(async { OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &transport).await })
+                .unwrap();
 
         assert_eq!(flow.challenge().user_code, "ABCD-EFGH");
         assert_eq!(flow.poll_interval(), StdDuration::from_secs(5));
@@ -4196,7 +4201,8 @@ mod tests {
                 reason: "operator denied browser authorization".to_string(),
             }]);
         let mut denied_flow =
-            run(async { OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &denied).await }).unwrap();
+            run(async { OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &denied).await })
+                .unwrap();
 
         let denied_error = run(async { denied_flow.poll(&cx(), &denied).await }).unwrap_err();
         assert_eq!(
@@ -4213,7 +4219,8 @@ mod tests {
                 reason: "device code expired".to_string(),
             }]);
         let mut expired_flow =
-            run(async { OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &expired).await }).unwrap();
+            run(async { OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &expired).await })
+                .unwrap();
 
         let expired_error = run(async { expired_flow.poll(&cx(), &expired).await }).unwrap_err();
         assert_eq!(
@@ -4232,10 +4239,9 @@ mod tests {
         challenge.interval = StdDuration::ZERO;
         let transport = ScriptedDeviceTransport::new([]).with_challenge(challenge);
 
-        let error = run(async {
-            OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &transport).await
-        })
-        .unwrap_err();
+        let error =
+            run(async { OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &transport).await })
+                .unwrap_err();
 
         assert_eq!(
             error,
@@ -4578,10 +4584,9 @@ mod tests {
             reason: "refresh token expired".to_string(),
         }]);
 
-        let error = run(async {
-            OAuthRefreshTokenFlow::refresh(&cx(), &config, &grant, &rejected).await
-        })
-        .unwrap_err();
+        let error =
+            run(async { OAuthRefreshTokenFlow::refresh(&cx(), &config, &grant, &rejected).await })
+                .unwrap_err();
         assert_eq!(
             error,
             AuthError::ProviderRejected {
@@ -4601,10 +4606,9 @@ mod tests {
         let malformed =
             ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(bad_tokens)]);
 
-        let error = run(async {
-            OAuthRefreshTokenFlow::refresh(&cx(), &config, &grant, &malformed).await
-        })
-        .unwrap_err();
+        let error =
+            run(async { OAuthRefreshTokenFlow::refresh(&cx(), &config, &grant, &malformed).await })
+                .unwrap_err();
         assert_eq!(
             error,
             AuthError::InvalidConfig {
@@ -4619,7 +4623,8 @@ mod tests {
         let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
         let transport = ScriptedRefreshTransport::new([]);
 
-        let error = run(async { auth.refresh_with_transport(&cx(), &transport).await }).unwrap_err();
+        let error =
+            run(async { auth.refresh_with_transport(&cx(), &transport).await }).unwrap_err();
 
         assert_eq!(
             error,
@@ -4924,7 +4929,8 @@ mod tests {
             TokenRefreshPolicy::new(StdDuration::from_secs(3_600)),
         );
 
-        let outcome = run(async { actor.refresh_profile(&cx(), "bootstrap", "setup").await }).unwrap();
+        let outcome =
+            run(async { actor.refresh_profile(&cx(), "bootstrap", "setup").await }).unwrap();
 
         assert!(matches!(
             outcome,
@@ -4949,7 +4955,8 @@ mod tests {
         let store = Arc::new(InMemoryAuthProfileStore::new());
         let actor = TokenRefreshActor::new(Arc::clone(&store), TokenRefreshPolicy::default());
 
-        let error = run(async { actor.refresh_profile(&cx(), "openai", "work").await }).unwrap_err();
+        let error =
+            run(async { actor.refresh_profile(&cx(), "openai", "work").await }).unwrap_err();
 
         assert_eq!(
             error,

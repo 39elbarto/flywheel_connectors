@@ -239,15 +239,18 @@ pub fn build_readiness_report(
         {
             continue;
         }
-        let report = evaluate_target(target, options)?;
-        if options.only_missing && report.status == ProofReadinessStatus::Ready {
-            continue;
-        }
-        reports.push(report);
+        reports.push(evaluate_target(target, options)?);
     }
 
+    // Summary and aggregate status always describe the full evaluated set;
+    // `only_missing` narrows only the listed targets. Filtering before
+    // summarizing would report `ready_count: 0` for a fleet that is in fact
+    // ready, misrepresenting overall readiness.
     let summary = summarize_targets(&reports);
     let status = aggregate_status(&summary);
+    if options.only_missing {
+        reports.retain(|report| report.status != ProofReadinessStatus::Ready);
+    }
     Ok(ProofReadinessReport {
         schema_version: PROOF_READINESS_REPORT_SCHEMA_VERSION.to_owned(),
         status,
@@ -590,7 +593,11 @@ fn artifact_is_stale(path: &Path, now: SystemTime, freshness_days: u32) -> bool 
         return true;
     };
     let max_age = Duration::from_secs(u64::from(freshness_days) * 24 * 60 * 60);
-    now.duration_since(modified).is_ok_and(|age| age > max_age)
+    // A modification time in the future means the artifact's timestamp cannot
+    // be trusted (clock skew, copied or tampered file); fail closed like the
+    // metadata-read failures above instead of treating it as fresh.
+    now.duration_since(modified)
+        .map_or(true, |age| age > max_age)
 }
 
 fn json_field_present(value: &Value, field: &str) -> bool {

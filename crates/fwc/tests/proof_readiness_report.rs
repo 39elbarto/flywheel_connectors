@@ -292,10 +292,47 @@ fn test_cli_only_missing_suppresses_satisfied_target() {
     let payload: Value =
         serde_json::from_slice(&output.stdout).expect("stdout should be JSON payload");
     assert_eq!(payload["status"], "ready");
-    assert_eq!(payload["summary"]["target_count"], 0);
+    // The summary describes the full evaluated set; only the listed targets
+    // are narrowed by --only-missing.
+    assert_eq!(payload["summary"]["target_count"], 1);
+    assert_eq!(payload["summary"]["ready_count"], 1);
     assert_eq!(
         payload["targets"].as_array().expect("targets array").len(),
         0
     );
     assert_schema_valid(&payload);
+}
+
+#[test]
+fn test_future_timestamped_artifact_is_not_fresh() {
+    let temp = tempdir().expect("temp repo root");
+    write_json_artifact(
+        temp.path(),
+        "artifacts/perf/pq_signing/contabo-good.json",
+        &json!({
+            "schema_version": "fcp.pq-signing-overhead.v1",
+            "machine_class": "contabo",
+            "git_sha": "0123456789abcdef0123456789abcdef01234567",
+            "sample_count": 10000,
+            "summary": { "p50_us": 10, "p99_us": 20 }
+        }),
+    );
+
+    // Evaluate at a point in the past so the artifact's modification time sits
+    // in the future. A future timestamp cannot prove freshness; the artifact
+    // must fail closed instead of counting as fresh evidence.
+    let report = build_report_for_at(
+        temp.path(),
+        "pq_signing_contabo",
+        SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60),
+    );
+    let target = &report.targets[0];
+    assert_eq!(target.status, ProofReadinessStatus::MissingPrerequisites);
+    assert!(target.satisfied_artifacts.is_empty());
+    assert!(
+        target
+            .missing
+            .iter()
+            .any(|item| item.kind == MissingPrerequisiteKind::Freshness)
+    );
 }

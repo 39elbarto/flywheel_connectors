@@ -2455,9 +2455,15 @@ fn cdp_wait_for_location_expression(
     return typeof entry.name === "string" ? entry.name : null;
   }};
   const timeOriginChanged = () => typeof previousTimeOrigin !== "number" || performance.timeOrigin !== previousTimeOrigin;
-  const isExpectedDocument = () => !requireNewDocument || (
-    navigationEntryName() === expectedUrl && timeOriginChanged()
-  );
+  // A new document's final URL legitimately diverges from the requested URL
+  // on server-side redirects (and trailing-slash normalization), so document
+  // identity is proven by the time-origin change rather than URL equality —
+  // the loader-aware navigation wait that precedes this poll already
+  // confirmed which navigation committed. Same-document (fragment)
+  // navigations keep exact URL matching: they never change the time origin.
+  const isExpectedDocument = () => requireNewDocument
+    ? timeOriginChanged()
+    : window.location.href === expectedUrl;
   const snapshot = (matched) => ({{
     href: window.location.href,
     ready_state: document.readyState,
@@ -2465,7 +2471,7 @@ fn cdp_wait_for_location_expression(
     time_origin: Number.isFinite(performance.timeOrigin) ? performance.timeOrigin : null,
     matched,
   }});
-  const matched = window.location.href === expectedUrl && isExpectedDocument() && isDocumentReady();
+  const matched = isExpectedDocument() && isDocumentReady();
   return snapshot(matched);
 }})()"#
     ))
@@ -7956,6 +7962,25 @@ while :; do sleep 1; done
         assert!(message.contains("did not reach expected active document"));
         assert!(message.contains("readable-fixture"));
         assert!(message.contains("navigation entry"));
+    }
+
+    #[test]
+    fn cdp_wait_for_location_expression_tolerates_redirects_for_new_documents() {
+        let expression = cdp_wait_for_location_expression(
+            "http://127.0.0.1:9999/start",
+            Some("load"),
+            true,
+            Some(42.0),
+        )
+        .unwrap();
+
+        // New documents are identified by the time-origin change so that
+        // server-side redirects (final URL != requested URL) still complete;
+        // same-document navigations keep exact URL matching.
+        assert!(expression.contains("requireNewDocument\n    ? timeOriginChanged()"));
+        assert!(expression.contains(": window.location.href === expectedUrl"));
+        assert!(!expression.contains("navigationEntryName() === expectedUrl"));
+        assert!(expression.contains("const matched = isExpectedDocument() && isDocumentReady();"));
     }
 
     #[test]

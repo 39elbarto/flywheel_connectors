@@ -202,13 +202,18 @@ impl ArxivClient {
             "/api/query?search_query={}&start={offset}&max_results={max}",
             urlencoded(query)
         );
+        // `sort_by` / `sort_order` are caller-supplied; percent-encode them like
+        // every other URL value in this client so a value such as
+        // `relevance&max_results=99999` cannot smuggle additional query
+        // parameters. arXiv's valid sort tokens are all unreserved characters,
+        // so legitimate values pass through unchanged.
         if let Some(sb) = sort_by {
             url.push_str("&sortBy=");
-            url.push_str(sb);
+            url.push_str(&urlencoded(sb));
         }
         if let Some(so) = sort_order {
             url.push_str("&sortOrder=");
-            url.push_str(so);
+            url.push_str(&urlencoded(so));
         }
         let xml = self.arxiv_get(&url).await?;
         let papers = xml_parser::parse_atom_entries(&xml);

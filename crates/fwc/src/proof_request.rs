@@ -228,6 +228,28 @@ fn render_bundle_markdown(
     markdown
 }
 
+/// Backslash-escape inline-markdown metacharacters so manifest- and
+/// artifact-derived text cannot inject links, code spans, or structure into
+/// the paste-safe bundle markdown (the redaction guard only blocks
+/// `scheme://` URLs, so protocol-relative `[text](//host)` links would
+/// otherwise survive). Newlines collapse to spaces so a multi-line value
+/// cannot break out of its heading or list item.
+fn escape_markdown_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '#' | '<' | '>' | '|' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            '\r' => {}
+            '\n' => escaped.push(' '),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 fn render_target_markdown(
     target: &ProofReadinessTarget,
     target_report: &ProofReadinessTargetReport,
@@ -236,7 +258,12 @@ fn render_target_markdown(
     follow_up_commands: &[String],
 ) -> String {
     let mut markdown = String::new();
-    let _ = write!(markdown, "## `{}` - {}\n\n", target.target_id, target.title);
+    let _ = write!(
+        markdown,
+        "## `{}` - {}\n\n",
+        target.target_id,
+        escape_markdown_text(&target.title)
+    );
     let _ = writeln!(markdown, "- Status: `{:?}`", target_report.status);
     let _ = writeln!(
         markdown,
@@ -248,7 +275,9 @@ fn render_target_markdown(
         let _ = writeln!(
             markdown,
             "  - `{:?}` `{}`: {}",
-            missing.kind, missing.id, missing.message
+            missing.kind,
+            missing.id,
+            escape_markdown_text(&missing.message)
         );
     }
     markdown.push_str("\nCommand template:\n\n```text\n");

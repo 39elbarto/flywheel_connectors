@@ -203,6 +203,53 @@ sample_count = "10000"
 }
 
 #[test]
+fn test_request_bundle_escapes_markdown_in_title_and_messages() {
+    let manifest = parse_targets_manifest_str(
+        r#"
+schema_version = "fcp.fwc.proof-readiness-targets.v1"
+
+[[targets]]
+target_id = "markdown_injection_target"
+title = "Injection [click](//evil.example) *title* `fence`"
+blocked_beads = ["flywheel_connectors-qeg89.3"]
+artifact_schema = "fcp.threshold-proof.v1"
+artifact_root = "artifacts/proof/threshold"
+artifact_globs = ["artifacts/proof/threshold/*.json"]
+freshness_days = 9
+machine_classes = ["csd"]
+host_roles = []
+required_artifact_fields = ["schema_version", "git_sha", "summary"]
+command_template = "cargo bench -p fcp-crypto --bench hybrid_verify -- --statpack-out artifacts/proof/threshold/csd-<date>-<sha>.json"
+redaction_policy = ["no_raw_hostnames", "no_private_ips", "no_tokens"]
+evidence_notes = ["Fixture for markdown escaping."]
+"#,
+    )
+    .expect("injection manifest parses");
+    let temp = tempdir().expect("temp repo root");
+    let report = build_readiness_report(
+        &manifest,
+        &ProofReadinessReportOptions {
+            repo_root: temp.path().to_path_buf(),
+            now: SystemTime::now(),
+            generated_at: Some("2026-06-12T12:00:00Z".to_owned()),
+            target_filter: Some("markdown_injection_target".to_owned()),
+            only_missing: true,
+        },
+    )
+    .expect("readiness report builds");
+    let bundle =
+        build_proof_request_bundle(&manifest, &report).expect("proof request bundle builds");
+    let markdown = &bundle.requests[0].message_markdown;
+
+    // The protocol-relative link and emphasis/code metacharacters from the
+    // title must arrive backslash-escaped, never as live markdown.
+    assert!(!markdown.contains("[click](//evil.example)"));
+    assert!(markdown.contains("\\[click\\]\\(//evil.example\\)"));
+    assert!(markdown.contains("\\*title\\*"));
+    assert!(markdown.contains("\\`fence\\`"));
+}
+
+#[test]
 fn test_request_bundle_is_stable_for_same_report() {
     let temp = tempdir().expect("temp repo root");
     let manifest = load_targets_manifest(repo_manifest()).expect("repository manifest loads");

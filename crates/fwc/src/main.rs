@@ -2753,6 +2753,10 @@ struct ServeMcpArgs {
     #[arg(long)]
     zone: Option<String>,
 
+    /// Maximum risk level to include (low, medium, high, critical).
+    #[arg(long)]
+    risk_max: Option<String>,
+
     /// Optional principal identity forwarded on each live tool call.
     #[arg(long)]
     principal: Option<String>,
@@ -3402,7 +3406,10 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
         catalog.connectors.clone()
     };
 
-    let config = serve_mcp_config(args.connector.as_ref().and(connectors.first()));
+    let config = serve_mcp_config(
+        args.connector.as_ref().and(connectors.first()),
+        args.risk_max.as_deref(),
+    );
 
     let mut tools = Vec::new();
     for connector in &connectors {
@@ -3442,10 +3449,14 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
 
 fn serve_mcp_config(
     selected_connector: Option<&HostConnectorRecord>,
+    risk_max: Option<&str>,
 ) -> serve_mcp::McpServerConfig {
     let mut config = serve_mcp::McpServerConfig::new();
     if let Some(connector) = selected_connector {
         config = config.with_connector_filter(connector.slug.clone());
+    }
+    if let Some(risk_max) = risk_max {
+        config = config.with_risk_max(risk_max);
     }
     config
 }
@@ -43815,7 +43826,8 @@ depends_on = ["missing"]
                 .expect("mock introspection response should deserialize");
         let tools = try_host_mcp_tool_definitions(connector, &introspection)
             .expect("live MCP tool definitions should build");
-        let state = serve_mcp::state_from_tools(tools, super::serve_mcp_config(Some(connector)));
+        let state =
+            serve_mcp::state_from_tools(tools, super::serve_mcp_config(Some(connector), None));
         let response = serve_mcp::handle_request(
             &state,
             &serve_mcp::JsonRpcRequest {
@@ -43832,6 +43844,16 @@ depends_on = ["missing"]
         assert_eq!(state.config.connector_filter.as_deref(), Some("github"));
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["name"], "github.create_issue");
+    }
+
+    #[test]
+    fn serve_mcp_config_applies_risk_max() {
+        let config = super::serve_mcp_config(None, Some("medium"));
+        assert_eq!(config.risk_max.as_deref(), Some("medium"));
+        assert!(config.connector_filter.is_none());
+
+        let config = super::serve_mcp_config(None, None);
+        assert!(config.risk_max.is_none());
     }
 
     #[test]

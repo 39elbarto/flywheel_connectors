@@ -563,14 +563,9 @@ impl SendGridConnector {
         let end_date = input
             .get("end_date")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+            .filter(|s| !s.is_empty());
 
-        let query = if end_date.is_empty() {
-            format!("start_date={start_date}")
-        } else {
-            format!("start_date={start_date}&end_date={end_date}")
-        };
-        let resp = client.get_stats(&query).await?;
+        let resp = client.get_stats(start_date, end_date).await?;
         Ok(json!({ "stats": resp }))
     }
 

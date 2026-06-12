@@ -108,6 +108,34 @@ fn validate_numeric_id<'a>(id: &'a str, field: &str) -> TwitterResult<&'a str> {
     Ok(trimmed)
 }
 
+/// Validate a Twitter username before interpolating it into a request path.
+///
+/// Usernames are interpolated into `/2/users/by/username/{username}` with no
+/// path encoding; `reqwest` normalizes `..` while building the request, so an
+/// unvalidated username could traverse to a sibling endpoint under the
+/// allowlisted host or inject extra path segments. Twitter handles are
+/// `[A-Za-z0-9_]` (an optional leading `@` is accepted and stripped), so that
+/// charset both matches the real API contract and rejects every injection
+/// vector. Returns the bare handle (without `@`).
+fn validate_username<'a>(username: &'a str, field: &str) -> TwitterResult<&'a str> {
+    let trimmed = username.trim();
+    let handle = trimmed.strip_prefix('@').unwrap_or(trimmed);
+    if handle.is_empty() {
+        return Err(TwitterError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if !handle
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(TwitterError::InvalidInput(format!(
+            "{field} must be a Twitter username (letters, digits, underscore), got: {handle}"
+        )));
+    }
+    Ok(handle)
+}
+
 /// Twitter REST API client.
 pub struct TwitterApiClient {
     client: Client,
@@ -535,6 +563,7 @@ impl TwitterApiClient {
         &self,
         username: &str,
     ) -> TwitterResult<TwitterResponse<User>> {
+        let username = validate_username(username, "username")?;
         let params = vec![(
             "user.fields".to_string(),
             "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
@@ -1039,6 +1068,48 @@ mod tests {
 
         let err = client.get_user("../admin").await.unwrap_err();
         assert!(matches!(err, TwitterError::InvalidInput(_)));
+    }
+
+    // ── validate_username tests ────────────────────────────────────
+
+    #[test]
+    fn validate_username_accepts_handles() {
+        assert_eq!(validate_username("jack", "username").unwrap(), "jack");
+        assert_eq!(
+            validate_username("Test_User_99", "username").unwrap(),
+            "Test_User_99"
+        );
+        assert_eq!(
+            validate_username("  spaced  ", "username").unwrap(),
+            "spaced"
+        );
+    }
+
+    #[test]
+    fn validate_username_strips_leading_at() {
+        assert_eq!(validate_username("@jack", "username").unwrap(), "jack");
+        assert_eq!(validate_username("  @jack ", "username").unwrap(), "jack");
+    }
+
+    #[test]
+    fn validate_username_rejects_empty() {
+        assert!(matches!(
+            validate_username("", "username").unwrap_err(),
+            TwitterError::InvalidInput(_)
+        ));
+        assert!(matches!(
+            validate_username("@", "username").unwrap_err(),
+            TwitterError::InvalidInput(_)
+        ));
+    }
+
+    #[test]
+    fn validate_username_rejects_path_and_query_injection() {
+        assert!(validate_username("foo/../../admin", "username").is_err());
+        assert!(validate_username("foo/bar", "username").is_err());
+        assert!(validate_username("foo?x=1", "username").is_err());
+        assert!(validate_username("foo bar", "username").is_err());
+        assert!(validate_username("foo%2Fbar", "username").is_err());
     }
 
     #[fcp_async_core::runtime::test]

@@ -661,7 +661,9 @@ impl YouTubeClient {
         response_mode: GoogleResponseMode,
     ) -> YouTubeResult<GoogleExecuteResponse> {
         let parsed_url = Url::parse(raw_url).map_err(|error| YouTubeError::Api {
-            message: format!("invalid request url `{raw_url}`: {error}"),
+            // `raw_url` carries `&key=<API_KEY>`; every other diagnostic path
+            // redacts it, so this parse-failure branch must too.
+            message: format!("invalid request url `{}`: {error}", redact_key(raw_url)),
             status_code: None,
         })?;
 

@@ -510,10 +510,23 @@ fn append_query_params(base_url: &str, params: &[(&str, String)]) -> String {
 
 fn sanitize_resource_name(resource_name: &str) -> PeopleResult<String> {
     let trimmed = resource_name.trim().trim_start_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+    // The value is interpolated raw into `{base_url}/{resource_name}` and then
+    // `Url::parse`'d, which normalizes `..` segments. Requiring the `people/`
+    // prefix is not enough on its own: `people/../../../foo/bar` satisfies the
+    // prefix yet resolves to a sibling endpoint on the API host, carrying the
+    // caller's Google OAuth bearer token. Reject traversal, encoded-slash, and
+    // query/fragment characters the way the google-chat connector does.
     if trimmed.is_empty()
         || !trimmed.starts_with("people/")
         || trimmed.contains('?')
         || trimmed.contains('&')
+        || trimmed.contains('#')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+        || lower.contains("%2e")
         || trimmed.chars().any(char::is_whitespace)
     {
         return Err(GooglePeopleError::InvalidInput {
@@ -565,5 +578,31 @@ mod tests {
         let sanitized = sanitize_resource_name("people/c123").unwrap();
         assert_eq!(sanitized, "people/c123");
         assert!(sanitize_resource_name("people/me?bad=1").is_err());
+    }
+
+    #[test]
+    fn sanitize_resource_name_rejects_path_traversal() {
+        // Each of these satisfies the `people/` prefix yet would normalize to a
+        // sibling endpoint (or inject a query/fragment) once `Url::parse` runs.
+        for bad in [
+            "people/../../../foo/bar",
+            "people/..%2f..%2fadmin",
+            "people/c123%2e%2e/x",
+            "people/c123\\x",
+            "people/me#frag",
+            "people/me&x=1",
+            "/people/../secret",
+        ] {
+            assert!(
+                sanitize_resource_name(bad).is_err(),
+                "expected `{bad}` to be rejected"
+            );
+        }
+        // Legitimate resource names still pass.
+        assert_eq!(sanitize_resource_name("people/me").unwrap(), "people/me");
+        assert_eq!(
+            sanitize_resource_name("people/c9876543210").unwrap(),
+            "people/c9876543210"
+        );
     }
 }

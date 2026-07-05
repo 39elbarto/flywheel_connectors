@@ -146,6 +146,7 @@ impl ZendeskClient {
             .build()
             .map_err(ZendeskError::Http)?;
 
+        validate_subdomain(auth.subdomain())?;
         let base_url = format!("https://{}.zendesk.com/api/v2", auth.subdomain());
 
         let request_timeout = Duration::from_secs(30);
@@ -532,6 +533,33 @@ impl ZendeskClient {
     }
 }
 
+/// Validate a Zendesk subdomain before interpolating it into the API host.
+///
+/// The subdomain becomes the leftmost label of `https://{subdomain}.zendesk.com`,
+/// and the client carries the account's Basic-auth credentials as a default
+/// header. Without validation, a value such as `attacker.example.com/` or
+/// `evil.com#` reparses the URL host to an attacker-controlled domain, so the
+/// `Authorization` header (email + API token) is exfiltrated on every request.
+/// A real Zendesk subdomain is a single DNS label: ASCII alphanumeric with
+/// optional internal hyphens, 1-63 characters.
+fn validate_subdomain(subdomain: &str) -> ZendeskResult<()> {
+    let value = subdomain.trim();
+    let valid = !value.is_empty()
+        && value.len() <= 63
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if !valid {
+        return Err(ZendeskError::InvalidConfig(format!(
+            "invalid Zendesk subdomain `{subdomain}`: must be a single DNS label \
+             (ASCII alphanumeric and hyphens, 1-63 characters)"
+        )));
+    }
+    Ok(())
+}
+
 /// Reject query-parameter values that contain URL-breaking characters.
 fn sanitize_query_value<'a>(value: &'a str, field: &str) -> ZendeskResult<&'a str> {
     if value.trim().is_empty() {
@@ -716,6 +744,32 @@ mod tests {
         )
         .expect("write response");
         stream.flush().expect("flush response");
+    }
+
+    #[test]
+    fn subdomain_validation_blocks_host_injection() {
+        // Attacker-controlled subdomains that would reparse the URL host to a
+        // foreign domain (and exfiltrate the Basic-auth credential) must be
+        // rejected at construction time.
+        for bad in [
+            "attacker.example.com/",
+            "evil.com#",
+            "evil.com:8443",
+            "a@evil.com",
+            "sub.zendesk.com",
+            "has space",
+            "-leading",
+            "trailing-",
+            "",
+        ] {
+            assert!(
+                ZendeskClient::new(bad, "user@example.com", "token123").is_err(),
+                "expected subdomain `{bad}` to be rejected"
+            );
+        }
+        // Legitimate single-label subdomains still build.
+        assert!(ZendeskClient::new("mycompany", "user@example.com", "token123").is_ok());
+        assert!(ZendeskClient::new("my-company-1", "user@example.com", "token123").is_ok());
     }
 
     #[fcp_async_core::runtime::test]

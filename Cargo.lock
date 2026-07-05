@@ -7657,6 +7657,7 @@ dependencies = [
  "fcp-testkit",
  "hex",
  "jsonschema",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

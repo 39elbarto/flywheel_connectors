@@ -20,6 +20,7 @@ fcp-prelude.workspace = true
 fcp-sdk.workspace = true
 fcp-async-core.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+percent-encoding.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

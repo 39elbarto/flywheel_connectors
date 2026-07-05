@@ -4,12 +4,21 @@ use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::ConnectorRuntime;
 use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
 use tracing::debug;
 
 use crate::error::{TwitchError, TwitchResult};
+
+/// Percent-encode set for `application/x-www-form-urlencoded` values: encode
+/// everything except the RFC 3986 unreserved characters (`-`, `_`, `.`, `~`).
+const FORM_VALUE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 use crate::types::*;
 
 /// Twitch Helix API client with OAuth2 client credentials.
@@ -71,16 +80,28 @@ impl TwitchClient {
 
     /// Acquire an OAuth2 token via client credentials grant.
     ///
-    /// Twitch's token endpoint accepts parameters as query strings on POST.
+    /// The `client_id`/`client_secret` are sent in the
+    /// `application/x-www-form-urlencoded` request body (per RFC 6749 §4.4.2),
+    /// never in the URL query string: reqwest's `Error` `Display` appends the
+    /// full request URL, so a secret placed in the query would leak into any
+    /// transport-error message or log. The body keeps the secret off the URL.
     pub async fn acquire_token(&mut self) -> TwitchResult<()> {
+        // Build the form body manually (the workspace `reqwest` is compiled
+        // without the feature that provides `RequestBuilder::form`). Values are
+        // percent-encoded; `grant_type` is a fixed literal.
+        let body = format!(
+            "client_id={}&client_secret={}&grant_type=client_credentials",
+            utf8_percent_encode(&self.client_id, FORM_VALUE),
+            utf8_percent_encode(&self.client_secret, FORM_VALUE),
+        );
         let resp = self
             .client
             .post(&self.token_url)
-            .query(&[
-                ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
-                ("grant_type", "client_credentials"),
-            ])
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(body)
             .send()
             .await
             .map_err(TwitchError::Http)?;

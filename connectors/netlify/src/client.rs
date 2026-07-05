@@ -19,9 +19,17 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> NetlifyResult<&'a s
         )));
     }
     let lower = value.to_ascii_lowercase();
+    // Path segments are interpolated before the `?site_id=` query suffix, so a
+    // `?`/`#`/`&` inside a segment would open the query/fragment early and
+    // truncate or re-target the intended endpoint (e.g. `.../accounts/acme?x=1/env`
+    // parses as `GET /accounts/acme`). Reject the query/fragment delimiters here
+    // too, matching `sanitize_query_param`.
     if value.contains('/')
         || value.contains('\\')
         || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('&')
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
@@ -591,6 +599,12 @@ mod tests {
         assert!(sanitize_path_segment("foo%5Cbar", "site_id").is_err());
         assert!(sanitize_path_segment("", "site_id").is_err());
         assert!(sanitize_path_segment("  ", "site_id").is_err());
+        // Query/fragment delimiters must be rejected in path segments too: they
+        // are interpolated before the `?site_id=` suffix, so an embedded `?`/`#`
+        // would open the query early and re-target the endpoint.
+        assert!(sanitize_path_segment("acme?x=1", "account_slug").is_err());
+        assert!(sanitize_path_segment("acme#frag", "account_slug").is_err());
+        assert!(sanitize_path_segment("acme&y=2", "account_slug").is_err());
     }
 
     #[test]

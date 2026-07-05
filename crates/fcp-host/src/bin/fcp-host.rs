@@ -1029,7 +1029,20 @@ impl NativeWarmPoolConnector {
                 "native warm-pool eviction"
             );
         }
-        entries.retain(|entry| plan.retained.iter().any(|key| key == &entry.key));
+        // Apply eviction by entry index, not by `WarmPoolKey`: several live
+        // entries can share one key (same connector/zone/manifest/credential
+        // class), so a key-membership filter would retain every same-key entry
+        // and silently drop the controller's planned per-connector/RSS-cap
+        // evictions. `plan.retained_indices` indexes into `snapshots`, which was
+        // built from `entries` in order just above, so the indices line up 1:1.
+        let retained: std::collections::HashSet<usize> =
+            plan.retained_indices.iter().copied().collect();
+        let mut index = 0usize;
+        entries.retain(|_entry| {
+            let keep = retained.contains(&index);
+            index += 1;
+            keep
+        });
     }
 
     fn pressure_snapshot(&self) -> WarmPoolPressureSnapshot {

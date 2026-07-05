@@ -272,11 +272,17 @@ fn render_target_markdown(
     );
     markdown.push_str("- Missing prerequisites:\n");
     for missing in &target_report.missing {
+        // `missing.id` is filesystem-derived (a discovered artifact's
+        // repo-relative path for Schema/Freshness/read failures), so it must be
+        // markdown-escaped like `missing.message` beside it — an unescaped
+        // backtick would close the surrounding code span and let a
+        // `[text](//host)` protocol-relative link survive `ensure_redaction_safe`
+        // into the "safe for agent mail" bundle.
         let _ = writeln!(
             markdown,
-            "  - `{:?}` `{}`: {}",
+            "  - `{:?}` {}: {}",
             missing.kind,
-            missing.id,
+            escape_markdown_text(&missing.id),
             escape_markdown_text(&missing.message)
         );
     }

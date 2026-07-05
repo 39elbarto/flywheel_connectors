@@ -215,25 +215,29 @@ impl PlivoClient {
         &self,
         request: &ContinueCallRequest<'_>,
     ) -> PlivoResult<PlivoCommand> {
+        let call_uuid = sanitize_call_uuid(request.call_uuid, "call_uuid")?;
         let payload = build_continue_call_payload(request);
-        self.post_form(&format!("/Call/{}/", request.call_uuid), &payload)
+        self.post_form(&format!("/Call/{call_uuid}/"), &payload)
             .await
     }
 
     /// Speak text during an active call.
     pub async fn speak_call(&self, request: &SpeakCallRequest<'_>) -> PlivoResult<PlivoCommand> {
+        let call_uuid = sanitize_call_uuid(request.call_uuid, "call_uuid")?;
         let payload = build_speak_call_payload(request);
-        self.post_form(&format!("/Call/{}/Speak/", request.call_uuid), &payload)
+        self.post_form(&format!("/Call/{call_uuid}/Speak/"), &payload)
             .await
     }
 
     /// End a call.
     pub async fn end_call(&self, call_uuid: &str) -> PlivoResult<PlivoCommand> {
+        let call_uuid = sanitize_call_uuid(call_uuid, "call_uuid")?;
         self.delete(&format!("/Call/{call_uuid}/")).await
     }
 
     /// Fetch call status/details.
     pub async fn status_call(&self, call_uuid: &str) -> PlivoResult<PlivoCall> {
+        let call_uuid = sanitize_call_uuid(call_uuid, "call_uuid")?;
         self.get(&format!("/Call/{call_uuid}/")).await
     }
 
@@ -242,8 +246,9 @@ impl PlivoClient {
         &self,
         request: &TransferCallRequest<'_>,
     ) -> PlivoResult<PlivoCommand> {
+        let call_uuid = sanitize_call_uuid(request.call_uuid, "call_uuid")?;
         let payload = build_transfer_call_payload(request);
-        self.post_form(&format!("/Call/{}/", request.call_uuid), &payload)
+        self.post_form(&format!("/Call/{call_uuid}/"), &payload)
             .await
     }
 
@@ -361,6 +366,36 @@ fn retry_after_header(response: &Response) -> Option<Duration> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_secs)
+}
+
+/// Validate a Plivo `call_uuid` before interpolating it into a request path.
+///
+/// The value is a UUID (`[0-9a-fA-F-]`), so this rejects only the characters
+/// that would let a caller-supplied value escape its segment: `/`, `\`, `..`,
+/// encoded slashes, and `?`/`#`. Without it, a `call_uuid` with an embedded
+/// `/` or `..` pivots `end_call`/`status_call` to sibling endpoints under the
+/// account (e.g. `DELETE /Call/../Endpoint/...`), or a `?` injects query params.
+fn sanitize_call_uuid<'a>(value: &'a str, field: &str) -> PlivoResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(PlivoError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(PlivoError::InvalidInput(format!(
+            "{field} contains path traversal or URL control characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 fn duration_millis_saturating(duration: Duration) -> u64 {

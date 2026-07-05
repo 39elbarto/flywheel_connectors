@@ -192,6 +192,7 @@ impl TelnyxClient {
 
     /// Answer/continue a call.
     pub async fn continue_call(&self, call_control_id: &str) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(call_control_id, "call_control_id")?;
         self.post_data(
             &format!("/calls/{call_control_id}/actions/answer"),
             &serde_json::json!({}),
@@ -201,8 +202,9 @@ impl TelnyxClient {
 
     /// Speak text into a call.
     pub async fn speak_call(&self, request: &SpeakCallRequest<'_>) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(request.call_control_id, "call_control_id")?;
         self.post_data(
-            &format!("/calls/{}/actions/speak", request.call_control_id),
+            &format!("/calls/{call_control_id}/actions/speak"),
             &build_speak_call_payload(request),
         )
         .await
@@ -210,6 +212,7 @@ impl TelnyxClient {
 
     /// End a call.
     pub async fn end_call(&self, call_control_id: &str) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(call_control_id, "call_control_id")?;
         self.post_data(
             &format!("/calls/{call_control_id}/actions/hangup"),
             &serde_json::json!({}),
@@ -219,6 +222,7 @@ impl TelnyxClient {
 
     /// Fetch call status/details.
     pub async fn status_call(&self, call_control_id: &str) -> TelnyxResult<TelnyxCall> {
+        let call_control_id = sanitize_call_control_id(call_control_id, "call_control_id")?;
         self.get_data(&format!("/calls/{call_control_id}")).await
     }
 
@@ -227,8 +231,9 @@ impl TelnyxClient {
         &self,
         request: &TransferCallRequest<'_>,
     ) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(request.call_control_id, "call_control_id")?;
         self.post_data(
-            &format!("/calls/{}/actions/transfer", request.call_control_id),
+            &format!("/calls/{call_control_id}/actions/transfer"),
             &build_transfer_call_payload(request),
         )
         .await
@@ -239,11 +244,9 @@ impl TelnyxClient {
         &self,
         request: &GatherUsingSpeakRequest<'_>,
     ) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(request.call_control_id, "call_control_id")?;
         self.post_data(
-            &format!(
-                "/calls/{}/actions/gather_using_speak",
-                request.call_control_id
-            ),
+            &format!("/calls/{call_control_id}/actions/gather_using_speak"),
             &build_gather_using_speak_payload(request),
         )
         .await
@@ -342,6 +345,37 @@ impl TelnyxClient {
 fn unwrap_data<T: DeserializeOwned>(value: serde_json::Value) -> TelnyxResult<T> {
     let envelope: TelnyxEnvelope<T> = serde_json::from_value(value)?;
     Ok(envelope.data)
+}
+
+/// Validate a Telnyx `call_control_id` before interpolating it into a request
+/// path.
+///
+/// The identifier is a URL-safe base64 token (`[A-Za-z0-9_=-]` plus `:`), so
+/// this rejects only the characters that would let a caller-supplied value
+/// escape its segment: `/`, `\`, `..`, encoded slashes, and `?`/`#`. Without it,
+/// a `call_control_id` of `REALID/actions/hangup#` turns an `answer` request
+/// into a `hangup`, and a raw `/` reaches sibling `/v2/...` resources.
+fn sanitize_call_control_id<'a>(value: &'a str, field: &str) -> TelnyxResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(TelnyxError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(TelnyxError::InvalidInput(format!(
+            "{field} contains path traversal or URL control characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 fn retry_after_header(response: &Response) -> Option<Duration> {

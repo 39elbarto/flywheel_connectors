@@ -349,7 +349,14 @@ impl GcpClient {
         object_name: &str,
     ) -> GcpResult<StorageObject> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
-        let object_name = sanitize_object_name(object_name, "object_name")?;
+        // Mirror `upload_object`: `sanitize_object_name` permits `/` for GCS
+        // hierarchy but leaves `?`/`#`/`&` intact, so also reject query/fragment
+        // characters — otherwise `secret.txt?alt=media` flips this metadata read
+        // into a raw media download.
+        let object_name = sanitize_query_param(
+            sanitize_object_name(object_name, "object_name")?,
+            "object_name",
+        )?;
         let url = format!(
             "{}/storage/v1/b/{}/o/{}",
             self.storage_base, bucket, object_name
@@ -406,7 +413,13 @@ impl GcpClient {
         object_name: &str,
     ) -> GcpResult<serde_json::Value> {
         let bucket = sanitize_path_segment(bucket, "bucket")?;
-        let object_name = sanitize_object_name(object_name, "object_name")?;
+        // Mirror `upload_object`/`get_object`: block `?`/`#`/`&` (which
+        // `sanitize_object_name` permits) so a crafted object name cannot inject
+        // a query/fragment against the storage host.
+        let object_name = sanitize_query_param(
+            sanitize_object_name(object_name, "object_name")?,
+            "object_name",
+        )?;
         let url = format!(
             "{}/storage/v1/b/{}/o/{}",
             self.storage_base, bucket, object_name

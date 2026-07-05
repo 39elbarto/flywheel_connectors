@@ -70,6 +70,8 @@ impl MastodonClient {
             || segment.contains('\\')
             || segment.contains("..")
             || segment.contains('\0')
+            || segment.contains('?')
+            || segment.contains('#')
             || lower.contains("%2f")
             || lower.contains("%5c")
         {

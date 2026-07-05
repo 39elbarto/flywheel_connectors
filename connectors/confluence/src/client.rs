@@ -32,14 +32,25 @@ impl std::fmt::Debug for ConfluenceClient {
     }
 }
 
-/// Sanitize a path segment to prevent path traversal.
+/// Sanitize a path segment to prevent path traversal and query/fragment
+/// injection. Confluence space keys, content/page IDs, and version numbers are
+/// `[A-Za-z0-9._~-]`-shaped, so rejecting slashes, `..`, encoded slashes, and
+/// URL delimiters (`?`/`#`/`&`/`=`) never trips a legitimate value while
+/// stopping `123?status=trashed` (query smuggling) and `x%2f..%2fadmin`.
 fn sanitize_path_segment(segment: &str) -> Result<&str> {
+    let lower = segment.to_ascii_lowercase();
     if segment.trim().is_empty()
         || segment.contains('/')
         || segment.contains('\\')
         || segment.contains('\0')
+        || segment.contains("..")
+        || segment.contains('?')
+        || segment.contains('#')
+        || segment.contains('&')
+        || segment.contains('=')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
         || segment == "."
-        || segment == ".."
     {
         return Err(Error::InvalidInput(format!(
             "Invalid path segment: {segment}"

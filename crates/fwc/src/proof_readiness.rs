@@ -586,18 +586,79 @@ fn evaluate_artifact(
 }
 
 fn artifact_is_stale(path: &Path, now: SystemTime, freshness_days: u32) -> bool {
+    let max_age = Duration::from_secs(u64::from(freshness_days) * 24 * 60 * 60);
+
+    // Prefer the generation date committed into the artifact path — proof
+    // artifacts follow the `<class>-YYYY-MM-DD-<sha>.json` (and dated-directory)
+    // convention. Filesystem mtime is not committed provenance: a fresh clone or
+    // CI checkout resets every file's mtime to the checkout time, which would
+    // make an arbitrarily old committed proof look freshly generated and
+    // silently defeat the freshness gate. The path date travels with the
+    // committed file and is immune to checkout.
+    if let Some(generated) = generation_time_from_path(path) {
+        // A future generation date cannot be trusted (skew/tamper); fail closed.
+        return now
+            .duration_since(generated)
+            .map_or(true, |age| age > max_age);
+    }
+
+    // Fall back to filesystem mtime only when the path carries no date token.
     let Ok(metadata) = fs::metadata(path) else {
         return true;
     };
     let Ok(modified) = metadata.modified() else {
         return true;
     };
-    let max_age = Duration::from_secs(u64::from(freshness_days) * 24 * 60 * 60);
     // A modification time in the future means the artifact's timestamp cannot
     // be trusted (clock skew, copied or tampered file); fail closed like the
     // metadata-read failures above instead of treating it as fresh.
     now.duration_since(modified)
         .map_or(true, |age| age > max_age)
+}
+
+/// Extracts the generation date committed into a proof artifact's path,
+/// returning the instant at UTC midnight of that day.
+///
+/// Proof/StatPack artifacts encode their generation date in the committed path
+/// — either in the filename (`csd-2026-06-20-<sha>.json`) or in a dated parent
+/// directory (`.../2026-06-20/...`). Unlike filesystem mtime, this survives a
+/// git checkout unchanged. Path components are scanned from the filename
+/// outward so the most specific date wins. Returns `None` when no `YYYY-MM-DD`
+/// token is present.
+fn generation_time_from_path(path: &Path) -> Option<SystemTime> {
+    let mut components: Vec<String> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
+        .collect();
+    components.reverse();
+    components
+        .iter()
+        .find_map(|component| date_token_to_time(component))
+}
+
+/// Parses the first `YYYY-MM-DD` token found in a single path component (after
+/// splitting on `-`, `_`, and `.`) into a UTC-midnight instant.
+fn date_token_to_time(component: &str) -> Option<SystemTime> {
+    let parts: Vec<&str> = component.split(['-', '_', '.']).collect();
+    for window in parts.windows(3) {
+        let (year, month, day) = (window[0], window[1], window[2]);
+        if year.len() == 4
+            && month.len() == 2
+            && day.len() == 2
+            && [year, month, day]
+                .iter()
+                .all(|token| token.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            if let Ok(date) =
+                chrono::NaiveDate::parse_from_str(&format!("{year}-{month}-{day}"), "%Y-%m-%d")
+            {
+                let seconds = date.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
+                let seconds = u64::try_from(seconds).ok()?;
+                return Some(UNIX_EPOCH + Duration::from_secs(seconds));
+            }
+        }
+    }
+    None
 }
 
 fn json_field_present(value: &Value, field: &str) -> bool {

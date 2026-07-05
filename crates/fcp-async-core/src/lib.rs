@@ -1866,10 +1866,30 @@ pub mod sync {
 
     pub use asupersync::sync::OwnedSemaphorePermit;
     use asupersync::sync::{
-        MutexGuard, RwLockReadGuard, RwLockWriteGuard, SemaphorePermit as AsupersyncSemaphorePermit,
+        LockError, MutexGuard, RwLockReadGuard, RwLockWriteGuard,
+        SemaphorePermit as AsupersyncSemaphorePermit,
     };
 
     use crate::compatibility_cx;
+
+    /// Builds a detached, non-root [`Cx`](asupersync::Cx) for scoping a
+    /// semaphore-permit obligation.
+    ///
+    /// asupersync refuses to create an obligation in the runtime *root* region:
+    /// `ObligationToken::reserve` panics with "obligations must be scoped to
+    /// non-root regions". The fcp-async-core runtime polls `block_on` futures —
+    /// and every `task::spawn`ed task — in the root region, so the ambient
+    /// `Cx::current()` there is root and acquiring a permit against it would
+    /// always panic (a compatibility break introduced by asupersync 0.3.4). A
+    /// permit's real effect is concurrency limiting via its `Drop`; the
+    /// obligation is only leak bookkeeping. `detached_cancel_context` provides a
+    /// synthetic non-root region intended for exactly this case — it cannot
+    /// create a root-scoped obligation. `compatibility_cx()` is still consulted
+    /// first so acquiring outside a runtime keeps its clear panic.
+    fn permit_scope_cx() -> asupersync::Cx<asupersync::cx::NoCaps> {
+        let _ambient = compatibility_cx();
+        asupersync::Cx::<asupersync::cx::NoCaps>::detached_cancel_context()
+    }
 
     /// Async mutex compatibility wrapper.
     #[derive(Debug, Default)]
@@ -1895,6 +1915,33 @@ pub mod sync {
                 .lock(&cx)
                 .await
                 .expect("fcp_async_core::sync::Mutex lock cancelled or poisoned")
+        }
+
+        /// Acquire the mutex, tolerating poison instead of panicking.
+        ///
+        /// Returns `None` when the mutex is (or becomes) poisoned — i.e. a task
+        /// panicked while holding the guard. Callers that use the lock purely as
+        /// an optimization (e.g. single-flight guards) can degrade to an
+        /// unsynchronized path on `None` rather than propagating a poison panic
+        /// forever. Cancellation still panics, matching [`Self::lock`].
+        ///
+        /// # Panics
+        /// Panics if the underlying lock operation is cancelled.
+        pub async fn lock_poison_tolerant(&self) -> Option<MutexGuard<'_, T>> {
+            let cx = compatibility_cx();
+            match self.inner.lock(&cx).await {
+                Ok(guard) => Some(guard),
+                Err(LockError::Poisoned) => None,
+                Err(other) => {
+                    panic!("fcp_async_core::sync::Mutex lock_poison_tolerant failed: {other:?}")
+                }
+            }
+        }
+
+        /// Returns `true` if the mutex has been poisoned by a panic while held.
+        #[must_use]
+        pub fn is_poisoned(&self) -> bool {
+            self.inner.is_poisoned()
         }
 
         /// Try to acquire the mutex without waiting.
@@ -2039,6 +2086,13 @@ pub mod sync {
         /// # Errors
         /// Returns `TryAcquireError` when no permit is currently available.
         pub fn try_acquire(&self) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+            // asupersync's synchronous `try_acquire` scopes the permit obligation
+            // to `Cx::current()`, which panics with no active context or in the
+            // root region (see `permit_scope_cx`). Because this call never awaits,
+            // temporarily installing a detached non-root context is safe and keeps
+            // the obligation off the root region.
+            let _cx_guard = asupersync::Cx::<asupersync::cx::NoCaps>::detached_cancel_context()
+                .set_current_restricted();
             self.inner.try_acquire(1).map_err(|_| TryAcquireError(()))
         }
 
@@ -2047,7 +2101,7 @@ pub mod sync {
         /// # Errors
         /// Returns `AcquireError` when the semaphore is closed before a permit is acquired.
         pub async fn acquire(&self) -> Result<SemaphorePermit<'_>, AcquireError> {
-            let cx = compatibility_cx();
+            let cx = permit_scope_cx();
             self.inner
                 .acquire(&cx, 1)
                 .await
@@ -2063,6 +2117,10 @@ pub mod sync {
         /// # Errors
         /// Returns `TryAcquireError` when no permit is currently available.
         pub fn try_acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+            // See `try_acquire`: scope the permit obligation to a detached
+            // non-root context for the duration of this non-awaiting call.
+            let _cx_guard = asupersync::Cx::<asupersync::cx::NoCaps>::detached_cancel_context()
+                .set_current_restricted();
             asupersync::sync::OwnedSemaphorePermit::try_acquire_arc(&self.inner, 1)
                 .map_err(|_| TryAcquireError(()))
         }
@@ -2072,7 +2130,7 @@ pub mod sync {
         /// # Errors
         /// Returns `AcquireError` when the semaphore is closed before a permit is acquired.
         pub async fn acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, AcquireError> {
-            let cx = compatibility_cx();
+            let cx = permit_scope_cx();
             asupersync::sync::OwnedSemaphorePermit::acquire(Arc::clone(&self.inner), &cx, 1)
                 .await
                 .map_err(|_| AcquireError(()))
@@ -5151,6 +5209,43 @@ mod tests {
         assert_eq!(sem.available_permits(), 0);
         drop(permit);
         assert_eq!(sem.available_permits(), 1);
+    }
+
+    // Regression (nwclu): the runtime polls `runtime::test`/`block_on` futures in
+    // the *root* region, where asupersync 0.3.4 refuses to create a permit
+    // obligation. Every permit acquisition — owned or borrowed, async or
+    // `try_*` — must scope its obligation off the root region rather than
+    // panicking. This mirrors how the fcp-host bulkhead acquires owned permits
+    // from spawned request handlers (which also run in the root region).
+    #[runtime::test]
+    async fn semaphore_permit_acquisition_never_panics_in_root_region() {
+        let sem = Arc::new(super::sync::Semaphore::new(2));
+
+        // Owned async acquire while another owned permit is held.
+        let first = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("owned async acquire in root region should not panic");
+        let second = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("second owned async acquire should not panic");
+        assert_eq!(sem.available_permits(), 0);
+
+        // Non-blocking try paths must also avoid the root-region obligation.
+        assert!(Arc::clone(&sem).try_acquire_owned().is_err());
+        assert!(sem.try_acquire().is_err());
+
+        drop(first);
+        assert_eq!(sem.available_permits(), 1);
+        let borrowed = sem
+            .try_acquire()
+            .expect("borrowed try_acquire in root region should not panic");
+        assert_eq!(sem.available_permits(), 0);
+
+        drop(second);
+        drop(borrowed);
+        assert_eq!(sem.available_permits(), 2);
     }
 
     // ─────────────────────────────────────────────────────────────────────

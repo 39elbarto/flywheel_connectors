@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use fwc::proof_readiness::{
     MissingPrerequisiteKind, ProofClass, ProofReadinessReportOptions, ProofReadinessStatus,
-    build_readiness_report, load_targets_manifest,
+    build_readiness_report, load_targets_manifest, system_time_from_unix_secs,
 };
 use jsonschema::Validator;
 use serde_json::{Value, json};
@@ -210,6 +210,73 @@ fn test_rejects_stale_or_wrong_schema_artifact() {
             .iter()
             .any(|item| item.kind == MissingPrerequisiteKind::Freshness)
     );
+}
+
+#[test]
+fn test_committed_filename_date_marks_stale_proof_despite_fresh_mtime() {
+    // Regression (fz3ux): a committed proof whose filename date is far in the
+    // past must be reported stale even though its filesystem mtime is "now"
+    // (which is exactly the state after a fresh clone or CI checkout). Under the
+    // old mtime-only check this artifact would look freshly generated.
+    let temp = tempdir().expect("temp repo root");
+    write_json_artifact(
+        temp.path(),
+        "artifacts/perf/pq_signing/csd-2020-01-01-abcdef0.json",
+        &json!({
+            "schema_version": "fcp.pq-signing-overhead.v1",
+            "machine_class": "csd",
+            "git_sha": "0123456789abcdef0123456789abcdef01234567",
+            "sample_count": 10000,
+            "summary": { "p50_us": 10, "p99_us": 20 }
+        }),
+    );
+
+    // `now` is the real wall clock (always years after 2020-01-01), while the
+    // just-written file's mtime is the current instant.
+    let report = build_report_for_at(temp.path(), "pq_signing_csd", SystemTime::now());
+    let target = &report.targets[0];
+    assert_eq!(target.status, ProofReadinessStatus::MissingPrerequisites);
+    assert!(target.satisfied_artifacts.is_empty());
+    assert!(
+        target
+            .missing
+            .iter()
+            .any(|item| item.kind == MissingPrerequisiteKind::Freshness),
+        "committed filename date must drive the freshness verdict, not fs mtime"
+    );
+}
+
+#[test]
+fn test_committed_filename_date_within_window_is_fresh() {
+    // A committed proof whose filename date falls inside the freshness window is
+    // satisfied — the date parser must not over-reject valid recent artifacts.
+    let temp = tempdir().expect("temp repo root");
+    write_json_artifact(
+        temp.path(),
+        "artifacts/perf/pq_signing/csd-2026-06-20-abcdef0.json",
+        &json!({
+            "schema_version": "fcp.pq-signing-overhead.v1",
+            "machine_class": "csd",
+            "git_sha": "0123456789abcdef0123456789abcdef01234567",
+            "sample_count": 10000,
+            "summary": { "p50_us": 10, "p99_us": 20 }
+        }),
+    );
+
+    // 2026-06-25T00:00:00Z — five days after the filename date, inside the
+    // 30-day window for the csd target.
+    let now = system_time_from_unix_secs(1_782_345_600);
+    let report = build_report_for_at(temp.path(), "pq_signing_csd", now);
+    let target = &report.targets[0];
+    assert_eq!(target.status, ProofReadinessStatus::Ready);
+    assert!(
+        target
+            .missing
+            .iter()
+            .all(|item| item.kind != MissingPrerequisiteKind::Freshness),
+        "recent committed filename date must be treated as fresh"
+    );
+    assert_eq!(target.satisfied_artifacts.len(), 1);
 }
 
 #[test]

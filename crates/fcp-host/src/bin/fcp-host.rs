@@ -534,7 +534,7 @@ impl SubprocessConnector {
                 })?;
                 if let Some(error) = response.get("error") {
                     return Err(HostError::RegistryError(format!(
-                        "connector error: {error}"
+                        "{CONNECTOR_JSON_RPC_ERROR_PREFIX}{error}"
                     )));
                 }
                 Ok(response.get("result").cloned().unwrap_or(json!({})))
@@ -848,17 +848,34 @@ impl NativeWarmPoolConnector {
                 Ok(response)
             }
             Err(error) => {
-                tracing::warn!(
-                    event = WARM_POOL_EVIDENCE_EVENT,
-                    action = "evicted",
-                    connector_id = %entry.key.connector_id,
-                    zone_hash = %warm_pool_log_label("zone", &entry.key.zone),
-                    manifest_hash = %entry.key.manifest_hash,
-                    reason = "invoke_error",
-                    idle_ms = entry.snapshot(Instant::now()).idle_ms,
-                    rss_bytes = entry.rss_bytes,
-                    "dropping native warm-pool entry after invoke error"
-                );
+                if warm_entry_survives_error(&error) {
+                    // Request-level rejection (shed/circuit/bulkhead) or a
+                    // connector JSON-RPC error — the subprocess is healthy, so
+                    // return it to the pool instead of destroying warm capacity.
+                    entry.last_used_at = Instant::now();
+                    tracing::debug!(
+                        event = WARM_POOL_EVIDENCE_EVENT,
+                        action = "retained",
+                        connector_id = %entry.key.connector_id,
+                        zone_hash = %warm_pool_log_label("zone", &entry.key.zone),
+                        manifest_hash = %entry.key.manifest_hash,
+                        reason = "request_level_invoke_error",
+                        "retaining native warm-pool entry after request-level invoke error"
+                    );
+                    self.insert_pool_entry(entry).await;
+                } else {
+                    tracing::warn!(
+                        event = WARM_POOL_EVIDENCE_EVENT,
+                        action = "evicted",
+                        connector_id = %entry.key.connector_id,
+                        zone_hash = %warm_pool_log_label("zone", &entry.key.zone),
+                        manifest_hash = %entry.key.manifest_hash,
+                        reason = "fatal_invoke_error",
+                        idle_ms = entry.snapshot(Instant::now()).idle_ms,
+                        rss_bytes = entry.rss_bytes,
+                        "dropping native warm-pool entry after fatal invoke error"
+                    );
+                }
                 Err(error)
             }
         }
@@ -874,7 +891,15 @@ impl NativeWarmPoolConnector {
                 self.insert_pool_entry(entry).await;
                 Ok(response)
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                if warm_entry_survives_error(&error) {
+                    // Same taxonomy as `invoke`: a healthy subprocess that
+                    // merely rejected or errored this request stays warm.
+                    entry.last_used_at = Instant::now();
+                    self.insert_pool_entry(entry).await;
+                }
+                Err(error)
+            }
         }
     }
 
@@ -3740,6 +3765,11 @@ enum ResponseIdDisposition {
 
 const CONNECTOR_RPC_QUEUE_CAPACITY: usize = 64;
 const CONNECTOR_RPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Message prefix stamped on `HostError::RegistryError` when a connector replies
+/// with a JSON-RPC error object (as opposed to a transport/dispatcher failure).
+/// Single-sourced so the warm-pool retention classifier and the constructor can
+/// never drift apart. See [`warm_entry_survives_error`].
+const CONNECTOR_JSON_RPC_ERROR_PREFIX: &str = "connector error: ";
 const CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES: usize = 64 * 1024;
 const CONNECTOR_RPC_MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
 
@@ -14301,6 +14331,42 @@ fn map_resilience_error(
             "connector '{connector_id}' method '{method}' timed out after {}ms",
             timeout.as_millis()
         )),
+    }
+}
+
+/// Decides whether a connector subprocess is healthy enough to return to the
+/// warm pool after an `invoke`/`simulate` error.
+///
+/// Evicting a warm entry on *any* error is a self-inflicted wound: a
+/// request-level rejection (resilience load-shed / circuit-open / bulkhead-full
+/// / queue-timeout, or a connector JSON-RPC error reply) leaves the subprocess
+/// fully alive. Dropping it there destroys warm capacity for no reason — and
+/// because those rejections are *most* frequent exactly when the host is under
+/// load, the eviction storm feeds back into more cold starts and more pressure.
+/// Only genuinely process-fatal failures (dispatcher gone, transport/IO error,
+/// unexpected internal state) should drop the entry.
+fn warm_entry_survives_error(error: &HostError) -> bool {
+    match error {
+        // Every resilience-layer rejection maps to `Unavailable`
+        // (see `map_resilience_error`); the process itself is healthy.
+        HostError::Unavailable(_)
+        // Authorization / zone / filter / lookup denials are request-level.
+        | HostError::PreflightFailed(_)
+        | HostError::ZoneEnvelopeRequired(_)
+        | HostError::InvalidFilter(_)
+        | HostError::ConnectorNotFound(_)
+        | HostError::CacheError(_) => true,
+        // `RegistryError` is overloaded: a connector that replied with a
+        // JSON-RPC error is alive and reusable (retain), whereas a
+        // dispatcher/transport/IO failure means the subprocess is unusable
+        // (drop). Distinguish by the single message the JSON-RPC-error path
+        // stamps; any other `RegistryError` — including a future message change
+        // — falls through to the safe "drop".
+        HostError::RegistryError(message) => {
+            message.starts_with(CONNECTOR_JSON_RPC_ERROR_PREFIX)
+        }
+        // Unexpected internal/protocol state: assume the subprocess is broken.
+        HostError::Internal(_) => false,
     }
 }
 
@@ -25113,6 +25179,68 @@ done"#;
         );
         assert!(matches!(error, HostError::Unavailable(_)));
         assert!(error.to_string().contains("load shed"));
+    }
+
+    #[test]
+    fn warm_entry_survives_request_level_errors_but_not_fatal_ones() {
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+
+        // Regression (z7kz4): every resilience-layer rejection maps to
+        // `Unavailable` and must keep the warm entry alive. Shedding a request
+        // under load must not also destroy warm capacity, or the eviction storm
+        // feeds back into more cold starts and more pressure.
+        let resilience_rejections: [ResilienceError<HostError>; 7] = [
+            ResilienceError::LoadShed {
+                load_per_mille: 950,
+            },
+            ResilienceError::CircuitOpen {
+                retry_after: Duration::from_millis(500),
+            },
+            ResilienceError::BulkheadFull,
+            ResilienceError::QueueTimeout {
+                timeout: Duration::from_millis(50),
+            },
+            ResilienceError::HalfOpenLimited,
+            ResilienceError::Unhealthy {
+                reason: "probe failed".to_string(),
+            },
+            ResilienceError::TimedOut {
+                timeout: Duration::from_millis(100),
+            },
+        ];
+        for rejection in resilience_rejections {
+            let error = map_resilience_error(&connector_id, "invoke", rejection);
+            assert!(
+                warm_entry_survives_error(&error),
+                "resilience rejection `{error}` should retain the warm entry"
+            );
+        }
+
+        // A connector that replied with a JSON-RPC error object is still alive.
+        let connector_reply = HostError::RegistryError(format!(
+            "{CONNECTOR_JSON_RPC_ERROR_PREFIX}{{\"code\":-32000,\"message\":\"bad request\"}}"
+        ));
+        assert!(warm_entry_survives_error(&connector_reply));
+
+        // Authorization / zone / filter denials are request-level.
+        assert!(warm_entry_survives_error(&HostError::PreflightFailed(
+            "capability denied".into()
+        )));
+        assert!(warm_entry_survives_error(&HostError::ZoneEnvelopeRequired(
+            "no allowed_zones".into()
+        )));
+
+        // Transport/dispatcher failures and unexpected internal state are fatal:
+        // the subprocess is unusable and must be dropped.
+        assert!(!warm_entry_survives_error(&HostError::RegistryError(
+            "connector dispatcher unavailable".into()
+        )));
+        assert!(!warm_entry_survives_error(&HostError::RegistryError(
+            "connector IO error: broken pipe".into()
+        )));
+        assert!(!warm_entry_survives_error(&HostError::Internal(
+            "protocol desync".into()
+        )));
     }
 
     // ── parse_connector_id ──

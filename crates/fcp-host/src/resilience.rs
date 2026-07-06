@@ -543,6 +543,13 @@ impl BackpressureFairnessContext {
         let shed_count = usize::try_from(self.shed_count).unwrap_or(usize::MAX);
         let total_count = usize::try_from(self.admitted_count.saturating_add(self.shed_count))
             .unwrap_or(usize::MAX);
+        if total_count == 0 {
+            // No traffic yet in this window means nothing has been shed. Without
+            // this guard `ratio_per_mille(0, 0)` returns 1000 (its full-pressure
+            // sentinel for a zero denominator), which would hand a fresh, empty
+            // window a bogus 50% starvation credit in `pressure_per_mille`.
+            return 0;
+        }
         to_u16(ratio_per_mille(shed_count, total_count))
     }
 
@@ -2291,12 +2298,21 @@ impl CircuitBreaker {
         inner.probe_in_flight = false;
         inner.successes = 0;
 
-        let opened = if inner.state == CircuitState::HalfOpen {
-            open_circuit(&mut inner, &self.config)
-        } else {
-            inner.failures = inner.failures.saturating_add(1);
-            inner.failures >= self.config.failure_threshold
-                && open_circuit(&mut inner, &self.config)
+        let opened = match inner.state {
+            // A failure from a request that was admitted while Closed can complete
+            // *after* other concurrent failures have already tripped the breaker.
+            // The breaker is already open — such a straggler must not re-run
+            // `open_circuit` (which would reset `opened_until`, pushing the first
+            // recovery probe later than the configured `open_duration`, and
+            // double-count `circuit_opened`). Mirror `record_success`, which also
+            // no-ops in the Open state.
+            CircuitState::Open => false,
+            CircuitState::HalfOpen => open_circuit(&mut inner, &self.config),
+            CircuitState::Closed => {
+                inner.failures = inner.failures.saturating_add(1);
+                inner.failures >= self.config.failure_threshold
+                    && open_circuit(&mut inner, &self.config)
+            }
         };
         drop(inner);
         opened
@@ -2316,6 +2332,16 @@ struct Bulkhead {
     permits: Arc<Semaphore>,
     config: BulkheadConfig,
     queued: AtomicUsize,
+}
+
+/// Decrements the bulkhead's `queued` counter on drop, so the count is released
+/// on both normal completion and cancellation of the queue-wait future.
+struct QueuedGuard<'a>(&'a AtomicUsize);
+
+impl Drop for QueuedGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2344,13 +2370,21 @@ impl Bulkhead {
             return Err(BulkheadAcquireError::QueueFull);
         }
 
+        // Decrement `queued` via a drop guard rather than a plain statement after
+        // the await: if the enclosing `execute` future is cancelled (e.g. client
+        // disconnect) while parked in the queue wait, a bare `fetch_sub` would
+        // never run, permanently over-counting `queued`. That phantom count
+        // eventually pins `queued >= max_queued`, so every later waiter is
+        // rejected with `QueueFull` even with no real waiters (the queue bricks),
+        // and it also inflates `pressure_per_mille`. The guard runs on both normal
+        // completion and cancellation.
+        let _queued_guard = QueuedGuard(&self.queued);
+
         let permit_result = time::timeout(
             self.config.queue_timeout,
             Arc::clone(&self.permits).acquire_owned(),
         )
         .await;
-
-        self.queued.fetch_sub(1, Ordering::SeqCst);
 
         match permit_result {
             Ok(Ok(permit)) => Ok(permit),
@@ -4123,6 +4157,32 @@ mod tests {
     }
 
     #[test]
+    fn shed_ratio_zero_traffic_grants_no_starvation_credit() {
+        // Regression: a fresh fairness window that has processed no traffic has,
+        // by definition, shed nothing. `ratio_per_mille(0, 0)` returns its
+        // zero-denominator sentinel of 1000, so without the zero-traffic guard
+        // `shed_ratio_per_mille` would report full shedding and hand the empty
+        // window a bogus 500-per-mille starvation credit that masks real
+        // imbalance in `pressure_per_mille`.
+        let ctx = BackpressureFairnessContext::new(BackpressureFairnessContextInput {
+            connector_class: "request_response_saas".to_string(),
+            zone_id: "z:work".to_string(),
+            capability: "cap".to_string(),
+            connector_class_pressure_per_mille: 0,
+            zone_share_per_mille: 400,
+            capability_share_per_mille: 0,
+            target_share_per_mille: 0,
+            admitted_count: 0,
+            shed_count: 0,
+        });
+
+        assert_eq!(ctx.shed_ratio_per_mille(), 0);
+        // imbalance = 400, saturation = 0, starvation_credit = 0 → pressure = 400.
+        // (A phantom 1000 shed ratio would give a 500 credit → pressure = 0.)
+        assert_eq!(ctx.pressure_per_mille(), 400);
+    }
+
+    #[test]
     fn fairness_load_shedding_evidence_record_is_jsonl_and_redacted() {
         let fairness = BackpressureFairnessContext::new(BackpressureFairnessContextInput {
             connector_class: "request_response_saas".to_string(),
@@ -4647,6 +4707,32 @@ mod tests {
     }
 
     #[test]
+    fn record_failure_on_already_open_circuit_is_noop() {
+        // Regression: a request admitted while the breaker was still Closed can
+        // fail *after* concurrent failures have already tripped the breaker. Such
+        // a straggler must not re-run `open_circuit` — that would push
+        // `opened_until` later than the configured `open_duration` (delaying the
+        // first recovery probe) and double-count the circuit-opened transition.
+        let cb = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(30),
+            ..CircuitBreakerConfig::default()
+        });
+
+        // First failure trips the breaker and reports the open transition.
+        assert!(cb.record_failure());
+        assert_eq!(cb.state(), CircuitState::Open);
+        let opened_until = lock_unpoisoned(&cb.inner).opened_until;
+        assert!(opened_until.is_some());
+
+        // The straggler failure is a no-op: it reports `false` (no new
+        // transition) and leaves `opened_until` untouched.
+        assert!(!cb.record_failure());
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert_eq!(lock_unpoisoned(&cb.inner).opened_until, opened_until);
+    }
+
+    #[test]
     fn cancel_inflight_probe_clears_probe_flag() {
         let cb = CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 1,
@@ -4769,6 +4855,30 @@ mod tests {
         // Give it a moment to enqueue
         time::sleep(Duration::from_millis(10)).await;
         assert!(bh.queued.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn bulkhead_queued_released_when_wait_future_cancelled() {
+        // Regression: if the enclosing request future is cancelled (e.g. client
+        // disconnect) while parked in the queue wait, the `queued` counter must
+        // still be released. A bare post-await `fetch_sub` would be skipped on
+        // cancellation, permanently over-counting `queued` until it pins at
+        // `max_queued` and bricks the queue with phantom `QueueFull` rejections.
+        let bh = Bulkhead::new(BulkheadConfig {
+            max_concurrent: 1,
+            max_queued: 4,
+            queue_timeout: Duration::from_secs(30),
+        });
+        // Hold the only permit so the next acquire must enqueue and park.
+        let _hold = bh.acquire().await.unwrap();
+
+        // Cancel the waiter by timing out the *enclosing* future well before the
+        // 30s internal queue_timeout could ever fire. This drops the parked
+        // acquire future mid-wait, which must run the queued drop guard.
+        let cancelled = time::timeout(Duration::from_millis(20), bh.acquire()).await;
+        assert!(cancelled.is_err());
+
+        assert_eq!(bh.queued.load(Ordering::SeqCst), 0);
     }
 
     #[fcp_async_core::runtime::test]

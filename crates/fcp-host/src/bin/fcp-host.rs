@@ -797,6 +797,18 @@ impl NativeWarmPoolConnector {
         Ok(connector)
     }
 
+    /// Top the warm pool back up toward `prewarm.min_idle`.
+    ///
+    /// This is count-aware: it spawns only the current deficit
+    /// (`min_idle - live_entries`), never over-provisioning past the target, and
+    /// is a cheap lock + length check when the pool is already at or above it. At
+    /// initial spawn the pool is empty so it spawns the full `min_idle` target.
+    /// It is also called after a fatal invoke/simulate error drops an entry, so
+    /// the min_idle warm-start guarantee is restored rather than silently
+    /// decaying to cold starts (bead warmpool-min-idle-restore). Each spawned
+    /// entry is inserted through [`insert_pool_entry`], which re-applies
+    /// retention, so the pressure/RSS controller keeps final say over whether the
+    /// replacement is actually retained.
     async fn maintain_min_idle(&self) -> HostResult<()> {
         let zones = self
             .config
@@ -809,11 +821,30 @@ impl NativeWarmPoolConnector {
         }
 
         let target = usize::try_from(self.config.prewarm.min_idle).unwrap_or(usize::MAX);
-        for zone in zones.iter().cycle().take(target) {
+        let current = self.entries.lock().await.len();
+        let Some(deficit) = target.checked_sub(current).filter(|deficit| *deficit > 0) else {
+            return Ok(());
+        };
+        for zone in zones.iter().cycle().take(deficit) {
             let entry = self.spawn_pool_entry(zone).await?;
             self.insert_pool_entry(entry).await;
         }
         Ok(())
+    }
+
+    /// Best-effort warm-pool top-up after a fatal error destroyed an entry. A
+    /// respawn failure must never mask the original invoke/simulate error, so
+    /// this swallows and logs the error rather than propagating it.
+    async fn replenish_after_fatal_drop(&self) {
+        if let Err(error) = self.maintain_min_idle().await {
+            tracing::warn!(
+                event = WARM_POOL_EVIDENCE_EVENT,
+                action = "replenish_failed",
+                connector_id = %self.connector_id,
+                error = %error,
+                "failed to replenish native warm pool toward min_idle after fatal error"
+            );
+        }
     }
 
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
@@ -875,6 +906,7 @@ impl NativeWarmPoolConnector {
                         rss_bytes = entry.rss_bytes,
                         "dropping native warm-pool entry after fatal invoke error"
                     );
+                    self.replenish_after_fatal_drop().await;
                 }
                 Err(error)
             }
@@ -897,6 +929,10 @@ impl NativeWarmPoolConnector {
                     // merely rejected or errored this request stays warm.
                     entry.last_used_at = Instant::now();
                     self.insert_pool_entry(entry).await;
+                } else {
+                    // Fatal error dropped the entry; restore warm capacity
+                    // toward min_idle so it does not decay to cold starts.
+                    self.replenish_after_fatal_drop().await;
                 }
                 Err(error)
             }
@@ -23531,6 +23567,72 @@ done"#;
         let pooled_after_second = only_native_warm_pool_entry(&connector).await;
         assert!(Arc::ptr_eq(&prewarmed, &pooled_after_second));
         assert_eq!(subprocess_handshake_count(&pooled_after_second).await, 1);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_maintain_min_idle_is_count_aware_and_replenishes() {
+        // Regression (bead warmpool-min-idle-restore): maintain_min_idle must
+        // (a) not over-provision past min_idle when already satisfied, and
+        // (b) respawn the deficit after an entry is dropped, restoring the
+        // warm-start guarantee instead of decaying to cold starts.
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping native warm-pool min_idle test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool-min-idle:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        // min_idle 1 with max_idle headroom (3) so an accidental over-provision
+        // would be visible rather than masked by max_idle retention.
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            3,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+
+        // Startup prewarm fills exactly min_idle.
+        assert_eq!(connector.entries.lock().await.len(), 1);
+
+        // Count-aware: calling maintain_min_idle while already at target must not
+        // over-provision. Pre-fix it spawned an unconditional `min_idle` more,
+        // which max_idle=3 retention would have kept, leaving 2 entries.
+        connector
+            .maintain_min_idle()
+            .await
+            .expect("maintain_min_idle at target should succeed");
+        assert_eq!(
+            connector.entries.lock().await.len(),
+            1,
+            "maintain_min_idle must not over-provision past min_idle"
+        );
+
+        // Simulate a fatal drop by removing the only entry, then replenish.
+        {
+            let mut entries = connector.entries.lock().await;
+            entries.pop();
+            assert_eq!(entries.len(), 0);
+        }
+        connector
+            .maintain_min_idle()
+            .await
+            .expect("replenishment should respawn the deficit");
+        assert_eq!(
+            connector.entries.lock().await.len(),
+            1,
+            "maintain_min_idle must restore the pool to min_idle after a drop"
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

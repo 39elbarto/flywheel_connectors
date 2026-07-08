@@ -394,6 +394,15 @@ impl FcpStoreConnectorStateStore {
             return Ok(Some((object_id, root)));
         }
 
+        // Sample the change generation *before* scanning. A concurrent writer
+        // bumps the generation only after the new root object is durably
+        // stored (append_object_inner: store_root_with_retry then
+        // publish_change(RootUpdated)). Caching under this pre-scan value means
+        // any root update that races our scan advances the generation past it,
+        // so the next read misses the cache and rescans rather than serving
+        // this now-stale result as fresh.
+        let generation = self.change_bus.generation();
+
         let mut best: Option<(ObjectId, ConnectorStateRoot, Option<u64>)> = None;
 
         for object_id in self.object_store.list_zone(&self.zone_id).await {
@@ -426,7 +435,7 @@ impl FcpStoreConnectorStateStore {
 
         let root = best.map(|(object_id, root, _head_seq)| (object_id, root));
         if let Some((object_id, root)) = &root {
-            self.cache_root(*object_id, root.clone());
+            self.cache_root(generation, *object_id, root.clone());
         }
         Ok(root)
     }
@@ -440,9 +449,9 @@ impl FcpStoreConnectorStateStore {
             .map(|cached| (cached.object_id, cached.root.clone()))
     }
 
-    fn cache_root(&self, object_id: ObjectId, root: ConnectorStateRoot) {
+    fn cache_root(&self, generation: u64, object_id: ObjectId, root: ConnectorStateRoot) {
         *self.root_cache.write() = Some(CachedConnectorStateRoot {
-            generation: self.change_bus.generation(),
+            generation,
             object_id,
             root,
         });
@@ -822,9 +831,21 @@ impl FcpStoreConnectorStateStore {
     }
 
     async fn compact_inner(&self, before_seq: u64) -> Result<usize> {
+        // The current head is still referenced by the root, so relaxing its
+        // retention would let a retention-only GC strand the live chain
+        // (`read_root`/`current_head` would then fail with `MissingHead`).
+        // Honor the documented "non-head chain entries" contract and never
+        // touch the head, even when `before_seq` exceeds the head sequence.
+        let head_object_id = match self.read_root().await? {
+            Some((_root_id, root)) => root.head,
+            None => return Ok(0),
+        };
         let states = self.read_chain(None, usize::MAX).await?;
         let mut updated = 0;
         for (object_id, state) in states {
+            if head_object_id.as_ref() == Some(&object_id) {
+                continue;
+            }
             if state.seq < before_seq {
                 self.object_store
                     .set_retention(&object_id, RetentionClass::Ephemeral)
@@ -2719,6 +2740,33 @@ mod tests {
         let new_meta = run_async(object_store.get_storage_meta(&head1)).unwrap();
         assert_eq!(old_meta.retention, RetentionClass::Ephemeral);
         assert_eq!(new_meta.retention, RetentionClass::Pinned);
+    }
+
+    #[test]
+    fn compact_never_marks_head_even_when_before_seq_exceeds_head() {
+        // Per the documented contract, compact only relaxes retention on
+        // non-head chain entries. A `before_seq` past the head sequence must
+        // still leave the head Pinned, or a retention-only GC could delete the
+        // live head and strand the root (MissingHead).
+        let object_store = store();
+        let state_store = test_store(object_store.clone());
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
+
+        let count = run_async(state_store.compact(u64::MAX)).unwrap();
+
+        // Only the non-head predecessor is relaxed; the head is preserved.
+        assert_eq!(count, 1);
+        let old_meta = run_async(object_store.get_storage_meta(&head0)).unwrap();
+        let head_meta = run_async(object_store.get_storage_meta(&head1)).unwrap();
+        assert_eq!(old_meta.retention, RetentionClass::Ephemeral);
+        assert_eq!(
+            head_meta.retention,
+            RetentionClass::Pinned,
+            "head must remain Pinned even when before_seq exceeds its sequence"
+        );
+        // The chain is still fully resolvable through the preserved head.
+        assert!(run_async(state_store.read_root()).unwrap().is_some());
     }
 
     #[test]

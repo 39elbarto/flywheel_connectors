@@ -1339,13 +1339,20 @@ impl ObjectStoreCursorBackend {
     }
 
     fn connector_state_store(&self) -> fcp_store::FcpStoreConnectorStateStore {
-        let store = fcp_store::FcpStoreConnectorStateStore::new(
+        let mut store = fcp_store::FcpStoreConnectorStateStore::new(
             Arc::clone(&self.object_store),
             self.object_id_key,
             self.connector_id.clone(),
             self.zone_id.clone(),
         )
         .with_retention(self.retention);
+
+        // Pin canonical reads to the verified append writer so a zone member
+        // holding the shared object-id key cannot plant a self-signed chain
+        // that this backend would then trust as canonical state.
+        if let Some(authorization) = &self.write_authorization {
+            store = store.with_trusted_writer_keys([authorization.writer_public_key()]);
+        }
 
         if let Some(instance_id) = &self.instance_id {
             store.with_instance_id(instance_id.clone())
@@ -1489,6 +1496,16 @@ impl ObjectStoreCursorBackend {
 
             if let Err(err) = self.validate_loaded_state_object(object_id, &stored, &state) {
                 tracing::warn!(error = %err, object_id = %object_id, "Rejecting tampered connector state object");
+                continue;
+            }
+
+            if let Some(authorization) = &self.write_authorization
+                && state.writer_public_key != authorization.writer_public_key()
+            {
+                tracing::warn!(
+                    object_id = %object_id,
+                    "Rejecting connector state object signed by untrusted writer"
+                );
                 continue;
             }
 

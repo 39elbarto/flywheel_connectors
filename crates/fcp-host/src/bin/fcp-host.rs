@@ -723,6 +723,7 @@ impl SubprocessConnector {
 
 const NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES: u64 = 96 * 1024 * 1024;
 const NATIVE_WARM_POOL_OPERATION: &str = "fcp.host.warm_pool/checkout";
+const NATIVE_WARM_POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct NativeWarmPoolEntry {
@@ -731,6 +732,11 @@ struct NativeWarmPoolEntry {
     created_at: Instant,
     last_used_at: Instant,
     rss_bytes: u64,
+    /// Last observed subprocess health, refreshed at checkout and by the
+    /// background maintenance sweep so retention planning sees real liveness
+    /// instead of a synthetic always-Ready snapshot (bead
+    /// warmpool-snapshot-ready-imtdj).
+    last_health: PrewarmHealthState,
 }
 
 impl NativeWarmPoolEntry {
@@ -741,6 +747,7 @@ impl NativeWarmPoolEntry {
             self.rss_bytes,
         );
         snapshot.age_ms = duration_ms(now.saturating_duration_since(self.created_at));
+        snapshot.health = self.last_health;
         snapshot
     }
 }
@@ -759,6 +766,10 @@ struct NativeWarmPoolConnector {
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
     controller: AdaptiveWarmPoolController,
     entries: Mutex<Vec<NativeWarmPoolEntry>>,
+    /// Background maintenance task handle. Dropping the pool drops the handle,
+    /// which aborts the task (the task itself only holds a `Weak` back-pointer
+    /// so it never keeps the pool alive).
+    maintainer: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl NativeWarmPoolConnector {
@@ -766,7 +777,7 @@ impl NativeWarmPoolConnector {
         config: ConnectorConfig,
         resilience: Arc<ResilienceLayer>,
         capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
-    ) -> HostResult<Self> {
+    ) -> HostResult<Arc<Self>> {
         let control = Arc::new(
             SubprocessConnector::spawn(
                 config.clone(),
@@ -781,7 +792,7 @@ impl NativeWarmPoolConnector {
             .max(1);
         let global_rss_cap_bytes = NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES
             .saturating_mul(u64::from(config.prewarm.max_idle.max(1)));
-        let connector = Self {
+        let connector = Arc::new(Self {
             config,
             connector_id,
             control,
@@ -792,9 +803,81 @@ impl NativeWarmPoolConnector {
                 global_rss_cap_bytes,
             )),
             entries: Mutex::new(Vec::new()),
-        };
+            maintainer: Mutex::new(None),
+        });
         connector.maintain_min_idle().await?;
+        let handle = Self::start_maintainer(&connector);
+        *connector.maintainer.lock().await = Some(handle);
         Ok(connector)
+    }
+
+    /// Spawn the periodic warm-pool maintainer.
+    ///
+    /// Each tick refreshes cached health for idle pooled entries, re-plans
+    /// retention so liveness-aware eviction can act on the refreshed truth
+    /// (bead warmpool-snapshot-ready-imtdj), and regrows the pool toward
+    /// `prewarm.min_idle` once pressure allows (bead
+    /// warmpool-pressure-regrow-hyjqg). The task holds only a `Weak` reference
+    /// and exits when the pool is dropped.
+    fn start_maintainer(connector: &Arc<Self>) -> JoinHandle<()> {
+        let weak = Arc::downgrade(connector);
+        task::spawn(async move {
+            loop {
+                fcp_async_core::time::sleep(NATIVE_WARM_POOL_MAINTENANCE_INTERVAL).await;
+                let Some(connector) = weak.upgrade() else {
+                    break;
+                };
+                connector.run_maintenance_once().await;
+            }
+        })
+    }
+
+    /// One maintenance pass: refresh idle-entry health, apply retention, and
+    /// regrow toward `min_idle` when the pressure controller permits.
+    async fn run_maintenance_once(&self) {
+        self.refresh_idle_entry_health().await;
+        let pool_enabled = {
+            let mut entries = self.entries.lock().await;
+            self.apply_retention_locked(&mut entries)
+        };
+        // Regrow only while the pressure controller is not actively shedding
+        // the pool: inline replenishment during sustained pressure would fight
+        // the controller (spawn -> immediate re-evict thrash).
+        if pool_enabled && let Err(error) = self.maintain_min_idle().await {
+            tracing::warn!(
+                event = WARM_POOL_EVIDENCE_EVENT,
+                action = "regrow_failed",
+                connector_id = %self.connector_id,
+                error = %error,
+                "failed to regrow native warm pool toward min_idle during maintenance"
+            );
+        }
+    }
+
+    /// Probe the health of currently pooled entries and cache the result so
+    /// retention planning sees real liveness. Probes run without holding the
+    /// pool lock; an entry checked out mid-probe is simply skipped.
+    async fn refresh_idle_entry_health(&self) {
+        let probes: Vec<Arc<SubprocessConnector>> = {
+            let entries = self.entries.lock().await;
+            entries
+                .iter()
+                .map(|entry| Arc::clone(&entry.connector))
+                .collect()
+        };
+        for connector in probes {
+            let health = match connector.health().await {
+                Ok(snapshot) => prewarm_health_state(&snapshot),
+                Err(_) => PrewarmHealthState::Failed,
+            };
+            let mut entries = self.entries.lock().await;
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| Arc::ptr_eq(&entry.connector, &connector))
+            {
+                entry.last_health = health;
+            }
+        }
     }
 
     /// Top the warm pool back up toward `prewarm.min_idle`.
@@ -975,13 +1058,14 @@ impl NativeWarmPoolConnector {
 
     async fn try_admit_entry(
         &self,
-        entry: NativeWarmPoolEntry,
+        mut entry: NativeWarmPoolEntry,
         zone: &ZoneId,
     ) -> HostResult<Option<NativeWarmPoolCheckout>> {
         let health = match entry.connector.health().await {
             Ok(snapshot) => prewarm_health_state(&snapshot),
             Err(_) => PrewarmHealthState::Failed,
         };
+        entry.last_health = health;
         let observation = PrewarmCheckoutObservation {
             pool_state: PrewarmPoolState::WarmHit,
             manifest: PrewarmManifestState::Current,
@@ -1037,6 +1121,7 @@ impl NativeWarmPoolConnector {
             created_at: now,
             last_used_at: now,
             rss_bytes: NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES,
+            last_health: PrewarmHealthState::Ready,
         })
     }
 
@@ -1057,7 +1142,10 @@ impl NativeWarmPoolConnector {
         self.apply_retention_locked(&mut entries);
     }
 
-    fn apply_retention_locked(&self, entries: &mut Vec<NativeWarmPoolEntry>) {
+    /// Plan and apply retention over the locked pool. Returns `false` when the
+    /// pressure controller disabled the pool for this pass, so callers (the
+    /// background maintainer) know not to regrow into active pressure.
+    fn apply_retention_locked(&self, entries: &mut Vec<NativeWarmPoolEntry>) -> bool {
         let pressure = self.pressure_snapshot();
         let now = Instant::now();
         let snapshots = entries
@@ -1104,6 +1192,7 @@ impl NativeWarmPoolConnector {
             index += 1;
             keep
         });
+        !plan.disabled
     }
 
     fn pressure_snapshot(&self) -> WarmPoolPressureSnapshot {
@@ -1541,10 +1630,10 @@ impl ConnectorRuntime {
             )));
         }
         if config.prewarm.strategy == PrewarmStrategy::WarmPool {
-            return Ok(Self::NativeWarmPool(Arc::new(
+            return Ok(Self::NativeWarmPool(
                 NativeWarmPoolConnector::spawn(config, resilience, capability_verifying_key)
                     .await?,
-            )));
+            ));
         }
         Ok(Self::Native(Arc::new(
             SubprocessConnector::spawn(config, resilience, capability_verifying_key).await?,
@@ -23632,6 +23721,123 @@ done"#;
             connector.entries.lock().await.len(),
             1,
             "maintain_min_idle must restore the pool to min_idle after a drop"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_maintenance_sweep_evicts_dead_idle_entry() {
+        // Regression (bead warmpool-snapshot-ready-imtdj): retention planning
+        // used a synthetic always-Ready snapshot, so an entry whose subprocess
+        // died or degraded while idle in the pool was invisible to the
+        // controller and lingered in a retention slot. The maintenance sweep
+        // must probe idle entries, cache real health, and let retention evict.
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping native warm-pool sweep test");
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool-sweep:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.env.insert(
+            "FCP_TEST_CONNECTOR_HEALTH".to_string(),
+            "degraded".to_string(),
+        );
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            1,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+
+        // The freshly prewarmed entry starts with cached Ready health; the
+        // degraded subprocess is undetected until a sweep runs.
+        let dead_entry = only_native_warm_pool_entry(&connector).await;
+        {
+            let entries = connector.entries.lock().await;
+            assert_eq!(
+                entries[0].snapshot(Instant::now()).health,
+                PrewarmHealthState::Ready,
+                "pre-sweep snapshot reports the synthetic initial health"
+            );
+        }
+
+        connector.run_maintenance_once().await;
+
+        // The sweep marked the entry Failed, retention evicted it, and the
+        // maintainer regrew toward min_idle with a fresh subprocess.
+        let entries = connector.entries.lock().await;
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| Arc::ptr_eq(&entry.connector, &dead_entry)),
+            "dead idle entry must be evicted by the maintenance sweep"
+        );
+        assert_eq!(
+            entries.len(),
+            1,
+            "pool must be regrown toward min_idle after the sweep eviction"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_maintenance_regrows_toward_min_idle() {
+        // Regression (bead warmpool-pressure-regrow-hyjqg): after pressure/RSS
+        // eviction shrinks the pool, nothing regrew it toward min_idle once
+        // pressure subsided. The background maintenance pass must top the pool
+        // back up when the pressure controller is healthy, and stay idempotent
+        // when the pool is already at target.
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping native warm-pool regrow test");
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool-regrow:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            3,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+        assert_eq!(connector.entries.lock().await.len(), 1);
+
+        // Simulate a pressure eviction emptying the pool.
+        {
+            let mut entries = connector.entries.lock().await;
+            entries.clear();
+        }
+
+        connector.run_maintenance_once().await;
+        assert_eq!(
+            connector.entries.lock().await.len(),
+            1,
+            "maintenance must regrow the pool toward min_idle after eviction"
+        );
+
+        // A tick at target must not over-provision.
+        connector.run_maintenance_once().await;
+        assert_eq!(
+            connector.entries.lock().await.len(),
+            1,
+            "maintenance at target must stay idempotent"
         );
     }
 

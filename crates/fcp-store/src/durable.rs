@@ -841,6 +841,10 @@ impl DurableObjectStore {
 
 #[async_trait]
 impl ObjectStore for DurableObjectStore {
+    fn has_object_id_verifier(&self) -> bool {
+        self.verifier.is_some()
+    }
+
     async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
         self.record_mutation(ObjectWalOp::Put(Box::new(object)))
             .await

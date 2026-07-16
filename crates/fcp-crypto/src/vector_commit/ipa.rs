@@ -21,12 +21,19 @@ use sha2_09::{Digest, Sha512};
 
 use super::{SlotValue, VcError, VcScheme, VectorCommitmentScheme, check_domain};
 
-/// Map a 32-byte slot value into the ristretto scalar field by wide
-/// reduction. Deterministic, matching prover and verifier.
+/// Map a 32-byte slot value into the ristretto scalar field.
+///
+/// The value is hashed (domain-separated SHA-512) before wide reduction
+/// rather than reduced directly: a direct reduction mod the group order `l`
+/// (`l < 2^253`) would let two distinct 32-byte values `X` and `X + l` map
+/// to the same scalar, so a proof for one would verify for the other.
+/// Hashing first makes the map collision-resistant, restoring byte-level
+/// binding.
 fn slot_to_scalar(slot: &SlotValue) -> Scalar {
-    let mut wide = [0u8; 64];
-    wide[..32].copy_from_slice(slot);
-    Scalar::from_bytes_mod_order_wide(&wide)
+    let mut hasher = Sha512::new();
+    hasher.update(b"FCP-VC-IPA-SLOT-v1");
+    hasher.update(slot);
+    hash_to_scalar(hasher)
 }
 
 /// Derive generator `label[index]` by hashing to a ristretto point.

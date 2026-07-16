@@ -28,12 +28,21 @@ use sha2_09::{Digest, Sha512};
 
 use super::{SlotValue, VcError, VcScheme, VectorCommitmentScheme, check_domain};
 
-/// Map a 32-byte slot value into the BLS12-381 scalar field by wide
-/// reduction (zero-extend to 64 bytes, reduce mod r). Deterministic, so
-/// prover and verifier agree on the committed field element.
+/// Map a 32-byte slot value into the BLS12-381 scalar field.
+///
+/// The value is hashed (domain-separated SHA-512) before wide reduction,
+/// rather than reduced directly. A direct `from_bytes_wide` of the raw
+/// bytes reduces mod r (r < 2^255), so two distinct 32-byte values `X` and
+/// `X + r` would map to the same scalar and a proof for one would verify
+/// for the other — a value-binding gap. Hashing first makes the map
+/// collision-resistant, so distinct 32-byte values map to distinct scalars
+/// except with negligible probability, restoring byte-level binding.
 fn slot_to_scalar(slot: &SlotValue) -> Scalar {
+    let mut hasher = Sha512::new();
+    hasher.update(b"FCP-VC-KZG-SLOT-v1");
+    hasher.update(slot);
     let mut wide = [0u8; 64];
-    wide[..32].copy_from_slice(slot);
+    wide.copy_from_slice(&hasher.finalize());
     Scalar::from_bytes_wide(&wide)
 }
 
@@ -107,16 +116,27 @@ impl KzgSrs {
     ///
     /// # Errors
     ///
-    /// [`VcError::BadCommit`] if fewer than 2 powers are supplied.
+    /// [`VcError::BadCommit`] if fewer than 2 powers are supplied, or if the
+    /// zeroth power / `g2_one` are not the respective group generators
+    /// (`verify` assumes `g1_powers[0] = [1]₁` and `g2_one = [1]₂`).
     pub fn from_ceremony(
         g1_powers: Vec<G1Projective>,
         g2_one: G2Affine,
         g2_tau: G2Affine,
     ) -> Result<Self, VcError> {
+        let bad = || VcError::BadCommit {
+            scheme: VcScheme::Kzg,
+        };
         if g1_powers.len() < 2 {
-            return Err(VcError::BadCommit {
-                scheme: VcScheme::Kzg,
-            });
+            return Err(bad());
+        }
+        // `[τ^0]₁` must be the G1 generator and `[1]₂` the G2 generator;
+        // otherwise the pairing check in `verify` (which hard-codes the
+        // generators for the `v·[1]₁` and `z·[1]₂` terms) is inconsistent
+        // with `commit`. This is a cheap structural guard, not a full
+        // transcript verification (still the caller's responsibility).
+        if g1_powers[0].to_affine() != G1Affine::generator() || g2_one != G2Affine::generator() {
+            return Err(bad());
         }
         Ok(Self {
             g1_powers,
@@ -247,6 +267,14 @@ impl KzgVectorCommitment {
     /// or [`VcError::BadCommit`] if the SRS has too few powers.
     pub fn new(srs: Arc<KzgSrs>, domain: usize) -> Result<Self, VcError> {
         check_domain(domain)?;
+        // The domain must not exceed the field's 2-adicity: ω is
+        // `ROOT_OF_UNITY^(2^(S−k))` for `domain = 2^k`, which requires
+        // `k ≤ S` (else the shift underflows and ω would not be a
+        // primitive domain-th root). Unreachable in practice (needs a
+        // 2^S-power SRS) but fail closed.
+        if domain > (1usize << Scalar::S) {
+            return Err(VcError::UnsupportedDomain { size: domain });
+        }
         if srs.max_degree() < domain {
             return Err(VcError::BadCommit {
                 scheme: VcScheme::Kzg,

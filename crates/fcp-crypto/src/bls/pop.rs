@@ -151,6 +151,15 @@ impl PopRegistry {
             return Err(BlsError::SignerAlreadyRegistered { signer });
         }
 
+        // Defense-in-depth: reject a key already bound to a DIFFERENT signer
+        // ID, so one key-holder cannot register the same key under two IDs
+        // and thereby inflate a distinct-signer quorum count.
+        if let Some((existing_signer, _)) = self.keys.iter().find(|(_, pk)| **pk == public_key) {
+            return Err(BlsError::KeyAlreadyBound {
+                existing_signer: existing_signer.clone(),
+            });
+        }
+
         if proof.verify(&public_key).is_err() {
             return Err(BlsError::PopInvalid { signer });
         }
@@ -295,6 +304,28 @@ mod tests {
             registry.get("node-1").unwrap().to_bytes(),
             replacement.public_key().to_bytes()
         );
+    }
+
+    #[test]
+    fn test_same_key_under_two_ids_refused() {
+        // One key-holder must not be able to register the same key under
+        // two signer IDs (which would inflate a distinct-signer quorum
+        // count from a single key).
+        let sk = BlsSecretKey::generate();
+        let mut registry = PopRegistry::new();
+        registry
+            .register("node-a", sk.public_key(), &sk.prove_possession())
+            .unwrap();
+        let err = registry
+            .register("node-b", sk.public_key(), &sk.prove_possession())
+            .expect_err("same key under a second ID must be rejected");
+        assert_eq!(
+            err,
+            BlsError::KeyAlreadyBound {
+                existing_signer: "node-a".to_string()
+            }
+        );
+        assert_eq!(registry.len(), 1);
     }
 
     #[test]

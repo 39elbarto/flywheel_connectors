@@ -130,6 +130,17 @@ pub enum BlsError {
         signer: String,
     },
 
+    /// The public key being registered is already bound to a different
+    /// signer ID.
+    ///
+    /// Rejected so one key-holder cannot claim multiple signer slots (which
+    /// would let a single key satisfy a t-of-n *distinct-signer* threshold).
+    #[error("public key is already registered under signer '{existing_signer}'")]
+    KeyAlreadyBound {
+        /// The signer ID that already owns this public key.
+        existing_signer: String,
+    },
+
     /// An aggregation or verification was attempted over zero signers.
     #[error("aggregate operation requires at least one signer")]
     EmptySigners,

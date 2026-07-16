@@ -82,9 +82,20 @@ fn state_root_inclusion_proof() {
     // verifies (the integrity anchor beneath the vector commitment).
     let tree = MerkleTree::new(&values);
     assert_eq!(tree.root(), far_commitment.merkle_root);
-    let mproof = tree.prove(SLOT);
+    let mproof = tree.prove(SLOT).unwrap();
     assert!(MerkleTree::verify(
         &far_commitment.merkle_root,
+        N,
+        SLOT,
+        &values[SLOT],
+        &mproof
+    ));
+    // The Merkle fallback authenticates the index: the same proof must not
+    // verify at a different claimed slot.
+    assert!(!MerkleTree::verify(
+        &far_commitment.merkle_root,
+        N,
+        SLOT + 1,
         &values[SLOT],
         &mproof
     ));

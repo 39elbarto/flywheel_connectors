@@ -272,9 +272,17 @@ pub struct MerkleTree {
     levels: Vec<Vec<[u8; 32]>>,
 }
 
-fn hash_leaf(slot: &SlotValue) -> [u8; 32] {
+/// Leaf hash binds the slot's index AND the total leaf count, not just the
+/// value. Binding the index prevents a proof for one position from being
+/// replayed at another; binding the count prevents the classic Merkle
+/// duplication ambiguity (CVE-2012-2459), where a k-leaf tree and a
+/// (k+promoted-tail)-leaf tree would otherwise share a root and admit a
+/// phantom slot.
+fn hash_leaf(index: u64, count: u64, slot: &SlotValue) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(&[0x00]);
+    h.update(&index.to_le_bytes());
+    h.update(&count.to_le_bytes());
     h.update(slot);
     *h.finalize().as_bytes()
 }
@@ -287,6 +295,16 @@ fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+/// Number of sibling-path levels for a tree over `count` leaves
+/// (`ceil(log2 count)`; 0 for `count ≤ 1`).
+fn tree_height(count: usize) -> usize {
+    if count <= 1 {
+        0
+    } else {
+        (usize::BITS - (count - 1).leading_zeros()) as usize
+    }
+}
+
 impl MerkleTree {
     /// Build a Merkle tree over `slots`. An empty input yields the
     /// all-zero root.
@@ -297,7 +315,12 @@ impl MerkleTree {
                 levels: vec![vec![[0u8; 32]]],
             };
         }
-        let mut current: Vec<[u8; 32]> = slots.iter().map(hash_leaf).collect();
+        let count = slots.len() as u64;
+        let mut current: Vec<[u8; 32]> = slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| hash_leaf(i as u64, count, slot))
+            .collect();
         let mut levels = vec![current.clone()];
         while current.len() > 1 {
             let mut next = Vec::with_capacity(current.len().div_ceil(2));
@@ -329,9 +352,21 @@ impl MerkleTree {
             .unwrap_or([0u8; 32])
     }
 
-    /// Produce an inclusion proof (sibling path) for `index`.
+    /// Number of leaves in this tree.
     #[must_use]
-    pub fn prove(&self, index: usize) -> MerkleProof {
+    pub fn leaf_count(&self) -> usize {
+        self.levels.first().map_or(0, Vec::len)
+    }
+
+    /// Produce an inclusion proof (bottom-up sibling hashes) for `index`,
+    /// or `None` if `index` is out of range. Sibling direction is not
+    /// stored — it is re-derived from the index bits at verification, so a
+    /// forged direction cannot relabel a proof.
+    #[must_use]
+    pub fn prove(&self, index: usize) -> Option<MerkleProof> {
+        if index >= self.leaf_count() {
+            return None;
+        }
         let mut siblings = Vec::with_capacity(self.levels.len());
         let mut idx = index;
         for level in &self.levels[..self.levels.len().saturating_sub(1)] {
@@ -339,44 +374,66 @@ impl MerkleTree {
                 if idx + 1 < level.len() {
                     level[idx + 1]
                 } else {
-                    level[idx] // promoted duplicate
+                    level[idx] // promoted duplicate of the last node
                 }
             } else {
                 level[idx - 1]
             };
-            siblings.push((idx % 2 == 1, sib));
+            siblings.push(sib);
             idx /= 2;
         }
-        MerkleProof {
+        Some(MerkleProof {
             index: index as u64,
             siblings,
-        }
+        })
     }
 
-    /// Verify a Merkle inclusion proof for `value` at the proof's index
-    /// against `root`.
+    /// Verify a Merkle inclusion proof that `value` sits at `index` in a
+    /// tree over `count` leaves, against `root`.
+    ///
+    /// The index and count are authenticated: they are bound into the leaf
+    /// hash and drive the left/right steering, so neither the position nor
+    /// the leaf count can be forged by a malicious proof.
     #[must_use]
-    pub fn verify(root: &[u8; 32], value: &SlotValue, proof: &MerkleProof) -> bool {
-        let mut acc = hash_leaf(value);
-        for (sibling_is_left, sib) in &proof.siblings {
-            acc = if *sibling_is_left {
-                hash_node(sib, &acc)
-            } else {
+    pub fn verify(
+        root: &[u8; 32],
+        count: usize,
+        index: usize,
+        value: &SlotValue,
+        proof: &MerkleProof,
+    ) -> bool {
+        if index >= count
+            || proof.index != index as u64
+            || proof.siblings.len() != tree_height(count)
+        {
+            return false;
+        }
+        let mut acc = hash_leaf(index as u64, count as u64, value);
+        let mut idx = index;
+        for sib in &proof.siblings {
+            acc = if idx % 2 == 0 {
                 hash_node(&acc, sib)
+            } else {
+                hash_node(sib, &acc)
             };
+            idx /= 2;
         }
         &acc == root
     }
 }
 
-/// A Merkle inclusion proof: the sibling hashes from leaf to root, each
-/// flagged with whether the sibling sits on the left.
+/// A Merkle inclusion proof: the sibling hashes from leaf to root.
+///
+/// The left/right direction at each level is NOT stored — it is re-derived
+/// from the (authenticated) index during verification, so it cannot be
+/// forged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MerkleProof {
-    /// The proven leaf index.
+    /// The proven leaf index (bound into the leaf hash and checked by
+    /// [`MerkleTree::verify`]).
     pub index: u64,
-    /// `(sibling_is_left, sibling_hash)` bottom-up.
-    pub siblings: Vec<(bool, [u8; 32])>,
+    /// Sibling hashes bottom-up (leaf level first, root's child last).
+    pub siblings: Vec<[u8; 32]>,
 }
 
 #[cfg(test)]
@@ -472,16 +529,56 @@ mod tests {
         // always-present merkle_root.
         let tree = MerkleTree::new(&values);
         assert_eq!(tree.root(), commitment.merkle_root);
-        let mproof = tree.prove(13);
+        let mproof = tree.prove(13).unwrap();
         assert!(MerkleTree::verify(
             &commitment.merkle_root,
+            n,
+            13,
             &values[13],
             &mproof
         ));
         // ...and a wrong value fails the fallback path too.
         let mut bad = values[13];
         bad[0] ^= 0x01;
-        assert!(!MerkleTree::verify(&commitment.merkle_root, &bad, &mproof));
+        assert!(!MerkleTree::verify(
+            &commitment.merkle_root,
+            n,
+            13,
+            &bad,
+            &mproof
+        ));
+        // ...and the SAME proof must not verify at a different claimed index
+        // (index is authenticated: bound into the leaf hash and checked).
+        assert!(!MerkleTree::verify(
+            &commitment.merkle_root,
+            n,
+            14,
+            &values[13],
+            &mproof
+        ));
+    }
+
+    #[test]
+    fn merkle_index_and_count_are_authenticated() {
+        // A proof for slot j cannot be replayed at index k != j, and a
+        // proof against a tree of count N cannot claim a phantom slot in a
+        // count-N' view (CVE-2012-2459 duplication ambiguity is closed by
+        // binding the count into the leaf hash).
+        let values = slots(6);
+        let tree = MerkleTree::new(&values);
+        let root = tree.root();
+        let proof = tree.prove(5).unwrap(); // last (odd-position) leaf
+
+        assert!(MerkleTree::verify(&root, 6, 5, &values[5], &proof));
+        // Wrong claimed index with a mismatched proof.index -> rejected.
+        let mut relabeled = proof.clone();
+        relabeled.index = 4;
+        assert!(!MerkleTree::verify(&root, 6, 4, &values[5], &relabeled));
+        // Phantom slot: claim a larger leaf count than the tree was built
+        // for -> the leaf hash binds count=6, so a count=8 view rejects.
+        assert!(!MerkleTree::verify(&root, 8, 5, &values[5], &proof));
+        // Out-of-range index rejected.
+        assert!(tree.prove(6).is_none());
     }
 
     #[test]
@@ -491,8 +588,8 @@ mod tests {
         let tree = MerkleTree::new(&values);
         let root = tree.root();
         for (i, value) in values.iter().enumerate() {
-            let p = tree.prove(i);
-            assert!(MerkleTree::verify(&root, value, &p), "index {i}");
+            let p = tree.prove(i).unwrap();
+            assert!(MerkleTree::verify(&root, n, i, value, &p), "index {i}");
         }
     }
 

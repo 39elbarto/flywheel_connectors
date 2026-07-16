@@ -106,6 +106,7 @@ pub mod ml_dsa;
 pub mod owner_key;
 pub mod secret_fetch;
 pub mod shamir;
+pub mod vector_commit;
 pub mod x25519;
 pub mod xwing;
 

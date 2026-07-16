@@ -132,6 +132,10 @@ name = "bls_aggregate"
 harness = false
 
 [[bench]]
+name = "vector_commit"
+harness = false
+
+[[bench]]
 name = "crypto_benchmarks"
 harness = false
 

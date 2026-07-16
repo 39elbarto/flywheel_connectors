@@ -41,6 +41,7 @@ pub mod quorum;
 pub mod replay;
 pub mod revocation;
 pub mod session;
+pub mod state_root;
 pub mod symbol_request;
 pub mod transport;
 
@@ -59,5 +60,6 @@ pub use quorum::*;
 pub use replay::*;
 pub use revocation::*;
 pub use session::*;
+pub use state_root::*;
 pub use symbol_request::*;
 pub use transport::*;

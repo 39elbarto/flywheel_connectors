@@ -1183,15 +1183,13 @@ impl ExecutionPlanner {
                 None
             }
         };
-        candidates.sort_by(|left, right| {
-            match (cost_rank(left), cost_rank(right)) {
-                (Some(left_rank), Some(right_rank)) => {
-                    left_rank.cmp(&right_rank).then_with(|| left.cmp(right))
-                }
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => left.cmp(right),
+        candidates.sort_by(|left, right| match (cost_rank(left), cost_rank(right)) {
+            (Some(left_rank), Some(right_rank)) => {
+                left_rank.cmp(&right_rank).then_with(|| left.cmp(right))
             }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => left.cmp(right),
         });
     }
 

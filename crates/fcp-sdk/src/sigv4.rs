@@ -61,6 +61,33 @@ pub struct SigningScope {
     pub service: String,
 }
 
+impl SigningScope {
+    /// How many times this service's canonical URI path is encoded.
+    ///
+    /// SigV4 requires each path segment to be URI-encoded **twice** for every
+    /// service except Amazon S3, which requires exactly **once**. Signing S3
+    /// with the double-encoded form (or anything else with the single-encoded
+    /// form) produces a canonical request the service will not reproduce, and
+    /// the request is rejected with `SignatureDoesNotMatch`.
+    #[must_use]
+    pub fn canonical_path_encoding(&self) -> CanonicalPathEncoding {
+        if self.service == "s3" {
+            CanonicalPathEncoding::Single
+        } else {
+            CanonicalPathEncoding::Double
+        }
+    }
+}
+
+/// Number of URI-encoding passes applied to the canonical request's path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalPathEncoding {
+    /// Encode each path segment once — Amazon S3.
+    Single,
+    /// Encode each path segment twice — every other AWS service.
+    Double,
+}
+
 // ── Request to Sign ─────────────────────────────────────────────────────
 
 /// HTTP request components needed for SigV4 signing.
@@ -68,7 +95,15 @@ pub struct SigningScope {
 pub struct SignableRequest {
     /// HTTP method (GET, PUT, POST, DELETE, etc.).
     pub method: String,
-    /// URI path (e.g., "/bucket/key").
+    /// **Wire** URI path — the absolute path exactly as it will appear in the
+    /// request line, percent-encoded (e.g. `url::Url::path()` gives this
+    /// directly, as `/bucket/my%20key`).
+    ///
+    /// The signer percent-DECODES this back to the raw path before building
+    /// the canonical URI, because that is what the service does with what it
+    /// receives. Passing an already-decoded path here signs a different
+    /// resource than the one the request targets whenever the path contains
+    /// anything needing an escape.
     pub uri: String,
     /// Query string parameters (key → value).
     pub query_params: BTreeMap<String, String>,
@@ -221,9 +256,13 @@ impl SigV4Signer {
             .map(|(k, v)| format!("{k}:{v}\n"))
             .collect::<String>();
 
+        // Same canonical-URI rule as `sign`; using `request.uri` verbatim here
+        // meant presigned URLs were signed against a different path than
+        // signed requests for the identical resource.
+        let canonical_uri = canonical_uri_path(&request.uri, self.scope.canonical_path_encoding());
         let canonical_request = format!(
-            "{}\n{}\n{canonical_query}\n{canonical_headers}\nhost\n{UNSIGNED_PAYLOAD}",
-            request.method, request.uri,
+            "{}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\nhost\n{UNSIGNED_PAYLOAD}",
+            request.method,
         );
 
         let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
@@ -236,7 +275,15 @@ impl SigV4Signer {
         query.insert("X-Amz-Signature".into(), signature);
 
         let final_query = build_canonical_query(&query);
-        let url = format!("{}?{final_query}", request.uri);
+        // Build an ABSOLUTE url. This previously returned bare
+        // `{path}?{query}`, so `PresignedUrl.url` — documented as "The
+        // presigned URL" and handed straight back to callers — was an
+        // un-dereferenceable relative path. The `host` header is already
+        // required for the signature, so it is always available here.
+        let url = request.headers.get("host").map_or_else(
+            || format!("{}?{final_query}", request.uri),
+            |host| format!("https://{host}{}?{final_query}", request.uri),
+        );
 
         PresignedUrl {
             url,
@@ -256,8 +303,8 @@ impl SigV4Signer {
         request: &SignableRequest,
         amz_date: &str,
     ) -> (String, String) {
-        // Canonical URI
-        let canonical_uri = uri_encode_path(&request.uri);
+        // Canonical URI — single-encoded for S3, double-encoded elsewhere.
+        let canonical_uri = canonical_uri_path(&request.uri, self.scope.canonical_path_encoding());
 
         // Canonical query string (sorted by key)
         let canonical_query = build_canonical_query(&request.query_params);
@@ -276,16 +323,24 @@ impl SigV4Signer {
                 .or_insert_with(|| token.clone());
         }
 
-        let canonical_headers: String = headers
+        // Re-key by the LOWERCASED name before ordering. AWS orders canonical
+        // headers by the lowercased name, but `headers` is keyed by whatever
+        // case the caller used — so `{"Host": .., "content-type": ..}` emitted
+        // `host;content-type`, which is mis-sorted and fails verification, and
+        // two case variants of one header produced a duplicated entry in both
+        // lists. Collecting into a fresh BTreeMap fixes the order and collapses
+        // the duplicate.
+        let lowercased: BTreeMap<String, String> = headers
             .iter()
-            .map(|(k, v)| format!("{}:{}\n", k.to_lowercase(), v.trim()))
+            .map(|(k, v)| (k.to_lowercase(), v.trim().to_string()))
             .collect();
 
-        let signed_headers: String = headers
-            .keys()
-            .map(|k| k.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(";");
+        let canonical_headers: String = lowercased
+            .iter()
+            .map(|(k, v)| format!("{k}:{v}\n"))
+            .collect();
+
+        let signed_headers: String = lowercased.keys().cloned().collect::<Vec<_>>().join(";");
 
         let canonical_request = format!(
             "{}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{}",
@@ -342,6 +397,35 @@ fn uri_encode_path(path: &str) -> String {
         .join("/")
 }
 
+/// Percent-decode a wire path back to the raw bytes the service will see.
+///
+/// Invalid UTF-8 is replaced rather than rejected: the canonical URI is only
+/// ever compared against the service's own rendering, and a request whose path
+/// is not valid UTF-8 will fail on its own merits rather than here.
+fn percent_decode_path(path: &str) -> String {
+    percent_encoding::percent_decode_str(path)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// Build the canonical URI for a request.
+///
+/// The service percent-decodes the path it receives and then re-encodes it to
+/// canonicalize, so the signer has to do the same thing: decode the wire path,
+/// then apply the service's required number of encoding passes. Encoding the
+/// wire path directly (the previous behaviour) is only equivalent when the
+/// path contains nothing that needed escaping in the first place — which is
+/// why plain ASCII keys signed correctly while a key with a space, a literal
+/// `%`, or any non-ASCII character produced `SignatureDoesNotMatch`.
+fn canonical_uri_path(wire_path: &str, encoding: CanonicalPathEncoding) -> String {
+    let raw = percent_decode_path(wire_path);
+    let once = uri_encode_path(&raw);
+    match encoding {
+        CanonicalPathEncoding::Single => once,
+        CanonicalPathEncoding::Double => uri_encode_path(&once),
+    }
+}
+
 fn build_canonical_query(params: &BTreeMap<String, String>) -> String {
     params
         .iter()
@@ -377,6 +461,159 @@ mod tests {
 
     fn test_signer() -> SigV4Signer {
         SigV4Signer::new(test_credentials(), test_scope()).with_fixed_time(fixed_time())
+    }
+
+    // ── Canonical URI encoding (br-1nqg7) ────────────────────────
+
+    /// S3 requires exactly ONE encoding pass; every other service requires two.
+    /// The signer previously encoded the wire path once regardless of service,
+    /// which is correct only for a path that needed no escaping to begin with.
+    #[test]
+    fn canonical_uri_encodes_once_for_s3_and_twice_for_other_services() {
+        // `%20` on the wire decodes to a space, which S3 canonicalizes back to
+        // `%20` — not `%2520`.
+        assert_eq!(
+            canonical_uri_path("/bucket/my%20report.pdf", CanonicalPathEncoding::Single),
+            "/bucket/my%20report.pdf"
+        );
+        assert_eq!(
+            canonical_uri_path("/bucket/my%20report.pdf", CanonicalPathEncoding::Double),
+            "/bucket/my%2520report.pdf"
+        );
+    }
+
+    /// A path containing only unreserved characters must canonicalize
+    /// identically under the old and new rules — the fix must not disturb the
+    /// requests that already signed correctly.
+    #[test]
+    fn canonical_uri_is_unchanged_for_paths_needing_no_escape() {
+        for path in ["/bucket/plain.pdf", "/bucket/path/to/file.txt", "/"] {
+            assert_eq!(
+                canonical_uri_path(path, CanonicalPathEncoding::Single),
+                uri_encode_path(path),
+                "single-pass encoding must be a no-op change for {path}"
+            );
+        }
+    }
+
+    /// Characters the URL parser leaves unescaped (`&`, `+`, `:`) still get
+    /// encoded by the canonicalizer, matching what S3 computes after decoding.
+    #[test]
+    fn canonical_uri_encodes_aws_reserved_characters_left_raw_by_the_url_parser() {
+        assert_eq!(
+            canonical_uri_path("/bucket/Q&A.pdf", CanonicalPathEncoding::Single),
+            "/bucket/Q%26A.pdf"
+        );
+        assert_eq!(
+            canonical_uri_path("/bucket/a+b.pdf", CanonicalPathEncoding::Single),
+            "/bucket/a%2Bb.pdf"
+        );
+    }
+
+    /// A literal `%` in the key arrives as `%25` and must survive the
+    /// decode/re-encode round trip rather than becoming `%2525`.
+    #[test]
+    fn canonical_uri_round_trips_a_literal_percent() {
+        assert_eq!(
+            canonical_uri_path("/bucket/50%25.pdf", CanonicalPathEncoding::Single),
+            "/bucket/50%25.pdf"
+        );
+    }
+
+    /// Non-ASCII keys are the most common real-world trigger — any accented or
+    /// CJK filename arrives percent-encoded and was double-encoded before.
+    #[test]
+    fn canonical_uri_handles_non_ascii_keys() {
+        assert_eq!(
+            canonical_uri_path("/bucket/e%C3%B1e.pdf", CanonicalPathEncoding::Single),
+            "/bucket/e%C3%B1e.pdf"
+        );
+    }
+
+    /// Signing the same resource under S3 and a non-S3 scope must produce
+    /// different signatures, proving the mode is actually threaded through.
+    #[test]
+    fn s3_and_non_s3_scopes_sign_the_same_path_differently() {
+        let request = SignableRequest {
+            method: "GET".into(),
+            uri: "/bucket/my%20report.pdf".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".to_string(), "s3.amazonaws.com".to_string())]),
+            payload_hash: EMPTY_PAYLOAD_HASH.into(),
+        };
+
+        let s3 = SigV4Signer::new(test_credentials(), test_scope()).with_fixed_time(fixed_time());
+        let other = SigV4Signer::new(
+            test_credentials(),
+            SigningScope {
+                region: "us-east-1".into(),
+                service: "bedrock".into(),
+            },
+        )
+        .with_fixed_time(fixed_time());
+
+        assert_ne!(
+            s3.sign(&request).authorization,
+            other.sign(&request).authorization,
+            "the canonical path encoding must differ between S3 and other services"
+        );
+    }
+
+    /// Canonical headers are ordered by the LOWERCASED name, and two case
+    /// variants of one header collapse to a single entry.
+    #[test]
+    fn canonical_headers_sort_by_lowercased_name() {
+        let request = SignableRequest {
+            method: "GET".into(),
+            uri: "/bucket/key".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([
+                ("Host".to_string(), "s3.amazonaws.com".to_string()),
+                ("content-type".to_string(), "text/plain".to_string()),
+            ]),
+            payload_hash: EMPTY_PAYLOAD_HASH.into(),
+        };
+        let (_, signed_headers) =
+            test_signer().build_canonical_request(&request, "20130524T000000Z");
+        let names: Vec<&str> = signed_headers.split(';').collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            names, sorted,
+            "signed headers must be sorted: {signed_headers}"
+        );
+        assert!(names.contains(&"content-type"), "{signed_headers}");
+        assert!(names.contains(&"host"), "{signed_headers}");
+        assert_eq!(
+            names.iter().filter(|n| **n == "host").count(),
+            1,
+            "case variants must collapse: {signed_headers}"
+        );
+    }
+
+    /// The presigned URL must be absolute — it is handed straight to callers.
+    #[test]
+    fn presigned_url_is_absolute() {
+        let request = SignableRequest {
+            method: "GET".into(),
+            uri: "/bucket/report.pdf".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".to_string(), "s3.amazonaws.com".to_string())]),
+            payload_hash: UNSIGNED_PAYLOAD.into(),
+        };
+        let presigned = test_signer().presign(&request, 900);
+        assert!(
+            presigned
+                .url
+                .starts_with("https://s3.amazonaws.com/bucket/report.pdf?"),
+            "presigned url must be dereferenceable, got {}",
+            presigned.url
+        );
+        assert!(
+            presigned.url.contains("X-Amz-Signature="),
+            "{}",
+            presigned.url
+        );
     }
 
     // ── Signing Key Derivation ───────────────────────────────────

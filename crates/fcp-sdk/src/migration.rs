@@ -601,10 +601,14 @@ impl RetryLoop {
                         return Err(error);
                     };
 
+                    // `redacted_summary()`, never `%error`: a connector error
+                    // that forwards a `reqwest::Error` renders the full URL,
+                    // and providers that authenticate via `?key=…` would leak
+                    // the credential into this line on every retry.
                     warn!(
                         attempt,
                         delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        error = %error,
+                        error = %error.redacted_summary(),
                         "retrying after transient error"
                     );
 

@@ -174,7 +174,12 @@ impl ArxivClient {
 
             match status.as_u16() {
                 429 => Err(ArxivError::RateLimited {
-                    retry_after_ms: retry_after.unwrap_or(60) * 1000,
+                    // `retry_after` is a hostile `Retry-After` header value.
+                    // `* 1000` on the raw u64 overflows for anything above
+                    // ~1.8e16 — a panic in debug/test and, since the release
+                    // profile leaves `overflow-checks` unset, a silent wrap in
+                    // release that turns a long backoff into a near-zero one.
+                    retry_after_ms: retry_after.unwrap_or(60).saturating_mul(1000),
                 }),
                 404 => Err(ArxivError::NotFound { resource: detail }),
                 code => Err(ArxivError::ScholarApi {

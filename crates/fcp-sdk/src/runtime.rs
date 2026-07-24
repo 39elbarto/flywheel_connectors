@@ -599,10 +599,23 @@ impl SupervisorConfig {
     }
 
     /// Get heartbeat timeout as a Duration (or None if disabled).
+    ///
+    /// `Duration::from_secs_f64` panics on NaN, negative, and non-finite or
+    /// overflowing input, and this struct is `#[derive(Deserialize)]` — it is
+    /// already embedded in externally-supplied connector config. `validate()`
+    /// cannot catch the dangerous values on its own because
+    /// `heartbeat_timeout_multiplier <= 1.0` is *false* for both `NaN` and
+    /// `1e308`, so a deserialized config could reach the supervisor loop and
+    /// abort it. Saturate instead of panicking.
     #[must_use]
     pub fn heartbeat_timeout(&self) -> Option<Duration> {
         self.heartbeat_interval().map(|interval| {
-            Duration::from_secs_f64(interval.as_secs_f64() * self.heartbeat_timeout_multiplier)
+            let seconds = interval.as_secs_f64() * self.heartbeat_timeout_multiplier;
+            if seconds.is_finite() && seconds >= 0.0 {
+                Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX)
+            } else {
+                Duration::MAX
+            }
         })
     }
 
@@ -623,7 +636,14 @@ impl SupervisorConfig {
         if self.max_consecutive_failures == 0 {
             errors.push("max_consecutive_failures must be > 0".to_string());
         }
-        if self.heartbeat_timeout_multiplier <= 1.0 {
+        // `<= 1.0` is FALSE for NaN, so the finiteness check has to be
+        // explicit — otherwise a deserialized `NaN` passes validation and then
+        // reaches `heartbeat_timeout()`. (Overflow to +inf is handled there by
+        // saturating rather than panicking, so it does not need a second check
+        // here.)
+        if !self.heartbeat_timeout_multiplier.is_finite() {
+            errors.push("heartbeat_timeout_multiplier must be finite".to_string());
+        } else if self.heartbeat_timeout_multiplier <= 1.0 {
             errors.push("heartbeat_timeout_multiplier must be > 1.0".to_string());
         }
 
@@ -2541,17 +2561,22 @@ impl<C: PollingCursor> PollingSupervisor<C> {
 
     /// Compute the next backoff delay, respecting rate-limit hints.
     ///
-    /// If `retry_after_ms` is provided and greater than the computed backoff,
-    /// it takes precedence.
+    /// A `retry_after_ms` hint raises the delay but never above
+    /// `max_backoff_ms`. The hint originates from an upstream `Retry-After`
+    /// header (`PollResult::rate_limited`), so it is attacker-controlled;
+    /// letting it win outright broke the documented guarantee that "backoff
+    /// will not exceed this value regardless of attempt count" and let a
+    /// single hostile 429 park the polling loop for as long as it asked
+    /// (`sleep_or_shutdown` only wakes on shutdown).
     fn compute_delay(&self, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
         let jitter = pseudo_random_jitter(attempt);
         let backoff = self.config.compute_backoff_with_jitter(attempt, jitter);
 
-        // Respect rate-limit Retry-After if present and larger
-        let delay_ms = match retry_after_ms {
-            Some(retry_after) if retry_after > backoff => retry_after,
-            _ => backoff,
-        };
+        let delay_ms = retry_after_ms.map_or(backoff, |retry_after| {
+            retry_after
+                .max(backoff)
+                .min(self.config.max_backoff_ms.max(backoff))
+        });
 
         Duration::from_millis(delay_ms)
     }

@@ -294,6 +294,23 @@ fn chrono_duration(duration: StdDuration) -> AuthResult<TimeDelta> {
         .map_err(|_| invalid_config("ttl", "duration is outside chrono range"))
 }
 
+/// Resolve a TTL into an absolute expiry, rejecting values that would overflow
+/// the timestamp instead of panicking.
+///
+/// `TimeDelta::from_std` only rejects durations outside `TimeDelta`'s own range
+/// (~9.2e15 s), but `DateTime<Utc>` tops out near year 262143 (~8.2e12 s from
+/// now) and `DateTime + TimeDelta` is an `expect` internally. Everything in the
+/// gap between those two bounds passed validation and then panicked. Since
+/// `expires_in` comes straight off a provider token response — a `u64` parsed
+/// from attacker-influenceable JSON — `{"expires_in": 9000000000000000}` was
+/// enough to panic the handler task. Fail closed with a typed error instead.
+fn expiry_from_ttl(duration: StdDuration, field: &'static str) -> AuthResult<DateTime<Utc>> {
+    let delta = chrono_duration(duration)?;
+    Utc::now()
+        .checked_add_signed(delta)
+        .ok_or_else(|| invalid_config(field, "expiry overflows the representable timestamp range"))
+}
+
 /// Secret string wrapper that redacts every formatting path and zeroizes on drop.
 #[derive(Eq)]
 pub struct RedactedSecret(Zeroizing<String>);
@@ -750,14 +767,24 @@ impl OAuthDeviceCodeAuth {
             let refresh_slot = &mut self.refresh_token;
             *refresh_slot = Some(material);
         }
-        self.expires_at = expires_at;
+        // Preserve a known expiry when the provider omits `expires_in`.
+        // RFC 6749 §5.1 makes `expires_in` RECOMMENDED, not required, and
+        // several providers omit it on refresh. Clobbering a known TTL to
+        // `None` turned the profile into a never-expiring one:
+        // `requires_refresh_in()` then returned `None`, the refresh policy
+        // classified it `NotRefreshable`, and every expiry gate
+        // (`apply_bearer_token`, the host's egress injector) is written as
+        // `if let Some(expires_at)` — so the stale bearer was injected
+        // indefinitely and never refreshed again. Same bug class already
+        // fixed on the fcp-oauth production path (br-62b0adc34).
+        self.expires_at = expires_at.or(self.expires_at);
     }
 
     fn validate_config(&self) -> AuthResult<()> {
         validate_non_empty(&self.client_id, "client_id")?;
         validate_no_crlf(&self.client_id, "client_id")?;
-        validate_oauth_endpoint(&self.device_code_url, "device_code_url")?;
-        validate_oauth_endpoint(&self.token_url, "token_url")?;
+        parse_oauth_url(&self.device_code_url, "device_code_url")?;
+        parse_oauth_url(&self.token_url, "token_url")?;
         validate_no_crlf(&self.scope, "scope")
     }
 }
@@ -915,9 +942,15 @@ impl OAuthDeviceCodeChallenge {
         validate_no_crlf(self.device_code.expose_secret(), "device_code")?;
         validate_non_empty(&self.user_code, "user_code")?;
         validate_no_crlf(&self.user_code, "user_code")?;
-        validate_oauth_endpoint(&self.verification_uri, "verification_uri")?;
+        // These two are the least-trusted inputs in the whole flow — they come
+        // verbatim from the provider's device-code response and are handed to
+        // an operator (or a browser) to open. A non-empty/no-CRLF check is not
+        // enough: it accepted `javascript:` and other non-HTTP schemes, and
+        // the host echoes the value straight back in its API response. Parse
+        // them and pin the scheme like every operator-supplied endpoint.
+        parse_oauth_url(&self.verification_uri, "verification_uri")?;
         if let Some(uri) = self.verification_uri_complete.as_deref() {
-            validate_oauth_endpoint(uri, "verification_uri_complete")?;
+            parse_oauth_url(uri, "verification_uri_complete")?;
         }
         if self.interval.is_zero() {
             return Err(invalid_config("interval", "must be greater than zero"));
@@ -975,9 +1008,8 @@ impl OAuthTokens {
             token_type: "Bearer".to_string(),
             refresh_token: refresh_token.map(RedactedSecret::new).transpose()?,
             expires_at: expires_in
-                .map(chrono_duration)
-                .transpose()?
-                .map(|duration| Utc::now() + duration),
+                .map(|ttl| expiry_from_ttl(ttl, "expires_in"))
+                .transpose()?,
             scope,
         })
     }
@@ -1562,7 +1594,11 @@ impl OAuthAuthCodeAuth {
             let refresh_slot = &mut self.refresh_token;
             *refresh_slot = Some(material);
         }
-        self.expires_at = expires_at;
+        // Preserve a known expiry when the provider omits `expires_in` —
+        // see the identical guard on `OAuthDeviceCodeAuth::apply_refreshed_tokens`
+        // for why clobbering it to `None` silently disables both the refresh
+        // loop and every downstream expiry gate.
+        self.expires_at = expires_at.or(self.expires_at);
     }
 
     fn validate_config(&self) -> AuthResult<()> {
@@ -2303,7 +2339,7 @@ impl JwtAuth {
 
     fn regenerate_jwt(&self) -> AuthResult<JwtCachedToken> {
         let jwt = RedactedSecret::new((self.generator)()?)?;
-        let expires_at = Utc::now() + chrono_duration(self.ttl)?;
+        let expires_at = expiry_from_ttl(self.ttl, "ttl")?;
         let cached = JwtCachedToken {
             token: jwt,
             expires_at,
@@ -2386,8 +2422,13 @@ pub struct SigV4SignedAuth {
 
 impl fmt::Debug for SigV4SignedAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `authorization` embeds `Credential=<ACCESS_KEY_ID>/<scope>` plus the
+        // request signature. `SigV4Auth` keeps `access_key` in a
+        // `RedactedSecret` precisely so it never reaches a log line, so
+        // printing the header verbatim here would have leaked it right back
+        // out through any `format!("{signed:?}")`.
         f.debug_struct("SigV4SignedAuth")
-            .field("authorization", &self.authorization)
+            .field("authorization", &"[REDACTED]")
             .field("x_amz_date", &self.x_amz_date)
             .field("x_amz_content_sha256", &self.x_amz_content_sha256)
             .field(
@@ -4521,6 +4562,130 @@ mod tests {
         assert_eq!(
             transport.seen_refresh_tokens.lock().as_slice(),
             &["fixture-refresh-token".to_string()]
+        );
+    }
+
+    /// RFC 6749 §5.1 makes `expires_in` RECOMMENDED, not required, and several
+    /// providers omit it on refresh. Clobbering a known expiry to `None` made
+    /// the profile never-expiring: `requires_refresh_in()` returned `None`, the
+    /// refresh loop classified it not-refreshable, and every downstream expiry
+    /// gate is `if let Some(expires_at)` — so the stale bearer would be
+    /// injected forever. The prior expiry must survive an omitted `expires_in`.
+    #[test]
+    fn oauth_refresh_preserves_expiry_when_provider_omits_expires_in() {
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        auth.apply_tokens(oauth_tokens());
+        let before = auth
+            .requires_refresh_in()
+            .expect("fixture tokens carry an expiry");
+
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "refreshed-access-token",
+                None, // provider omitted `expires_in`
+                Option::<String>::None,
+                Option::<String>::None,
+            )
+            .unwrap(),
+        )]);
+        run(async { auth.refresh_with_transport(&cx(), &transport).await }).unwrap();
+
+        let after = auth
+            .requires_refresh_in()
+            .expect("an omitted expires_in must not turn the profile never-expiring");
+        assert!(
+            after <= before,
+            "preserved expiry should still be counting down: before={before:?} after={after:?}"
+        );
+
+        // Same guard on the authorization-code path.
+        let mut auth = OAuthAuthCodeAuth::confidential_client(
+            "fixture-client",
+            "fixture-client-secret",
+            "https://auth.example.test/authorize",
+            "https://auth.example.test/token",
+            "https://agent.example.test/oauth/callback",
+            "chat messages",
+            true,
+        )
+        .unwrap();
+        auth.apply_tokens(oauth_tokens());
+        assert!(auth.requires_refresh_in().is_some());
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "refreshed-access-token",
+                None,
+                Option::<String>::None,
+                Option::<String>::None,
+            )
+            .unwrap(),
+        )]);
+        run(async { auth.refresh_with_transport(&cx(), &transport).await }).unwrap();
+        assert!(
+            auth.requires_refresh_in().is_some(),
+            "auth-code path must preserve the expiry too"
+        );
+    }
+
+    /// `expires_in` arrives as a `u64` from a provider JSON body. `TimeDelta`
+    /// accepts values far beyond what `DateTime<Utc>` can represent, and
+    /// `DateTime + TimeDelta` panics internally — so a hostile token response
+    /// used to abort the handler task instead of failing closed.
+    #[test]
+    fn oauth_tokens_reject_expires_in_that_overflows_the_timestamp_range() {
+        let err = OAuthTokens::bearer(
+            "access-token",
+            Some(StdDuration::from_secs(9_000_000_000_000_000)),
+            Option::<String>::None,
+            Option::<String>::None,
+        )
+        .expect_err("an overflowing expires_in must be rejected, not panic");
+        assert!(
+            matches!(err, AuthError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {err:?}"
+        );
+
+        // A sane TTL still works.
+        assert!(
+            OAuthTokens::bearer(
+                "access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Option::<String>::None,
+                Option::<String>::None,
+            )
+            .is_ok()
+        );
+    }
+
+    /// `verification_uri` is provider-controlled and is handed to an operator
+    /// or browser to open, so it must be scheme-pinned like every other
+    /// endpoint rather than merely non-empty and CRLF-free.
+    #[test]
+    fn device_code_challenge_rejects_non_http_verification_uri() {
+        let err = OAuthDeviceCodeChallenge::new(
+            "device-code",
+            "USER-CODE",
+            "javascript:fetch('https://evil.example')",
+            Option::<String>::None,
+            Utc::now() + TimeDelta::minutes(5),
+            StdDuration::from_secs(5),
+        )
+        .expect_err("non-http verification_uri must be refused");
+        assert!(
+            matches!(err, AuthError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {err:?}"
+        );
+
+        assert!(
+            OAuthDeviceCodeChallenge::new(
+                "device-code",
+                "USER-CODE",
+                "https://auth.example.test/device",
+                Option::<String>::None,
+                Utc::now() + TimeDelta::minutes(5),
+                StdDuration::from_secs(5),
+            )
+            .is_ok()
         );
     }
 

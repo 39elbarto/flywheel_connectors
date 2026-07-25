@@ -2806,6 +2806,7 @@ dependencies = [
  "fcp-sdk",
  "fcp-testkit",
  "hex",
+ "percent-encoding",
  "quick-xml",
  "reqwest 0.13.2",
  "serde",

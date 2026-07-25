@@ -9,7 +9,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -304,6 +304,52 @@ fn chrono_duration(duration: StdDuration) -> AuthResult<TimeDelta> {
 /// `expires_in` comes straight off a provider token response — a `u64` parsed
 /// from attacker-influenceable JSON — `{"expires_in": 9000000000000000}` was
 /// enough to panic the handler task. Fail closed with a typed error instead.
+/// Whether a refreshed scope string stays within the originally granted set.
+///
+/// RFC 6749 §6: a refresh response MUST NOT include any scope the resource
+/// owner did not originally grant. An empty `granted` means the grant scope was
+/// never observed (the provider omitted it on the original exchange), which
+/// cannot be meaningfully narrowed, so it accepts rather than failing closed on
+/// missing information.
+fn refreshed_scope_is_subset(granted: &str, refreshed: &str) -> bool {
+    let granted_scopes: HashSet<&str> = granted.split_whitespace().collect();
+    if granted_scopes.is_empty() {
+        return true;
+    }
+    refreshed
+        .split_whitespace()
+        .all(|scope| granted_scopes.contains(scope))
+}
+
+/// Decide the granted scope to keep after a refresh response.
+///
+/// Two failure modes this closes, both mirroring the fcp-oauth production path:
+/// - An OMITTED scope must preserve the previously granted one rather than
+///   dropping it, otherwise the next refresh has nothing to narrow against and
+///   the widening guard below is permanently disarmed.
+/// - A WIDENED scope is rejected: a compromised or misbehaving token endpoint
+///   answering `read` with `read write admin` must not silently escalate what
+///   the profile is authorized for.
+fn resolve_refreshed_scope(
+    granted: Option<&str>,
+    refreshed: Option<String>,
+) -> AuthResult<Option<String>> {
+    match refreshed {
+        None => Ok(granted.map(ToString::to_string)),
+        Some(refreshed) => {
+            if let Some(granted) = granted {
+                if !refreshed_scope_is_subset(granted, &refreshed) {
+                    return Err(invalid_config(
+                        "scope",
+                        "refresh response expanded the granted scope",
+                    ));
+                }
+            }
+            Ok(Some(refreshed))
+        }
+    }
+}
+
 fn expiry_from_ttl(duration: StdDuration, field: &'static str) -> AuthResult<DateTime<Utc>> {
     let delta = chrono_duration(duration)?;
     Utc::now()
@@ -646,6 +692,14 @@ pub struct OAuthDeviceCodeAuth {
     pub token_url: String,
     /// Requested scope string.
     pub scope: String,
+    /// Scope the provider actually GRANTED, as reported on the token response.
+    ///
+    /// Distinct from [`Self::scope`], which is only what was *requested*.
+    /// Refreshes are issued against this value so a user who consented to a
+    /// narrower set (or later revoked part of it) is not silently re-asked for
+    /// the full original scope on every refresh — RFC 6749 §6 forbids
+    /// requesting a scope that was never granted.
+    pub granted_scope: Option<String>,
     /// Current access token, if the flow has completed.
     pub access_token: Option<RedactedSecret>,
     /// Current refresh token, if the provider issued one.
@@ -679,6 +733,7 @@ impl OAuthDeviceCodeAuth {
             device_code_url: config.device_code_url,
             token_url: config.token_url,
             scope: config.scope,
+            granted_scope: None,
             access_token: None,
             refresh_token: None,
             expires_at: None,
@@ -691,6 +746,7 @@ impl OAuthDeviceCodeAuth {
             access_token,
             refresh_token,
             expires_at,
+            scope,
             ..
         } = tokens;
         let access_slot = &mut self.access_token;
@@ -698,18 +754,26 @@ impl OAuthDeviceCodeAuth {
         let refresh_slot = &mut self.refresh_token;
         *refresh_slot = refresh_token;
         self.expires_at = expires_at;
+        // Record what was actually granted; the token response is the only
+        // place this is ever observable.
+        self.granted_scope = scope;
     }
 
     /// Build refresh-token flow configuration from this auth state.
+    ///
+    /// Refreshes are issued against the GRANTED scope when one was observed,
+    /// falling back to the configured request scope only when the provider
+    /// never reported one.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::InvalidConfig`] when stored OAuth fields are invalid.
     pub fn refresh_config(&self) -> AuthResult<OAuthRefreshTokenConfig> {
-        let scope = if self.scope.is_empty() {
+        let effective = self.granted_scope.as_deref().unwrap_or(&self.scope);
+        let scope = if effective.is_empty() {
             None
         } else {
-            Some(self.scope.clone())
+            Some(effective.to_string())
         };
         OAuthRefreshTokenConfig::public_client(
             self.client_id.clone(),
@@ -750,17 +814,21 @@ impl OAuthDeviceCodeAuth {
         let config = self.refresh_config()?;
         let grant = self.refresh_grant()?;
         let tokens = OAuthRefreshTokenFlow::refresh(cx, &config, &grant, transport).await?;
-        self.apply_refreshed_tokens(tokens);
-        Ok(())
+        self.apply_refreshed_tokens(tokens)
     }
 
-    fn apply_refreshed_tokens(&mut self, tokens: OAuthTokens) {
+    fn apply_refreshed_tokens(&mut self, tokens: OAuthTokens) -> AuthResult<()> {
         let OAuthTokens {
             access_token: fresh_access,
             refresh_token: fresh_refresh,
             expires_at,
+            scope,
             ..
         } = tokens;
+        // Scope first: a widening response must be rejected BEFORE any state is
+        // mutated, so a refused refresh cannot leave half-applied material.
+        let granted_scope = resolve_refreshed_scope(self.granted_scope.as_deref(), scope)?;
+
         let access_slot = &mut self.access_token;
         *access_slot = Some(fresh_access);
         if let Some(material) = fresh_refresh {
@@ -778,6 +846,8 @@ impl OAuthDeviceCodeAuth {
         // indefinitely and never refreshed again. Same bug class already
         // fixed on the fcp-oauth production path (br-62b0adc34).
         self.expires_at = expires_at.or(self.expires_at);
+        self.granted_scope = granted_scope;
+        Ok(())
     }
 
     fn validate_config(&self) -> AuthResult<()> {
@@ -1430,6 +1500,11 @@ pub struct OAuthAuthCodeAuth {
     pub use_pkce: bool,
     /// Extra provider-specific authorization URL parameters.
     pub extra_authorize_params: BTreeMap<String, String>,
+    /// Scope the provider actually GRANTED, as reported on the token response.
+    ///
+    /// See [`OAuthDeviceCodeAuth::granted_scope`] for why refreshes are issued
+    /// against this rather than the requested [`Self::scope`].
+    pub granted_scope: Option<String>,
     /// Current access token, if the flow has completed.
     pub access_token: Option<RedactedSecret>,
     /// Current refresh token, if the provider issued one.
@@ -1501,6 +1576,7 @@ impl OAuthAuthCodeAuth {
             scope: config.scope,
             use_pkce: config.use_pkce,
             extra_authorize_params: config.extra_authorize_params,
+            granted_scope: None,
             access_token: None,
             refresh_token: None,
             expires_at: None,
@@ -1513,6 +1589,7 @@ impl OAuthAuthCodeAuth {
             access_token,
             refresh_token,
             expires_at,
+            scope,
             ..
         } = tokens;
         let access_slot = &mut self.access_token;
@@ -1520,18 +1597,23 @@ impl OAuthAuthCodeAuth {
         let refresh_slot = &mut self.refresh_token;
         *refresh_slot = refresh_token;
         self.expires_at = expires_at;
+        self.granted_scope = scope;
     }
 
     /// Build refresh-token flow configuration from this auth state.
+    ///
+    /// Refreshes are issued against the GRANTED scope when one was observed —
+    /// see [`OAuthDeviceCodeAuth::refresh_config`].
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::InvalidConfig`] when stored OAuth fields are invalid.
     pub fn refresh_config(&self) -> AuthResult<OAuthRefreshTokenConfig> {
-        let scope = if self.scope.is_empty() {
+        let effective = self.granted_scope.as_deref().unwrap_or(&self.scope);
+        let scope = if effective.is_empty() {
             None
         } else {
-            Some(self.scope.clone())
+            Some(effective.to_string())
         };
         let secret_material = self
             .client_secret
@@ -1577,17 +1659,21 @@ impl OAuthAuthCodeAuth {
         let config = self.refresh_config()?;
         let grant = self.refresh_grant()?;
         let tokens = OAuthRefreshTokenFlow::refresh(cx, &config, &grant, transport).await?;
-        self.apply_refreshed_tokens(tokens);
-        Ok(())
+        self.apply_refreshed_tokens(tokens)
     }
 
-    fn apply_refreshed_tokens(&mut self, tokens: OAuthTokens) {
+    fn apply_refreshed_tokens(&mut self, tokens: OAuthTokens) -> AuthResult<()> {
         let OAuthTokens {
             access_token: fresh_access,
             refresh_token: fresh_refresh,
             expires_at,
+            scope,
             ..
         } = tokens;
+        // Reject a widening scope before mutating anything — see
+        // `OAuthDeviceCodeAuth::apply_refreshed_tokens`.
+        let granted_scope = resolve_refreshed_scope(self.granted_scope.as_deref(), scope)?;
+
         let access_slot = &mut self.access_token;
         *access_slot = Some(fresh_access);
         if let Some(material) = fresh_refresh {
@@ -1599,6 +1685,8 @@ impl OAuthAuthCodeAuth {
         // for why clobbering it to `None` silently disables both the refresh
         // loop and every downstream expiry gate.
         self.expires_at = expires_at.or(self.expires_at);
+        self.granted_scope = granted_scope;
+        Ok(())
     }
 
     fn validate_config(&self) -> AuthResult<()> {
@@ -3175,6 +3263,28 @@ pub enum AuthMethodKind {
     SigV4(SigV4Auth),
 }
 
+impl AuthMethodKind {
+    /// The refresh token this method currently holds, if any.
+    ///
+    /// Used as the compare-and-swap witness for store-backed refreshes: it is
+    /// the one piece of state a provider rotates, so a mismatch is proof that
+    /// another refresh already landed and this response is stale.
+    #[must_use]
+    pub fn refresh_token_material(&self) -> Option<&str> {
+        match self {
+            Self::OAuthDeviceCode(method) => method
+                .refresh_token
+                .as_ref()
+                .map(RedactedSecret::expose_secret),
+            Self::OAuthAuthCode(method) => method
+                .refresh_token
+                .as_ref()
+                .map(RedactedSecret::expose_secret),
+            Self::ApiKey(_) | Self::SetupToken(_) | Self::Jwt(_) | Self::SigV4(_) => None,
+        }
+    }
+}
+
 #[async_trait]
 impl AuthMethod for AuthMethodKind {
     fn id(&self) -> &'static str {
@@ -3466,6 +3576,31 @@ pub trait AuthProfileStore: Send + Sync {
     /// Returns an [`AuthError`] when profile identity fields are invalid.
     async fn save_profile(&self, profile: AuthProfile) -> AuthResult<()>;
 
+    /// Save a profile only if the stored refresh token still matches
+    /// `expected_refresh_token`.
+    ///
+    /// Returns `Ok(false)` — leaving the store untouched — when it does not,
+    /// which means another refresh already rotated the credential and this
+    /// response is stale.
+    ///
+    /// Store-backed refresh is otherwise a read-modify-write with no lock held
+    /// across the provider round trip: two concurrent refreshes both snapshot
+    /// the same profile, both present the same refresh token, and the later
+    /// save wins. With refresh-token rotation (Google, Okta, Auth0) the
+    /// winner's exchange has already invalidated the loser's token, so the
+    /// value that lands in the store is dead and every later refresh fails
+    /// `invalid_grant` until an operator re-runs the login flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when profile identity fields are invalid, or
+    /// [`AuthError::ProfileNotFound`] when the profile no longer exists.
+    async fn save_profile_if_unchanged(
+        &self,
+        profile: AuthProfile,
+        expected_refresh_token: Option<&str>,
+    ) -> AuthResult<bool>;
+
     /// Delete one provider profile.
     ///
     /// # Errors
@@ -3557,12 +3692,30 @@ where
             return TokenRefreshOutcome::Skipped(decision);
         }
 
+        // Capture the refresh token we are about to spend, BEFORE the provider
+        // round trip rotates it. It is the compare-and-swap witness: if the
+        // stored value has moved on by the time we write back, another refresh
+        // already landed and ours is stale.
+        let expected_refresh_token = profile
+            .method
+            .refresh_token_material()
+            .map(ToString::to_string);
+
         if let Err(error) = profile.method.refresh(cx).await {
             return TokenRefreshOutcome::Failed { decision, error };
         }
 
-        match self.store.save_profile(profile).await {
-            Ok(()) => TokenRefreshOutcome::Refreshed(decision),
+        match self
+            .store
+            .save_profile_if_unchanged(profile, expected_refresh_token.as_deref())
+            .await
+        {
+            // Losing the race is not a failure: the winner's result is already
+            // stored and is strictly fresher than ours. Discarding our response
+            // is the whole point — writing it would install a refresh token the
+            // provider already invalidated.
+            Ok(true) => TokenRefreshOutcome::Refreshed(decision),
+            Ok(false) => TokenRefreshOutcome::Skipped(decision),
             Err(error) => TokenRefreshOutcome::Failed { decision, error },
         }
     }
@@ -3647,6 +3800,34 @@ impl AuthProfileStore for InMemoryAuthProfileStore {
             .write()
             .insert((profile.provider.clone(), profile.id.clone()), profile);
         Ok(())
+    }
+
+    async fn save_profile_if_unchanged(
+        &self,
+        mut profile: AuthProfile,
+        expected_refresh_token: Option<&str>,
+    ) -> AuthResult<bool> {
+        validate_non_empty(&profile.id, "profile_id")?;
+        validate_non_empty(&profile.label, "label")?;
+        profile.provider = canonical_provider(&profile.provider)?;
+
+        // The compare and the swap happen under ONE write guard — taking a read
+        // guard to compare and then a write guard to store would reintroduce
+        // the race this method exists to close.
+        let mut profiles = self.profiles.write();
+        let key = (profile.provider.clone(), profile.id.clone());
+        let outcome = match profiles.get(&key) {
+            None => Err(AuthError::ProfileNotFound {
+                provider: profile.provider.clone(),
+                profile_id: profile.id.clone(),
+            }),
+            Some(stored) => Ok(stored.method.refresh_token_material() == expected_refresh_token),
+        };
+        if matches!(outcome, Ok(true)) {
+            profiles.insert(key, profile);
+        }
+        drop(profiles);
+        outcome
     }
 
     async fn delete_profile(&self, provider: &str, profile_id: &str) -> AuthResult<()> {
@@ -4624,6 +4805,222 @@ mod tests {
         assert!(
             auth.requires_refresh_in().is_some(),
             "auth-code path must preserve the expiry too"
+        );
+    }
+
+    /// RFC 6749 §6: a refresh MUST NOT request a scope that was never granted.
+    /// The granted scope was being discarded entirely, so every refresh
+    /// re-requested the originally CONFIGURED scope — which a user who
+    /// consented to less (or later revoked part of it) never authorized.
+    #[test]
+    fn oauth_refresh_requests_the_granted_scope_not_the_configured_one() {
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        // Configured scope is "chat messages"; the provider granted only "chat".
+        assert_eq!(auth.scope, "chat messages");
+        auth.apply_tokens(
+            OAuthTokens::bearer(
+                "access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Some("refresh-token"),
+                Some("chat"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(auth.granted_scope.as_deref(), Some("chat"));
+
+        let config = auth.refresh_config().unwrap();
+        assert_eq!(
+            config.scope.as_deref(),
+            Some("chat"),
+            "refresh must ask for what was granted, not what was configured"
+        );
+    }
+
+    /// An omitted scope on refresh must preserve the recorded grant. Dropping it
+    /// would leave nothing to narrow against, permanently disarming the
+    /// widening guard below.
+    #[test]
+    fn oauth_refresh_preserves_granted_scope_when_provider_omits_it() {
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        auth.apply_tokens(
+            OAuthTokens::bearer(
+                "access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Some("refresh-token"),
+                Some("chat"),
+            )
+            .unwrap(),
+        );
+
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "refreshed-access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Option::<String>::None,
+                Option::<String>::None,
+            )
+            .unwrap(),
+        )]);
+        run(async { auth.refresh_with_transport(&cx(), &transport).await }).unwrap();
+
+        assert_eq!(auth.granted_scope.as_deref(), Some("chat"));
+    }
+
+    /// A token endpoint answering a `chat` refresh with `chat admin` must be
+    /// refused rather than silently escalating what the profile can do.
+    #[test]
+    fn oauth_refresh_rejects_a_widened_scope() {
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        auth.apply_tokens(
+            OAuthTokens::bearer(
+                "access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Some("refresh-token"),
+                Some("chat"),
+            )
+            .unwrap(),
+        );
+
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "escalated-access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Option::<String>::None,
+                Some("chat admin"),
+            )
+            .unwrap(),
+        )]);
+        let err = run(async { auth.refresh_with_transport(&cx(), &transport).await })
+            .expect_err("a widened scope must be refused");
+        assert!(
+            matches!(err, AuthError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {err:?}"
+        );
+        // Nothing was applied: the scope check runs before any mutation.
+        assert_eq!(auth.granted_scope.as_deref(), Some("chat"));
+        assert_eq!(
+            auth.access_token
+                .as_ref()
+                .map(RedactedSecret::expose_secret),
+            Some("access-token"),
+            "a refused refresh must not leave half-applied token material"
+        );
+
+        // Narrowing is legitimate and must be accepted.
+        let mut narrowing = OAuthDeviceCodeAuth::from_config(oauth_config());
+        narrowing.apply_tokens(
+            OAuthTokens::bearer(
+                "access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Some("refresh-token"),
+                Some("chat messages"),
+            )
+            .unwrap(),
+        );
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "narrowed-access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Option::<String>::None,
+                Some("chat"),
+            )
+            .unwrap(),
+        )]);
+        run(async { narrowing.refresh_with_transport(&cx(), &transport).await }).unwrap();
+        assert_eq!(narrowing.granted_scope.as_deref(), Some("chat"));
+    }
+
+    /// Store-backed refresh is a read-modify-write across a provider round
+    /// trip. Without a compare-and-swap the later save wins, and with
+    /// refresh-token rotation the loser's token was already invalidated by the
+    /// winner's exchange — so the value that lands is dead.
+    #[test]
+    fn store_refresh_rejects_a_stale_write_after_a_concurrent_rotation() {
+        let store = InMemoryAuthProfileStore::new();
+
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        auth.apply_tokens(
+            OAuthTokens::bearer(
+                "access-token",
+                Some(StdDuration::from_secs(3_600)),
+                Some("refresh-token-v1"),
+                Option::<String>::None,
+            )
+            .unwrap(),
+        );
+        let profile = AuthProfile::new(
+            "p1",
+            "example",
+            AuthMethodKind::OAuthDeviceCode(auth.clone()),
+            "label",
+            0,
+        )
+        .unwrap();
+        run(async { store.save_profile(profile.clone()).await }).unwrap();
+
+        // A concurrent refresh lands first, rotating the stored token to v2.
+        let mut winner = auth.clone();
+        winner.apply_tokens(
+            OAuthTokens::bearer(
+                "access-token-v2",
+                Some(StdDuration::from_secs(3_600)),
+                Some("refresh-token-v2"),
+                Option::<String>::None,
+            )
+            .unwrap(),
+        );
+        let winner_profile = AuthProfile::new(
+            "p1",
+            "example",
+            AuthMethodKind::OAuthDeviceCode(winner),
+            "label",
+            0,
+        )
+        .unwrap();
+        assert!(
+            run(async {
+                store
+                    .save_profile_if_unchanged(winner_profile, Some("refresh-token-v1"))
+                    .await
+            })
+            .unwrap(),
+            "the first writer holds the expected token and must win"
+        );
+
+        // Our in-flight refresh still believes the stored token is v1.
+        let mut loser = auth;
+        loser.apply_tokens(
+            OAuthTokens::bearer(
+                "access-token-stale",
+                Some(StdDuration::from_secs(3_600)),
+                Some("refresh-token-stale"),
+                Option::<String>::None,
+            )
+            .unwrap(),
+        );
+        let loser_profile = AuthProfile::new(
+            "p1",
+            "example",
+            AuthMethodKind::OAuthDeviceCode(loser),
+            "label",
+            0,
+        )
+        .unwrap();
+        assert!(
+            !run(async {
+                store
+                    .save_profile_if_unchanged(loser_profile, Some("refresh-token-v1"))
+                    .await
+            })
+            .unwrap(),
+            "a stale writer must be refused, not silently clobber the winner"
+        );
+
+        let stored = run(async { store.get_profile("example", "p1").await }).unwrap();
+        assert_eq!(
+            stored.method.refresh_token_material(),
+            Some("refresh-token-v2"),
+            "the winner's rotated token must survive"
         );
     }
 

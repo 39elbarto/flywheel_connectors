@@ -573,6 +573,13 @@ pub fn transport_error_reached_service(error: &reqwest::Error) -> bool {
 /// let ctx = runtime.request_context();
 /// let policy = RetryPolicy::new().with_max_attempts(Some(3));
 ///
+/// // `replayable` is the whole safety question: a POST that creates a
+/// // resource must NOT be replayed once the request has left the client,
+/// // because a 5xx or a timeout can both be reported after the service
+/// // already did the work. Set it to `true` unconditionally only for an
+/// // operation that is idempotent or that carries an idempotency key.
+/// let create_is_replayable = false;
+///
 /// let result = RetryLoop::execute(&ctx, &policy, |attempt| async move {
 ///     match client.post(url).send().await {
 ///         Ok(resp) if resp.status().is_success() => AttemptOutcome::Success(resp),
@@ -580,12 +587,22 @@ pub fn transport_error_reached_service(error: &reqwest::Error) -> bool {
 ///             error: MyError::RateLimited,
 ///             retry_after: Some(Duration::from_secs(30)),
 ///         },
+///         // A 5xx means the service RECEIVED the request.
+///         Ok(resp) if resp.status().is_server_error() => {
+///             AttemptOutcome::retryable_if_replayable(
+///                 MyError::Api(resp.status()),
+///                 None,
+///                 create_is_replayable,
+///             )
+///         }
 ///         Ok(resp) => AttemptOutcome::Terminal(MyError::Api(resp.status())),
-///         Err(e) if e.is_timeout() => AttemptOutcome::Retryable {
-///             error: MyError::Http(e),
-///             retry_after: None,
-///         },
-///         Err(e) => AttemptOutcome::Terminal(MyError::Http(e)),
+///         // Only a connect-phase failure proves the request never left the
+///         // client; `is_timeout()` covers the TOTAL request timeout, which
+///         // fires after the body was fully sent.
+///         Err(e) => {
+///             let replayable = create_is_replayable || !transport_error_reached_service(&e);
+///             AttemptOutcome::retryable_if_replayable(MyError::Http(e), None, replayable)
+///         }
 ///     }
 /// }).await;
 /// ```

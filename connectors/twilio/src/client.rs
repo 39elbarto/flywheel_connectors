@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::migration::{
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
+};
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode, header};
 // tracing macros handled by RetryLoop internals
@@ -961,7 +963,8 @@ impl TwilioClient {
     // ── HTTP helpers ─────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> TwilioResult<serde_json::Value> {
-        self.execute(|| self.http.get(url)).await
+        // GET is idempotent.
+        self.execute(true, || self.http.get(url)).await
     }
 
     async fn get_with_params(
@@ -983,7 +986,8 @@ impl TwilioClient {
                 let _ = write!(url, "{key}={encoded}");
             }
         }
-        self.execute(|| self.http.get(&url)).await
+        // GET is idempotent.
+        self.execute(true, || self.http.get(&url)).await
     }
 
     async fn get_bytes(&self, url: &str) -> TwilioResult<Vec<u8>> {
@@ -1051,7 +1055,9 @@ impl TwilioClient {
         body: &serde_json::Value,
     ) -> TwilioResult<serde_json::Value> {
         let encoded = encode_form_body(&json_to_form_pairs(body));
-        self.execute(|| {
+        // NOT replay-safe: these POSTs send messages and place calls, and
+        // Twilio offers no idempotency key for them.
+        self.execute(false, || {
             self.http
                 .post(url)
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -1061,15 +1067,29 @@ impl TwilioClient {
     }
 
     async fn delete(&self, url: &str) -> TwilioResult<()> {
-        let resp = self.execute(|| self.http.delete(url)).await;
+        // DELETE is idempotent per HTTP semantics.
+        let resp = self.execute(true, || self.http.delete(url)).await;
         match resp {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         }
     }
 
+    /// Run a request under the retry policy.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a side
+    /// effect. It must be `false` for anything that creates a resource: Twilio
+    /// has no idempotency-key mechanism on the Messages or Calls APIs, so a
+    /// replayed `POST /Messages` sends a second SMS and bills for it. Only a
+    /// pre-transmission failure (a connect error) may be retried in that case.
+    ///
+    /// A 429 stays retryable regardless — Twilio rejects a rate-limited request
+    /// without performing it, so replaying it cannot duplicate anything.
+    ///
+    /// See br-kxd3e.
     async fn execute(
         &self,
+        replay_safe: bool,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> TwilioResult<serde_json::Value> {
         let ctx = self.runtime.request_context();
@@ -1104,14 +1124,17 @@ impl TwilioClient {
 
                     if status.is_server_error() {
                         let body = response.text().await.unwrap_or_default();
-                        return AttemptOutcome::Retryable {
-                            error: TwilioError::Api {
+                        // A 5xx means Twilio RECEIVED the request; the message
+                        // may already have been queued for delivery.
+                        return AttemptOutcome::retryable_if_replayable(
+                            TwilioError::Api {
                                 message: format!("Server error {status}: {body}"),
                                 status_code: Some(status.as_u16()),
                                 error_code: None,
                             },
-                            retry_after: None,
-                        };
+                            None,
+                            replay_safe,
+                        );
                     }
 
                     if !status.is_success() {
@@ -1141,10 +1164,13 @@ impl TwilioClient {
                         Err(e) => AttemptOutcome::Terminal(TwilioError::Http(e)),
                     }
                 }
-                Err(e) => AttemptOutcome::Retryable {
-                    retry_after: None,
-                    error: TwilioError::Http(e),
-                },
+                // Only a connect-phase failure proves the request never left
+                // the client; `is_timeout()` covers the TOTAL request timeout,
+                // which fires after the body was fully sent.
+                Err(e) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&e);
+                    AttemptOutcome::retryable_if_replayable(TwilioError::Http(e), None, replayable)
+                }
             }
         })
         .await

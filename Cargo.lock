@@ -6449,6 +6449,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "parking_lot",
+ "percent-encoding",
  "rand 0.8.6",
  "sha2 0.10.9",
  "thiserror 2.0.18",

@@ -69,9 +69,13 @@ impl SigningScope {
     /// with the double-encoded form (or anything else with the single-encoded
     /// form) produces a canonical request the service will not reproduce, and
     /// the request is rejected with `SignatureDoesNotMatch`.
+    ///
+    /// The comparison is case-insensitive because `service` is a public field
+    /// with no normalizing constructor, so `SigningScope { service: "S3", .. }`
+    /// is constructible. Matches `fcp_provider_auth::SigV4Auth`.
     #[must_use]
     pub fn canonical_path_encoding(&self) -> CanonicalPathEncoding {
-        if self.service == "s3" {
+        if self.service.eq_ignore_ascii_case("s3") {
             CanonicalPathEncoding::Single
         } else {
             CanonicalPathEncoding::Double

@@ -420,7 +420,17 @@ impl fmt::Display for RedactedSecret {
 pub struct SigV4SigningContext {
     /// HTTP method such as `GET` or `POST`.
     pub method: String,
-    /// Absolute path component. Empty paths are canonicalized to `/`.
+    /// **Wire** path component — the absolute path exactly as it will appear in
+    /// the request line, percent-encoded (`url::Url::path()` produces it
+    /// directly, as `/bucket/my%20key`). Empty paths are canonicalized to `/`.
+    ///
+    /// The signer percent-DECODES this before building the canonical URI,
+    /// because that is what the service does with what it receives. Passing an
+    /// already-decoded path here signs a different resource than the one the
+    /// request targets whenever the path contains anything needing an escape.
+    ///
+    /// This matches `fcp_sdk::sigv4::SignableRequest::uri`; the two crates
+    /// must not diverge.
     pub uri_path: String,
     /// Query parameters before `SigV4` URI encoding.
     pub query_params: BTreeMap<String, String>,
@@ -2528,6 +2538,18 @@ impl fmt::Debug for SigV4SignedAuth {
     }
 }
 
+/// Number of URI-encoding passes applied to the canonical request's path.
+///
+/// Mirrors `fcp_sdk::sigv4::CanonicalPathEncoding`; the two crates sign the
+/// same resource and must agree byte-for-byte on how the path is rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalPathEncoding {
+    /// Encode each path segment once — Amazon S3.
+    Single,
+    /// Encode each path segment twice — every other AWS service.
+    Double,
+}
+
 /// AWS `SigV4` auth configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigV4Auth {
@@ -2569,6 +2591,25 @@ impl SigV4Auth {
         })
     }
 
+    /// How many times this service's canonical URI path is encoded.
+    ///
+    /// `SigV4` requires each path segment to be URI-encoded **twice** for every
+    /// service except Amazon S3, which requires exactly **once**. Signing S3
+    /// with the double-encoded form (or anything else with the single-encoded
+    /// form) produces a canonical request the service will not reproduce, and
+    /// the request is rejected with `SignatureDoesNotMatch`.
+    ///
+    /// The comparison is case-insensitive because `service` is a public field:
+    /// [`SigV4Auth::new`] lowercases it, but a struct literal does not.
+    #[must_use]
+    pub fn canonical_path_encoding(&self) -> CanonicalPathEncoding {
+        if self.service.eq_ignore_ascii_case("s3") {
+            CanonicalPathEncoding::Single
+        } else {
+            CanonicalPathEncoding::Double
+        }
+    }
+
     /// Sign a request context and return the headers `SigV4` must apply.
     ///
     /// # Errors
@@ -2601,7 +2642,12 @@ impl SigV4Auth {
         }
 
         let (canonical_headers, signed_headers) = canonical_headers(&headers)?;
-        let canonical_request = canonical_request(context, &canonical_headers, &signed_headers);
+        let canonical_request = canonical_request(
+            context,
+            &canonical_headers,
+            &signed_headers,
+            self.canonical_path_encoding(),
+        );
         let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
         let string_to_sign =
             format!("{SIGV4_ALGORITHM}\n{amz_date}\n{credential_scope}\n{canonical_hash}");
@@ -3150,11 +3196,12 @@ fn canonical_request(
     context: &SigV4SigningContext,
     canonical_headers: &str,
     signed_headers: &str,
+    path_encoding: CanonicalPathEncoding,
 ) -> String {
     format!(
         "{}\n{}\n{}\n{}\n{signed_headers}\n{}",
         context.method,
-        canonical_uri(&context.uri_path),
+        canonical_uri(&context.uri_path, path_encoding),
         canonical_query(&context.query_params),
         canonical_headers,
         context.payload_hash,
@@ -3201,16 +3248,46 @@ fn canonical_query(params: &BTreeMap<String, String>) -> String {
         .join("&")
 }
 
-fn canonical_uri(path: &str) -> String {
-    let path = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{path}")
-    };
+/// Percent-decode a wire path back to the raw bytes the service will see.
+///
+/// Invalid UTF-8 is replaced rather than rejected: the canonical URI is only
+/// ever compared against the service's own rendering, and a request whose path
+/// is not valid UTF-8 will fail on its own merits rather than here.
+fn percent_decode_path(path: &str) -> String {
+    percent_encoding::percent_decode_str(path)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+fn uri_encode_path(path: &str) -> String {
     path.split('/')
         .map(uri_encode)
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Build the canonical URI for a request.
+///
+/// The service percent-decodes the path it receives and then re-encodes it to
+/// canonicalize, so the signer has to do the same thing: decode the wire path,
+/// then apply the service's required number of encoding passes. Encoding the
+/// wire path directly (the previous behaviour) is only equivalent when the path
+/// contains nothing that needed escaping in the first place — which is why
+/// plain ASCII keys signed correctly while a key with a space, a literal `%`,
+/// or any non-ASCII character produced `SignatureDoesNotMatch`.
+///
+/// Ported verbatim from `fcp_sdk::sigv4`; see br-1nqg7 and br-0lsi3.
+fn canonical_uri(wire_path: &str, encoding: CanonicalPathEncoding) -> String {
+    let wire_path = if wire_path.starts_with('/') {
+        wire_path.to_string()
+    } else {
+        format!("/{wire_path}")
+    };
+    let once = uri_encode_path(&percent_decode_path(&wire_path));
+    match encoding {
+        CanonicalPathEncoding::Single => once,
+        CanonicalPathEncoding::Double => uri_encode_path(&once),
+    }
 }
 
 fn uri_encode(value: &str) -> String {
@@ -3890,6 +3967,17 @@ mod tests {
             session_token.map(str::to_string),
             "us-east-1",
             "s3",
+        )
+        .unwrap()
+    }
+
+    fn sigv4_auth_for_service(service: &str) -> SigV4Auth {
+        SigV4Auth::new(
+            aws_example_access_key(),
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            None::<String>,
+            "us-east-1",
+            service,
         )
         .unwrap()
     }
@@ -5246,6 +5334,142 @@ mod tests {
             Some("Bearer fixture-jwt-1")
         );
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    // ── Canonical URI encoding (br-0lsi3, porting br-1nqg7) ──────────
+
+    /// S3 requires exactly ONE encoding pass; every other service requires two.
+    /// `canonical_uri` previously encoded the wire path once regardless of
+    /// service, which is correct only for a path that needed no escaping.
+    #[test]
+    fn canonical_uri_encodes_once_for_s3_and_twice_for_other_services() {
+        // `%20` on the wire decodes to a space, which S3 canonicalizes back to
+        // `%20` — not `%2520`.
+        assert_eq!(
+            canonical_uri("/bucket/my%20report.pdf", CanonicalPathEncoding::Single),
+            "/bucket/my%20report.pdf"
+        );
+        assert_eq!(
+            canonical_uri("/bucket/my%20report.pdf", CanonicalPathEncoding::Double),
+            "/bucket/my%2520report.pdf"
+        );
+    }
+
+    /// The property that makes this change safe to land without live AWS
+    /// access: for a path built only from unreserved characters, BOTH the new
+    /// single- and double-pass forms equal the old single-encode-the-wire-path
+    /// behaviour. Every caller in the workspace today passes such a path, so
+    /// no signature that verifies now stops verifying.
+    #[test]
+    fn canonical_uri_is_unchanged_for_paths_needing_no_escape() {
+        for path in [
+            "/",
+            "/bucket/plain.pdf",
+            "/model/invoke",
+            "/path/to/file.txt",
+        ] {
+            let legacy = uri_encode_path(path);
+            assert_eq!(
+                canonical_uri(path, CanonicalPathEncoding::Single),
+                legacy,
+                "single-pass encoding must be a no-op change for {path}"
+            );
+            assert_eq!(
+                canonical_uri(path, CanonicalPathEncoding::Double),
+                legacy,
+                "double-pass encoding must also be a no-op change for {path}"
+            );
+        }
+    }
+
+    /// Characters the URL parser leaves unescaped (`&`, `+`, `:`) still get
+    /// encoded by the canonicalizer, matching what the service computes after
+    /// decoding. The widely-repeated claim that a raw `&` breaks S3 signing is
+    /// false — it round-trips; see br-1nqg7.
+    #[test]
+    fn canonical_uri_encodes_aws_reserved_characters_left_raw_by_the_url_parser() {
+        assert_eq!(
+            canonical_uri("/bucket/Q&A.pdf", CanonicalPathEncoding::Single),
+            "/bucket/Q%26A.pdf"
+        );
+        assert_eq!(
+            canonical_uri("/bucket/a+b.pdf", CanonicalPathEncoding::Single),
+            "/bucket/a%2Bb.pdf"
+        );
+        assert_eq!(
+            canonical_uri("/bucket/a:b.pdf", CanonicalPathEncoding::Single),
+            "/bucket/a%3Ab.pdf"
+        );
+    }
+
+    /// A literal `%` in the key arrives as `%25` and must survive the
+    /// decode/re-encode round trip rather than becoming `%2525`.
+    #[test]
+    fn canonical_uri_round_trips_a_literal_percent() {
+        assert_eq!(
+            canonical_uri("/bucket/50%25.pdf", CanonicalPathEncoding::Single),
+            "/bucket/50%25.pdf"
+        );
+    }
+
+    /// Non-ASCII keys are the most common real-world trigger — any accented or
+    /// CJK filename arrives percent-encoded and was double-encoded before.
+    #[test]
+    fn canonical_uri_handles_non_ascii_keys() {
+        assert_eq!(
+            canonical_uri("/bucket/e%C3%B1e.pdf", CanonicalPathEncoding::Single),
+            "/bucket/e%C3%B1e.pdf"
+        );
+    }
+
+    /// The selector must key off the service, and must not be defeated by a
+    /// struct literal that skips `SigV4Auth::new`'s lowercasing.
+    #[test]
+    fn canonical_path_encoding_selects_single_only_for_s3() {
+        assert_eq!(
+            sigv4_auth(None).canonical_path_encoding(),
+            CanonicalPathEncoding::Single
+        );
+        assert_eq!(
+            sigv4_auth_for_service("execute-api").canonical_path_encoding(),
+            CanonicalPathEncoding::Double
+        );
+        let uppercase = SigV4Auth {
+            service: "S3".to_string(),
+            ..sigv4_auth(None)
+        };
+        assert_eq!(
+            uppercase.canonical_path_encoding(),
+            CanonicalPathEncoding::Single
+        );
+    }
+
+    /// Proves the mode is actually threaded into the string that gets signed,
+    /// rather than merely existing as an unused selector. Asserting on the
+    /// canonical request is what makes this meaningful — comparing two
+    /// `Authorization` headers would differ anyway, because the service name
+    /// also appears in the credential scope.
+    #[test]
+    fn path_encoding_reaches_the_canonical_request() {
+        let context =
+            SigV4SigningContext::new("GET", "/bucket/my%20report.pdf", EMPTY_PAYLOAD_SHA256)
+                .unwrap();
+
+        let s3_line =
+            canonical_request(&context, "host:e\n", "host", CanonicalPathEncoding::Single)
+                .lines()
+                .nth(1)
+                .unwrap()
+                .to_string();
+        let other_line =
+            canonical_request(&context, "host:e\n", "host", CanonicalPathEncoding::Double)
+                .lines()
+                .nth(1)
+                .unwrap()
+                .to_string();
+
+        assert_eq!(s3_line, "/bucket/my%20report.pdf");
+        assert_eq!(other_line, "/bucket/my%2520report.pdf");
     }
 
     #[test]

@@ -198,6 +198,7 @@
 
 use std::time::Duration;
 
+use fcp_async_core::http::HttpClientError;
 use fcp_async_core::{AsyncError, ExecutionContext};
 #[cfg(feature = "connector-http")]
 use fcp_manifest::{
@@ -532,7 +533,9 @@ impl<T, E> AttemptOutcome<T, E> {
     /// silently performing the side effect up to `max_retries` more times.
     ///
     /// See [`transport_error_reached_service`] for classifying a
-    /// `reqwest::Error` on that axis.
+    /// `reqwest::Error` on that axis, or
+    /// [`http_client_error_reached_service`] for the asupersync
+    /// `HttpClientError`.
     pub const fn retryable_if_replayable(
         error: E,
         retry_after: Option<Duration>,
@@ -560,6 +563,45 @@ impl<T, E> AttemptOutcome<T, E> {
 #[must_use]
 pub fn transport_error_reached_service(error: &reqwest::Error) -> bool {
     !(error.is_connect() || error.is_builder())
+}
+
+/// Whether an asupersync [`HttpClientError`] leaves it POSSIBLE that the
+/// service received and acted on the request.
+///
+/// The asupersync counterpart of [`transport_error_reached_service`], for
+/// connectors built on `fcp_async_core::http` rather than `reqwest`. Unlike the
+/// `reqwest` helper this needs no feature gate: `fcp-async-core` is an
+/// unconditional dependency of this crate.
+///
+/// Returns `false` only for the variants that are raised while the connection
+/// is still being established, which proves no request bytes were written:
+/// URL parsing, DNS, TCP connect, the TLS handshake, proxy negotiation
+/// (SOCKS5 and HTTP `CONNECT`), and pool exhaustion.
+///
+/// Everything else returns `true`. In particular:
+/// - `Io` may be a mid-body write failure *or* a response-read failure that
+///   happens after the body was fully sent.
+/// - `DeadlineExceeded` is the total-request deadline, which fires after the
+///   request may have been fully transmitted.
+/// - `HttpError` and `TooManyRedirects` are response-phase: the service
+///   answered, so it necessarily received the request.
+/// - `Cancelled` can be observed at any point, including after transmission.
+///
+/// Conservative by construction: an unrecognised error class returns `true`
+/// (assume it reached the service) so a new upstream variant fails closed.
+#[must_use]
+pub fn http_client_error_reached_service(error: &HttpClientError) -> bool {
+    !matches!(
+        error,
+        HttpClientError::InvalidUrl(_)
+            | HttpClientError::DnsError(_)
+            | HttpClientError::ConnectError(_)
+            | HttpClientError::TlsError(_)
+            | HttpClientError::ConnectTunnelRefused { .. }
+            | HttpClientError::InvalidConnectInput(_)
+            | HttpClientError::ProxyError(_)
+            | HttpClientError::PoolExhausted { .. }
+    )
 }
 
 /// Generic retry executor using `ExecutionContext` for deadline-aware backoff.
@@ -802,6 +844,62 @@ mod tests {
                 retry_after: Some(_)
             }
         ));
+    }
+
+    /// Only the connection-establishment failures prove no request bytes were
+    /// written. These are the variants a non-idempotent operation may replay.
+    #[test]
+    fn http_client_error_pre_transmission_variants_did_not_reach_the_service() {
+        let pre_transmission = [
+            HttpClientError::InvalidUrl("not a url".to_string()),
+            HttpClientError::DnsError(std::io::Error::other("nxdomain")),
+            HttpClientError::ConnectError(std::io::Error::other("refused")),
+            HttpClientError::TlsError("handshake failed".to_string()),
+            HttpClientError::ConnectTunnelRefused {
+                status: 403,
+                reason: "Forbidden".to_string(),
+            },
+            HttpClientError::InvalidConnectInput("bad authority".to_string()),
+            HttpClientError::ProxyError("SOCKS5 auth rejected".to_string()),
+            HttpClientError::PoolExhausted {
+                host: "api.example.com".to_string(),
+                port: 443,
+            },
+        ];
+
+        for error in &pre_transmission {
+            assert!(
+                !http_client_error_reached_service(error),
+                "{error:?} is raised while connecting, so no request bytes were written"
+            );
+        }
+    }
+
+    /// Everything else may be observed after the body was fully sent, so a
+    /// non-idempotent operation must treat it as "may already have executed".
+    #[test]
+    fn http_client_error_post_transmission_variants_may_have_reached_the_service() {
+        let may_have_reached = [
+            // A mid-body write failure and a response-read failure are the
+            // same variant; only the latter proves transmission, so both must
+            // fail closed.
+            HttpClientError::Io(std::io::Error::other("connection reset")),
+            // The TOTAL request deadline — fires after the body may have been
+            // fully transmitted. This is the exact class that made
+            // `reqwest::Error::is_timeout()` unsafe to retry on.
+            HttpClientError::DeadlineExceeded,
+            // Redirects imply the service answered at least once.
+            HttpClientError::TooManyRedirects { count: 11, max: 10 },
+            // Cancellation can land at any point, including post-send.
+            HttpClientError::Cancelled,
+        ];
+
+        for error in &may_have_reached {
+            assert!(
+                http_client_error_reached_service(error),
+                "{error:?} can occur after transmission and must fail closed"
+            );
+        }
     }
 
     #[cfg(feature = "connector-http")]

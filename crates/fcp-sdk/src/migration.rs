@@ -488,7 +488,28 @@ pub const fn is_http_status_retryable(status: u16) -> bool {
 pub enum AttemptOutcome<T, E> {
     /// Operation succeeded.
     Success(T),
-    /// Operation failed but may be retried.
+    /// Operation failed and is SAFE TO REPLAY.
+    ///
+    /// "Retryable" is a claim about **side effects**, not just about whether
+    /// the error looks transient. Returning this asserts one of:
+    /// - the request provably never reached the service (a connect error), or
+    /// - the operation is idempotent, or
+    /// - the request carries an idempotency key the provider honours.
+    ///
+    /// It is NOT enough that the status code is in the 5xx family or that the
+    /// transport reported a timeout. A 5xx means the service *received* the
+    /// request, and `reqwest::Error::is_timeout()` covers the total-request
+    /// timeout, which fires after the body was fully sent — so for a
+    /// non-idempotent operation either one may mean the work already
+    /// happened. Replaying it then performs the side effect again.
+    ///
+    /// The host's receipt/idempotency-key deduplication does NOT cover this:
+    /// it deduplicates repeated *invokes*, while this retry happens inside the
+    /// connector process, below that boundary. The host sees one invoke and
+    /// writes one receipt while the provider saw N requests.
+    ///
+    /// Use [`AttemptOutcome::retryable_if_replayable`] when the safety of a
+    /// replay depends on whether the request was transmitted.
     Retryable {
         /// The error from this attempt.
         error: E,
@@ -497,6 +518,48 @@ pub enum AttemptOutcome<T, E> {
     },
     /// Operation failed terminally (no retry).
     Terminal(E),
+}
+
+impl<T, E> AttemptOutcome<T, E> {
+    /// Classify a transient failure for an operation whose replay safety
+    /// depends on whether the request was actually transmitted.
+    ///
+    /// `replayable` must be `true` only when replaying the request cannot
+    /// duplicate a side effect — because the request never left the client,
+    /// because the operation is idempotent, or because it carries an
+    /// idempotency key. When it is `false` the failure is reported as
+    /// [`AttemptOutcome::Terminal`]: giving the caller one honest error beats
+    /// silently performing the side effect up to `max_retries` more times.
+    ///
+    /// See [`transport_error_reached_service`] for classifying a
+    /// `reqwest::Error` on that axis.
+    pub const fn retryable_if_replayable(
+        error: E,
+        retry_after: Option<Duration>,
+        replayable: bool,
+    ) -> Self {
+        if replayable {
+            Self::Retryable { error, retry_after }
+        } else {
+            Self::Terminal(error)
+        }
+    }
+}
+
+/// Whether a `reqwest` transport error leaves it POSSIBLE that the service
+/// received and acted on the request.
+///
+/// Only a connect-phase failure proves the request never left the client. A
+/// timeout, a body/decode error, or a response-phase failure can all occur
+/// after the request was fully written, so for a non-idempotent operation they
+/// must be treated as "may already have executed".
+///
+/// Conservative by construction: an unrecognised error class returns `true`
+/// (assume it reached the service) so a new upstream variant fails closed.
+#[cfg(feature = "connector-http")]
+#[must_use]
+pub fn transport_error_reached_service(error: &reqwest::Error) -> bool {
+    !(error.is_connect() || error.is_builder())
 }
 
 /// Generic retry executor using `ExecutionContext` for deadline-aware backoff.
@@ -698,6 +761,31 @@ pub fn classify_http_status(status: u16, retry_after: Option<Duration>) -> Retry
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Replay safety (br-kxd3e) ─────────────────────────────────
+
+    /// `Retryable` is a claim about SIDE EFFECTS, not about how transient the
+    /// error looks. When a replay could duplicate one, the honest outcome is a
+    /// single terminal error rather than up to `max_retries` more executions.
+    #[test]
+    fn retryable_if_replayable_downgrades_an_unsafe_replay_to_terminal() {
+        let unsafe_replay: AttemptOutcome<(), &str> =
+            AttemptOutcome::retryable_if_replayable("boom", Some(Duration::from_secs(1)), false);
+        assert!(
+            matches!(unsafe_replay, AttemptOutcome::Terminal("boom")),
+            "a non-replayable failure must not be retried"
+        );
+
+        let safe_replay: AttemptOutcome<(), &str> =
+            AttemptOutcome::retryable_if_replayable("boom", Some(Duration::from_secs(1)), true);
+        assert!(matches!(
+            safe_replay,
+            AttemptOutcome::Retryable {
+                error: "boom",
+                retry_after: Some(_)
+            }
+        ));
+    }
 
     #[cfg(feature = "connector-http")]
     fn br_b0qqv_host_egress_context(

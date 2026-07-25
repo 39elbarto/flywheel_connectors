@@ -630,6 +630,24 @@ impl fmt::Debug for SseClient {
     }
 }
 
+/// Build the HTTP client used for SSE.
+///
+/// The transport's `max_body_size` is a cap on the TOTAL response body, and its
+/// counter accumulates across the whole response and is never reset — which is
+/// meaningless for an intentionally unbounded stream. Leaving it at the
+/// transport default (16 MiB) killed every long-lived SSE connection with
+/// `BodyTooLarge` once it had delivered that much: about 80 minutes for an
+/// endpoint pushing 200 KB/min. Where a supervisor reconnects with
+/// `Last-Event-ID` that degraded into a mysterious periodic reconnect rather
+/// than visible data loss, which is why it went unnoticed.
+///
+/// Memory is bounded by `SseConfig::max_buffer_size` instead, which caps what
+/// the parser RETAINS for an in-progress event — the correct bound for a stream,
+/// and one that is soundly accounted since the retained-bytes fix.
+fn sse_http_client() -> HttpClient {
+    HttpClientBuilder::new().max_body_size(usize::MAX).build()
+}
+
 impl SseClient {
     /// Create a new SSE client.
     #[must_use]
@@ -637,7 +655,7 @@ impl SseClient {
         Self {
             url: url.into(),
             config: SseConfig::default(),
-            http_client: Arc::new(HttpClientBuilder::new().build()),
+            http_client: Arc::new(sse_http_client()),
         }
     }
 
@@ -647,7 +665,7 @@ impl SseClient {
         Self {
             url: url.into(),
             config,
-            http_client: Arc::new(HttpClientBuilder::new().build()),
+            http_client: Arc::new(sse_http_client()),
         }
     }
 

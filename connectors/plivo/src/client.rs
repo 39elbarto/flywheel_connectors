@@ -14,7 +14,9 @@ use std::{collections::BTreeMap, fmt::Write as _, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::migration::{
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
+};
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{
     Client, Response, StatusCode,
@@ -253,13 +255,17 @@ impl PlivoClient {
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> PlivoResult<T> {
-        self.execute_json(|| self.http.get(format!("{}{}", self.base_url, path)))
+        // GET is idempotent.
+        self.execute_json(true, || self.http.get(format!("{}{}", self.base_url, path)))
             .await
     }
 
     async fn delete(&self, path: &str) -> PlivoResult<PlivoCommand> {
-        self.execute_json(|| self.http.delete(format!("{}{}", self.base_url, path)))
-            .await
+        // DELETE is idempotent per HTTP semantics.
+        self.execute_json(true, || {
+            self.http.delete(format!("{}{}", self.base_url, path))
+        })
+        .await
     }
 
     async fn post_form<T: DeserializeOwned>(
@@ -274,7 +280,9 @@ impl PlivoClient {
                     .map(|(key, value)| (key.as_str(), value.as_str())),
             )
             .finish();
-        self.execute_json(|| {
+        // NOT replay-safe: these POSTs send messages and place calls, and
+        // Plivo offers no idempotency key for them.
+        self.execute_json(false, || {
             self.http
                 .post(&url)
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -283,8 +291,18 @@ impl PlivoClient {
         .await
     }
 
+    /// Run a request under the retry policy.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a side
+    /// effect. Plivo has no idempotency-key mechanism on the Message or Call
+    /// APIs, so a replayed `POST /Message/` sends and bills a second SMS. Only
+    /// a pre-transmission failure may be retried for those.
+    ///
+    /// A 429 stays retryable regardless — Plivo rejects a rate-limited request
+    /// without performing it. See br-kxd3e.
     async fn execute_json<T: DeserializeOwned>(
         &self,
+        replay_safe: bool,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> PlivoResult<T> {
         let ctx = self.runtime.request_context();
@@ -292,18 +310,28 @@ impl PlivoClient {
 
         let data = RetryLoop::execute(&ctx, &policy, |_attempt| async {
             match build_request().send().await {
-                Ok(response) => Self::response_outcome(response).await,
-                Err(error) => AttemptOutcome::Retryable {
-                    retry_after: None,
-                    error: PlivoError::Http(error),
-                },
+                Ok(response) => Self::response_outcome(response, replay_safe).await,
+                // Only a connect-phase failure proves the request never left
+                // the client; `is_timeout()` covers the TOTAL request timeout,
+                // which fires after the body was fully sent.
+                Err(error) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&error);
+                    AttemptOutcome::retryable_if_replayable(
+                        PlivoError::Http(error),
+                        None,
+                        replayable,
+                    )
+                }
             }
         })
         .await?;
         serde_json::from_value(data).map_err(PlivoError::Json)
     }
 
-    async fn response_outcome(response: Response) -> AttemptOutcome<serde_json::Value, PlivoError> {
+    async fn response_outcome(
+        response: Response,
+        replay_safe: bool,
+    ) -> AttemptOutcome<serde_json::Value, PlivoError> {
         let status = response.status();
         let retry_after = retry_after_header(&response);
 
@@ -319,14 +347,18 @@ impl PlivoClient {
             || matches!(status, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY)
         {
             let body = response.text().await.unwrap_or_default();
-            return AttemptOutcome::Retryable {
-                error: PlivoError::Api {
+            // All of these mean Plivo RECEIVED the request. A 5xx can be
+            // returned after the message was already queued, and a 408 can
+            // follow a request the server read in full.
+            return AttemptOutcome::retryable_if_replayable(
+                PlivoError::Api {
                     message: format!("HTTP {status}: {body}"),
                     status_code: Some(status.as_u16()),
                     retry_after,
                 },
                 retry_after,
-            };
+                replay_safe,
+            );
         }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return AttemptOutcome::Terminal(PlivoError::Unauthorized);

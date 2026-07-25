@@ -580,17 +580,20 @@ pub fn transport_error_reached_service(error: &reqwest::Error) -> bool {
 ///
 /// Everything else returns `true`. In particular:
 /// - `Io` may be a mid-body write failure *or* a response-read failure that
-///   happens after the body was fully sent.
-/// - `DeadlineExceeded` is the total-request deadline, which fires after the
-///   request may have been fully transmitted.
+///   happens after the body was fully sent. The two are the same variant, so
+///   the ambiguous case decides it.
 /// - `HttpError` and `TooManyRedirects` are response-phase: the service
 ///   answered, so it necessarily received the request.
 /// - `Cancelled` can be observed at any point, including after transmission.
 ///
-/// Conservative by construction: an unrecognised error class returns `true`
-/// (assume it reached the service) so a new upstream variant fails closed.
+/// Conservative by construction: the classification is an allowlist of
+/// pre-transmission variants, so an error class added upstream returns `true`
+/// (assume it reached the service) and fails closed without a compile break.
+/// Asupersync after 0.3.4 adds `DeadlineExceeded` — the total-request
+/// deadline, which fires after the request may have been fully transmitted —
+/// and this helper already classifies it correctly.
 #[must_use]
-pub fn http_client_error_reached_service(error: &HttpClientError) -> bool {
+pub const fn http_client_error_reached_service(error: &HttpClientError) -> bool {
     !matches!(
         error,
         HttpClientError::InvalidUrl(_)
@@ -884,10 +887,6 @@ mod tests {
             // same variant; only the latter proves transmission, so both must
             // fail closed.
             HttpClientError::Io(std::io::Error::other("connection reset")),
-            // The TOTAL request deadline — fires after the body may have been
-            // fully transmitted. This is the exact class that made
-            // `reqwest::Error::is_timeout()` unsafe to retry on.
-            HttpClientError::DeadlineExceeded,
             // Redirects imply the service answered at least once.
             HttpClientError::TooManyRedirects { count: 11, max: 10 },
             // Cancellation can land at any point, including post-send.

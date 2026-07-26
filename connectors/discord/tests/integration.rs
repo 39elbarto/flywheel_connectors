@@ -3199,6 +3199,11 @@ async fn gateway_inbound_policy_loopback_drops_unauthorized_and_emits_authorized
             "api_url": mock_server.uri(),
             "gateway_url": gateway_url,
             "intents": ALL_REQUIRED_INTENTS,
+            // br-x13q4: the IDENTIFY limiter is process-global, so without this
+            // the second gateway test in the binary waits out the real 5 s
+            // window and blows its own 3 s timeout. `cfg(test)` does not reach
+            // integration tests, so the window has to be set here explicitly.
+            "gateway_identify_window_ms": 5,
             "inbound_policy": {
                 "require_mention_in_guilds": true,
                 "allowed_guilds": ["100"],
@@ -3435,6 +3440,9 @@ async fn gateway_inbound_delivery_loopback_retains_until_visible_send_success() 
             "api_url": fake_server.url(),
             "gateway_url": gateway_url,
             "intents": ALL_REQUIRED_INTENTS,
+            // br-x13q4: see the sibling gateway test — the IDENTIFY limiter is
+            // process-global and `cfg(test)` does not reach integration tests.
+            "gateway_identify_window_ms": 5,
             "retry": {
                 "max_attempts": 0,
                 "initial_delay_ms": 10,

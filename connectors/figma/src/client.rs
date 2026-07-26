@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::migration::{
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
+};
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tracing::instrument;
@@ -551,6 +553,13 @@ impl FigmaClient {
         }
     }
 
+    /// Execute one POST attempt.
+    ///
+    /// br-kxd3e: NOT replay-safe. Both callers CREATE — a file comment and a
+    /// webhook — and Figma offers no idempotency key, so a replay posts a
+    /// second comment or registers a second webhook. Only the rate-limit arm
+    /// (refused WITHOUT creating) and a connect-phase transport failure retry.
+    /// A converging POST added later needs its own path.
     async fn execute_post_once<T: serde::de::DeserializeOwned>(
         req: RequestBuilder,
         _path: &str,
@@ -578,14 +587,9 @@ impl FigmaClient {
                         status: status.as_u16(),
                         message: body_text,
                     };
-                    return if status.is_server_error() {
-                        AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        }
-                    } else {
-                        AttemptOutcome::Terminal(err)
-                    };
+                    // A 5xx means Figma received the request and may already
+                    // have created the comment or webhook.
+                    return AttemptOutcome::Terminal(err);
                 }
 
                 match resp.json::<T>().await {
@@ -594,15 +598,10 @@ impl FigmaClient {
                 }
             }
             Err(e) => {
-                let err: FigmaError = e.into();
-                if err.is_retryable() {
-                    AttemptOutcome::Retryable {
-                        retry_after: None,
-                        error: err,
-                    }
-                } else {
-                    AttemptOutcome::Terminal(err)
-                }
+                // Only a connect-phase failure proves the request never
+                // reached Figma.
+                let replayable = !transport_error_reached_service(&e);
+                AttemptOutcome::retryable_if_replayable(e.into(), None, replayable)
             }
         }
     }

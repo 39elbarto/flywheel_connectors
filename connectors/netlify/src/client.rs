@@ -403,7 +403,11 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
         Err(e) => {
             // Only a connect-phase failure proves the request never left us.
             let replayable = replay_safe || !transport_error_reached_service(&e);
-            return AttemptOutcome::retryable_if_replayable(NetlifyError::Http(e), None, replayable);
+            return AttemptOutcome::retryable_if_replayable(
+                NetlifyError::Http(e),
+                None,
+                replayable,
+            );
         }
     };
 
@@ -491,7 +495,11 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
         Err(e) => {
             // Only a connect-phase failure proves the request never left us.
             let replayable = replay_safe || !transport_error_reached_service(&e);
-            return AttemptOutcome::retryable_if_replayable(NetlifyError::Http(e), None, replayable);
+            return AttemptOutcome::retryable_if_replayable(
+                NetlifyError::Http(e),
+                None,
+                replayable,
+            );
         }
     };
 

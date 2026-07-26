@@ -353,12 +353,21 @@ impl CalendlyClient {
     }
 
     /// Generic POST with retry + JSON deserialization.
+    /// POST with retry.
+    ///
+    /// br-kxd3e: NOT replay-safe. Every caller of this helper CREATES a
+    /// resource and the provider offers no idempotency key, so a duplicate is a second scheduling link.
+    /// Only a connect-phase failure is retried. A converging POST added
+    /// later needs its own helper rather than reusing this one.
     async fn post_json<T: serde::de::DeserializeOwned>(
         &self,
         runtime: &ConnectorRuntime,
         url: &str,
         body: &serde_json::Value,
     ) -> CalendlyResult<T> {
+        // br-kxd3e: NOT replay-safe. The only caller creates a scheduling
+        // link and Calendly offers no idempotency key.
+        let replay_safe = false;
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let url = url.to_string();
@@ -383,10 +392,14 @@ impl CalendlyClient {
                         Ok(v) => AttemptOutcome::Success(v),
                         Err(e) => AttemptOutcome::Terminal(CalendlyError::Json(e)),
                     },
-                    Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
-                        retry_after: e.retry_after(),
-                        error: e,
-                    },
+                    Err(e) if e.is_retryable() => {
+                        // 429 stays retryable — refused WITHOUT performing the
+                        // work. A 5xx means the request arrived.
+                        let replayable =
+                            replay_safe || matches!(e, CalendlyError::RateLimited { .. });
+                        let retry_after = e.retry_after();
+                        AttemptOutcome::retryable_if_replayable(e, retry_after, replayable)
+                    }
                     Err(e) => AttemptOutcome::Terminal(e),
                 }
             }

@@ -23,7 +23,9 @@ use fcp_async_core::{
     websocket::{Message as WebSocketMessage, WebSocket, WebSocketConfig, WsError, WsUrl},
 };
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::migration::{
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
+};
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header};
@@ -5382,6 +5384,20 @@ impl BrowserClient {
         .await
     }
 
+    /// Execute one browser control-plane request with retry.
+    ///
+    /// br-kxd3e: NOT replay-safe, and deliberately not parameterised. Every
+    /// request through here drives a REAL browser — navigate, click, type,
+    /// submit, download — and `BrowserControlOperation` carries no idempotency
+    /// marker, so this layer cannot tell a screenshot from a checkout button.
+    /// Replaying a click after the worker already dispatched it can submit a
+    /// form or place an order twice.
+    ///
+    /// Same reasoning as mcp-bridge's `tools/call`: when the side effect is
+    /// unknowable from here, fail closed. The rate-limit arm above stays
+    /// retryable (the worker refused it WITHOUT driving the browser), and a
+    /// connect-phase transport failure still retries because the request
+    /// provably never reached the worker.
     async fn execute(
         &self,
         max_response_bytes: usize,
@@ -5424,10 +5440,9 @@ impl BrowserClient {
                                 message: format!("Server error {status}: {body}"),
                                 status_code: Some(status.as_u16()),
                             };
-                            return AttemptOutcome::Retryable {
-                                retry_after: None,
-                                error: err,
-                            };
+                            // A 5xx means the worker received the operation and
+                            // may already have driven the browser with it.
+                            return AttemptOutcome::Terminal(err);
                         }
 
                         if !status.is_success() {
@@ -5464,15 +5479,14 @@ impl BrowserClient {
                         }
                     }
                     Err(e) => {
-                        let err = BrowserError::Http(e);
-                        if err.is_retryable() {
-                            AttemptOutcome::Retryable {
-                                retry_after: None,
-                                error: err,
-                            }
-                        } else {
-                            AttemptOutcome::Terminal(err)
-                        }
+                        // Only a connect-phase failure proves the operation
+                        // never reached the control worker.
+                        let replayable = !transport_error_reached_service(&e);
+                        AttemptOutcome::retryable_if_replayable(
+                            BrowserError::Http(e),
+                            None,
+                            replayable,
+                        )
                     }
                 }
             }

@@ -852,3 +852,101 @@ fn manifest_capability_section() -> &'static str {
         .expect("Netlify manifest should separate capabilities from operations");
     capability_section
 }
+
+// ── Replay safety on retry (br-kxd3e) ────────────────────────────────
+//
+// The highest-harm case in the infra tier: a retried create_deploy does not
+// leave a stray record, it starts a SECOND build and ships it to production.
+// Netlify has no idempotency key. The assertion is the REQUEST COUNT.
+
+fn retrying_client_config() -> HttpRetryConfig {
+    HttpRetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1,
+        max_delay_ms: 5,
+        jitter_enabled: false,
+    }
+}
+
+async fn retrying_client(server: &MockServer) -> NetlifyClient {
+    NetlifyClient::new(
+        &server.uri(),
+        NetlifyAuth {
+            access_token: sample_auth_value(),
+        },
+        retrying_client_config(),
+    )
+    .await
+    .expect("wiremock URI should build a Netlify client")
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_deploy_is_not_retried_after_a_5xx() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/sites/site-1/deploys"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let result = retrying_client(&server)
+        .await
+        .create_deploy(
+            &test_runtime(),
+            "site-1",
+            &CreateDeployRequest {
+                branch: Some("main".into()),
+                title: None,
+            },
+        )
+        .await;
+    assert!(result.is_err());
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a 503 means Netlify received the deploy trigger — retrying starts a \
+         SECOND build and ships it"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_deploy_still_retries_a_429() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/sites/site-1/deploys"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/sites/site-1/deploys"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "deploy-1",
+            "site_id": "site-1",
+            "state": "building"
+        })))
+        .mount(&server)
+        .await;
+
+    retrying_client(&server)
+        .await
+        .create_deploy(
+            &test_runtime(),
+            "site-1",
+            &CreateDeployRequest {
+                branch: Some("main".into()),
+                title: None,
+            },
+        )
+        .await
+        .expect("a rate-limited trigger was refused without building anything");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "429 means Netlify did NOT start the build, so backoff is preserved"
+    );
+}

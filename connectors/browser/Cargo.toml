@@ -27,7 +27,7 @@ test-support = []
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
-fcp-sdk = { path = "../../crates/fcp-sdk" }
+fcp-sdk = { path = "../../crates/fcp-sdk", features = ["connector-http"] }
 fcp-cbor = { path = "../../crates/fcp-cbor" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 

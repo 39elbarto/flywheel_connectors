@@ -444,18 +444,15 @@ impl TwitchClient {
                 }
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
-                    let decision = classify_http_status(status, None);
-                    let err = TwitchError::Api {
+                    // br-kxd3e: NOT replay-safe — a replay creates a SECOND clip.
+                    // Every remaining retryable class here is a 5xx, which
+                    // means Twitch RECEIVED the request and may already have
+                    // acted. 429 is handled above, before this point, because
+                    // it was refused WITHOUT being performed.
+                    return AttemptOutcome::Terminal(TwitchError::Api {
                         status,
                         message: text,
-                    };
-                    if !matches!(decision, RetryDecision::Terminal) {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
-                    }
-                    return AttemptOutcome::Terminal(err);
+                    });
                 }
                 match resp.json::<HelixResponse<CreateClipResponse>>().await {
                     Ok(r) => AttemptOutcome::Success(r),
@@ -525,18 +522,15 @@ impl TwitchClient {
                 }
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
-                    let decision = classify_http_status(status, None);
-                    let err = TwitchError::Api {
+                    // br-kxd3e: NOT replay-safe — a replay posts the chat message TWICE.
+                    // Every remaining retryable class here is a 5xx, which
+                    // means Twitch RECEIVED the request and may already have
+                    // acted. 429 is handled above, before this point, because
+                    // it was refused WITHOUT being performed.
+                    return AttemptOutcome::Terminal(TwitchError::Api {
                         status,
                         message: text,
-                    };
-                    if !matches!(decision, RetryDecision::Terminal) {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
-                    }
-                    return AttemptOutcome::Terminal(err);
+                    });
                 }
                 match resp.json::<HelixResponse<SendChatMessageResponse>>().await {
                     Ok(r) => AttemptOutcome::Success(r),

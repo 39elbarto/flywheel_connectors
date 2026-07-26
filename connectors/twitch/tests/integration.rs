@@ -710,7 +710,9 @@ async fn mount_token(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/oauth2/token"))
         .and(body_string_contains(format!("client_id={CLIENT_ID}")))
-        .and(body_string_contains(format!("client_secret={CLIENT_SECRET}")))
+        .and(body_string_contains(format!(
+            "client_secret={CLIENT_SECRET}"
+        )))
         .and(body_string_contains("grant_type=client_credentials"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": ACCESS_TOKEN,

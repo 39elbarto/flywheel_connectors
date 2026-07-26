@@ -295,7 +295,7 @@ impl GooglePeopleClient {
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> PeopleResult<T> {
         let response = self
-            .execute_with_retry("GET", url, None, GoogleResponseMode::Json)
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Json, true)
             .await?;
         decode_json_response(response)
     }
@@ -306,7 +306,7 @@ impl GooglePeopleClient {
         body: &Value,
     ) -> PeopleResult<T> {
         let response = self
-            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json)
+            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json, false)
             .await?;
         decode_json_response(response)
     }
@@ -317,14 +317,14 @@ impl GooglePeopleClient {
         body: &Value,
     ) -> PeopleResult<T> {
         let response = self
-            .execute_with_retry("PATCH", url, Some(body), GoogleResponseMode::Json)
+            .execute_with_retry("PATCH", url, Some(body), GoogleResponseMode::Json, true)
             .await?;
         decode_json_response(response)
     }
 
     async fn delete_empty(&self, url: &str) -> PeopleResult<()> {
         let response = self
-            .execute_with_retry("DELETE", url, None, GoogleResponseMode::Auto)
+            .execute_with_retry("DELETE", url, None, GoogleResponseMode::Auto, true)
             .await?;
         if (200..300).contains(&response.status_code) {
             Ok(())
@@ -336,12 +336,19 @@ impl GooglePeopleClient {
         }
     }
 
+    /// Execute with retry.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a
+    /// side effect (br-kxd3e). It is a parameter rather than a function of
+    /// `http_method` because Google models several state changes — and some
+    /// pure reads — as POSTs, so the verb alone decides nothing.
     async fn execute_with_retry(
         &self,
         http_method: &'static str,
         url: &str,
         body: Option<&Value>,
         response_mode: GoogleResponseMode,
+        replay_safe: bool,
     ) -> PeopleResult<GoogleExecuteResponse> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         let ctx = self.runtime.request_context();
@@ -356,10 +363,14 @@ impl GooglePeopleClient {
                 .await
             {
                 Ok(response) => AttemptOutcome::Success(response),
-                Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
-                    retry_after: error.retry_after(),
-                    error,
-                },
+                Err(error) if error.is_retryable() => {
+                    // A rate limit was refused WITHOUT performing the work, so
+                    // it stays retryable; a 5xx means Google received the
+                    // request and may already have done it.
+                    let replayable = replay_safe || error.replay_is_safe();
+                    let retry_after = error.retry_after();
+                    AttemptOutcome::retryable_if_replayable(error, retry_after, replayable)
+                }
                 Err(error) => AttemptOutcome::Terminal(error),
             }
         })

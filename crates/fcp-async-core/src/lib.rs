@@ -947,6 +947,7 @@ pub mod channel {
     /// Tokio mpsc compatibility surface owned by async-core.
     pub mod mpsc {
         use std::sync::Arc;
+        use std::time::Duration;
 
         use super::{AtomicUsize, Ordering, StdMutex, VecDeque, decrement_depth};
         use crate::compatibility_cx;
@@ -1004,12 +1005,24 @@ pub mod channel {
             impl std::error::Error for TryRecvError {}
         }
 
+        /// Longest a parked [`Sender::closed`] waits before re-checking
+        /// `is_closed()` on its own initiative.
+        ///
+        /// The wrapper signals the closures it can observe (receiver drop and
+        /// explicit `Receiver::close`) through `close_signal`, so the common
+        /// case wakes immediately. This bound only covers closures that
+        /// originate inside the underlying asupersync channel, which the
+        /// wrapper never sees. It exists so `closed()` can never hang, and so
+        /// that waiting for it always parks the task instead of spinning.
+        const CLOSED_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
+
         /// Bounded sender wrapper.
         #[derive(Debug)]
         pub struct Sender<T> {
             inner: asupersync::channel::mpsc::Sender<T>,
             capacity: usize,
             depth: Arc<AtomicUsize>,
+            close_signal: Arc<asupersync::sync::Notify>,
         }
 
         impl<T> Clone for Sender<T> {
@@ -1018,6 +1031,7 @@ pub mod channel {
                     inner: self.inner.clone(),
                     capacity: self.capacity,
                     depth: Arc::clone(&self.depth),
+                    close_signal: Arc::clone(&self.close_signal),
                 }
             }
         }
@@ -1028,6 +1042,16 @@ pub mod channel {
             inner: asupersync::channel::mpsc::Receiver<T>,
             capacity: usize,
             depth: Arc<AtomicUsize>,
+            close_signal: Arc<asupersync::sync::Notify>,
+        }
+
+        impl<T> Drop for Receiver<T> {
+            fn drop(&mut self) {
+                // Dropping the receiver is what closes the channel for every
+                // sender. Wake anyone parked in `Sender::closed` so they observe
+                // it now rather than at the next re-check.
+                self.close_signal.notify_waiters();
+            }
         }
 
         struct UnboundedState<T> {
@@ -1191,9 +1215,25 @@ pub mod channel {
                 self.inner.is_closed()
             }
 
+            /// Resolve once the receiving half is gone.
+            ///
+            /// This parks the task. It must never busy-wait: this future is
+            /// typically one arm of a `select!` against socket I/O, and a
+            /// self-waking arm keeps the task permanently runnable, which
+            /// starves the runtime's I/O phase — readiness for every other
+            /// socket on the runtime then goes unobserved while only timers
+            /// keep firing.
             pub async fn closed(&self) {
-                while !self.is_closed() {
-                    crate::task::yield_now().await;
+                loop {
+                    // Register with the signal BEFORE re-testing. `Notified`
+                    // captures the notify generation when it is constructed, so a
+                    // close landing between this check and the park still
+                    // completes the future instead of being missed.
+                    let signalled = self.close_signal.notified();
+                    if self.is_closed() {
+                        return;
+                    }
+                    let _ = crate::time::timeout(CLOSED_RECHECK_INTERVAL, signalled).await;
                 }
             }
         }
@@ -1238,6 +1278,7 @@ pub mod channel {
 
             pub fn close(&mut self) {
                 self.inner.close();
+                self.close_signal.notify_waiters();
             }
 
             #[must_use]
@@ -1296,16 +1337,19 @@ pub mod channel {
         pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             let (sender, receiver) = asupersync::channel::mpsc::channel(capacity);
             let depth = Arc::new(AtomicUsize::new(0));
+            let close_signal = Arc::new(asupersync::sync::Notify::new());
             (
                 Sender {
                     inner: sender,
                     capacity,
                     depth: Arc::clone(&depth),
+                    close_signal: Arc::clone(&close_signal),
                 },
                 Receiver {
                     inner: receiver,
                     capacity,
                     depth,
+                    close_signal,
                 },
             )
         }
@@ -4248,6 +4292,83 @@ mod tests {
         assert_eq!(rx.capacity(), 4);
         tx.send(1).await.unwrap();
         assert_eq!(rx.capacity(), 3);
+    }
+
+    /// Complements `mpsc_sender_closed_returns_when_receiver_dropped`, which
+    /// drops the receiver before the sender ever parks and so only exercises
+    /// the fast path. Here the drop happens while the sender is already parked,
+    /// which is the path that depends on the close signal actually firing.
+    #[runtime::test]
+    async fn mpsc_sender_closed_wakes_when_receiver_drops_after_parking() {
+        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        task::spawn_detached(async move {
+            time::sleep(Duration::from_millis(20)).await;
+            drop(rx);
+        });
+        time::timeout(Duration::from_secs(5), tx.closed())
+            .await
+            .expect("closed() must wake once the receiver is dropped");
+        assert!(tx.is_closed());
+    }
+
+    /// br-4h5ph: `Sender::closed()` must PARK, never busy-wait.
+    ///
+    /// It was implemented as `while !is_closed() { yield_now().await }`. A
+    /// self-waking future keeps its task permanently runnable, so the
+    /// scheduler's run queue never empties and the runtime's I/O phase is
+    /// starved: socket readiness for every other connection on the runtime goes
+    /// unobserved while timers keep firing normally. That made two fcp-graphql
+    /// subscription tests hang for ~40s, because the real producer loop races
+    /// `tx.closed()` against socket reads in a `select!`.
+    ///
+    /// This pins the observable consequence rather than the implementation: a
+    /// task parked on `closed()` inside a `select!` must not prevent an
+    /// unrelated loopback socket from delivering bytes.
+    #[runtime::test]
+    async fn mpsc_sender_closed_does_not_starve_io_readiness() {
+        use io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = super::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        // Peer parks on a read that only completes once the client writes.
+        let peer = task::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut byte = [0u8; 1];
+            let started = Instant::now();
+            stream.read_exact(&mut byte).await.expect("peer read");
+            started.elapsed()
+        });
+
+        let mut client = super::net::TcpStream::connect(format!("{addr}"))
+            .await
+            .expect("connect");
+
+        // Hold a task in `select!` on `closed()` for the whole exchange. The
+        // receiver is kept alive so this arm never completes.
+        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        let _keep_receiver_alive = rx;
+        task::spawn_detached(async move {
+            crate::select! {
+                () = tx.closed() => {},
+                () = time::sleep(Duration::from_secs(30)) => {},
+            }
+        });
+
+        // Give the peer time to reach its parked read, then write.
+        time::sleep(Duration::from_millis(50)).await;
+        client.write_all(&[42u8]).await.expect("client write");
+
+        let observed = time::timeout(Duration::from_secs(5), peer)
+            .await
+            .expect("peer never observed the byte: the I/O phase was starved")
+            .expect("peer task");
+        assert!(
+            observed < Duration::from_secs(1),
+            "read wakeup was delayed by {observed:?}; closed() is starving the I/O phase"
+        );
     }
 
     #[runtime::test]

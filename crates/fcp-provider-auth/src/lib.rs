@@ -2785,8 +2785,14 @@ impl SigV4Auth {
             format!("{SIGV4_ALGORITHM}\n{amz_date}\n{credential_scope}\n{canonical_hash}");
         let signing_key = self.derive_signing_key(&date_stamp);
         let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+        // `", "` after each comma, matching AWS's own documented examples and
+        // `fcp_sdk::sigv4`. Both spacings are accepted by AWS — the Authorization
+        // header is not part of the signed material — but the two crates emitting
+        // different bytes meant a golden header captured from one could not be
+        // reused against the other, which is a trap for exactly the kind of
+        // cross-crate fixture sharing this parity work exists to enable.
         let authorization = format!(
-            "{SIGV4_ALGORITHM} Credential={}/{credential_scope},SignedHeaders={signed_headers},Signature={signature}",
+            "{SIGV4_ALGORITHM} Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
             self.access_key.expose_secret(),
         );
 
@@ -5851,8 +5857,13 @@ mod tests {
             request.value_for("x-amz-content-sha256"),
             Some(EMPTY_PAYLOAD_SHA256)
         );
+        // `", "` after each comma, matching AWS's documented examples and
+        // `fcp_sdk::sigv4`. The SIGNATURE below is byte-identical to what this test
+        // asserted under the old comma-only spacing, which is the proof that the
+        // Authorization header's formatting is outside the signed material — only
+        // the canonical request is hashed.
         let expected_authorization = format!(
-            "AWS4-HMAC-SHA256 Credential={}/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;x-amz-content-sha256;x-amz-date,Signature=fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543",
+            "AWS4-HMAC-SHA256 Credential={}/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543",
             aws_example_access_key()
         );
         assert_eq!(

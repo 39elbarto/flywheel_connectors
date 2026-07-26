@@ -166,7 +166,7 @@ impl SignableRequest {
 
 /// Result of SigV4 signing — the Authorization header value and
 /// signed headers list.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SignedRequest {
     /// The full Authorization header value.
     pub authorization: String,
@@ -178,6 +178,31 @@ pub struct SignedRequest {
     pub x_amz_content_sha256: String,
 }
 
+impl fmt::Debug for SignedRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `authorization` embeds `Credential=<ACCESS_KEY_ID>/<scope>` plus the
+        // request signature. This type derived `Debug` and so printed the access
+        // key id through any `format!("{signed:?}")` — even though `AwsCredentials`
+        // right above it hand-writes `Debug` specifically to keep credential
+        // material out of log lines, and `fcp_provider_auth::SigV4SignedAuth`
+        // redacts this same string for this same reason. An access key id is an
+        // identifier rather than a secret, but the workspace has already decided
+        // to treat it as log-sensitive, and two implementations of one rule
+        // disagreeing is how the stricter one eventually gets "simplified" away.
+        //
+        // The session token is redacted for the stronger reason: it IS secret.
+        f.debug_struct("SignedRequest")
+            .field("authorization", &"[REDACTED]")
+            .field("x_amz_date", &self.x_amz_date)
+            .field(
+                "x_amz_security_token",
+                &self.x_amz_security_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("x_amz_content_sha256", &self.x_amz_content_sha256)
+            .finish()
+    }
+}
+
 /// Intermediate artifacts produced by one SigV4 signing pass.
 ///
 /// SigV4 is a pipeline — canonical request, then string-to-sign, then
@@ -185,6 +210,12 @@ pub struct SignedRequest {
 /// final signature against a reference therefore tells you *that* a signer
 /// diverged but not *where*, and every stage hashes into an opaque hex digest
 /// that carries no diagnostic information on its own.
+///
+/// `Debug` is derived here DELIBERATELY, unlike on [`SignedRequest`]: this type
+/// exists to be printed. It carries no credential material — the canonical
+/// request and string-to-sign contain the access key id only inside the
+/// credential scope, and the signature is per-request and useless without the
+/// secret key. Redacting a diagnostic type would defeat its only purpose.
 ///
 /// Exposing the intermediates is what makes the published AWS test vectors
 /// usable as more than a pass/fail bit: the vectors ship the expected canonical
@@ -357,7 +388,11 @@ impl SigV4Signer {
                 authorization,
                 x_amz_date: amz_date,
                 x_amz_security_token: self.credentials.session_token.clone(),
-                x_amz_content_sha256: request.payload_hash.clone(),
+                // The NORMALISED hash, i.e. the one that was actually signed.
+                // Returning `request.payload_hash` verbatim would hand the caller
+                // an uppercase value to put on the wire while the signature
+                // covered the lowercase one.
+                x_amz_content_sha256: canonical_payload_hash(&request.payload_hash),
             },
             SigV4Trace {
                 canonical_request,
@@ -465,21 +500,34 @@ impl SigV4Signer {
         // Canonical query string (sorted by key)
         let canonical_query = build_canonical_query(&request.query_params);
 
-        // Canonical headers (sorted, lowercase, trimmed)
+        // Normalise the two remaining inputs the service canonicalises for us.
+        // Both were previously used verbatim, which meant `fcp-sdk` and
+        // `fcp_provider_auth` signed the same logical request differently
+        // (br-rt4q4): that crate uppercases the method and lowercases the hash at
+        // construction time.
+        let method = canonical_method(&request.method);
+        let payload_hash = canonical_payload_hash(&request.payload_hash);
+
+        // Canonical headers (sorted, lowercase, trimmed).
+        //
+        // The signer OWNS these three values, so it overwrites rather than
+        // deferring to the caller. Previously these used `entry().or_insert_with`,
+        // i.e. caller-wins, which desynchronised the signature from the returned
+        // headers: a caller-supplied `x-amz-date` was SIGNED, but `SignedRequest`
+        // still reported the signer's own computed date, so writing the returned
+        // value onto the wire sent a date that was not the one signed. Since the
+        // signer is the component that decides the timestamp (via `fixed_time` or
+        // `now`), computes the payload hash header from `payload_hash`, and holds
+        // the session token, signer-wins is the only self-consistent contract —
+        // and it matches `fcp_provider_auth`, which always overwrote.
         let mut headers = request.headers.clone();
-        headers
-            .entry("x-amz-date".into())
-            .or_insert_with(|| amz_date.into());
+        headers.insert("x-amz-date".into(), amz_date.into());
         if self.sign_content_sha256_header {
-            headers
-                .entry("x-amz-content-sha256".into())
-                .or_insert_with(|| request.payload_hash.clone());
+            headers.insert("x-amz-content-sha256".into(), payload_hash.clone());
         }
         if let Some(token) = &self.credentials.session_token {
             if !self.omit_session_token {
-                headers
-                    .entry("x-amz-security-token".into())
-                    .or_insert_with(|| token.clone());
+                headers.insert("x-amz-security-token".into(), token.clone());
             }
         }
 
@@ -503,8 +551,7 @@ impl SigV4Signer {
         let signed_headers: String = lowercased.keys().cloned().collect::<Vec<_>>().join(";");
 
         let canonical_request = format!(
-            "{}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{}",
-            request.method, request.payload_hash,
+            "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
         );
 
         (canonical_request, signed_headers)
@@ -582,6 +629,16 @@ fn canonical_uri_path(
     encoding: CanonicalPathEncoding,
     normalization: CanonicalPathNormalization,
 ) -> String {
+    // An absolute path is what the canonical request needs, and a relative one is
+    // malformed input rather than a different resource. `RemoveDotSegments` always
+    // returns a rooted path, so without this the two profiles disagreed on the
+    // same input: `Preserve` signed `bucket/key` unrooted while the other rooted
+    // it. `fcp_provider_auth` always rooted. (br-rt4q4)
+    let rooted: String = if wire_path.starts_with('/') {
+        wire_path.to_string()
+    } else {
+        format!("/{wire_path}")
+    };
     // Normalise the WIRE path, before decoding. Order matters: decoding first
     // would turn an encoded `%2F` inside a segment into a real separator, and
     // normalisation would then treat it as one — silently signing a different
@@ -589,14 +646,45 @@ fn canonical_uri_path(
     // never percent-encoded on the wire, which is why normalising first loses
     // nothing.
     let normalized = match normalization {
-        CanonicalPathNormalization::RemoveDotSegments => remove_dot_segments(wire_path),
-        CanonicalPathNormalization::Preserve => wire_path.to_string(),
+        CanonicalPathNormalization::RemoveDotSegments => remove_dot_segments(&rooted),
+        CanonicalPathNormalization::Preserve => rooted,
     };
     let raw = percent_decode_path(&normalized);
     let once = uri_encode_path(&raw);
     match encoding {
         CanonicalPathEncoding::Single => once,
         CanonicalPathEncoding::Double => uri_encode_path(&once),
+    }
+}
+
+/// Canonicalise the HTTP method: trim and uppercase.
+///
+/// Line 1 of the canonical request must match what the service sees, and the
+/// service sees a method that is uppercase — every registered HTTP method
+/// (RFC 9110) is, and every caller in the workspace builds one from a `Method`
+/// constant. Signing `get` verbatim produced a canonical request no service would
+/// reproduce.
+///
+/// Matches `fcp_provider_auth`, which normalises at `SigV4SigningContext::new`.
+/// NOTE for callers: this normalises what is SIGNED, so the request you send must
+/// also use the uppercase form.
+fn canonical_method(method: &str) -> String {
+    method.trim().to_ascii_uppercase()
+}
+
+/// Canonicalise the payload hash: lowercase hex, leaving the sentinels alone.
+///
+/// AWS emits and expects lowercase hex. `SignableRequest::hash_payload` already
+/// produces lowercase, so this only matters for a hand-built hash — but a
+/// hand-built uppercase hash previously signed differently here than in
+/// `fcp_provider_auth`, which lowercases at construction.
+///
+/// `UNSIGNED-PAYLOAD` is a literal sentinel, not hex, and must survive uppercase.
+fn canonical_payload_hash(payload_hash: &str) -> String {
+    if payload_hash.eq_ignore_ascii_case(UNSIGNED_PAYLOAD) {
+        UNSIGNED_PAYLOAD.to_string()
+    } else {
+        payload_hash.to_ascii_lowercase()
     }
 }
 
@@ -1187,6 +1275,135 @@ mod tests {
             trace.signature, default_trace.signature,
             "omitting the token must change the signature, or the flag is inert"
         );
+    }
+
+    /// The signer normalises the method, so a caller's casing cannot change what
+    /// is signed. (br-rt4q4)
+    #[test]
+    fn method_is_uppercased_before_signing() {
+        assert_eq!(canonical_method("get"), "GET");
+        assert_eq!(canonical_method("  put  "), "PUT");
+        assert_eq!(canonical_method("POST"), "POST");
+
+        let signer = test_signer();
+        let request = |method: &str| SignableRequest {
+            method: method.into(),
+            uri: "/".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "example.amazonaws.com".into())]),
+            payload_hash: EMPTY_PAYLOAD_HASH.into(),
+        };
+        let (_, lower) = signer.sign_traced(&request("get"));
+        let (_, upper) = signer.sign_traced(&request("GET"));
+        assert_eq!(
+            lower.canonical_request, upper.canonical_request,
+            "method casing must not reach the canonical request"
+        );
+        assert!(lower.canonical_request.starts_with("GET\n"));
+    }
+
+    /// The payload hash is lowercased, and the sentinel survives. (br-rt4q4)
+    #[test]
+    fn payload_hash_is_lowercased_but_the_sentinel_is_preserved() {
+        assert_eq!(
+            canonical_payload_hash(&EMPTY_PAYLOAD_HASH.to_uppercase()),
+            EMPTY_PAYLOAD_HASH
+        );
+        assert_eq!(canonical_payload_hash(UNSIGNED_PAYLOAD), UNSIGNED_PAYLOAD);
+        assert_eq!(
+            canonical_payload_hash("unsigned-payload"),
+            UNSIGNED_PAYLOAD,
+            "the sentinel is a literal, not hex — it must not be lowercased"
+        );
+
+        // And the value the caller is told to send matches the one signed.
+        let out = test_signer().sign(&SignableRequest {
+            method: "GET".into(),
+            uri: "/".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "example.amazonaws.com".into())]),
+            payload_hash: EMPTY_PAYLOAD_HASH.to_uppercase(),
+        });
+        assert_eq!(out.x_amz_content_sha256, EMPTY_PAYLOAD_HASH);
+    }
+
+    /// The signer owns `x-amz-date`, so what it returns is what it signed.
+    ///
+    /// The regression this guards is subtle and was the real hazard in br-rt4q4:
+    /// under the old caller-wins behaviour the caller's date was SIGNED while the
+    /// signer's computed date was RETURNED, so a caller who dutifully wrote the
+    /// returned header onto the wire sent a date the signature did not cover.
+    #[test]
+    fn signer_owned_headers_win_over_caller_supplied_ones() {
+        let (out, trace) = test_signer().sign_traced(&SignableRequest {
+            method: "GET".into(),
+            uri: "/".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([
+                ("host".into(), "example.amazonaws.com".into()),
+                ("x-amz-date".into(), "19990101T000000Z".into()),
+            ]),
+            payload_hash: EMPTY_PAYLOAD_HASH.into(),
+        });
+
+        assert!(
+            trace
+                .canonical_request
+                .contains(&format!("x-amz-date:{}", out.x_amz_date)),
+            "the signed date must be the returned date; canonical request was:\n{}",
+            trace.canonical_request
+        );
+        assert!(
+            !trace.canonical_request.contains("19990101T000000Z"),
+            "the caller's stale date must not be signed"
+        );
+    }
+
+    /// A relative path is rooted before signing, in BOTH profiles. (br-rt4q4)
+    #[test]
+    fn relative_paths_are_rooted_in_both_profiles() {
+        for normalization in [
+            CanonicalPathNormalization::Preserve,
+            CanonicalPathNormalization::RemoveDotSegments,
+        ] {
+            assert_eq!(
+                canonical_uri_path("bucket/key", CanonicalPathEncoding::Single, normalization),
+                "/bucket/key",
+                "a relative path must be rooted under {normalization:?}"
+            );
+        }
+    }
+
+    /// `SignedRequest` must not print credential material. (br-qyxkb)
+    #[test]
+    fn signed_request_debug_redacts_authorization_and_token() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+            session_token: Some("FwoGZXIvYXdzEBYaDHqa0AF".into()),
+        };
+        let signed = SigV4Signer::new(creds, test_scope())
+            .with_fixed_time(fixed_time())
+            .sign(&SignableRequest {
+                method: "GET".into(),
+                uri: "/".into(),
+                query_params: BTreeMap::new(),
+                headers: BTreeMap::from([("host".into(), "example.amazonaws.com".into())]),
+                payload_hash: EMPTY_PAYLOAD_HASH.into(),
+            });
+
+        let rendered = format!("{signed:?}");
+        assert!(
+            !rendered.contains("AKIAIOSFODNN7EXAMPLE"),
+            "the access key id reached Debug output: {rendered}"
+        );
+        assert!(
+            !rendered.contains("FwoGZXIvYXdzEBYaDHqa0AF"),
+            "the session token reached Debug output: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"));
+        // The non-sensitive fields stay legible, or the type is useless to debug.
+        assert!(rendered.contains(&signed.x_amz_date));
     }
 
     /// Pins the input-convention boundary between this signer and AWS's own.

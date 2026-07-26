@@ -76,6 +76,23 @@ struct ParsedRequest {
     query: BTreeMap<String, String>,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
+    /// Sign this payload hash verbatim instead of hashing `body`.
+    ///
+    /// Always `None` for vendored cases — the corpus's expectations are computed
+    /// from the body, so overriding it there would compare against the wrong
+    /// answer. Synthetic cross-signer cases set it, because two of the axes worth
+    /// checking (uppercase hex, and the `UNSIGNED-PAYLOAD` sentinel) are
+    /// properties OF the hash string and are unreachable by hashing a body.
+    payload_hash_override: Option<String>,
+}
+
+impl ParsedRequest {
+    /// The payload hash the signers should be handed.
+    fn payload_hash(&self) -> String {
+        self.payload_hash_override
+            .clone()
+            .unwrap_or_else(|| SignableRequest::hash_payload(&self.body))
+    }
 }
 
 fn vectors_dir() -> PathBuf {
@@ -158,6 +175,7 @@ fn parse_request(raw: &str) -> ParsedRequest {
         query,
         headers,
         body: body_lines.join("\n").into_bytes(),
+        payload_hash_override: None,
     }
 }
 
@@ -360,7 +378,7 @@ fn sign_with_sdk(v: &Vector) -> (String, String, String) {
         uri: v.request.path.clone(),
         query_params: v.request.query.clone(),
         headers: v.request.headers.clone(),
-        payload_hash: SignableRequest::hash_payload(&v.request.body),
+        payload_hash: v.request.payload_hash(),
     };
     let (_, trace) = signer.sign_traced(&req);
     (
@@ -396,13 +414,10 @@ fn sign_with_provider_auth(v: &Vector) -> Option<(String, String, String)> {
         .expect("timestamp")
         .with_timezone(&chrono::Utc);
 
-    let mut context = SigV4SigningContext::new(
-        &v.request.method,
-        &v.request.path,
-        SignableRequest::hash_payload(&v.request.body),
-    )
-    .expect("vector request is well-formed")
-    .with_signing_time(ts);
+    let mut context =
+        SigV4SigningContext::new(&v.request.method, &v.request.path, v.request.payload_hash())
+            .expect("vector request is well-formed")
+            .with_signing_time(ts);
     for (k, val) in &v.request.query {
         context = context
             .with_query_param(k.clone(), val.clone())
@@ -664,6 +679,182 @@ fn both_signers_agree_byte_for_byte_on_every_vector() {
         compared >= 30,
         "only {compared} vectors were comparable across both signers; the \
          cross-signer check has lost its coverage"
+    );
+}
+
+/// Build a synthetic vector for cross-signer comparison only.
+///
+/// The expectations are placeholders and are never asserted against: these cases
+/// exist to compare the two signers to EACH OTHER on inputs the official corpus
+/// cannot express, so there is no AWS-published answer to compare to.
+fn synthetic_vector(
+    name: &str,
+    method: &str,
+    path: &str,
+    query: &[(&str, &str)],
+    headers: &[(&str, &str)],
+    payload_hash: &str,
+) -> Vector {
+    Vector {
+        name: name.to_string(),
+        request: ParsedRequest {
+            method: method.to_string(),
+            path: path.to_string(),
+            query: query
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+            body: Vec::new(),
+            // Verbatim, NOT hashed from the empty body. Without this the
+            // uppercase-hex and `UNSIGNED-PAYLOAD` cases were inert: both signers
+            // recomputed the same lowercase hash from the same empty body, so they
+            // agreed for a reason that had nothing to do with the axis under test.
+            // Caught by running the negative control, which failed to name them.
+            payload_hash_override: Some(payload_hash.to_string()),
+        },
+        context: Context {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_string(),
+            token: None,
+            region: "us-east-1".to_string(),
+            service: "service".to_string(),
+            timestamp: "2015-08-30T12:36:00Z".to_string(),
+            sign_body: false,
+            normalize: true,
+            omit_session_token: false,
+        },
+        expected_canonical_request: String::new(),
+        expected_string_to_sign: String::new(),
+        expected_signature: String::new(),
+    }
+}
+
+/// Cross-signer parity on the axes the official corpus CANNOT exercise.
+///
+/// `both_signers_agree_byte_for_byte_on_every_vector` is necessary but not
+/// sufficient: every vendored case uses an uppercase method, a lowercase hex
+/// payload hash, an absolute path, and supplies no `x-amz-*` header of its own. So
+/// a green corpus says nothing about how the two signers treat those inputs, and
+/// they genuinely disagreed on all four (br-rt4q4) — `fcp-provider-auth`
+/// normalised the method and hash at construction while `fcp-sdk` used both
+/// verbatim, and the two took opposite sides on caller-supplied `x-amz-*` headers.
+///
+/// A parity test whose inputs all come from a uniform corpus is exactly how those
+/// survived a suite that looked comprehensive.
+#[test]
+fn both_signers_agree_on_inputs_the_corpus_cannot_express() {
+    let host = [("host", "example.amazonaws.com")];
+    let empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let cases = vec![
+        // Method casing.
+        synthetic_vector("lowercase-method", "get", "/", &[], &host, empty_hash),
+        synthetic_vector("padded-method", " POST ", "/", &[], &host, empty_hash),
+        // Payload-hash casing, and the sentinel.
+        synthetic_vector(
+            "uppercase-payload-hash",
+            "GET",
+            "/",
+            &[],
+            &host,
+            &empty_hash.to_uppercase(),
+        ),
+        synthetic_vector(
+            "unsigned-payload-sentinel",
+            "PUT",
+            "/object.txt",
+            &[],
+            &host,
+            "UNSIGNED-PAYLOAD",
+        ),
+        // A relative path. This one MUST run under the Preserve profile:
+        // `remove_dot_segments` roots its output anyway, so under
+        // RemoveDotSegments both signers agree no matter what either does about
+        // rooting, and the case proves nothing. Another axis the negative control
+        // caught as inert.
+        {
+            let mut v =
+                synthetic_vector("relative-path", "GET", "bucket/key", &[], &host, empty_hash);
+            v.context.normalize = false;
+            v
+        },
+        // Caller-supplied signer-owned headers.
+        synthetic_vector(
+            "caller-supplied-amz-date",
+            "GET",
+            "/",
+            &[],
+            &[
+                ("host", "example.amazonaws.com"),
+                ("x-amz-date", "19990101T000000Z"),
+            ],
+            empty_hash,
+        ),
+        // A query key that only differs in order once encoded.
+        synthetic_vector(
+            "encoded-order-query",
+            "GET",
+            "/",
+            &[("\u{1234}", "Value1"), ("Param", "Value2")],
+            &host,
+            empty_hash,
+        ),
+        // Mixed-case header names, which each crate lowercases differently.
+        synthetic_vector(
+            "mixed-case-header-names",
+            "GET",
+            "/",
+            &[],
+            &[("Host", "example.amazonaws.com"), ("X-Custom", "  a   b  ")],
+            empty_hash,
+        ),
+    ];
+
+    // Collected rather than asserted case by case: a normalisation regression
+    // usually breaks a FAMILY of these axes at once, and seeing only the first is
+    // how you fix one and re-run four times.
+    let mut mismatches: Vec<String> = Vec::new();
+
+    for v in &cases {
+        let (sdk_canonical, sdk_sts, sdk_sig) = sign_with_sdk(v);
+        let (pa_canonical, pa_sts, pa_sig) = sign_with_provider_auth(v).unwrap_or_else(|| {
+            panic!(
+                "{}: fcp-provider-auth refused to sign a synthetic parity case; if that \
+                 refusal is intended, assert it explicitly rather than dropping the case",
+                v.name
+            )
+        });
+
+        if sdk_canonical.trim_end() != pa_canonical.trim_end() {
+            mismatches.push(format!(
+                "{}: canonical requests differ\n  fcp-sdk:           {:?}\n  fcp-provider-auth: {:?}",
+                v.name,
+                sdk_canonical.trim_end(),
+                pa_canonical.trim_end()
+            ));
+        } else if sdk_sts.trim_end() != pa_sts.trim_end() || sdk_sig != pa_sig {
+            mismatches.push(format!(
+                "{}: canonical requests MATCH but a later stage does not \
+                 (string_to_sign_eq={}, signature_eq={}) — that implicates hashing or \
+                 key derivation, not canonicalisation",
+                v.name,
+                sdk_sts.trim_end() == pa_sts.trim_end(),
+                sdk_sig == pa_sig
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "the two SigV4 signers disagree on {} of {} inputs the official corpus cannot \
+         express. The same request would then verify or not depending on which crate is \
+         on the call path:\n\n{}",
+        mismatches.len(),
+        cases.len(),
+        mismatches.join("\n\n")
     );
 }
 

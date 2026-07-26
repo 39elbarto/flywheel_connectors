@@ -1,12 +1,18 @@
 //! Differential `SigV4` harness against AWS's published signing test suite.
 //!
 //! br-3wt77. The workspace has two independent `SigV4` signers —
-//! `fcp_sdk::sigv4` and `fcp_provider_auth` — and until now neither was
+//! `fcp_sdk::sigv4` and `fcp_provider_auth` — and before this harness neither was
 //! checked against AWS's own vectors. Each pinned exactly one real vector
 //! (`GetBucketLifecycle`), whose path is `/`: the single path for which a correct
 //! canonical-URI implementation and a broken one agree. That is precisely why
 //! the canonical-URI defect behind br-1nqg7 / br-0lsi3 survived in both crates
 //! while every test passed.
+//!
+//! BOTH signers are now driven over the same corpus, and additionally compared
+//! against **each other** byte for byte. Matching AWS is not sufficient on its
+//! own: two signers can each match on the cases they are checked against and
+//! still disagree elsewhere, in which case a request verifies or not depending on
+//! which crate happened to be on the call path.
 //!
 //! Vectors are vendored verbatim under `tests/vectors/aws-sigv4/`; see the
 //! README there for provenance. They are never fetched at test time.
@@ -20,6 +26,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use fcp_provider_auth::{
+    CanonicalPathNormalization as PaNormalization, SigV4Auth, SigV4SigningContext,
+    SigV4SigningOptions,
+};
 use fcp_sdk::sigv4::{
     AwsCredentials, CanonicalPathEncoding, CanonicalPathNormalization, SigV4Signer,
     SignableRequest, SigningScope,
@@ -44,10 +54,20 @@ struct Context {
     timestamp: String,
     /// When true the case expects `x-amz-content-sha256` in the signed set.
     sign_body: bool,
-    /// AWS couples two behaviours to this flag: path normalisation (RFC 3986
-    /// dot-segment removal) and double-encoding. `normalize: false` is the S3
-    /// profile; `true` is every other service.
+    /// RFC 3986 dot-segment removal, and ONLY that.
+    ///
+    /// This flag does not select the encoding profile. Upstream maps it to
+    /// `should_normalize_uri_path` alone, while `use_double_uri_encode` is
+    /// hardcoded `true` for every case in the suite
+    /// (`aws-c-auth` `tests/sigv4_signing_tests.c`,
+    /// `s_v4_test_context_init_signing_config`). Normalisation and encoding are
+    /// two independent axes upstream, exactly as they are here.
     normalize: bool,
+    /// When true the case adds `x-amz-security-token` to the request AFTER
+    /// signing, so the token must be absent from the signed header set.
+    ///
+    /// Upstream this is `flags.omit_session_token`; absent means `false`.
+    omit_session_token: bool,
 }
 
 struct ParsedRequest {
@@ -181,6 +201,7 @@ fn parse_context(raw: &str) -> Context {
         timestamp: v["timestamp"].as_str().unwrap_or_default().into(),
         sign_body: v["sign_body"].as_bool().unwrap_or(false),
         normalize: v["normalize"].as_bool().unwrap_or(true),
+        omit_session_token: v["omit_session_token"].as_bool().unwrap_or(false),
     }
 }
 
@@ -238,6 +259,28 @@ fn request_parser_matches_a_hand_checked_case() {
     assert_eq!(ctx.service, "service");
     assert_eq!(ctx.timestamp, "2015-08-30T12:36:00Z");
 
+    assert!(
+        !ctx.omit_session_token,
+        "absent omit_session_token must default to false"
+    );
+
+    // The sts pair is the only place this flag appears, and it appears on BOTH
+    // sides. A parser that silently dropped it would make `-after` look like a
+    // signer defect, which is exactly what happened before it was read.
+    for (case, expected) in [
+        ("post-sts-header-after", true),
+        ("post-sts-header-before", false),
+    ] {
+        let sts = parse_context(
+            &std::fs::read_to_string(vectors_dir().join(case).join("context.json")).unwrap(),
+        );
+        assert_eq!(
+            sts.omit_session_token, expected,
+            "{case}: omit_session_token must be read from context.json"
+        );
+        assert!(sts.token.is_some(), "{case} must carry a session token");
+    }
+
     let multiline = parse_request(
         &std::fs::read_to_string(vectors_dir().join("get-header-value-multiline/request.txt"))
             .unwrap(),
@@ -252,11 +295,14 @@ fn request_parser_matches_a_hand_checked_case() {
     );
 }
 
-/// The suite's `normalize` flag is the S3-vs-everything-else profile selector:
-/// `false` means "do not normalise the path, single-encode" (S3), `true` means
-/// "normalise and double-encode" (all other services). Every vendored case uses
-/// service `service`, i.e. the double-encoding profile, so this pins that the
-/// corpus is not silently exercising only one side of the split.
+/// The suite's `normalize` flag selects dot-segment removal, and nothing else.
+///
+/// It is NOT the S3-vs-everything-else encoding selector — an earlier version of
+/// this comment claimed it was. Upstream maps `normalize` to
+/// `should_normalize_uri_path` while hardcoding `use_double_uri_encode = true`
+/// for all 38 cases, so the corpus exercises both normalisation profiles but
+/// only the double-encoding profile. This pins that the normalisation split is
+/// still represented on both sides.
 #[test]
 fn vendored_corpus_covers_both_normalization_profiles() {
     let vectors = load_vectors();
@@ -302,7 +348,12 @@ fn sign_with_sdk(v: &Vector) -> (String, String, String) {
             CanonicalPathNormalization::RemoveDotSegments
         } else {
             CanonicalPathNormalization::Preserve
-        });
+        })
+        // `post-sts-header-after` carries `"omit_session_token": true`: the
+        // token travels on the wire but must not be in the signed header set.
+        // Ignoring this field made that case look like a signer defect when it
+        // is a documented AWS signing mode.
+        .with_omit_session_token(v.context.omit_session_token);
 
     let req = SignableRequest {
         method: v.request.method.clone(),
@@ -319,47 +370,134 @@ fn sign_with_sdk(v: &Vector) -> (String, String, String) {
     )
 }
 
-/// Cases where `fcp-sdk` does not yet reproduce AWS's canonical request.
+/// Drive `fcp-provider-auth`'s independent signer over the same vector.
+///
+/// This is the second half of br-3wt77: one corpus, one parser, one set of
+/// expectations, two signers. A vector suite that only ever ran against one of
+/// two implementations leaves the other exactly as unverified as it was before —
+/// and it was this crate, not `fcp-sdk`, that still had no path normalisation at
+/// all.
+///
+/// Returns `None` when the signer refuses the case rather than signing it.
+/// Refusals are surfaced, never swallowed: this signer validates header names
+/// and values and requires `host`, which `fcp-sdk` does not, so a refusal is a
+/// real behavioural difference that belongs in the report.
+fn sign_with_provider_auth(v: &Vector) -> Option<(String, String, String)> {
+    let auth = SigV4Auth::new(
+        v.context.access_key_id.clone(),
+        v.context.secret_access_key.clone(),
+        v.context.token.clone(),
+        v.context.region.clone(),
+        v.context.service.clone(),
+    )
+    .expect("vector credentials are well-formed");
+
+    let ts = chrono::DateTime::parse_from_rfc3339(&v.context.timestamp)
+        .expect("timestamp")
+        .with_timezone(&chrono::Utc);
+
+    let mut context = SigV4SigningContext::new(
+        &v.request.method,
+        &v.request.path,
+        SignableRequest::hash_payload(&v.request.body),
+    )
+    .expect("vector request is well-formed")
+    .with_signing_time(ts);
+    for (k, val) in &v.request.query {
+        context = context
+            .with_query_param(k.clone(), val.clone())
+            .expect("vector query param is well-formed");
+    }
+
+    let options = SigV4SigningOptions {
+        path_normalization: Some(if v.context.normalize {
+            PaNormalization::RemoveDotSegments
+        } else {
+            PaNormalization::Preserve
+        }),
+        sign_content_sha256_header: v.context.sign_body,
+        omit_session_token: v.context.omit_session_token,
+    };
+
+    let (_, trace) = auth
+        .sign_traced(&context, &v.request.headers, options)
+        .ok()?;
+    Some((
+        trace.canonical_request,
+        trace.string_to_sign,
+        trace.signature,
+    ))
+}
+
+/// Cases `fcp-provider-auth` REFUSES to sign, with the reason.
+///
+/// A refusal is not a divergence — this signer deliberately validates more than
+/// `fcp-sdk` does — but it is also not coverage, so it is enumerated rather than
+/// silently skipped. Listing it keeps the two signers' verified surface honest:
+/// these are the cases where only one of them is actually checked.
+///
+/// MEASURED EMPTY: the stricter validation refuses none of the 38 cases. Every
+/// vector carries `host`, header names stay inside the ASCII-alnum-plus-hyphen
+/// charset, and no value is empty after trimming — `get-header-value-multiline`
+/// unfolds to a value this signer accepts. The list stays here, asserted against,
+/// so that a future validation change cannot quietly convert coverage into a
+/// skip.
+const PROVIDER_AUTH_REFUSED: &[&str] = &[];
+
+/// Cases where this harness cannot compare the two signers on equal terms.
 ///
 /// This list is a RATCHET, not a suppression: the test asserts the divergent
-/// set is EXACTLY this, so a new divergence fails, and fixing one also fails
-/// until the name is removed here. Each entry is categorised, and the
-/// categories are tracked on the follow-up bead rather than left as folklore.
+/// set is EXACTLY this, so a new divergence fails, and a case that starts
+/// matching also fails until the name is removed here.
 ///
-/// A. Path normalisation not implemented (6). AWS removes RFC 3986 dot
-///    segments and collapses duplicate slashes before encoding for services in
-///    the normalising profile; `canonical_uri_path` decodes and re-encodes but
-///    never normalises. `/example/..` signs as `/example/..`, AWS signs `/`.
-/// B. One encoding pass too many for these paths (3). We emit `%2520` and
-///    `%25E1%2588%25B4` where the suite expects `%20` and `%E1%88%B4` — exactly
-///    one extra pass. Leading hypothesis: the whole aws-c-auth v4 corpus is
-///    generated with double-URI-encoding DISABLED, which would make these
-///    vectors describe the S3 path profile even though `service` reads
-///    `service`. That is a harness-mapping question, NOT licence to change the
-///    encoding contract: that contract was settled by measurement against live
-///    AWS in br-1nqg7 / br-0lsi3 and must not be re-derived from these files.
-///    Note the other 26 cases cannot discriminate — their paths contain nothing
-///    that needs escaping, so one pass and two agree.
-/// C. Canonical query ordering (1). AWS orders query parameters by their
-///    ENCODED key bytes; `build_canonical_query` receives a `BTreeMap` already
-///    keyed by decoded values, so `%E1%88%B4` sorts last for us and first for
-///    AWS.
-/// D. Header-value whitespace (1). AWS collapses sequential internal spaces in
-///    unquoted header values; we only trim the ends, so `"a   b   c"` stays
-///    wide where AWS expects `"a b c"`.
-/// E. Session token always signed (1). `post-sts-header-after` adds the token
-///    after signing and expects it absent from the signed set; we sign
-///    `x-amz-security-token` whenever the credentials carry one. Its sibling
-///    `post-sts-header-before` passes.
+/// Only ONE category remains, and it is a documented input-convention boundary
+/// rather than a signing defect. Resolved history, kept because it explains why
+/// the list is the shape it is (br-f57c6):
+///
+/// * Path normalisation (was 6 cases) — FIXED: `CanonicalPathNormalization` is
+///   now a second profile axis and `remove_dot_segments` resolves `.` / `..`
+///   and collapses duplicate slashes. Independently confirmed as the right
+///   shape by upstream, which also treats `should_normalize_uri_path` and
+///   `use_double_uri_encode` as independent flags.
+/// * Header-value whitespace (was 1) — FIXED: `canonical_header_value` collapses
+///   internal runs, not just the ends.
+/// * Canonical query ordering (was 1) — FIXED: pairs are percent-encoded and
+///   only THEN sorted, matching `s_transform_query_params` → `qsort` with
+///   `s_canonical_query_param_comparator`. The earlier note that this needed an
+///   API change was wrong: the encoded key is a pure function of the decoded
+///   key, so the ordering is always recoverable from a decoded-keyed map.
+/// * Session token always signed (was 1) — NOT A DEFECT: `context.json` carries
+///   `omit_session_token`, which this harness previously ignored. It is now
+///   parsed and threaded through `with_omit_session_token`.
+///
+/// REMAINING — raw-vs-wire input convention (3 cases):
+/// `get-space-normalized`, `get-space-unnormalized`, `get-utf8`.
+///
+/// These fixtures put a LITERAL space or a literal `U+1234` in the request
+/// target (`GET /example space/ HTTP/1.1`), which is not a legal
+/// request-target. AWS's own signer never percent-decodes the path: with
+/// `use_double_uri_encode` it applies exactly ONE encoding pass to whatever
+/// string it was handed, and with the flag off it emits that string verbatim
+/// (`aws-c-auth` `source/aws_signing.c`, `s_append_canonical_path`). So on a raw
+/// path it produces `%20`. `SignableRequest::uri` is documented to carry the
+/// WIRE path, and this signer decodes it before re-encoding, so on the same raw
+/// string its decode is a no-op and it emits one pass more: `%2520`.
+///
+/// For a canonically-encoded wire path the two algorithms are IDENTICAL in both
+/// profiles. That equivalence is measured directly, not asserted in prose, by
+/// `fcp_sdk::sigv4` test `wire_path_input_reproduces_aws_own_canonical_path_algorithm`
+/// and by [`wire_form_of_the_raw_fixture_paths_matches_aws`] below.
+///
+/// The encoding contract itself was settled by measurement against live AWS in
+/// br-1nqg7 / br-0lsi3 and is NOT re-derived from these files. The earlier
+/// hypothesis — that the corpus was generated with double-encoding disabled —
+/// was checked against the generator and REFUTED: `use_double_uri_encode` is
+/// hardcoded `true` for all 38 cases.
 const KNOWN_DIVERGENT: &[&str] = &[
-    // B — encoding passes
+    // Raw (non-wire) fixture paths; see above.
     "get-space-normalized",
     "get-space-unnormalized",
     "get-utf8",
-    // C — canonical query ordering
-    "get-vanilla-query-order-encoded",
-    // E — session token always signed
-    "post-sts-header-after",
 ];
 
 /// Every case is checked stage by stage. Divergences are reported all at once,
@@ -423,6 +561,194 @@ fn sdk_signer_against_official_vectors() {
         "These cases now match AWS: {newly_fixed:?}. Remove them from KNOWN_DIVERGENT \
          so the ratchet holds them from here on."
     );
+}
+
+/// The same corpus, the same stage-by-stage assertions, against the OTHER
+/// signer.
+///
+/// `fcp-provider-auth` is expected to reproduce AWS on exactly the cases
+/// `fcp-sdk` does: both crates now implement the same two path profiles, the same
+/// encode-then-sort query rule, the same header-whitespace collapse, and the same
+/// `omit_session_token` mode. The shared `KNOWN_DIVERGENT` ratchet therefore
+/// applies unchanged — if the two signers ever need different lists, they have
+/// drifted, and that is the bug this test exists to catch.
+#[test]
+fn provider_auth_signer_against_official_vectors() {
+    let vectors = load_vectors();
+    let mut diverged: Vec<String> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+
+    for v in &vectors {
+        let Some((canonical, sts, sig)) = sign_with_provider_auth(v) else {
+            refused.push(v.name.clone());
+            continue;
+        };
+        let canonical_ok = canonical.trim_end() == v.expected_canonical_request.trim_end();
+        let sts_ok = sts.trim_end() == v.expected_string_to_sign.trim_end();
+        let sig_ok = sig == v.expected_signature;
+
+        if canonical_ok && sts_ok && sig_ok {
+            continue;
+        }
+        diverged.push(v.name.clone());
+
+        assert!(
+            !(canonical_ok && (!sts_ok || !sig_ok)),
+            "{}: canonical request matches AWS but a later stage does not — \
+             string_to_sign_ok={sts_ok} signature_ok={sig_ok}. That implicates \
+             hashing or signing-key derivation, not canonicalisation.",
+            v.name
+        );
+    }
+
+    diverged.sort();
+    refused.sort();
+    let mut expected_divergent: Vec<String> =
+        KNOWN_DIVERGENT.iter().map(|s| (*s).to_string()).collect();
+    expected_divergent.sort();
+    let mut expected_refused: Vec<String> = PROVIDER_AUTH_REFUSED
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    expected_refused.sort();
+
+    eprintln!(
+        "aws-sigv4 official vectors (fcp-provider-auth): {}/{} reproduce AWS exactly; \
+         {} known divergences; {} refused",
+        vectors.len() - diverged.len() - refused.len(),
+        vectors.len(),
+        diverged.len(),
+        refused.len(),
+    );
+
+    assert_eq!(
+        refused, expected_refused,
+        "the set of cases fcp-provider-auth refuses to sign changed. A refusal is \
+         not coverage — if this grew, a case silently stopped being checked."
+    );
+    assert_eq!(
+        diverged, expected_divergent,
+        "fcp-provider-auth's divergence set must equal fcp-sdk's. A difference \
+         here means the two signers no longer agree on canonicalisation, so the \
+         same request signs two ways depending on which crate runs."
+    );
+}
+
+/// The two signers must produce byte-identical canonical requests.
+///
+/// This is the assertion that actually protects callers. Both crates matching AWS
+/// on 35 of 38 cases would still permit them to differ on the other 3, and a
+/// request signed by whichever crate happened to be on the call path would then
+/// verify or not depending on that accident. Comparing them to each other
+/// directly closes that gap — including on the cases where NEITHER matches AWS.
+#[test]
+fn both_signers_agree_byte_for_byte_on_every_vector() {
+    let mut compared = 0_usize;
+    for v in &load_vectors() {
+        let Some((pa_canonical, pa_sts, pa_sig)) = sign_with_provider_auth(v) else {
+            continue;
+        };
+        let (sdk_canonical, sdk_sts, sdk_sig) = sign_with_sdk(v);
+
+        assert_eq!(
+            sdk_canonical.trim_end(),
+            pa_canonical.trim_end(),
+            "{}: the two signers built different canonical requests",
+            v.name
+        );
+        assert_eq!(sdk_sts.trim_end(), pa_sts.trim_end(), "{}", v.name);
+        assert_eq!(sdk_sig, pa_sig, "{}", v.name);
+        compared += 1;
+    }
+    assert!(
+        compared >= 30,
+        "only {compared} vectors were comparable across both signers; the \
+         cross-signer check has lost its coverage"
+    );
+}
+
+/// AWS's URI-path encoder: percent-encode every byte outside the unreserved
+/// set, preserving `/` as the segment separator.
+///
+/// Harness-local on purpose. It exists to CHARACTERISE the remaining divergence,
+/// never to construct an expectation a signer is then checked against, so it
+/// must not be imported from the crate under test.
+fn aws_uri_encode_path_once(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            segment
+                .bytes()
+                .map(|b| match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        (b as char).to_string()
+                    }
+                    other => format!("%{other:02X}"),
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Characterises the three remaining divergences EXACTLY, so the ratchet records
+/// a bounded, understood difference rather than an open question.
+///
+/// For each case the claim is: our canonical request differs from AWS's in the
+/// canonical-URI line ONLY, and that line is precisely one additional
+/// URI-encoding pass over AWS's. Both halves matter. The second half says the
+/// difference is the input-convention boundary (see [`KNOWN_DIVERGENT`]); the
+/// first says no OTHER defect is hiding inside these three cases, which is the
+/// part a bare "known divergence" entry cannot tell you.
+#[test]
+fn remaining_divergences_are_exactly_one_extra_encoding_pass() {
+    let raw_path_cases = ["get-space-normalized", "get-space-unnormalized", "get-utf8"];
+    assert_eq!(
+        raw_path_cases.len(),
+        KNOWN_DIVERGENT.len(),
+        "every known divergence must be characterised here, not just listed"
+    );
+
+    for v in load_vectors()
+        .iter()
+        .filter(|v| raw_path_cases.contains(&v.name.as_str()))
+    {
+        let (canonical, _, _) = sign_with_sdk(v);
+        let ours: Vec<&str> = canonical.trim_end().split('\n').collect();
+        let theirs: Vec<&str> = v
+            .expected_canonical_request
+            .trim_end()
+            .split('\n')
+            .collect();
+
+        assert_eq!(
+            ours.len(),
+            theirs.len(),
+            "{}: canonical request line count differs, so this is not a \
+             canonical-URI-only difference",
+            v.name
+        );
+
+        // Line 1 is the method; line 2 is the canonical URI.
+        assert_eq!(
+            ours[1],
+            aws_uri_encode_path_once(theirs[1]),
+            "{}: our canonical URI must be exactly one encoding pass over AWS's",
+            v.name
+        );
+
+        for (i, (a, b)) in ours.iter().zip(theirs.iter()).enumerate() {
+            if i == 1 {
+                continue;
+            }
+            assert_eq!(
+                a, b,
+                "{}: line {i} of the canonical request differs too — the \
+                 divergence is NOT confined to the canonical URI, so something \
+                 else is wrong in this case",
+                v.name
+            );
+        }
+    }
 }
 
 /// Guards the thing the single-vector era could not: that the corpus actually

@@ -227,6 +227,9 @@ pub struct SigV4Signer {
     sign_content_sha256_header: bool,
     /// Overrides the scope-derived path-normalisation profile when set.
     path_normalization: Option<CanonicalPathNormalization>,
+    /// When true, `x-amz-security-token` is left out of the signed header set
+    /// even though the credentials carry one. Defaults to `false`.
+    omit_session_token: bool,
 }
 
 impl SigV4Signer {
@@ -239,6 +242,7 @@ impl SigV4Signer {
             fixed_time: None,
             sign_content_sha256_header: true,
             path_normalization: None,
+            omit_session_token: false,
         }
     }
 
@@ -279,6 +283,31 @@ impl SigV4Signer {
     #[must_use]
     pub const fn with_content_sha256_header(mut self, enabled: bool) -> Self {
         self.sign_content_sha256_header = enabled;
+        self
+    }
+
+    /// Sign without `x-amz-security-token`, leaving the caller to add the token
+    /// to the request *after* signing.
+    ///
+    /// This is AWS's own `omit_session_token` signing flag
+    /// (`aws_signing_config_aws.flags.omit_session_token`). The default —
+    /// signing the token — is correct for ordinary requests made with session
+    /// credentials, and is what the published vector
+    /// `post-sts-header-before` pins.
+    ///
+    /// Some flows need the other shape: the token must travel on the wire but
+    /// must not be part of the signed header set, because the receiving service
+    /// re-derives the signature over a header set that does not include it.
+    /// `post-sts-header-after` is exactly that case, and it carries
+    /// `"omit_session_token": true` in its `context.json`.
+    ///
+    /// [`SignedRequest::x_amz_security_token`] is still populated when this is
+    /// set — the token is omitted from the *signature*, not from the request.
+    /// Dropping it from the wire as well would break any service that requires
+    /// it.
+    #[must_use]
+    pub const fn with_omit_session_token(mut self, omit: bool) -> Self {
+        self.omit_session_token = omit;
         self
     }
 
@@ -447,9 +476,11 @@ impl SigV4Signer {
                 .or_insert_with(|| request.payload_hash.clone());
         }
         if let Some(token) = &self.credentials.session_token {
-            headers
-                .entry("x-amz-security-token".into())
-                .or_insert_with(|| token.clone());
+            if !self.omit_session_token {
+                headers
+                    .entry("x-amz-security-token".into())
+                    .or_insert_with(|| token.clone());
+            }
         }
 
         // Re-key by the LOWERCASED name before ordering. AWS orders canonical
@@ -606,10 +637,40 @@ fn remove_dot_segments(path: &str) -> String {
     format!("/{}{trailing}", resolved.join("/"))
 }
 
+/// Build the canonical query string: percent-encode every pair, THEN order by
+/// the encoded bytes.
+///
+/// The order of those two steps is the whole content of this function. AWS sorts
+/// canonical query parameters by their **encoded** key, so a key that encodes to
+/// a percent escape sorts by `%` (0x25) rather than by the first byte of its raw
+/// form. Confirmed against AWS's own signer (`aws-c-auth`
+/// `source/aws_signing.c`), which runs `s_transform_query_params` with
+/// `aws_byte_buf_append_encoding_uri_param` and only then `qsort`s with
+/// `s_canonical_query_param_comparator` — a lexical compare on the encoded key
+/// with the encoded value as tiebreak. Pinned by the published vector
+/// `get-vanilla-query-order-encoded`, where `%E1%88%B4` must sort FIRST.
+///
+/// Iterating the `BTreeMap` directly (the previous behaviour) ordered by the
+/// DECODED key, which is a different order for every key containing a byte
+/// outside the unreserved set: `ᐴ` sorts after `Param` by its UTF-8 bytes
+/// (0xE1 > 0x50) but before it once encoded (0x25 < 0x50). The map's key order
+/// is not the signing order and must not be reused as one.
+///
+/// The decoded-to-encoded map is total, so nothing is lost by the map being
+/// keyed on decoded values: the encoded form is a pure function of the decoded
+/// key, so the ordering AWS needs is always recoverable here.
 fn build_canonical_query(params: &BTreeMap<String, String>) -> String {
-    params
+    let mut encoded: Vec<(String, String)> = params
         .iter()
-        .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
+        .map(|(k, v)| (uri_encode(k), uri_encode(v)))
+        .collect();
+    // Key first, then value — matching AWS's comparator. The value tiebreak is
+    // unreachable through a BTreeMap (keys are unique) but is kept so this
+    // matches the reference rule rather than the current input type.
+    encoded.sort();
+    encoded
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -1028,8 +1089,162 @@ mod tests {
             ("a-param".into(), "value1".into()),
         ]);
         let result = build_canonical_query(&params);
-        // BTreeMap sorts by raw key; '-' is unreserved so not encoded
+        // All-unreserved keys: encoded and decoded order agree here, so this
+        // case cannot discriminate the two. See the test below for one that can.
         assert!(result.starts_with("a-param"), "got: {result}");
+    }
+
+    /// AWS orders canonical query parameters by the ENCODED key, so a key whose
+    /// raw bytes sort late can sort first once encoded.
+    ///
+    /// Pinned by the published vector `get-vanilla-query-order-encoded` and
+    /// confirmed against AWS's own signer, which percent-encodes every pair and
+    /// only then sorts (`aws-c-auth` `source/aws_signing.c`:
+    /// `s_transform_query_params` → `qsort` with
+    /// `s_canonical_query_param_comparator`).
+    ///
+    /// This is the regression test for reusing the `BTreeMap`'s own key order as
+    /// the signing order: `ᐴ` is 0xE1.. raw so it sorted AFTER `Param` (0x50),
+    /// but encodes to `%E1%88%B4` which sorts BEFORE it (0x25 < 0x50).
+    #[test]
+    fn canonical_query_orders_by_encoded_key_not_by_decoded_key() {
+        let params = BTreeMap::from([
+            ("Param-3".to_string(), "Value3".to_string()),
+            ("Param".to_string(), "Value2".to_string()),
+            // The decoded form of `%E1%88%B4`.
+            ("\u{1234}".to_string(), "Value1".to_string()),
+        ]);
+
+        assert_eq!(
+            build_canonical_query(&params),
+            "%E1%88%B4=Value1&Param=Value2&Param-3=Value3"
+        );
+
+        // Guard the premise: the map's own iteration order is the WRONG order,
+        // so this test would not detect a regression if that ever stopped being
+        // true.
+        let map_order: Vec<&str> = params.keys().map(String::as_str).collect();
+        assert_eq!(
+            map_order,
+            vec!["Param", "Param-3", "\u{1234}"],
+            "BTreeMap order is by decoded key; if this changes the test above \
+             no longer discriminates encoded-vs-decoded ordering"
+        );
+    }
+
+    /// `omit_session_token` keeps the token off the SIGNATURE, not off the wire.
+    ///
+    /// Pinned by the published vector pair `post-sts-header-before` (token
+    /// signed, the default) and `post-sts-header-after` (token added after
+    /// signing, `"omit_session_token": true`).
+    #[test]
+    fn omit_session_token_drops_the_token_from_the_signed_set_only() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            session_token: Some("AQoDYXdzEXAMPLETOKEN".into()),
+        };
+        let request = SignableRequest {
+            method: "POST".into(),
+            uri: "/".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "example.amazonaws.com".into())]),
+            payload_hash: EMPTY_PAYLOAD_HASH.into(),
+        };
+
+        let signed = SigV4Signer::new(creds.clone(), test_scope())
+            .with_fixed_time(fixed_time())
+            .with_content_sha256_header(false)
+            .with_omit_session_token(true);
+        let (out, trace) = signed.sign_traced(&request);
+
+        assert_eq!(
+            trace.signed_headers, "host;x-amz-date",
+            "the token must not appear in the signed header set"
+        );
+        assert!(
+            !trace.canonical_request.contains("x-amz-security-token"),
+            "canonical request must not carry the token: {}",
+            trace.canonical_request
+        );
+        assert_eq!(
+            out.x_amz_security_token.as_deref(),
+            Some("AQoDYXdzEXAMPLETOKEN"),
+            "the token is omitted from the signature, NOT from the request — \
+             dropping it from the wire too would break the service call"
+        );
+
+        // Default (omit = false) signs it, and the two shapes must differ.
+        let default_signer = SigV4Signer::new(creds, test_scope())
+            .with_fixed_time(fixed_time())
+            .with_content_sha256_header(false);
+        let (_, default_trace) = default_signer.sign_traced(&request);
+        assert_eq!(
+            default_trace.signed_headers,
+            "host;x-amz-date;x-amz-security-token"
+        );
+        assert_ne!(
+            trace.signature, default_trace.signature,
+            "omitting the token must change the signature, or the flag is inert"
+        );
+    }
+
+    /// Pins the input-convention boundary between this signer and AWS's own.
+    ///
+    /// `aws-c-auth` NEVER percent-decodes the path: with `use_double_uri_encode`
+    /// it applies exactly ONE encoding pass to the path string it was handed, and
+    /// with the flag off it emits that string verbatim (`source/aws_signing.c`,
+    /// `s_append_canonical_path`). This signer instead decodes the wire path and
+    /// then applies its profile's number of passes.
+    ///
+    /// Those two algorithms are IDENTICAL for a canonically-encoded wire path,
+    /// which is what [`SignableRequest::uri`] is documented to carry — that
+    /// equivalence is what this test measures, in both profiles. They differ only
+    /// when the input is a RAW (un-encoded) path, which is not a legal
+    /// request-target and not what this API accepts.
+    ///
+    /// That difference is the entire explanation for the three published vectors
+    /// (`get-space-normalized`, `get-space-unnormalized`, `get-utf8`) whose
+    /// fixtures supply raw paths: it is an input-convention boundary, not a
+    /// signing defect. Recorded here as measurement so it cannot decay back into
+    /// a suspected bug.
+    #[test]
+    fn wire_path_input_reproduces_aws_own_canonical_path_algorithm() {
+        for wire in ["/example%20space/", "/%E1%88%B4", "/bucket/plain.txt", "/"] {
+            // Non-S3 profile: AWS applies one encode pass to the wire path.
+            assert_eq!(
+                canonical_uri_path(
+                    wire,
+                    CanonicalPathEncoding::Double,
+                    CanonicalPathNormalization::RemoveDotSegments,
+                ),
+                uri_encode_path(wire),
+                "double-encoding profile must equal one encode pass over the \
+                 wire path for {wire}"
+            );
+            // S3 profile: AWS emits the wire path verbatim.
+            assert_eq!(
+                canonical_uri_path(
+                    wire,
+                    CanonicalPathEncoding::Single,
+                    CanonicalPathNormalization::Preserve,
+                ),
+                wire,
+                "single-encoding profile must equal the wire path verbatim for {wire}"
+            );
+        }
+
+        // And the boundary itself: handed the RAW path the fixtures use, this
+        // signer emits one pass MORE than AWS does, because its decode step is a
+        // no-op on a string with no escapes. Measured, not desired.
+        assert_eq!(
+            canonical_uri_path(
+                "/example space/",
+                CanonicalPathEncoding::Double,
+                CanonicalPathNormalization::RemoveDotSegments,
+            ),
+            "/example%2520space/",
+        );
     }
 
     // ── Full Signing ─────────────────────────────────────────────

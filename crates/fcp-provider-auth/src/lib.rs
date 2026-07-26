@@ -2550,6 +2550,93 @@ pub enum CanonicalPathEncoding {
     Double,
 }
 
+/// Whether the canonical URI path has RFC 3986 dot segments resolved.
+///
+/// A second, independent axis from [`CanonicalPathEncoding`], and independent in
+/// AWS's own signer too: `aws-c-auth` carries `should_normalize_uri_path` and
+/// `use_double_uri_encode` as separate flags.
+///
+/// S3 treats the path as an opaque object key, so `/a/../b` names a literal key
+/// containing `..` and must be signed as written; every other service resolves it
+/// to `/b` before signing.
+///
+/// Mirrors `fcp_sdk::sigv4::CanonicalPathNormalization`; the two crates sign the
+/// same resource and must agree byte-for-byte on how the path is rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalPathNormalization {
+    /// Resolve `.` / `..` and collapse duplicate slashes — every service but S3.
+    RemoveDotSegments,
+    /// Sign the path exactly as supplied — Amazon S3.
+    Preserve,
+}
+
+/// Per-call overrides for [`SigV4Auth::sign_traced`].
+///
+/// These are signing-call options, deliberately NOT fields on [`SigV4Auth`].
+/// `SigV4Auth` is a credential/config value that derives `PartialEq`, so folding
+/// behaviour knobs into it would make two otherwise-identical auth
+/// configurations compare unequal over a difference that is not part of the
+/// credential at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigV4SigningOptions {
+    /// Overrides the service-derived path-normalisation profile when set.
+    ///
+    /// Production callers should leave this `None`:
+    /// [`SigV4Auth::canonical_path_normalization`] derives it from the service
+    /// name. It exists so the signer can be driven per case against AWS's
+    /// published vectors, which carry the profile in each case's
+    /// `context.normalize` while every case names the same service.
+    pub path_normalization: Option<CanonicalPathNormalization>,
+    /// Whether `x-amz-content-sha256` joins the signed header set. Default
+    /// `true`.
+    ///
+    /// Set `false` to sign exactly the headers supplied. AWS's published vectors
+    /// sign a service that does not carry the header, so leaving it in makes
+    /// every vector mismatch for a reason unrelated to the canonicalisation
+    /// rules they exist to pin.
+    pub sign_content_sha256_header: bool,
+    /// Sign without `x-amz-security-token`, leaving the caller to add the token
+    /// to the request *after* signing. Default `false`.
+    ///
+    /// This is AWS's own `omit_session_token` signing flag. The token is omitted
+    /// from the *signature*, not from the request:
+    /// [`SigV4SignedAuth::x_amz_security_token`] is still populated.
+    pub omit_session_token: bool,
+}
+
+impl Default for SigV4SigningOptions {
+    fn default() -> Self {
+        Self {
+            path_normalization: None,
+            sign_content_sha256_header: true,
+            omit_session_token: false,
+        }
+    }
+}
+
+/// Intermediate artifacts produced by one `SigV4` signing pass.
+///
+/// `SigV4` is a pipeline — canonical request, then string-to-sign, then
+/// signature — and each stage hashes into the next. Comparing only the final
+/// signature against a reference tells you *that* a signer diverged but not
+/// *where*, because every stage collapses into an opaque hex digest.
+///
+/// Mirrors `fcp_sdk::sigv4::SigV4Trace`, so one differential harness can drive
+/// both signers and localise a mismatch to a single stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigV4Trace {
+    /// Canonical request (AWS "Task 1").
+    pub canonical_request: String,
+    /// String to sign (AWS "Task 2").
+    pub string_to_sign: String,
+    /// Hex-encoded signature (AWS "Task 3").
+    pub signature: String,
+    /// Semicolon-joined lowercase signed header names.
+    pub signed_headers: String,
+    /// `<date>/<region>/<service>/aws4_request`.
+    pub credential_scope: String,
+}
+
 /// AWS `SigV4` auth configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigV4Auth {
@@ -2610,6 +2697,24 @@ impl SigV4Auth {
         }
     }
 
+    /// Whether this service's canonical URI has dot segments resolved.
+    ///
+    /// Same S3-vs-everything-else split as [`Self::canonical_path_encoding`], and
+    /// case-insensitive for the same reason.
+    ///
+    /// S3 stays on `Preserve` and that is the point of the split, not an
+    /// optimisation: an S3 object key may legitimately contain `..` or a double
+    /// slash, so `/a/../b` names a literal key there while every other service
+    /// resolves it to `/b`.
+    #[must_use]
+    pub fn canonical_path_normalization(&self) -> CanonicalPathNormalization {
+        if self.service.eq_ignore_ascii_case("s3") {
+            CanonicalPathNormalization::Preserve
+        } else {
+            CanonicalPathNormalization::RemoveDotSegments
+        }
+    }
+
     /// Sign a request context and return the headers `SigV4` must apply.
     ///
     /// # Errors
@@ -2620,6 +2725,26 @@ impl SigV4Auth {
         context: &SigV4SigningContext,
         request_headers: &BTreeMap<String, String>,
     ) -> AuthResult<SigV4SignedAuth> {
+        self.sign_traced(context, request_headers, SigV4SigningOptions::default())
+            .map(|(signed, _trace)| signed)
+    }
+
+    /// Sign a request context, additionally returning every intermediate
+    /// artifact.
+    ///
+    /// Same computation as [`Self::sign`], which delegates here with
+    /// [`SigV4SigningOptions::default`]; see [`SigV4Trace`] for why the
+    /// intermediates are worth surfacing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when required request context or headers are invalid.
+    pub fn sign_traced(
+        &self,
+        context: &SigV4SigningContext,
+        request_headers: &BTreeMap<String, String>,
+        options: SigV4SigningOptions,
+    ) -> AuthResult<(SigV4SignedAuth, SigV4Trace)> {
         validate_non_empty(&self.region, "region")?;
         validate_non_empty(&self.service, "service")?;
         let signing_time = context.signing_time.unwrap_or_else(Utc::now);
@@ -2630,15 +2755,19 @@ impl SigV4Auth {
 
         let mut headers = request_headers.clone();
         headers.insert("x-amz-date".to_string(), amz_date.clone());
-        headers.insert(
-            "x-amz-content-sha256".to_string(),
-            context.payload_hash.clone(),
-        );
-        if let Some(session_token) = &self.session_token {
+        if options.sign_content_sha256_header {
             headers.insert(
-                "x-amz-security-token".to_string(),
-                session_token.expose_secret().to_string(),
+                "x-amz-content-sha256".to_string(),
+                context.payload_hash.clone(),
             );
+        }
+        if let Some(session_token) = &self.session_token {
+            if !options.omit_session_token {
+                headers.insert(
+                    "x-amz-security-token".to_string(),
+                    session_token.expose_secret().to_string(),
+                );
+            }
         }
 
         let (canonical_headers, signed_headers) = canonical_headers(&headers)?;
@@ -2647,6 +2776,9 @@ impl SigV4Auth {
             &canonical_headers,
             &signed_headers,
             self.canonical_path_encoding(),
+            options
+                .path_normalization
+                .unwrap_or_else(|| self.canonical_path_normalization()),
         );
         let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
         let string_to_sign =
@@ -2658,16 +2790,27 @@ impl SigV4Auth {
             self.access_key.expose_secret(),
         );
 
-        Ok(SigV4SignedAuth {
-            authorization,
-            x_amz_date: amz_date,
-            x_amz_content_sha256: context.payload_hash.clone(),
-            x_amz_security_token: self
-                .session_token
-                .as_ref()
-                .map(|token| token.expose_secret().to_string()),
-            signed_headers,
-        })
+        Ok((
+            SigV4SignedAuth {
+                authorization,
+                x_amz_date: amz_date,
+                x_amz_content_sha256: context.payload_hash.clone(),
+                // Populated even when `omit_session_token` is set: the token is
+                // omitted from the signature, not from the request.
+                x_amz_security_token: self
+                    .session_token
+                    .as_ref()
+                    .map(|token| token.expose_secret().to_string()),
+                signed_headers: signed_headers.clone(),
+            },
+            SigV4Trace {
+                canonical_request,
+                string_to_sign,
+                signature,
+                signed_headers,
+                credential_scope,
+            },
+        ))
     }
 
     fn derive_signing_key(&self, date_stamp: &str) -> Vec<u8> {
@@ -3197,11 +3340,12 @@ fn canonical_request(
     canonical_headers: &str,
     signed_headers: &str,
     path_encoding: CanonicalPathEncoding,
+    path_normalization: CanonicalPathNormalization,
 ) -> String {
     format!(
         "{}\n{}\n{}\n{}\n{signed_headers}\n{}",
         context.method,
-        canonical_uri(&context.uri_path, path_encoding),
+        canonical_uri(&context.uri_path, path_encoding, path_normalization),
         canonical_query(&context.query_params),
         canonical_headers,
         context.payload_hash,
@@ -3277,17 +3421,61 @@ fn uri_encode_path(path: &str) -> String {
 /// or any non-ASCII character produced `SignatureDoesNotMatch`.
 ///
 /// Ported verbatim from `fcp_sdk::sigv4`; see br-1nqg7 and br-0lsi3.
-fn canonical_uri(wire_path: &str, encoding: CanonicalPathEncoding) -> String {
+fn canonical_uri(
+    wire_path: &str,
+    encoding: CanonicalPathEncoding,
+    normalization: CanonicalPathNormalization,
+) -> String {
     let wire_path = if wire_path.starts_with('/') {
         wire_path.to_string()
     } else {
         format!("/{wire_path}")
     };
-    let once = uri_encode_path(&percent_decode_path(&wire_path));
+    // Normalise the WIRE path, before decoding. Order matters, and matches both
+    // `fcp_sdk::sigv4` and AWS's own signer (`aws-c-auth` normalises the URI path
+    // it was handed and only then encodes). Decoding first would turn an encoded
+    // `%2F` inside a segment into a real separator, and normalisation would then
+    // treat it as one — silently signing a different resource than the request
+    // targets. Dot segments are unreserved and so are never percent-encoded on
+    // the wire, which is why normalising first loses nothing.
+    let normalized = match normalization {
+        CanonicalPathNormalization::RemoveDotSegments => remove_dot_segments(&wire_path),
+        CanonicalPathNormalization::Preserve => wire_path,
+    };
+    let once = uri_encode_path(&percent_decode_path(&normalized));
     match encoding {
         CanonicalPathEncoding::Single => once,
         CanonicalPathEncoding::Double => uri_encode_path(&once),
     }
+}
+
+/// Resolve `.` and `..` segments and collapse duplicate slashes, per RFC 3986
+/// §6.2.2.3 plus AWS's additional empty-segment collapsing.
+///
+/// Verified against AWS's published vectors: `/example/..`, `//` and `/./` all
+/// canonicalise to `/`; `/./example` to `/example`; `//example//` to `/example/`.
+/// A trailing slash on the input is preserved when any segment survives.
+///
+/// Ported from `fcp_sdk::sigv4` so both signers render a joined path the same
+/// way. Its absence here was a live `SignatureDoesNotMatch` for every non-S3
+/// caller that built a path by joining segments and landed a `//`, `.` or `..`.
+fn remove_dot_segments(path: &str) -> String {
+    let mut resolved: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            // An empty segment is a duplicate (or leading/trailing) slash.
+            "" | "." => {}
+            ".." => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    if resolved.is_empty() {
+        return "/".to_string();
+    }
+    let trailing = if path.ends_with('/') { "/" } else { "" };
+    format!("/{}{trailing}", resolved.join("/"))
 }
 
 fn uri_encode(value: &str) -> String {
@@ -5338,6 +5526,27 @@ mod tests {
 
     // ── Canonical URI encoding (br-0lsi3, porting br-1nqg7) ──────────
 
+    /// Canonical URI under the real S3 profile: single-encode, preserve dot
+    /// segments.
+    fn canonical_uri_s3(path: &str) -> String {
+        canonical_uri(
+            path,
+            CanonicalPathEncoding::Single,
+            CanonicalPathNormalization::Preserve,
+        )
+    }
+
+    /// Canonical URI under the real non-S3 profile: double-encode, resolve dot
+    /// segments. Both axes move together in production, so tests pair them the
+    /// same way rather than exercising combinations no service uses.
+    fn canonical_uri_other(path: &str) -> String {
+        canonical_uri(
+            path,
+            CanonicalPathEncoding::Double,
+            CanonicalPathNormalization::RemoveDotSegments,
+        )
+    }
+
     /// S3 requires exactly ONE encoding pass; every other service requires two.
     /// `canonical_uri` previously encoded the wire path once regardless of
     /// service, which is correct only for a path that needed no escaping.
@@ -5346,13 +5555,164 @@ mod tests {
         // `%20` on the wire decodes to a space, which S3 canonicalizes back to
         // `%20` — not `%2520`.
         assert_eq!(
-            canonical_uri("/bucket/my%20report.pdf", CanonicalPathEncoding::Single),
+            canonical_uri_s3("/bucket/my%20report.pdf"),
             "/bucket/my%20report.pdf"
         );
         assert_eq!(
-            canonical_uri("/bucket/my%20report.pdf", CanonicalPathEncoding::Double),
+            canonical_uri_other("/bucket/my%20report.pdf"),
             "/bucket/my%2520report.pdf"
         );
+    }
+
+    /// The port of `remove_dot_segments` into this crate.
+    ///
+    /// This was a LIVE `SignatureDoesNotMatch` bug, not a cosmetic gap: this
+    /// signer had no normalisation at all, so any non-S3 caller that built a path
+    /// by joining segments and landed a `//`, `/./` or `/../` signed the literal
+    /// path while the service signed the resolved one. `fcp-sdk` was fixed first;
+    /// this crate carries an independent signer and was still exposed.
+    #[test]
+    fn non_s3_resolves_dot_segments_and_s3_preserves_them() {
+        for (input, resolved) in [
+            ("/example/..", "/"),
+            ("/example1/example2/../..", "/"),
+            ("//", "/"),
+            ("/./", "/"),
+            ("/./example", "/example"),
+            ("//example//", "/example/"),
+        ] {
+            assert_eq!(
+                canonical_uri_other(input),
+                resolved,
+                "non-S3 must resolve {input}"
+            );
+        }
+
+        // S3 must NOT normalise: an object key may legitimately contain `..` or
+        // a double slash, so `/a/../b` names a literal key there. One input, two
+        // different canonical URIs — so a future refactor cannot collapse the two
+        // axes into one.
+        assert_eq!(canonical_uri_s3("/bucket/a/../b"), "/bucket/a/../b");
+        assert_eq!(canonical_uri_other("/bucket/a/../b"), "/bucket/b");
+    }
+
+    /// The normalisation profile must be threaded into the string that is
+    /// actually signed, not merely exist as an unused selector.
+    ///
+    /// Asserting on the canonical request is what makes this meaningful:
+    /// comparing two `Authorization` headers would differ anyway, because the
+    /// service name also feeds the credential scope.
+    #[test]
+    fn path_normalization_reaches_the_canonical_request() {
+        let context = SigV4SigningContext::new("GET", "/example/..", EMPTY_PAYLOAD_SHA256).unwrap();
+        let uri_line = |normalization| {
+            canonical_request(
+                &context,
+                "host:e\n",
+                "host",
+                CanonicalPathEncoding::Single,
+                normalization,
+            )
+            .lines()
+            .nth(1)
+            .unwrap()
+            .to_string()
+        };
+
+        assert_eq!(uri_line(CanonicalPathNormalization::RemoveDotSegments), "/");
+        assert_eq!(
+            uri_line(CanonicalPathNormalization::Preserve),
+            "/example/.."
+        );
+    }
+
+    /// The selector must key off the service, and must not be defeated by a
+    /// struct literal that skips `SigV4Auth::new`'s lowercasing.
+    #[test]
+    fn canonical_path_normalization_preserves_only_for_s3() {
+        assert_eq!(
+            sigv4_auth(None).canonical_path_normalization(),
+            CanonicalPathNormalization::Preserve
+        );
+        assert_eq!(
+            sigv4_auth_for_service("execute-api").canonical_path_normalization(),
+            CanonicalPathNormalization::RemoveDotSegments
+        );
+        let uppercase = SigV4Auth {
+            service: "S3".to_string(),
+            ..sigv4_auth(None)
+        };
+        assert_eq!(
+            uppercase.canonical_path_normalization(),
+            CanonicalPathNormalization::Preserve
+        );
+    }
+
+    /// `omit_session_token` keeps the token off the SIGNATURE, not off the wire.
+    #[test]
+    fn omit_session_token_drops_the_token_from_the_signed_set_only() {
+        let auth = sigv4_auth(Some("AQoDYXdzEXAMPLETOKEN"));
+        let context = SigV4SigningContext::new("POST", "/", EMPTY_PAYLOAD_SHA256)
+            .unwrap()
+            .with_signing_time(sigv4_time());
+        let headers = BTreeMap::from([("host".to_string(), "example.amazonaws.com".to_string())]);
+
+        let options = SigV4SigningOptions {
+            sign_content_sha256_header: false,
+            omit_session_token: true,
+            ..SigV4SigningOptions::default()
+        };
+        let (signed, trace) = auth.sign_traced(&context, &headers, options).unwrap();
+
+        assert_eq!(trace.signed_headers, "host;x-amz-date");
+        assert!(!trace.canonical_request.contains("x-amz-security-token"));
+        assert_eq!(
+            signed.x_amz_security_token.as_deref(),
+            Some("AQoDYXdzEXAMPLETOKEN"),
+            "the token is omitted from the signature, NOT from the request"
+        );
+
+        // The default signs it, and the two shapes must differ.
+        let (_, default_trace) = auth
+            .sign_traced(
+                &context,
+                &headers,
+                SigV4SigningOptions {
+                    sign_content_sha256_header: false,
+                    ..SigV4SigningOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            default_trace.signed_headers,
+            "host;x-amz-date;x-amz-security-token"
+        );
+        assert_ne!(
+            trace.signature, default_trace.signature,
+            "omitting the token must change the signature, or the flag is inert"
+        );
+    }
+
+    /// `sign` must stay a pure delegation to `sign_traced`, or the traced path
+    /// could drift from the production one and the vector harness would be
+    /// checking something nothing ships.
+    #[test]
+    fn sign_and_sign_traced_agree() {
+        let auth = sigv4_auth(None);
+        let context = SigV4SigningContext::new("GET", "/bucket/key.txt", EMPTY_PAYLOAD_SHA256)
+            .unwrap()
+            .with_signing_time(sigv4_time());
+        let headers = BTreeMap::from([("host".to_string(), "e.amazonaws.com".to_string())]);
+
+        let plain = auth.sign(&context, &headers).unwrap();
+        let (traced, trace) = auth
+            .sign_traced(&context, &headers, SigV4SigningOptions::default())
+            .unwrap();
+
+        assert_eq!(plain, traced);
+        assert!(plain.authorization.contains(&trace.signature));
+        assert!(plain.authorization.contains(&trace.credential_scope));
+        assert_eq!(plain.signed_headers, trace.signed_headers);
     }
 
     /// The property that makes this change safe to land without live AWS
@@ -5370,12 +5730,12 @@ mod tests {
         ] {
             let legacy = uri_encode_path(path);
             assert_eq!(
-                canonical_uri(path, CanonicalPathEncoding::Single),
+                canonical_uri_s3(path),
                 legacy,
                 "single-pass encoding must be a no-op change for {path}"
             );
             assert_eq!(
-                canonical_uri(path, CanonicalPathEncoding::Double),
+                canonical_uri_other(path),
                 legacy,
                 "double-pass encoding must also be a no-op change for {path}"
             );
@@ -5388,28 +5748,16 @@ mod tests {
     /// false — it round-trips; see br-1nqg7.
     #[test]
     fn canonical_uri_encodes_aws_reserved_characters_left_raw_by_the_url_parser() {
-        assert_eq!(
-            canonical_uri("/bucket/Q&A.pdf", CanonicalPathEncoding::Single),
-            "/bucket/Q%26A.pdf"
-        );
-        assert_eq!(
-            canonical_uri("/bucket/a+b.pdf", CanonicalPathEncoding::Single),
-            "/bucket/a%2Bb.pdf"
-        );
-        assert_eq!(
-            canonical_uri("/bucket/a:b.pdf", CanonicalPathEncoding::Single),
-            "/bucket/a%3Ab.pdf"
-        );
+        assert_eq!(canonical_uri_s3("/bucket/Q&A.pdf"), "/bucket/Q%26A.pdf");
+        assert_eq!(canonical_uri_s3("/bucket/a+b.pdf"), "/bucket/a%2Bb.pdf");
+        assert_eq!(canonical_uri_s3("/bucket/a:b.pdf"), "/bucket/a%3Ab.pdf");
     }
 
     /// A literal `%` in the key arrives as `%25` and must survive the
     /// decode/re-encode round trip rather than becoming `%2525`.
     #[test]
     fn canonical_uri_round_trips_a_literal_percent() {
-        assert_eq!(
-            canonical_uri("/bucket/50%25.pdf", CanonicalPathEncoding::Single),
-            "/bucket/50%25.pdf"
-        );
+        assert_eq!(canonical_uri_s3("/bucket/50%25.pdf"), "/bucket/50%25.pdf");
     }
 
     /// Non-ASCII keys are the most common real-world trigger — any accented or
@@ -5417,7 +5765,7 @@ mod tests {
     #[test]
     fn canonical_uri_handles_non_ascii_keys() {
         assert_eq!(
-            canonical_uri("/bucket/e%C3%B1e.pdf", CanonicalPathEncoding::Single),
+            canonical_uri_s3("/bucket/e%C3%B1e.pdf"),
             "/bucket/e%C3%B1e.pdf"
         );
     }
@@ -5455,18 +5803,28 @@ mod tests {
             SigV4SigningContext::new("GET", "/bucket/my%20report.pdf", EMPTY_PAYLOAD_SHA256)
                 .unwrap();
 
-        let s3_line =
-            canonical_request(&context, "host:e\n", "host", CanonicalPathEncoding::Single)
-                .lines()
-                .nth(1)
-                .unwrap()
-                .to_string();
-        let other_line =
-            canonical_request(&context, "host:e\n", "host", CanonicalPathEncoding::Double)
-                .lines()
-                .nth(1)
-                .unwrap()
-                .to_string();
+        let s3_line = canonical_request(
+            &context,
+            "host:e\n",
+            "host",
+            CanonicalPathEncoding::Single,
+            CanonicalPathNormalization::Preserve,
+        )
+        .lines()
+        .nth(1)
+        .unwrap()
+        .to_string();
+        let other_line = canonical_request(
+            &context,
+            "host:e\n",
+            "host",
+            CanonicalPathEncoding::Double,
+            CanonicalPathNormalization::RemoveDotSegments,
+        )
+        .lines()
+        .nth(1)
+        .unwrap()
+        .to_string();
 
         assert_eq!(s3_line, "/bucket/my%20report.pdf");
         assert_eq!(other_line, "/bucket/my%2520report.pdf");

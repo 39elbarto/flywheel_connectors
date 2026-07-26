@@ -81,7 +81,12 @@ impl DingTalkError {
                 // URL (query dropped) instead.
                 let message = error.url().map_or_else(
                     || "HTTP transport error".to_string(),
-                    |url| format!("HTTP transport error for url ({})", redact_url(url.as_str())),
+                    |url| {
+                        format!(
+                            "HTTP transport error for url ({})",
+                            redact_url(url.as_str())
+                        )
+                    },
                 );
                 FcpError::External {
                     service: "dingtalk".into(),

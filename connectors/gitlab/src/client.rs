@@ -460,10 +460,7 @@ mod tests {
         // (`/projects/../issues` → `/issues`), widening the authorization scope.
         for evil in ["..", ".", "../..", "a..b", ""] {
             assert!(
-                matches!(
-                    encode_path_segment(evil),
-                    Err(GitLabError::InvalidInput(_))
-                ),
+                matches!(encode_path_segment(evil), Err(GitLabError::InvalidInput(_))),
                 "path segment {evil:?} must be rejected"
             );
         }

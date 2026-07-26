@@ -929,9 +929,7 @@ fn validate_name(name: &str) -> Result<&str> {
 /// legitimately contain consecutive dots, so such values are rejected.
 fn encode_segment(input: &str) -> Result<String> {
     if input.is_empty() {
-        return Err(Error::InvalidInput(
-            "path segment must not be empty".into(),
-        ));
+        return Err(Error::InvalidInput("path segment must not be empty".into()));
     }
     if input == "." || input.contains("..") {
         return Err(Error::InvalidInput(

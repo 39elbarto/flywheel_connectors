@@ -1948,3 +1948,152 @@ async fn sync_reconcile_conflict_is_explicit_and_persisted() {
         persisted["mappings"]["br-123"]["jiraFingerprint"]
     );
 }
+
+// ============================================================================
+// Replay safety on retry (br-kxd3e)
+// ============================================================================
+//
+// Jira has no idempotency key, so a 5xx retry on a create endpoint files a
+// second issue, posts a second comment, or logs the same work twice. The last
+// one flows into billing and capacity reports, which is why worklog is the
+// case worth naming.
+//
+// The 429 test is not optional: `JiraError::is_retryable()` returns true for
+// BOTH rate limits and 5xx, so a gate written as "did it reach the service"
+// would silently disable rate-limit backoff on every write. The predicate is
+// phrased as "can replaying duplicate a side effect" precisely to avoid that.
+
+fn replay_test_client(mock_server: &MockServer) -> JiraClient {
+    JiraClient::new("test", "user@example.com", "token")
+        .unwrap()
+        .with_base_url(&mock_server.uri())
+        .with_retry_config(3, 1, 5)
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_issue_is_not_retried_after_a_5xx() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_json(jira_error_response(&["Service temporarily unavailable"])),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let result = replay_test_client(&mock_server)
+        .create_issue(&json!({ "fields": { "summary": "x" } }))
+        .await;
+    assert!(result.is_err());
+
+    let requests = mock_server
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a 503 means Jira received the create — retrying files a SECOND issue"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn add_worklog_is_not_retried_after_a_5xx() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/issue/PROJ-1/worklog"))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(jira_error_response(&["Internal error"])),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let result = replay_test_client(&mock_server)
+        .add_worklog("PROJ-1", &json!({ "timeSpentSeconds": 3600 }))
+        .await;
+    assert!(result.is_err());
+
+    let requests = mock_server
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a duplicate worklog double-counts logged time into billing and \
+         capacity reports"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_issue_still_retries_a_429() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "10001",
+            "key": "PROJ-100",
+            "self": "https://test-org.atlassian.net/rest/api/3/issue/10001"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    replay_test_client(&mock_server)
+        .create_issue(&json!({ "fields": { "summary": "x" } }))
+        .await
+        .expect("a rate-limited create was refused without filing anything");
+
+    let requests = mock_server
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "429 means Jira did NOT create the issue, so backoff must be preserved"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn search_jql_is_still_retried_after_a_5xx() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "startAt": 0,
+            "maxResults": 50,
+            "total": 0,
+            "issues": []
+        })))
+        .mount(&mock_server)
+        .await;
+
+    replay_test_client(&mock_server)
+        .search_jql(&json!({ "jql": "project = PROJ" }))
+        .await
+        .expect("JQL search is read-only, so the retry must be preserved");
+
+    let requests = mock_server
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "Jira models JQL search as a POST but it only reads — refusing this \
+         retry would be a pure availability loss"
+    );
+}

@@ -1074,3 +1074,81 @@ async fn test_list_satisfaction_ratings_no_filter() {
     let ratings = result["satisfaction_ratings"].as_array().unwrap();
     assert_eq!(ratings.len(), 3);
 }
+
+// ============================================================================
+// Replay safety on retry (br-kxd3e)
+// ============================================================================
+//
+// Zendesk has no idempotency key wired here, so a 5xx retry on create_ticket
+// files a second support ticket. The assertion is the REQUEST COUNT.
+
+#[fcp_async_core::runtime::test]
+async fn create_ticket_is_not_retried_after_a_5xx() {
+    let _ctx = AsyncTestContext::for_scenario("zendesk-create-ticket-replay-safety");
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/tickets.json"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&mock_server)
+        .await;
+
+    let client = fcp_zendesk::client::ZendeskClient::new("testco", "agent@testco.com", "tok")
+        .unwrap()
+        .with_base_url(&mock_server.uri())
+        .with_retry_config(3);
+
+    let result = client
+        .create_ticket(&json!({ "subject": "help", "comment": { "body": "x" } }))
+        .await;
+    assert!(result.is_err());
+
+    let requests = mock_server
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a 503 means Zendesk received the create — retrying files a SECOND \
+         support ticket"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_ticket_still_retries_a_429() {
+    let _ctx = AsyncTestContext::for_scenario("zendesk-create-ticket-429");
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/tickets.json"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .up_to_n_times(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tickets.json"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "ticket": { "id": 1, "subject": "help", "status": "new" }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = fcp_zendesk::client::ZendeskClient::new("testco", "agent@testco.com", "tok")
+        .unwrap()
+        .with_base_url(&mock_server.uri())
+        .with_retry_config(3);
+
+    client
+        .create_ticket(&json!({ "subject": "help", "comment": { "body": "x" } }))
+        .await
+        .expect("a rate-limited create was refused without filing anything");
+
+    let requests = mock_server
+        .received_requests()
+        .await
+        .expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "429 means Zendesk did NOT file the ticket, so backoff must be preserved"
+    );
+}

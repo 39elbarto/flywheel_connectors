@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::migration::{
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
+};
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, header};
 
@@ -200,7 +202,8 @@ impl ZendeskClient {
     ) -> ZendeskResult<serde_json::Value> {
         let url = format!("{}/tickets.json", self.base_url);
         let body = serde_json::json!({ "ticket": ticket_data });
-        let data = self.post_json(&url, &body).await?;
+        // NOT replay-safe: a duplicate is a second support ticket.
+        let data = self.post_json(&url, &body, false).await?;
         Ok(data)
     }
 
@@ -401,15 +404,25 @@ impl ZendeskClient {
     // ── HTTP helpers ──────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> ZendeskResult<serde_json::Value> {
-        self.execute(|| self.http.get(url)).await
+        self.execute(|| self.http.get(url), true).await
     }
 
+    /// POST with retry.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a
+    /// side effect (br-kxd3e). Zendesk documents an `Idempotency-Key` header
+    /// on some POST endpoints; threading it would make these retries genuinely
+    /// safe rather than refused, and is recorded as a follow-up on the bead
+    /// rather than done blind, because claiming dedup on an endpoint that does
+    /// not honour the header would be false assurance.
     async fn post_json(
         &self,
         url: &str,
         body: &serde_json::Value,
+        replay_safe: bool,
     ) -> ZendeskResult<serde_json::Value> {
-        self.execute(|| self.http.post(url).json(body)).await
+        self.execute(|| self.http.post(url).json(body), replay_safe)
+            .await
     }
 
     async fn put_json(
@@ -417,16 +430,19 @@ impl ZendeskClient {
         url: &str,
         body: &serde_json::Value,
     ) -> ZendeskResult<serde_json::Value> {
-        self.execute(|| self.http.put(url).json(body)).await
+        // PUT is idempotent per HTTP semantics: Zendesk's updates set named
+        // fields to named values, so a replay converges.
+        self.execute(|| self.http.put(url).json(body), true).await
     }
 
     async fn delete(&self, url: &str) -> ZendeskResult<serde_json::Value> {
-        self.execute(|| self.http.delete(url)).await
+        self.execute(|| self.http.delete(url), true).await
     }
 
     async fn execute(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
+        replay_safe: bool,
     ) -> ZendeskResult<serde_json::Value> {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -477,10 +493,10 @@ impl ZendeskClient {
                                 message: format!("Server error {status}: {body}"),
                                 status_code: Some(status.as_u16()),
                             };
-                            return AttemptOutcome::Retryable {
-                                retry_after: None,
-                                error: err,
-                            };
+                            // br-kxd3e: a 5xx means Zendesk received the
+                            // request and may already have created the ticket.
+                            // The 429 arm above stays ahead of this gate.
+                            return AttemptOutcome::retryable_if_replayable(err, None, replay_safe);
                         }
 
                         if !status.is_success() {
@@ -516,15 +532,14 @@ impl ZendeskClient {
                         }
                     }
                     Err(e) => {
-                        let err = ZendeskError::Http(e);
-                        if err.is_retryable() {
-                            AttemptOutcome::Retryable {
-                                retry_after: None,
-                                error: err,
-                            }
-                        } else {
-                            AttemptOutcome::Terminal(err)
-                        }
+                        // Only a connect-phase failure proves the request never
+                        // left the client.
+                        let replayable = replay_safe || !transport_error_reached_service(&e);
+                        AttemptOutcome::retryable_if_replayable(
+                            ZendeskError::Http(e),
+                            None,
+                            replayable,
+                        )
                     }
                 }
             }

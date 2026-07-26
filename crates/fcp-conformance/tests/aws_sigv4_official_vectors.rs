@@ -21,7 +21,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use fcp_sdk::sigv4::{
-    AwsCredentials, CanonicalPathEncoding, SigV4Signer, SignableRequest, SigningScope,
+    AwsCredentials, CanonicalPathEncoding, CanonicalPathNormalization, SigV4Signer,
+    SignableRequest, SigningScope,
 };
 
 /// One vendored case.
@@ -292,7 +293,16 @@ fn sign_with_sdk(v: &Vector) -> (String, String, String) {
     // comma join, already matched.
     let signer = SigV4Signer::new(creds, scope)
         .with_fixed_time(ts)
-        .with_content_sha256_header(v.context.sign_body);
+        .with_content_sha256_header(v.context.sign_body)
+        // Every vendored case uses service `service`, so the scope-derived
+        // profile would normalise all 38. The corpus instead carries the profile
+        // per case in `context.normalize`, which is the axis these fixtures
+        // exist to exercise, so it is driven explicitly here.
+        .with_path_normalization(if v.context.normalize {
+            CanonicalPathNormalization::RemoveDotSegments
+        } else {
+            CanonicalPathNormalization::Preserve
+        });
 
     let req = SignableRequest {
         method: v.request.method.clone(),
@@ -342,21 +352,12 @@ fn sign_with_sdk(v: &Vector) -> (String, String, String) {
 ///    `x-amz-security-token` whenever the credentials carry one. Its sibling
 ///    `post-sts-header-before` passes.
 const KNOWN_DIVERGENT: &[&str] = &[
-    // A — path normalisation
-    "get-relative-normalized",
-    "get-relative-relative-normalized",
-    "get-slash-dot-slash-normalized",
-    "get-slash-normalized",
-    "get-slash-pointless-dot-normalized",
-    "get-slashes-normalized",
     // B — encoding passes
     "get-space-normalized",
     "get-space-unnormalized",
     "get-utf8",
     // C — canonical query ordering
     "get-vanilla-query-order-encoded",
-    // D — header-value whitespace
-    "get-header-value-trim",
     // E — session token always signed
     "post-sts-header-after",
 ];

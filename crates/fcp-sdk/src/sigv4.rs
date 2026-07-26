@@ -81,6 +81,20 @@ impl SigningScope {
             CanonicalPathEncoding::Double
         }
     }
+
+    /// Whether this service's canonical URI has dot segments resolved.
+    ///
+    /// Same S3-vs-everything-else split as [`Self::canonical_path_encoding`],
+    /// and case-insensitive for the same reason: `service` is a public field
+    /// with no normalising constructor.
+    #[must_use]
+    pub fn canonical_path_normalization(&self) -> CanonicalPathNormalization {
+        if self.service.eq_ignore_ascii_case("s3") {
+            CanonicalPathNormalization::Preserve
+        } else {
+            CanonicalPathNormalization::RemoveDotSegments
+        }
+    }
 }
 
 /// Number of URI-encoding passes applied to the canonical request's path.
@@ -90,6 +104,21 @@ pub enum CanonicalPathEncoding {
     Single,
     /// Encode each path segment twice — every other AWS service.
     Double,
+}
+
+/// Whether the canonical URI path has RFC 3986 dot segments resolved.
+///
+/// A second, independent axis from [`CanonicalPathEncoding`]. S3 treats the path
+/// as an opaque object key, so `/a/../b` names a literal key containing `..` and
+/// must be signed as written; every other service resolves it to `/b` before
+/// signing. Getting this wrong yields `SignatureDoesNotMatch` for any caller
+/// that builds a path by joining segments and lands a `//`, `.` or `..`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalPathNormalization {
+    /// Resolve `.` / `..` and collapse duplicate slashes — every service but S3.
+    RemoveDotSegments,
+    /// Sign the path exactly as supplied — Amazon S3.
+    Preserve,
 }
 
 // ── Request to Sign ─────────────────────────────────────────────────────
@@ -196,6 +225,8 @@ pub struct SigV4Signer {
     /// Whether to add `x-amz-content-sha256` to the signed header set when the
     /// caller did not supply it. Defaults to `true`.
     sign_content_sha256_header: bool,
+    /// Overrides the scope-derived path-normalisation profile when set.
+    path_normalization: Option<CanonicalPathNormalization>,
 }
 
 impl SigV4Signer {
@@ -207,6 +238,7 @@ impl SigV4Signer {
             scope,
             fixed_time: None,
             sign_content_sha256_header: true,
+            path_normalization: None,
         }
     }
 
@@ -214,6 +246,21 @@ impl SigV4Signer {
     #[must_use]
     pub fn with_fixed_time(mut self, time: DateTime<Utc>) -> Self {
         self.fixed_time = Some(time);
+        self
+    }
+
+    /// Override the scope-derived path-normalisation profile.
+    ///
+    /// Production callers should not need this — [`SigningScope`] derives the
+    /// profile from the service name. It exists so the signer can be driven per
+    /// case against AWS's published vectors, which carry the profile in each
+    /// case's `context.normalize` while every case names the same service.
+    #[must_use]
+    pub const fn with_path_normalization(
+        mut self,
+        normalization: CanonicalPathNormalization,
+    ) -> Self {
+        self.path_normalization = Some(normalization);
         self
     }
 
@@ -329,7 +376,12 @@ impl SigV4Signer {
         // Same canonical-URI rule as `sign`; using `request.uri` verbatim here
         // meant presigned URLs were signed against a different path than
         // signed requests for the identical resource.
-        let canonical_uri = canonical_uri_path(&request.uri, self.scope.canonical_path_encoding());
+        let canonical_uri = canonical_uri_path(
+            &request.uri,
+            self.scope.canonical_path_encoding(),
+            self.path_normalization
+                .unwrap_or_else(|| self.scope.canonical_path_normalization()),
+        );
         let canonical_request = format!(
             "{}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\nhost\n{UNSIGNED_PAYLOAD}",
             request.method,
@@ -374,7 +426,12 @@ impl SigV4Signer {
         amz_date: &str,
     ) -> (String, String) {
         // Canonical URI — single-encoded for S3, double-encoded elsewhere.
-        let canonical_uri = canonical_uri_path(&request.uri, self.scope.canonical_path_encoding());
+        let canonical_uri = canonical_uri_path(
+            &request.uri,
+            self.scope.canonical_path_encoding(),
+            self.path_normalization
+                .unwrap_or_else(|| self.scope.canonical_path_normalization()),
+        );
 
         // Canonical query string (sorted by key)
         let canonical_query = build_canonical_query(&request.query_params);
@@ -404,7 +461,7 @@ impl SigV4Signer {
         // the duplicate.
         let lowercased: BTreeMap<String, String> = headers
             .iter()
-            .map(|(k, v)| (k.to_lowercase(), v.trim().to_string()))
+            .map(|(k, v)| (k.to_lowercase(), canonical_header_value(v)))
             .collect();
 
         let canonical_headers: String = lowercased
@@ -489,13 +546,64 @@ fn percent_decode_path(path: &str) -> String {
 /// path contains nothing that needed escaping in the first place — which is
 /// why plain ASCII keys signed correctly while a key with a space, a literal
 /// `%`, or any non-ASCII character produced `SignatureDoesNotMatch`.
-fn canonical_uri_path(wire_path: &str, encoding: CanonicalPathEncoding) -> String {
-    let raw = percent_decode_path(wire_path);
+fn canonical_uri_path(
+    wire_path: &str,
+    encoding: CanonicalPathEncoding,
+    normalization: CanonicalPathNormalization,
+) -> String {
+    // Normalise the WIRE path, before decoding. Order matters: decoding first
+    // would turn an encoded `%2F` inside a segment into a real separator, and
+    // normalisation would then treat it as one — silently signing a different
+    // resource than the request targets. Dot segments are unreserved and so are
+    // never percent-encoded on the wire, which is why normalising first loses
+    // nothing.
+    let normalized = match normalization {
+        CanonicalPathNormalization::RemoveDotSegments => remove_dot_segments(wire_path),
+        CanonicalPathNormalization::Preserve => wire_path.to_string(),
+    };
+    let raw = percent_decode_path(&normalized);
     let once = uri_encode_path(&raw);
     match encoding {
         CanonicalPathEncoding::Single => once,
         CanonicalPathEncoding::Double => uri_encode_path(&once),
     }
+}
+
+/// Canonicalise a header value: trim the ends and collapse every run of
+/// internal whitespace to a single space.
+///
+/// AWS requires the collapse, not just the trim. Confirmed by the published
+/// vector `get-header-value-trim`, whose expected canonical request carries
+/// `my-header2:"a b c"` for an input of `"a   b   c"` — note it collapses inside
+/// the quotes too, so this is unconditional rather than quote-aware.
+fn canonical_header_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Resolve `.` and `..` segments and collapse duplicate slashes, per RFC 3986
+/// §6.2.2.3 plus AWS's additional empty-segment collapsing.
+///
+/// Verified against AWS's published vectors: `/example/..` and `//` and `/./`
+/// all canonicalise to `/`; `/./example` to `/example`; `//example//` to
+/// `/example/`. A trailing slash on the input is preserved when any segment
+/// survives.
+fn remove_dot_segments(path: &str) -> String {
+    let mut resolved: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            // An empty segment is a duplicate (or leading/trailing) slash.
+            "" | "." => {}
+            ".." => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    if resolved.is_empty() {
+        return "/".into();
+    }
+    let trailing = if path.ends_with('/') { "/" } else { "" };
+    format!("/{}{trailing}", resolved.join("/"))
 }
 
 fn build_canonical_query(params: &BTreeMap<String, String>) -> String {
@@ -545,11 +653,19 @@ mod tests {
         // `%20` on the wire decodes to a space, which S3 canonicalizes back to
         // `%20` — not `%2520`.
         assert_eq!(
-            canonical_uri_path("/bucket/my%20report.pdf", CanonicalPathEncoding::Single),
+            canonical_uri_path(
+                "/bucket/my%20report.pdf",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::Preserve,
+            ),
             "/bucket/my%20report.pdf"
         );
         assert_eq!(
-            canonical_uri_path("/bucket/my%20report.pdf", CanonicalPathEncoding::Double),
+            canonical_uri_path(
+                "/bucket/my%20report.pdf",
+                CanonicalPathEncoding::Double,
+                CanonicalPathNormalization::RemoveDotSegments,
+            ),
             "/bucket/my%2520report.pdf"
         );
     }
@@ -557,11 +673,125 @@ mod tests {
     /// A path containing only unreserved characters must canonicalize
     /// identically under the old and new rules — the fix must not disturb the
     /// requests that already signed correctly.
+    /// Expectations taken from AWS's published v4 vectors (see
+    /// crates/fcp-conformance/tests/vectors/aws-sigv4), not from this
+    /// implementation.
+    #[test]
+    fn dot_segments_resolve_the_way_aws_signs_them() {
+        for (input, expected) in [
+            ("/example/..", "/"),
+            ("/example1/example2/../..", "/"),
+            ("/./", "/"),
+            ("//", "/"),
+            ("/./example", "/example"),
+            ("//example//", "/example/"),
+            ("/", "/"),
+            ("/example", "/example"),
+            // `..` cannot escape the root.
+            ("/../../etc/passwd", "/etc/passwd"),
+        ] {
+            assert_eq!(
+                remove_dot_segments(input),
+                expected,
+                "remove_dot_segments({input:?})"
+            );
+        }
+    }
+
+    /// S3 signs the path as written because an object key may legitimately
+    /// contain `..` or a double slash; every other service resolves first.
+    /// Signing the wrong one of these yields SignatureDoesNotMatch.
+    #[test]
+    fn s3_preserves_dot_segments_and_other_services_resolve_them() {
+        assert_eq!(
+            SigningScope {
+                region: "us-east-1".into(),
+                service: "s3".into(),
+            }
+            .canonical_path_normalization(),
+            CanonicalPathNormalization::Preserve
+        );
+        assert_eq!(
+            SigningScope {
+                region: "us-east-1".into(),
+                service: "execute-api".into(),
+            }
+            .canonical_path_normalization(),
+            CanonicalPathNormalization::RemoveDotSegments
+        );
+
+        // Same input, two profiles, two different canonical URIs.
+        assert_eq!(
+            canonical_uri_path(
+                "/bucket/a/../b",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::Preserve,
+            ),
+            "/bucket/a/../b"
+        );
+        assert_eq!(
+            canonical_uri_path(
+                "/bucket/a/../b",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::RemoveDotSegments,
+            ),
+            "/bucket/b"
+        );
+    }
+
+    #[test]
+    fn header_values_collapse_internal_whitespace_the_way_aws_signs_them() {
+        // Expectation from AWS's get-header-value-trim vector.
+        assert_eq!(canonical_header_value("\"a   b   c\""), "\"a b c\"");
+        assert_eq!(canonical_header_value("  value  "), "value");
+        assert_eq!(canonical_header_value("a\tb"), "a b");
+        assert_eq!(canonical_header_value("value"), "value");
+        assert_eq!(canonical_header_value(""), "");
+    }
+
+    /// PINS CURRENT BEHAVIOUR — deliberately not a correctness claim.
+    ///
+    /// AWS's published vectors contain no case with a percent-encoded slash, so
+    /// nothing authoritative constrains this path. What the pipeline does today:
+    /// dot-segment resolution runs on the WIRE path (RFC 3986 §6.2.2.3 operates
+    /// on the still-encoded path, where `%2F` is not a separator), then the
+    /// decode step turns `%2F` into a real `/`, and `uri_encode_path` treats
+    /// that as a separator and leaves it unencoded. Net effect: a `..` that only
+    /// becomes a segment AFTER decoding is not resolved.
+    ///
+    /// Recorded so the behaviour cannot drift unnoticed. Resolving whether it
+    /// matches live AWS needs a measurement against a real endpoint, not a
+    /// closer reading of the spec — see br-f57c6.
+    #[test]
+    fn encoded_slash_behaviour_is_pinned_pending_measurement() {
+        assert_eq!(
+            canonical_uri_path(
+                "/bucket/a%2F..%2Fb",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::RemoveDotSegments,
+            ),
+            "/bucket/a/../b"
+        );
+        // S3 preserves, so the encoded slash still decodes but nothing resolves.
+        assert_eq!(
+            canonical_uri_path(
+                "/bucket/a%2F..%2Fb",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::Preserve,
+            ),
+            "/bucket/a/../b"
+        );
+    }
+
     #[test]
     fn canonical_uri_is_unchanged_for_paths_needing_no_escape() {
         for path in ["/bucket/plain.pdf", "/bucket/path/to/file.txt", "/"] {
             assert_eq!(
-                canonical_uri_path(path, CanonicalPathEncoding::Single),
+                canonical_uri_path(
+                    path,
+                    CanonicalPathEncoding::Single,
+                    CanonicalPathNormalization::Preserve,
+                ),
                 uri_encode_path(path),
                 "single-pass encoding must be a no-op change for {path}"
             );
@@ -573,11 +803,19 @@ mod tests {
     #[test]
     fn canonical_uri_encodes_aws_reserved_characters_left_raw_by_the_url_parser() {
         assert_eq!(
-            canonical_uri_path("/bucket/Q&A.pdf", CanonicalPathEncoding::Single),
+            canonical_uri_path(
+                "/bucket/Q&A.pdf",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::Preserve,
+            ),
             "/bucket/Q%26A.pdf"
         );
         assert_eq!(
-            canonical_uri_path("/bucket/a+b.pdf", CanonicalPathEncoding::Single),
+            canonical_uri_path(
+                "/bucket/a+b.pdf",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::Preserve,
+            ),
             "/bucket/a%2Bb.pdf"
         );
     }
@@ -587,7 +825,11 @@ mod tests {
     #[test]
     fn canonical_uri_round_trips_a_literal_percent() {
         assert_eq!(
-            canonical_uri_path("/bucket/50%25.pdf", CanonicalPathEncoding::Single),
+            canonical_uri_path(
+                "/bucket/50%25.pdf",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::Preserve,
+            ),
             "/bucket/50%25.pdf"
         );
     }
@@ -597,7 +839,11 @@ mod tests {
     #[test]
     fn canonical_uri_handles_non_ascii_keys() {
         assert_eq!(
-            canonical_uri_path("/bucket/e%C3%B1e.pdf", CanonicalPathEncoding::Single),
+            canonical_uri_path(
+                "/bucket/e%C3%B1e.pdf",
+                CanonicalPathEncoding::Single,
+                CanonicalPathNormalization::Preserve,
+            ),
             "/bucket/e%C3%B1e.pdf"
         );
     }

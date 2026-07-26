@@ -99,10 +99,14 @@ impl SignalClient {
                 let resp = match client.post(&url).json(&body).send().await {
                     Ok(r) => r,
                     Err(e) => {
-                        return AttemptOutcome::Retryable {
-                            error: SignalError::Http(e),
-                            retry_after: None,
-                        };
+                        // br-kxd3e: only a connect-phase failure proves the
+                        // request never reached the daemon.
+                        let replayable = !transport_error_reached_service(&e);
+                        return AttemptOutcome::retryable_if_replayable(
+                            SignalError::Http(e),
+                            None,
+                            replayable,
+                        );
                     }
                 };
 
@@ -134,15 +138,13 @@ impl SignalClient {
 
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
-                    let decision = classify_http_status(status, None);
-                    let err = SignalError::from_api_response(status, &text);
-                    if !matches!(decision, RetryDecision::Terminal) {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
-                    }
-                    return AttemptOutcome::Terminal(err);
+                    // br-kxd3e: every remaining retryable class here is a 5xx,
+                    // which means the daemon received the send and may already
+                    // have delivered it. signal-cli offers no dedup key, so the
+                    // honest outcome is one error rather than N more messages.
+                    // 429 is handled above, before this gate, because it was
+                    // refused WITHOUT the message being sent.
+                    return AttemptOutcome::Terminal(SignalError::from_api_response(status, &text));
                 }
 
                 match resp.json::<SendMessageResponse>().await {

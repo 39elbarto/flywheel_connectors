@@ -21278,7 +21278,21 @@ deny_ptrace = true
                 config: Some(invoke_token_bucket_config(operation_id)),
                 categories: vec!["test".to_string()],
                 version: None,
-                allowed_zones: vec![ZoneId::work().as_str().to_string()],
+                // TWO zones, deliberately. `invoke_token_bucket_is_partitioned_per_zone`
+                // proves that one rate-limit pool keeps an independent bucket per
+                // zone, which it can only observe by invoking the same pool from a
+                // SECOND zone. Zone binding is stage 5 of the enforcement pipeline
+                // and the rate-limit gate is stage 9, so a connector that is not
+                // bound to `z:private` is refused long before its `z:private`
+                // bucket is ever consulted — the test then fails on a zone-binding
+                // denial while appearing to be about rate limiting.
+                //
+                // That is exactly what happened: 8234bb06b (angoc.2.1, "require
+                // host allowed_zones") backfilled `vec![z:work]` into every test
+                // fixture uniformly, which was right everywhere except here, where
+                // it silently removed the test's premise. Do not "normalise" this
+                // back to a single zone.
+                allowed_zones: vec![ZoneId::work().as_str().to_string(), "z:private".to_string()],
                 allowed_operations: Vec::new(),
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,

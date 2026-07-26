@@ -2348,19 +2348,53 @@ pub mod task {
         }
     }
 
-    /// A future wrapper that enters a Tokio runtime context on every poll,
-    /// ensuring crates that depend on `tokio` (e.g., `reqwest`, `wiremock`)
-    /// work correctly on asupersync worker threads.
-    struct TokioContextFuture<F> {
+    /// A future wrapper that re-establishes both ambient runtime contexts on
+    /// EVERY poll: the Tokio compatibility context (so crates depending on
+    /// `tokio`, e.g. `reqwest` and `wiremock`, work on asupersync worker threads)
+    /// and the `fcp_async_core` runtime context (so the task can itself spawn).
+    ///
+    /// Per-poll rather than once-per-task, and that distinction is the whole
+    /// point. Both contexts live in thread-locals, and on a work-stealing
+    /// multi-threaded scheduler a task may resume on a different worker after
+    /// every await. A context installed at the first poll and held across an
+    /// await is simply not present on the thread the task resumes on, so the next
+    /// `task::spawn` from inside a perfectly healthy task panics with "called
+    /// outside an active runtime".
+    ///
+    /// The Tokio side was already per-poll; the `fcp_async_core` side was not,
+    /// which is the bug br-2ak6l traced back to here from two failing `fcp-host`
+    /// dispatcher tests.
+    ///
+    /// Cost: one thread-local read plus a handle clone and a `Vec` push/pop per
+    /// poll, the same order as the `Handle::enter` immediately above it that this
+    /// path already paid. The alternative — falling back to the ambient handle
+    /// inside `current_runtime_context` instead — would be free per poll but has
+    /// to GUESS the runtime flavor, since the ambient asupersync handle does not
+    /// carry it. Carrying the spawner's flavor explicitly is worth the read: it
+    /// also makes `runtime::flavor()` report the truth inside a migrated task.
+    struct TaskContextFuture<F> {
         inner: Pin<Box<F>>,
         handle: tokio::runtime::Handle,
+        /// Flavor of the runtime this task was spawned from, so the re-derived
+        /// context reports the same flavor the spawner had.
+        flavor: crate::runtime::RuntimeFlavor,
     }
 
-    impl<F: Future> Future for TokioContextFuture<F> {
+    impl<F: Future> Future for TaskContextFuture<F> {
         type Output = F::Output;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let _guard = self.handle.enter();
+            let _tokio_guard = self.handle.enter();
+            // Re-derive from the polling thread's ambient asupersync handle
+            // rather than carrying a cloned handle in this future. asupersync
+            // installs a WEAK handle on each worker thread; holding a strong
+            // clone inside the task would risk dropping the runtime's final
+            // reference on a worker during shutdown, which is the hazard
+            // `detached_task_shutdown_does_not_drop_final_runtime_reference_on_worker`
+            // exists to pin.
+            let flavor = self.flavor;
+            let _runtime_guard = crate::runtime::worker_runtime_context(flavor)
+                .map(crate::runtime::RuntimeGuard::enter);
             self.inner.as_mut().poll(cx)
         }
     }
@@ -2424,14 +2458,13 @@ pub mod task {
             abort_registration,
         );
 
-        let wrapped = TokioContextFuture {
+        let wrapped = TaskContextFuture {
             inner: Box::pin(future),
             handle: tokio_handle,
+            flavor: runtime_flavor,
         };
 
         std::mem::drop(runtime.spawn(async move {
-            let _guard = crate::runtime::worker_runtime_context(runtime_flavor)
-                .map(crate::runtime::RuntimeGuard::enter);
             let result = match wrapped.await {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(payload)) => Err(JoinError::panicked(payload.as_ref())),
@@ -4885,6 +4918,90 @@ mod tests {
 
         let result = handle.await.expect("outer task should join");
         assert_eq!(result, 11);
+    }
+
+    /// The same nested spawn, but AFTER an await — which is a different test.
+    ///
+    /// `spawned_task_inherits_fcp_runtime_context_for_nested_spawn` above nests
+    /// immediately, so the nested spawn always runs on the same thread that ran
+    /// the outer task's first poll. That cannot detect a runtime context which is
+    /// established once per task rather than once per poll.
+    ///
+    /// On a work-stealing multi-threaded scheduler a task may resume on a
+    /// different worker after every await. A thread-local context installed at the
+    /// first poll and held across the await is then simply absent on the thread
+    /// the task resumes on, and the next `task::spawn` panics with "called outside
+    /// an active runtime" — on a healthy runtime, from inside a live task.
+    ///
+    /// Several awaits, and a spawn after each, because which poll lands on which    /// worker is a scheduling decision this test does not control: one await is
+    /// not reliably enough to force a migration.
+    #[runtime::test(flavor = "multi_thread")]
+    async fn nested_spawn_survives_thread_migration_across_awaits() {
+        let handle = task::spawn(async {
+            let mut total = 0_u32;
+            for round in 0..8_u32 {
+                // Yield and sleep both hand the task back to the scheduler,
+                // which is where a migration to another worker can happen.
+                task::yield_now().await;
+                time::sleep(Duration::from_millis(1)).await;
+
+                // The assertion is simply that this does not panic. Spawning is
+                // what a task does after awaiting anything, so if the context is
+                // lost here it is lost for effectively every real task.
+                let nested = task::spawn(async move { round });
+                total += nested.await.expect("nested task should join");
+            }
+            total
+        });
+
+        assert_eq!(
+            handle.await.expect("outer task should join"),
+            (0..8_u32).sum::<u32>()
+        );
+    }
+
+    /// `spawn_detached` must survive the same migration.
+    ///
+    /// This is the exact shape that broke the `fcp-host` subprocess-dispatcher
+    /// tests (br-2ak6l): a long-lived dispatcher loop awaits on a channel and then
+    /// detaches a task to answer the request. The panic surfaced there as a
+    /// dropped oneshot — "dispatcher stopped before replying" and `RecvError` —
+    /// which points at the channel rather than at the spawn that actually died.
+    #[runtime::test(flavor = "multi_thread")]
+    async fn detached_spawn_survives_thread_migration_across_awaits() {
+        let (tx, mut rx) = channel::mpsc::channel::<u32>(8);
+        let (done_tx, mut done_rx) = channel::mpsc::channel::<u32>(8);
+
+        let loop_task = task::spawn(async move {
+            while let Some(value) = rx.recv().await {
+                let done_tx = done_tx.clone();
+                // Yield and sleep before detaching. Awaiting the channel alone did
+                // NOT reliably migrate the task off its original worker, so without
+                // these the test passed with the bug still present — it has to be
+                // able to fail to be evidence of anything.
+                task::yield_now().await;
+                time::sleep(Duration::from_millis(1)).await;
+                // Detached spawn from a task that has already awaited — the
+                // dispatcher shape.
+                task::spawn_detached(async move {
+                    let _ = done_tx.send(value * 2).await;
+                });
+            }
+        });
+
+        for value in 1..=5_u32 {
+            tx.send(value).await.expect("send should succeed");
+        }
+        drop(tx);
+
+        let mut seen = Vec::new();
+        for _ in 1..=5_u32 {
+            seen.push(done_rx.recv().await.expect("each reply should arrive"));
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, vec![2, 4, 6, 8, 10]);
+
+        loop_task.await.expect("dispatcher loop should join");
     }
 
     #[test]

@@ -149,6 +149,32 @@ pub struct SignedRequest {
     pub x_amz_content_sha256: String,
 }
 
+/// Intermediate artifacts produced by one SigV4 signing pass.
+///
+/// SigV4 is a pipeline — canonical request, then string-to-sign, then
+/// signature — and each stage feeds a hash into the next. Comparing only the
+/// final signature against a reference therefore tells you *that* a signer
+/// diverged but not *where*, and every stage hashes into an opaque hex digest
+/// that carries no diagnostic information on its own.
+///
+/// Exposing the intermediates is what makes the published AWS test vectors
+/// usable as more than a pass/fail bit: the vectors ship the expected canonical
+/// request and string-to-sign alongside the expected signature precisely so a
+/// mismatch can be localised to one stage.
+#[derive(Debug, Clone)]
+pub struct SigV4Trace {
+    /// Canonical request (AWS "Task 1").
+    pub canonical_request: String,
+    /// String to sign (AWS "Task 2").
+    pub string_to_sign: String,
+    /// Hex-encoded signature (AWS "Task 3").
+    pub signature: String,
+    /// Semicolon-joined lowercase signed header names.
+    pub signed_headers: String,
+    /// `<date>/<region>/<service>/aws4_request`.
+    pub credential_scope: String,
+}
+
 /// Result of query string presigning.
 #[derive(Debug, Clone)]
 pub struct PresignedUrl {
@@ -167,6 +193,9 @@ pub struct SigV4Signer {
     scope: SigningScope,
     /// Fixed timestamp for deterministic testing. If None, uses Utc::now().
     fixed_time: Option<DateTime<Utc>>,
+    /// Whether to add `x-amz-content-sha256` to the signed header set when the
+    /// caller did not supply it. Defaults to `true`.
+    sign_content_sha256_header: bool,
 }
 
 impl SigV4Signer {
@@ -177,6 +206,7 @@ impl SigV4Signer {
             credentials,
             scope,
             fixed_time: None,
+            sign_content_sha256_header: true,
         }
     }
 
@@ -187,9 +217,36 @@ impl SigV4Signer {
         self
     }
 
+    /// Control whether `x-amz-content-sha256` is added to the signed header
+    /// set when the caller did not supply it. Default `true`.
+    ///
+    /// S3 requires the header, and signing it is only safe because callers
+    /// forward `SignedRequest::x_amz_content_sha256` onto the wire — a signed
+    /// header that is not actually sent produces `SignatureDoesNotMatch`.
+    ///
+    /// Set `false` to sign exactly the headers supplied. This exists so the
+    /// signer can be driven in the shape AWS's published test vectors describe:
+    /// those vectors sign a service that does not carry the header, so leaving
+    /// it in would make every vector mismatch for a reason that has nothing to
+    /// do with the canonical-URI and query-encoding rules they exist to pin.
+    #[must_use]
+    pub const fn with_content_sha256_header(mut self, enabled: bool) -> Self {
+        self.sign_content_sha256_header = enabled;
+        self
+    }
+
     /// Sign a request and return the Authorization header components.
     #[must_use]
     pub fn sign(&self, request: &SignableRequest) -> SignedRequest {
+        self.sign_traced(request).0
+    }
+
+    /// Sign a request, additionally returning every intermediate artifact.
+    ///
+    /// Same computation as [`Self::sign`]; see [`SigV4Trace`] for why the
+    /// intermediates are worth surfacing.
+    #[must_use]
+    pub fn sign_traced(&self, request: &SignableRequest) -> (SignedRequest, SigV4Trace) {
         let now = self.now();
         let date_stamp = now.format("%Y%m%d").to_string();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -219,12 +276,21 @@ impl SigV4Signer {
             self.credentials.access_key_id,
         );
 
-        SignedRequest {
-            authorization,
-            x_amz_date: amz_date,
-            x_amz_security_token: self.credentials.session_token.clone(),
-            x_amz_content_sha256: request.payload_hash.clone(),
-        }
+        (
+            SignedRequest {
+                authorization,
+                x_amz_date: amz_date,
+                x_amz_security_token: self.credentials.session_token.clone(),
+                x_amz_content_sha256: request.payload_hash.clone(),
+            },
+            SigV4Trace {
+                canonical_request,
+                string_to_sign,
+                signature,
+                signed_headers,
+                credential_scope,
+            },
+        )
     }
 
     /// Generate a presigned URL with SigV4 query string signing.
@@ -318,9 +384,11 @@ impl SigV4Signer {
         headers
             .entry("x-amz-date".into())
             .or_insert_with(|| amz_date.into());
-        headers
-            .entry("x-amz-content-sha256".into())
-            .or_insert_with(|| request.payload_hash.clone());
+        if self.sign_content_sha256_header {
+            headers
+                .entry("x-amz-content-sha256".into())
+                .or_insert_with(|| request.payload_hash.clone());
+        }
         if let Some(token) = &self.credentials.session_token {
             headers
                 .entry("x-amz-security-token".into())

@@ -9,10 +9,14 @@ use std::{
     time::Instant,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use fcp_crypto::{CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_manifest::{ConnectorManifest, OperationSection};
-use fcp_plivo::connector::PlivoConnector;
+use fcp_plivo::{
+    client::{InitiateCallRequest, PlivoClient},
+    connector::PlivoConnector,
+};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, OperationId, ZoneId,
 };
@@ -21,10 +25,11 @@ use fcp_voice_call::{
     stable_redacted_hash,
 };
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use url::form_urlencoded;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{header, method, path},
 };
 
 const TEST_AUTH_ID: &str = "MA123";
@@ -56,6 +61,13 @@ async fn configure_connector(connector: &mut PlivoConnector, server: &MockServer
         }))
         .await
         .unwrap();
+}
+
+fn test_client(base_url: &str) -> PlivoClient {
+    PlivoClient::new(TEST_AUTH_ID, TEST_AUTH_SECRET)
+        .unwrap()
+        .with_base_url(base_url)
+        .with_retry_config(0)
 }
 
 async fn setup_handshake(connector: &mut PlivoConnector) -> Ed25519SigningKey {
@@ -202,7 +214,9 @@ fn open_plivo_e2e_log() -> (File, PathBuf) {
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     );
-    let dir = std::env::temp_dir().join(unique);
+    let base_dir =
+        std::env::var_os("PLIVO_E2E_LOG_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    let dir = base_dir.join(unique);
     std::fs::create_dir_all(&dir).expect("create plivo e2e log dir");
     let path = dir.join("plivo_voice_call_e2e.jsonl");
     let file = File::create(&path).expect("create plivo e2e log");
@@ -349,6 +363,91 @@ fn manifest_declares_strict_per_operation_network_constraints() {
             "{id} should declare per-operation network_constraints"
         );
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_initiate_call_uses_basic_auth_and_account_call_endpoint() {
+    let server = MockServer::start().await;
+    let expected_auth = format!(
+        "Basic {}",
+        STANDARD.encode(format!("{TEST_AUTH_ID}:{TEST_AUTH_SECRET}"))
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/Account/MA123/Call/"))
+        .and(header("authorization", expected_auth.as_str()))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "request_uuid": "call-uuid-1",
+            "message": "call fired"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&format!("{}/v1/Account/{TEST_AUTH_ID}", server.uri()));
+    let response = client
+        .initiate_call(&InitiateCallRequest {
+            to: "+15551230000",
+            from: "+15559870000",
+            answer_url: "https://voice.example.com/plivo",
+            answer_method: Some("POST"),
+            hangup_url: None,
+            hangup_method: None,
+            ring_url: None,
+            ring_method: None,
+            fallback_url: None,
+            time_limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.request_uuid.as_deref(), Some("call-uuid-1"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_transient_server_error_retries_then_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/Account/MA123/Call/call-uuid-1/"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("try later"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/Account/MA123/Call/call-uuid-1/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "call_uuid": "call-uuid-1",
+            "call_state": "ANSWER"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = PlivoClient::new(TEST_AUTH_ID, TEST_AUTH_SECRET)
+        .unwrap()
+        .with_base_url(&format!("{}/v1/Account/{TEST_AUTH_ID}", server.uri()))
+        .with_retry_config(1);
+    let response = client.status_call("call-uuid-1").await.unwrap();
+    assert_eq!(response.call_state.as_deref(), Some("ANSWER"));
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        2
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_provider_error_maps_message_and_rate_limit_retry_after() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/Account/MA123/Call/missing/"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "error": "call uuid is invalid"
+        })))
+        .mount(&server)
+        .await;
+    let client = test_client(&format!("{}/v1/Account/{TEST_AUTH_ID}", server.uri()));
+    let error = client.status_call("missing").await.unwrap_err();
+    assert!(format!("{error}").contains("call uuid is invalid"));
+    assert!(matches!(
+        error.to_fcp_error(),
+        fcp_prelude::FcpError::External { .. }
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -849,6 +948,12 @@ async fn plivo_loopback_e2e_jsonl_covers_provider_edges() {
     logs.flush().unwrap();
 
     let contents = std::fs::read_to_string(&log_path).unwrap();
+    let log_hash = Sha256::digest(contents.as_bytes());
+    println!("plivo_voice_call_e2e_sha256={}", hex::encode(log_hash));
+    println!(
+        "plivo_voice_call_e2e_record_count={}",
+        contents.lines().count()
+    );
     for scenario in [
         "signed_webhook_acceptance",
         "invalid_signature_denial",

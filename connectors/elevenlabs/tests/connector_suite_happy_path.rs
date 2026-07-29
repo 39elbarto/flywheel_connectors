@@ -1,4 +1,3 @@
-use asupersync::Cx;
 use asupersync::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
@@ -21,7 +20,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path},
+    matchers::{body_json, header, method, path},
 };
 
 const OP_VOICES_LIST: &str = "elevenlabs.voices.list";
@@ -271,20 +270,23 @@ async fn accept_elevenlabs_test_websocket(mut stream: TcpStream) -> (TestServerW
         .expect("read websocket handshake");
     let headers = String::from_utf8_lossy(&request).into_owned();
     let ws = WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket");
     (ws, headers)
 }
 
 async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        ServerWsMessage::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Result<String, String> {
-    match ws.recv(&Cx::for_testing()).await {
+    match ws.recv(&fcp_async_core::compatibility_cx()).await {
         Ok(Some(ServerWsMessage::Text(text))) => Ok(text),
         Ok(Some(other)) => Err(format!("expected text frame for {context}, got {other:?}")),
         Ok(None) => Err(format!("websocket closed before {context}")),
@@ -293,7 +295,9 @@ async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Result<
 }
 
 async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
 }
 
 #[fcp_async_core::runtime::test]
@@ -321,6 +325,52 @@ async fn connector_suite_voices_happy_path_uses_mock_server() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn tts_uses_openclaw_aligned_default_model_when_omitted() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/text-to-speech/voice-default"))
+        .and(header("xi-api-key", "test-key"))
+        .and(body_json(json!({
+            "text": "hello",
+            "model_id": "eleven_multilingual_v2"
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "audio/mpeg")
+                .set_body_bytes([1, 2, 3]),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut connector = ElevenlabsConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "test-key",
+            "base_url": server.uri()
+        }))
+        .await
+        .expect("expected configure to succeed");
+    connector
+        .handle_handshake(json!({"session_id": "default-model-test"}))
+        .await
+        .expect("expected handshake to succeed");
+
+    let response = connector
+        .handle_invoke(json!({
+            "operation_id": "elevenlabs.tts.generate",
+            "input": {
+                "voice_id": "voice-default",
+                "text": "hello"
+            }
+        }))
+        .await
+        .expect("default model TTS should succeed");
+
+    assert_eq!(response["audio_size_bytes"], 3);
 }
 
 #[fcp_async_core::runtime::test]

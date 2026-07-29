@@ -90,10 +90,12 @@
 
 #[allow(dead_code)] // Access-planning command family.
 mod access_cmd;
+mod agent_bootstrap;
 #[allow(dead_code)] // Multi-agent coordination wired when Agent Mail integration lands.
 mod agent_coord;
 #[allow(dead_code)] // Agent Mail multi-agent coordination.
 mod agent_mail;
+mod agent_readiness_cmd;
 #[allow(dead_code)] // Audit types used by later CLI commands.
 mod audit;
 #[allow(dead_code)] // Legacy file-based audit-chain verify/timeline support.
@@ -121,6 +123,7 @@ mod bench_cmd;
 #[cfg(test)]
 mod bench_helpers;
 mod bootstrap_migrate_owner_key;
+mod capability_replay;
 #[allow(dead_code)]
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
@@ -158,6 +161,7 @@ mod error_taxonomy;
 mod event_stream;
 #[allow(dead_code)] // Comprehensive event filtering engine.
 mod events;
+mod evidence_index_cmd;
 #[allow(dead_code)]
 mod export_tools;
 #[allow(dead_code)] // jq-style field extraction with --extract flag.
@@ -224,6 +228,9 @@ mod policy_cmd;
 #[allow(dead_code)] // Prerequisite onboarding, repair, and drift detection.
 mod prerequisite;
 mod proof_cmd;
+mod proof_readiness;
+#[allow(dead_code)]
+mod proof_request;
 #[allow(dead_code, clippy::cast_precision_loss)]
 mod rate_forecast;
 #[allow(dead_code)]
@@ -282,18 +289,19 @@ mod zone_scope;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, Utc};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use fcp_audit::HybridLogicalClock;
 use fcp_crypto::{
     Ed25519Signature, Ed25519VerifyingKey, canonicalize::to_deterministic_cbor, cose::CoseToken,
 };
@@ -310,7 +318,7 @@ use fcp_host::{
     ConnectorInventoryMutationKind as HostConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest as HostConnectorInventoryMutationRequest,
     ConnectorInventoryMutationResponse as HostConnectorInventoryMutationResponse,
-    ConnectorInventoryResponse as HostConnectorInventoryResponse,
+    ConnectorInventoryResponse as HostConnectorInventoryResponse, ConnectorPrewarmConfig,
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
     DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest,
     EventQueryRequest as HostEventQueryRequest, EventQueryResponse as HostEventQueryResponse,
@@ -327,7 +335,19 @@ use fcp_kernel::{
     SupplyChainAttestation,
 };
 use fcp_manifest::ConnectorManifest;
-use fcp_prelude::{ApprovalToken, CapabilityToken, ConnectorTarget, ZoneId};
+use fcp_mesh::{
+    HierarchicalVersionVector, IbltMask, LayeredFilterConfig, LayeredReconciliationFilter,
+    MaskedIblt,
+};
+use fcp_migrate::{
+    Bandwidth, DirtyTracker, DirtyTrackerMode, PageFaultSource, PageFetch, PostCopyDecision,
+    PostCopyFallbackDecision, PostCopyForwarder, PostCopyOutcome, PreCopyController,
+    PreCopyOutcome, SoftDirtyProc, StaticSoftDirtyReader, Workload,
+};
+use fcp_prelude::{
+    ApprovalToken, CapabilityToken, ConnectorTarget, LeasePurpose as CoreLeasePurpose, ObjectId,
+    ZoneId,
+};
 use fcp_registry::{
     AttestationEvidence as RegistryAttestationEvidence, ConnectorBundle,
     MANIFEST_SIGNATURE_CONTEXT, ManifestSignatureArtifact, RegistryTrustPolicy, RegistryVerifier,
@@ -357,6 +377,10 @@ use crate::readiness::{
 };
 use crate::render::{
     ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
+};
+use crate::truth::{
+    KnowledgeState, RequiredTruthSource, ResolutionError, SourceOutcome,
+    TRUTH_SOURCE_SCHEMA_VERSION, TruthSourceUnavailable,
 };
 
 const ABOUT: &str =
@@ -390,6 +414,7 @@ Examples:
   fwc agent announce --agent BronzeValley --connector github --purpose \"triage issue backlog\"
   fwc agent send --from BronzeValley --to GoldenWolf --kind info --payload '{\"bead\":\"flywheel_connectors-qnchs.13.3\"}'
   fwc agent inbox --agent GoldenWolf
+  fwc agent-readiness fixture --agent BronzeValley --out-dir /tmp/fwc-readiness
   fwc auth list
   fwc auth add github --token <token>
   fwc auth status
@@ -403,6 +428,7 @@ Examples:
   fwc ops github
   fwc schema github issues.create
   fwc doctor --zone z:work --host http://127.0.0.1:8787
+  fwc doctor self-test --fixture crates/fwc/fixtures/healthy_env --json
   fwc budget --host http://127.0.0.1:8787
   fwc telemetry otlp-readiness --endpoint http://127.0.0.1:4317 --json
   fwc capabilities report
@@ -503,6 +529,14 @@ enum Commands {
     /// Coordinate local multi-agent work through the fwc agent-mail hub.
     Agent(AgentArgs),
 
+    /// Bootstrap an agent session with identity, reservation, ready beads, and doctor checks.
+    #[command(name = "agent-bootstrap")]
+    AgentBootstrap(AgentBootstrapArgs),
+
+    /// Build and replay redaction-safe agent readiness handoff bundles.
+    #[command(name = "agent-readiness", visible_alias = "readiness-handoff")]
+    AgentReadiness(agent_readiness_cmd::AgentReadinessArgs),
+
     /// Compile a natural-language goal into exact primitive fwc steps.
     #[command(visible_alias = "workflow")]
     Plan(IntentArgs),
@@ -554,6 +588,9 @@ enum Commands {
     #[command(name = "swarm-evidence", visible_alias = "swarm")]
     SwarmEvidence(swarm_evidence_cmd::SwarmEvidenceArgs),
 
+    /// Index and query replayable evidence bundles and verifier records.
+    Evidence(evidence_index_cmd::EvidenceArgs),
+
     /// Inspect, rank, explain, and rerun ProofGraph claims.
     Proof(proof_cmd::ProofArgs),
 
@@ -593,6 +630,9 @@ enum Commands {
 
     /// Report and recommend capability usage from real execution history.
     Capabilities(CapabilitiesArgs),
+
+    /// Reconstruct capability-token predicate traces from audit-chain evidence.
+    Capability(CapabilityArgs),
 
     /// Install a connector package.
     Install(InstallArgs),
@@ -783,14 +823,21 @@ struct ContextArgs {
     command: ContextCommand,
 }
 
+#[derive(Args, Clone, Copy, Debug, Default, Serialize)]
+struct ContextReadOnlyArgs {
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
+}
+
 #[derive(Subcommand, Debug, Serialize)]
 #[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
 enum ContextCommand {
     /// List configured contexts and show the active one.
-    List,
+    List(ContextReadOnlyArgs),
 
     /// Show the current active context.
-    Current,
+    Current(ContextReadOnlyArgs),
 
     /// Switch the active context.
     Use(ContextNameArgs),
@@ -875,6 +922,9 @@ enum MeshCommand {
     /// Evaluate mesh-native cutover gates and report fail-closed status.
     #[command(name = "cutover-gates")]
     CutoverGates(MeshCutoverGatesArgs),
+
+    /// Inspect deterministic singleton-writer lease ladders.
+    Lease(MeshLeaseArgs),
 }
 
 #[derive(Args, Debug, Default, Serialize)]
@@ -918,6 +968,10 @@ struct MeshAvailabilityArgs {
     /// Optional zone to compare against offline manifest declarations.
     #[arg(long)]
     zone: Option<String>,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -952,6 +1006,30 @@ struct MeshCutoverGatesArgs {
 }
 
 #[derive(Args, Debug, Serialize)]
+struct MeshLeaseArgs {
+    #[command(subcommand)]
+    command: MeshLeaseCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum MeshLeaseCommand {
+    /// Show per-connector HRW lease holder order from persisted mesh context.
+    Ladder(MeshLeaseLadderArgs),
+}
+
+#[derive(Args, Debug, Default, Serialize)]
+struct MeshLeaseLadderArgs {
+    /// Optional connector id/alias to restrict the ladder.
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Optional zone override for the HRW subject.
+    #[arg(long)]
+    zone: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
 struct ConnectorArgs {
     #[command(subcommand)]
     command: ConnectorCommand,
@@ -962,6 +1040,9 @@ struct ConnectorArgs {
 enum ConnectorCommand {
     /// Inspect connector state storage and local cache evidence.
     State(ConnectorStateArgs),
+
+    /// Inspect singleton-writer lease routing and fencing state.
+    Lease(ConnectorLeaseArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -990,6 +1071,38 @@ struct ConnectorStateExplainArgs {
     /// Override the connector state root used for local cache inspection.
     #[arg(long, value_name = "PATH")]
     state_root: Option<PathBuf>,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ConnectorLeaseArgs {
+    #[command(subcommand)]
+    command: ConnectorLeaseCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum ConnectorLeaseCommand {
+    /// Show current holder hash, fencing token, expiry, and quorum signature count.
+    Status(ConnectorLeaseStatusArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ConnectorLeaseStatusArgs {
+    /// Connector id, alias, or family name.
+    #[arg(long)]
+    connector: String,
+
+    /// Optional zone override for the lease subject.
+    #[arg(long)]
+    zone: Option<String>,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1330,6 +1443,28 @@ struct AgentInboxArgs {
 }
 
 #[derive(Args, Debug, Serialize)]
+struct AgentBootstrapArgs {
+    /// Agent persona name, for example `SunnyMoose`.
+    name: String,
+
+    /// File scope to reserve; use `none` to skip reservation.
+    #[arg(long, default_value = "src/**")]
+    scope: String,
+
+    /// Reservation TTL in seconds.
+    #[arg(long, default_value_t = 3600)]
+    ttl_seconds: u64,
+
+    /// Bead id or reason recorded with the reservation.
+    #[arg(long)]
+    reason: Option<String>,
+
+    /// Print the plan without changing bootstrap state.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
 struct ListArgs {
     /// Filter to a zone such as z:work or z:private.
     #[arg(long)]
@@ -1346,6 +1481,10 @@ struct ListArgs {
     /// Include connectors hidden from default catalog flows such as incubating or quarantined entries.
     #[arg(long, default_value_t = false)]
     include_hidden: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1406,6 +1545,10 @@ struct SearchArgs {
     /// Include connectors hidden from default catalog flows such as incubating or quarantined entries.
     #[arg(long, default_value_t = false)]
     include_hidden: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1416,6 +1559,10 @@ struct ShowArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1430,6 +1577,10 @@ struct OpsArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1459,6 +1610,10 @@ struct SchemaArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1472,6 +1627,10 @@ struct ExampleArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1518,6 +1677,10 @@ struct WatchArgs {
 struct StatusArgs {
     /// Optional connector id. Omit for fleet status.
     connector: Option<String>,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1540,9 +1703,21 @@ struct HealthArgs {
 
 #[derive(Args, Debug, Serialize)]
 struct DoctorArgs {
+    /// Local doctor check to run without a live host.
+    #[arg(value_enum, value_name = "CHECK")]
+    check: Option<DoctorLocalCheck>,
+
+    /// Local targeted doctor probe to run without a live host.
+    #[arg(long, value_enum, value_name = "PROBE")]
+    probe: Option<DoctorProbe>,
+
+    /// Deterministic swarm-pressure fixture for `fwc doctor --probe swarm-pressure`.
+    #[arg(long = "swarm-pressure-fixture", value_name = "PATH")]
+    swarm_pressure_fixture: Option<PathBuf>,
+
     /// Zone to diagnose.
     #[arg(long, short = 'z')]
-    zone: String,
+    zone: Option<String>,
 
     /// Connector ids, aliases, or family names to self-check.
     #[arg(long, value_name = "CONNECTOR")]
@@ -1559,6 +1734,82 @@ struct DoctorArgs {
     /// Auto-apply safe fixes (e.g. clear caches, retry health checks). Unsafe fixes require confirmation.
     #[arg(long, default_value_t = false)]
     fix: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
+
+    /// Signed audit-chain head artifact for `fwc doctor audit`.
+    #[arg(long = "audit-head", value_name = "PATH")]
+    audit_head: Option<PathBuf>,
+
+    /// Audit event records artifact for `fwc doctor audit`.
+    #[arg(long = "audit-events", value_name = "PATH")]
+    audit_events: Option<PathBuf>,
+
+    /// Minimum quorum signer count expected by `fwc doctor audit`.
+    #[arg(long = "audit-min-quorum-signers", default_value_t = 2)]
+    audit_min_quorum_signers: u64,
+
+    /// Maximum quorum checkpoint age considered fresh by `fwc doctor audit`.
+    #[arg(long = "audit-max-age-seconds", default_value_t = 60)]
+    audit_max_age_seconds: u64,
+
+    /// Maximum HLC physical drift allowed by `fwc doctor audit`.
+    #[arg(long = "audit-max-hlc-drift-ms", default_value_t = 60_000)]
+    audit_max_hlc_drift_ms: u64,
+
+    /// Override current Unix time for deterministic `fwc doctor audit` verification.
+    #[arg(long = "audit-now-unix-secs")]
+    audit_now_unix_secs: Option<u64>,
+
+    #[command(subcommand)]
+    command: Option<DoctorCommand>,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum DoctorCommand {
+    /// Run doctor checks against a fixture environment without touching live services.
+    #[command(name = "self-test")]
+    SelfTest(DoctorSelfTestArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct DoctorSelfTestArgs {
+    /// Fixture directory containing self_test.toml.
+    #[arg(
+        long,
+        value_name = "FIXTURE",
+        default_value = "crates/fwc/fixtures/healthy_env"
+    )]
+    fixture: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum DoctorLocalCheck {
+    /// Verify audit-chain status artifacts and operator readiness thresholds.
+    Audit,
+    /// Verify the Lean formal-proof gate and local proof artifacts.
+    Lean,
+    /// Verify migration dirty-tracking, pre-copy, and post-copy local thresholds.
+    Migration,
+    /// Verify reality-check cadence artifacts and README drift hygiene.
+    RealityCadence,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum DoctorProbe {
+    /// Verify HLC and HierVV local invariants and warning thresholds.
+    Hlc,
+    /// Verify masked IBLT and layered filter local invariants and warning thresholds.
+    Iblt,
+    /// Verify migration dirty-tracking, pre-copy, and post-copy local thresholds.
+    Migration,
+    /// Verify local swarm pressure and resource-headroom thresholds.
+    SwarmPressure,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1613,6 +1864,59 @@ struct TelemetryOtlpReadinessArgs {
 struct CapabilitiesArgs {
     #[command(subcommand)]
     command: CapabilitiesCommand,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CapabilityArgs {
+    #[command(subcommand)]
+    command: CapabilityCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum CapabilityCommand {
+    /// Reconstruct the predicate-evaluation trace for one capability token.
+    Replay(CapabilityReplayArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CapabilityReplayArgs {
+    /// Capability token id or raw token value to hash before lookup.
+    token: String,
+
+    /// Audit-chain lookback duration (e.g. 30s, 5m, 2h, 7d).
+    #[arg(long, default_value = "7d")]
+    since: String,
+
+    /// Confirm replay windows wider than the default 7-day cap.
+    #[arg(long, default_value_t = false)]
+    confirm: bool,
+
+    /// Render the trace as canonical JSON, JSONL steps, or a human narrative.
+    #[arg(long, value_enum, default_value_t = CapabilityReplayOutputArg::Json)]
+    output: CapabilityReplayOutputArg,
+
+    /// Audit-chain artifact to replay (JSON bundle, JSON array, JSONL, or `-` for stdin).
+    #[arg(long = "audit-chain", env = capability_replay::AUDIT_CHAIN_ENV, value_name = "PATH")]
+    audit_chain: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum CapabilityReplayOutputArg {
+    Json,
+    Jsonl,
+    Human,
+}
+
+impl From<CapabilityReplayOutputArg> for capability_replay::ReplayOutput {
+    fn from(value: CapabilityReplayOutputArg) -> Self {
+        match value {
+            CapabilityReplayOutputArg::Json => Self::Json,
+            CapabilityReplayOutputArg::Jsonl => Self::Jsonl,
+            CapabilityReplayOutputArg::Human => Self::Human,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Serialize)]
@@ -2449,6 +2753,10 @@ struct ServeMcpArgs {
     #[arg(long)]
     zone: Option<String>,
 
+    /// Maximum risk level to include (low, medium, high, critical).
+    #[arg(long)]
+    risk_max: Option<String>,
+
     /// Optional principal identity forwarded on each live tool call.
     #[arg(long)]
     principal: Option<String>,
@@ -2550,6 +2858,10 @@ struct HistoryArgs {
     /// Maximum number of entries to return.
     #[arg(long, default_value_t = 20)]
     limit: usize,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -2948,7 +3260,7 @@ fn execute_passthrough_command(prepared: &PreparedCli) -> Result<Option<Executio
         Commands::Audit(args) => match &args.command {
             audit_chain::AuditCommands::Matrix(_) | audit_chain::AuditCommands::Gaps(_) => Ok(None),
             _ => {
-                audit_chain::run(args.clone())?;
+                audit_chain::run_with_host(args.clone(), prepared.cli.host.as_deref())?;
                 Ok(Some(ExecutionOutcome {
                     text: String::new(),
                     exit_code: ExitCode::SUCCESS,
@@ -3094,7 +3406,10 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
         catalog.connectors.clone()
     };
 
-    let config = serve_mcp_config(args.connector.as_ref().and(connectors.first()));
+    let config = serve_mcp_config(
+        args.connector.as_ref().and(connectors.first()),
+        args.risk_max.as_deref(),
+    );
 
     let mut tools = Vec::new();
     for connector in &connectors {
@@ -3134,10 +3449,14 @@ fn execute_serve_mcp(prepared: &PreparedCli, args: &ServeMcpArgs) -> Result<Exec
 
 fn serve_mcp_config(
     selected_connector: Option<&HostConnectorRecord>,
+    risk_max: Option<&str>,
 ) -> serve_mcp::McpServerConfig {
     let mut config = serve_mcp::McpServerConfig::new();
     if let Some(connector) = selected_connector {
         config = config.with_connector_filter(connector.slug.clone());
+    }
+    if let Some(risk_max) = risk_max {
+        config = config.with_risk_max(risk_max);
     }
     config
 }
@@ -3242,18 +3561,39 @@ fn render_dispatch(
         &effective_render_options,
     );
 
-    let text = if let Some(rendered) =
+    let footer = truth_source_footer(&dispatch.payload, format, &effective_render_options);
+    let mut text = if let Some(rendered) =
         render_human_dispatch(&dispatch.payload, format, &effective_render_options)
     {
         rendered
     } else {
         render_with_options(dispatch.payload, format, &effective_render_options)?
     };
+    if let Some(footer) = footer {
+        text.push_str(&footer);
+    }
 
     Ok(ExecutionOutcome {
         text,
         exit_code: dispatch.exit_code.into(),
     })
+}
+
+fn truth_source_footer(
+    payload: &Value,
+    format: OutputFormat,
+    render_options: &RenderOptions,
+) -> Option<String> {
+    if format != OutputFormat::Toon || render_options.has_transform() {
+        return None;
+    }
+
+    let source = payload.get("_truth_source").and_then(Value::as_str)?;
+    if source == "mesh" {
+        return None;
+    }
+
+    Some(format!("(answer source: {source})\n"))
 }
 
 fn render_human_dispatch(
@@ -3507,6 +3847,15 @@ fn build_render_options(
 }
 
 fn internal_error_dispatch(args: &[String], error: &anyhow::Error) -> DispatchOutcome {
+    if let Some(error) = error.downcast_ref::<ResolutionError>() {
+        let (command, subcommand) = truth_resolver_command_context(args);
+        return truth_resolver_internal_error_dispatch(
+            &command,
+            subcommand.as_deref(),
+            truth_resolver_redacted_cause(error),
+        );
+    }
+
     let mut dispatch = structured_error(
         "internal-error",
         "fwc hit an unexpected internal error before it could finish the request.",
@@ -3538,6 +3887,133 @@ fn internal_error_dispatch(args: &[String], error: &anyhow::Error) -> DispatchOu
     }
 
     dispatch
+}
+
+fn truth_resolver_command_context(args: &[String]) -> (String, Option<String>) {
+    let cli_command = Cli::command();
+    let mut command = None::<String>;
+    let mut subcommand = None::<String>;
+
+    for arg in args.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
+        let Some(command_name) = command.as_deref() else {
+            if cli_command.find_subcommand(arg).is_some() {
+                command = Some(arg.clone());
+            }
+            continue;
+        };
+
+        if cli_command
+            .find_subcommand(command_name)
+            .and_then(|command| command.find_subcommand(arg))
+            .is_some()
+        {
+            subcommand = Some(arg.clone());
+        }
+        break;
+    }
+
+    (command.unwrap_or_else(|| "fwc".to_owned()), subcommand)
+}
+
+fn truth_resolver_redacted_cause(error: &ResolutionError) -> String {
+    let outcomes = error
+        .attempts
+        .iter()
+        .map(|attempt| {
+            format!(
+                "{}:{}",
+                attempt.source.operator_truth_source(),
+                source_outcome_label(attempt.outcome)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if outcomes.is_empty() {
+        format!("{} strategy failed before querying sources", error.strategy)
+    } else {
+        format!(
+            "{} strategy exhausted {} source(s): {}",
+            error.strategy,
+            outcomes.len(),
+            outcomes.join(",")
+        )
+    }
+}
+
+fn source_outcome_label(outcome: SourceOutcome) -> &'static str {
+    match outcome {
+        SourceOutcome::Success => "success",
+        SourceOutcome::Partial => "partial",
+        SourceOutcome::Unreachable => "unreachable",
+        SourceOutcome::Error => "error",
+        SourceOutcome::Skipped => "skipped",
+        SourceOutcome::NotConfigured => "not-configured",
+    }
+}
+
+fn truth_resolver_internal_error_dispatch(
+    command: &str,
+    subcommand: Option<&str>,
+    redacted_cause: String,
+) -> DispatchOutcome {
+    truth_resolver_internal_error_dispatch_with_correlation(
+        command,
+        subcommand,
+        &redacted_cause,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+fn truth_resolver_internal_error_dispatch_with_correlation(
+    command: &str,
+    subcommand: Option<&str>,
+    redacted_cause: &str,
+    correlation_id: &str,
+) -> DispatchOutcome {
+    let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, command);
+    let display_command = subcommand.map_or_else(
+        || command.to_owned(),
+        |subcommand| format!("{command} {subcommand}"),
+    );
+
+    tracing::error!(
+        event = "fcp.truth_resolver.internal_error",
+        command = %display_command,
+        correlation_id = %correlation_id,
+        redacted_cause = %redacted_cause,
+        "truth resolver internal error"
+    );
+
+    let mut payload = json!({
+        "status": "error",
+        "command": command,
+        "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+        "_truth_source": "unavailable",
+        "error": {
+            "type": "truth-resolver-internal-error",
+            "message": format!(
+                "`fwc {display_command}` could not classify live truth because the resolver failed internally."
+            ),
+            "recoverable": false,
+            "redacted_cause": redacted_cause,
+            "log_event": "fcp.truth_resolver.internal_error",
+            "correlation_id": correlation_id,
+            "bead_reference": "flywheel_connectors-hr0rr.2.5",
+        },
+        "next_actions": [
+            "Inspect logs for `fcp.truth_resolver.internal_error` with the returned correlation_id.",
+            "Treat this response as non-authoritative until the resolver bug is fixed.",
+            "If the workflow cannot wait, use a lower-level host-backed command and record the weaker truth source.",
+        ],
+    });
+    if let Some(subcommand) = subcommand {
+        payload["subcommand"] = Value::String(subcommand.to_owned());
+    }
+    envelope.inject_into(&mut payload);
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Internal,
+    }
 }
 
 fn template_render_failure_dispatch(
@@ -3659,6 +4135,8 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Task(args) => task_dispatch(args)?,
         Commands::Session(args) => session_dispatch(args)?,
         Commands::Agent(args) => agent_dispatch(args)?,
+        Commands::AgentBootstrap(args) => agent_bootstrap_dispatch(args)?,
+        Commands::AgentReadiness(args) => agent_readiness_dispatch(args)?,
         Commands::Plan(args) => intent_plan_dispatch(&args.request(intent::IntentMode::Plan))?,
         Commands::Explain(args) => {
             intent_explain_dispatch(&args.request(intent::IntentMode::Explain))?
@@ -3674,7 +4152,8 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::SupplyChain(_) => passthrough_only_dispatch("supply-chain"),
         Commands::Bootstrap(args) => bootstrap_dispatch(args)?,
         Commands::Audit(args) => audit_dispatch(args)?,
-        Commands::SwarmEvidence(args) => swarm_evidence_dispatch(args)?,
+        Commands::SwarmEvidence(args) => swarm_evidence_dispatch(args, cli.host.as_deref())?,
+        Commands::Evidence(args) => evidence_index_cmd::dispatch(args)?,
         Commands::Proof(args) => proof_dispatch(args)?,
         Commands::Manifest(_) => passthrough_only_dispatch("manifest"),
         Commands::Net(_) => passthrough_only_dispatch("net"),
@@ -3687,6 +4166,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Budget(args) => budget_dispatch(args, cli.host.as_deref())?,
         Commands::Telemetry(args) => telemetry_dispatch(args),
         Commands::Capabilities(args) => capabilities_dispatch(args, cli.host.as_deref())?,
+        Commands::Capability(args) => capability_dispatch(args)?,
         Commands::Install(args) => install_dispatch(args, cli.host.as_deref())?,
         Commands::Update(args) => update_dispatch(args, cli.host.as_deref())?,
         Commands::Pin(args) => pin_dispatch(args, cli.host.as_deref())?,
@@ -4633,6 +5113,30 @@ impl HostAdminClient {
 
     fn connector_status(&self, connector_id: &str) -> Result<HostConnectorAdminStatus> {
         self.get_json(&format!("/rpc/connectors/{connector_id}/status"))
+    }
+
+    fn connector_state_explain(&self, connector_id: &str, zone: Option<&str>) -> Result<Value> {
+        let mut path = format!("/rpc/admin/connectors/{connector_id}/state/explain");
+        if let Some(zone) = zone.map(str::trim).filter(|zone| !zone.is_empty()) {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("zone", zone)
+                .finish();
+            path.push('?');
+            path.push_str(&query);
+        }
+        self.get_json(&path)
+    }
+
+    fn connector_lease_status(&self, connector_id: &str, zone: Option<&str>) -> Result<Value> {
+        let mut path = format!("/rpc/admin/connectors/{connector_id}/lease/status");
+        if let Some(zone) = zone.map(str::trim).filter(|zone| !zone.is_empty()) {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("zone", zone)
+                .finish();
+            path.push('?');
+            path.push_str(&query);
+        }
+        self.get_json(&path)
     }
 
     fn config_snapshot(&self, connector_id: &str) -> Result<ConnectorConfigSnapshot> {
@@ -5800,6 +6304,164 @@ fn attach_template_provenance(
     }
 }
 
+const FWC_METADATA_CACHE_SCHEMA_VERSION: &str = "fwc.metadata-cache.v1";
+const FWC_METADATA_CACHE_ALL_CONNECTORS: &str = "*";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FwcMetadataCacheKey {
+    command: String,
+    source_class: String,
+    connector_id: String,
+    manifest_hash: String,
+    output_format: String,
+    schema_version: String,
+    truth_source: String,
+    request_fingerprint: String,
+}
+
+impl FwcMetadataCacheKey {
+    fn new(
+        command: impl Into<String>,
+        source_class: impl Into<String>,
+        connector_id: impl Into<String>,
+        manifest_hash: impl Into<String>,
+        output_format: impl Into<String>,
+        truth_source: KnowledgeState,
+        request_fingerprint: impl Into<String>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            source_class: source_class.into(),
+            connector_id: connector_id.into(),
+            manifest_hash: manifest_hash.into(),
+            output_format: output_format.into(),
+            schema_version: FWC_METADATA_CACHE_SCHEMA_VERSION.to_owned(),
+            truth_source: truth_source.operator_truth_source().to_owned(),
+            request_fingerprint: request_fingerprint.into(),
+        }
+    }
+
+    fn etag(&self) -> String {
+        let encoded = serde_json::to_vec(self).unwrap_or_else(|_| {
+            format!(
+                "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+                self.command,
+                self.source_class,
+                self.connector_id,
+                self.manifest_hash,
+                self.output_format,
+                self.schema_version,
+                self.truth_source,
+                self.request_fingerprint
+            )
+            .into_bytes()
+        });
+        blake3_prefixed(&encoded)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct FwcMetadataCacheEvidence {
+    hit: bool,
+    validated: bool,
+    etag: String,
+    age_ms: u64,
+    source: String,
+}
+
+fn metadata_cache_evidence(key: &FwcMetadataCacheKey, hit: bool) -> FwcMetadataCacheEvidence {
+    FwcMetadataCacheEvidence {
+        hit,
+        validated: true,
+        etag: key.etag(),
+        age_ms: 0,
+        source: key.source_class.clone(),
+    }
+}
+
+fn attach_metadata_cache_evidence(payload: &mut Value, key: &FwcMetadataCacheKey, hit: bool) {
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "_cache".to_owned(),
+            serde_json::to_value(metadata_cache_evidence(key, hit)).unwrap_or(Value::Null),
+        );
+    }
+}
+
+fn metadata_request_fingerprint(request: &Value) -> String {
+    let encoded = serde_json::to_vec(request).unwrap_or_default();
+    blake3_prefixed(&encoded)
+}
+
+fn update_metadata_cache_hash_component(hasher: &mut blake3::Hasher, value: &str) {
+    let bytes = value.as_bytes();
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn metadata_manifest_hash(connector: &DiscoveredConnector) -> Result<String> {
+    let manifest_path = readiness::workspace_root().join(&connector.manifest_path);
+    let manifest_bytes = std::fs::read(&manifest_path).with_context(|| {
+        format!(
+            "failed to read connector manifest for metadata cache key: {}",
+            manifest_path.display()
+        )
+    })?;
+    Ok(blake3_prefixed(&manifest_bytes))
+}
+
+fn metadata_manifest_set_hash<'a>(
+    connectors: impl IntoIterator<Item = &'a DiscoveredConnector>,
+) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FWC-METADATA-MANIFEST-SET-V1");
+    let mut count = 0_u64;
+
+    for connector in connectors {
+        count = count.saturating_add(1);
+        update_metadata_cache_hash_component(&mut hasher, &connector.slug);
+        update_metadata_cache_hash_component(&mut hasher, &connector.detail.summary.id);
+        update_metadata_cache_hash_component(&mut hasher, &metadata_manifest_hash(connector)?);
+    }
+
+    hasher.update(&count.to_le_bytes());
+    Ok(blake3_prefixed(hasher.finalize().as_bytes()))
+}
+
+fn offline_manifest_set_cache_key<'a>(
+    command: &str,
+    connectors: impl IntoIterator<Item = &'a DiscoveredConnector>,
+    output_format: &str,
+    request: &Value,
+) -> Result<FwcMetadataCacheKey> {
+    Ok(FwcMetadataCacheKey::new(
+        command,
+        "workspace-manifests",
+        FWC_METADATA_CACHE_ALL_CONNECTORS,
+        metadata_manifest_set_hash(connectors)?,
+        output_format,
+        KnowledgeState::Offline,
+        metadata_request_fingerprint(request),
+    ))
+}
+
+fn offline_connector_cache_key(
+    command: &str,
+    connector: &DiscoveredConnector,
+    output_format: &str,
+    request: &Value,
+) -> Result<FwcMetadataCacheKey> {
+    Ok(FwcMetadataCacheKey::new(
+        command,
+        "workspace-manifests",
+        &connector.detail.summary.id,
+        metadata_manifest_hash(connector)?,
+        output_format,
+        KnowledgeState::Offline,
+        metadata_request_fingerprint(request),
+    ))
+}
+
 fn attach_live_host_admin_contract(
     payload: &mut Value,
     command: &str,
@@ -6057,6 +6719,16 @@ impl LiveTruthResolution {
             degraded,
             fallback_derived: true,
             reason: reason.into(),
+        }
+    }
+
+    fn operator_knowledge_state(&self) -> KnowledgeState {
+        match self.knowledge_state {
+            LiveTruthKnowledgeState::Offline => KnowledgeState::Offline,
+            LiveTruthKnowledgeState::NodeLocal => KnowledgeState::NodeLocal,
+            LiveTruthKnowledgeState::MeshBacked => KnowledgeState::MeshBacked,
+            LiveTruthKnowledgeState::Degraded => KnowledgeState::Degraded,
+            LiveTruthKnowledgeState::FallbackDerived => KnowledgeState::FallbackDerived,
         }
     }
 }
@@ -6731,6 +7403,12 @@ fn attach_tool_inventory_provenance(
 }
 
 fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
+    if let Some(outcome) =
+        enforce_required_truth_source("list", args.require_source, KnowledgeState::HostBacked)
+    {
+        return Ok(outcome);
+    }
+
     let client = HostAdminClient::new(host)?;
     let filter = HostDiscoveryFilter {
         category: args.category.clone(),
@@ -6768,6 +7446,7 @@ fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
         "list",
         catalog::DiscoveryDataSource::LiveHostInventory,
     );
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -6781,11 +7460,9 @@ fn show_dispatch_host(args: &ShowArgs, host: &str) -> Result<DispatchOutcome> {
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "show",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("show", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
     let inventory = client.connector(connector.summary.id.as_str())?;
@@ -6823,6 +7500,7 @@ fn show_dispatch_host(args: &ShowArgs, host: &str) -> Result<DispatchOutcome> {
         &example_operation,
     ))?;
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -6835,11 +7513,9 @@ fn ops_dispatch_host(args: &OpsArgs, host: &str) -> Result<DispatchOutcome> {
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "ops",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("ops", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
     let introspection = client.introspect(connector.summary.id.as_str())?;
@@ -6881,6 +7557,7 @@ fn ops_dispatch_host(args: &OpsArgs, host: &str) -> Result<DispatchOutcome> {
         catalog::DiscoveryDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -6894,11 +7571,9 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "schema",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("schema", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
     let inventory = client.connector(connector.summary.id.as_str())?;
@@ -6909,12 +7584,14 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
         let operation = match resolve_host_tool(&introspection.tools, operation_selector) {
             Ok(operation) => operation,
             Err(error) => {
-                return Ok(host_operation_resolution_dispatch(
+                let mut outcome = host_operation_resolution_dispatch(
                     "schema",
                     &connector.slug,
                     operation_selector,
                     &error,
-                ));
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
             }
         };
 
@@ -6936,6 +7613,7 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
                 catalog::DiscoveryDataSource::LiveHostIntrospection,
             );
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
             return Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
@@ -7001,6 +7679,7 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
             catalog::DiscoveryDataSource::LiveHostIntrospection,
         );
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -7031,6 +7710,7 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
         catalog::DiscoveryDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -7044,11 +7724,9 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "examples",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("examples", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
     let introspection = client.introspect(connector.summary.id.as_str())?;
@@ -7058,12 +7736,14 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
         let operation = match resolve_host_tool(&introspection.tools, operation_selector) {
             Ok(operation) => operation,
             Err(error) => {
-                return Ok(host_operation_resolution_dispatch(
+                let mut outcome = host_operation_resolution_dispatch(
                     "examples",
                     &connector.slug,
                     operation_selector,
                     &error,
-                ));
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
             }
         };
 
@@ -7106,6 +7786,7 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
             catalog::TemplateDataSource::LiveHostIntrospection,
         );
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -7162,6 +7843,7 @@ fn examples_dispatch_host(args: &ExampleArgs, host: &str) -> Result<DispatchOutc
         catalog::TemplateDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -7172,25 +7854,36 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("list"));
+            let mut outcome = conflicting_catalog_mode_dispatch("list");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
         return list_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        let mut outcome = missing_host_dispatch(
             "list",
             json!({
                 "filters": {
-                    "zone": args.zone,
-                    "category": args.category,
+                    "zone": args.zone.clone(),
+                    "category": args.category.clone(),
                     "include_hidden": args.include_hidden,
+                    "require_source": args.require_source.map(RequiredTruthSource::label),
                 },
             }),
             vec![
                 "fwc list --host <endpoint>".to_owned(),
                 "fwc list --offline".to_owned(),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("list", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     let catalog = DiscoveryCatalog::load()?;
@@ -7216,6 +7909,16 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
         "category": args.category.clone(),
         "include_hidden": args.include_hidden,
     });
+    let cache_key = offline_manifest_set_cache_key(
+        "list",
+        catalog.list(
+            args.zone.as_deref(),
+            args.category.as_deref(),
+            args.include_hidden,
+        ),
+        "json",
+        &filters,
+    )?;
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "list");
     let mut payload = json!({
@@ -7246,6 +7949,8 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
         "list",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -7391,6 +8096,7 @@ fn zones_dispatch(args: &ZonesArgs) -> Result<DispatchOutcome> {
     }
 
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -7509,13 +8215,31 @@ fn audit_dispatch(args: &audit_chain::AuditArgs) -> Result<DispatchOutcome> {
 
 fn swarm_evidence_dispatch(
     args: &swarm_evidence_cmd::SwarmEvidenceArgs,
+    explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
-    let mut payload = swarm_evidence_cmd::run(args)?;
+    let mut payload = swarm_evidence_cmd::run_with_host(args, explicit_host)?;
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "swarm-evidence");
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
+    })
+}
+
+fn agent_readiness_dispatch(
+    args: &agent_readiness_cmd::AgentReadinessArgs,
+) -> Result<DispatchOutcome> {
+    let result = agent_readiness_cmd::run(args)?;
+    let mut payload = result.payload;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "agent-readiness");
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: if result.success {
+            CliExitCode::Success
+        } else {
+            CliExitCode::Validation
+        },
     })
 }
 
@@ -7536,6 +8260,12 @@ fn proof_dispatch(args: &proof_cmd::ProofArgs) -> Result<DispatchOutcome> {
 
 #[allow(clippy::too_many_lines)]
 fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutcome> {
+    if let Some(outcome) =
+        enforce_audit_required_truth_source("matrix", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
+    }
+
     let connectors_root = match audit_connectors_root() {
         Ok(root) => root,
         Err(error) => {
@@ -7552,28 +8282,30 @@ fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutco
 
     if let Some(name) = args.connector.as_deref() {
         let Some(entry) = matrix.connectors.get(name) else {
+            let mut payload = json!({
+                "status": "error",
+                "command": "audit",
+                "subcommand": "matrix",
+                "error": {
+                    "type": "connector-not-found",
+                    "message": format!("Connector `{name}` was not found in the audit matrix built from workspace manifests."),
+                    "recoverable": true,
+                },
+                "filters": {
+                    "connector": name,
+                },
+                "details": {
+                    "connectors_root": connectors_root_display,
+                    "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
+                },
+                "next_actions": [
+                    "Run `fwc audit matrix` to inspect the full compliance matrix first.".to_owned(),
+                    "Use a connector directory name such as `github` or `slack`.".to_owned(),
+                ],
+            });
+            inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
             return Ok(DispatchOutcome {
-                payload: json!({
-                    "status": "error",
-                    "command": "audit",
-                    "subcommand": "matrix",
-                    "error": {
-                        "type": "connector-not-found",
-                        "message": format!("Connector `{name}` was not found in the audit matrix built from workspace manifests."),
-                        "recoverable": true,
-                    },
-                    "filters": {
-                        "connector": name,
-                    },
-                    "details": {
-                        "connectors_root": connectors_root_display,
-                        "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
-                    },
-                    "next_actions": [
-                        "Run `fwc audit matrix` to inspect the full compliance matrix first.".to_owned(),
-                        "Use a connector directory name such as `github` or `slack`.".to_owned(),
-                    ],
-                }),
+                payload,
                 exit_code: CliExitCode::Validation,
             });
         };
@@ -7599,6 +8331,7 @@ fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutco
         });
         payload["toon"] = json!(format_connector_audit_toon(entry));
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -7628,6 +8361,7 @@ fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutco
     });
     payload["toon"] = json!(format_audit_matrix_toon(&matrix));
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -7636,6 +8370,12 @@ fn audit_matrix_dispatch(args: &audit_chain::MatrixArgs) -> Result<DispatchOutco
 
 #[allow(clippy::too_many_lines)]
 fn audit_gaps_dispatch(args: &audit_chain::GapsArgs) -> Result<DispatchOutcome> {
+    if let Some(outcome) =
+        enforce_audit_required_truth_source("gaps", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
+    }
+
     let connectors_root = match audit_connectors_root() {
         Ok(root) => root,
         Err(error) => {
@@ -7652,29 +8392,31 @@ fn audit_gaps_dispatch(args: &audit_chain::GapsArgs) -> Result<DispatchOutcome> 
     if let Some(name) = args.connector.as_deref()
         && !matrix.connectors.contains_key(name)
     {
+        let mut payload = json!({
+            "status": "error",
+            "command": "audit",
+            "subcommand": "gaps",
+            "error": {
+                "type": "connector-not-found",
+                "message": format!("Connector `{name}` was not found in the audit gap report built from workspace manifests."),
+                "recoverable": true,
+            },
+            "filters": {
+                "connector": name,
+                "blocking_only": args.blocking_only,
+            },
+            "details": {
+                "connectors_root": connectors_root_display,
+                "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
+            },
+            "next_actions": [
+                "Run `fwc audit matrix` to inspect the full connector inventory first.".to_owned(),
+                "Use a connector directory name such as `github` or `slack`.".to_owned(),
+            ],
+        });
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
-            payload: json!({
-                "status": "error",
-                "command": "audit",
-                "subcommand": "gaps",
-                "error": {
-                    "type": "connector-not-found",
-                    "message": format!("Connector `{name}` was not found in the audit gap report built from workspace manifests."),
-                    "recoverable": true,
-                },
-                "filters": {
-                    "connector": name,
-                    "blocking_only": args.blocking_only,
-                },
-                "details": {
-                    "connectors_root": connectors_root_display,
-                    "available": matrix.connectors.keys().take(10).cloned().collect::<Vec<_>>(),
-                },
-                "next_actions": [
-                    "Run `fwc audit matrix` to inspect the full connector inventory first.".to_owned(),
-                    "Use a connector directory name such as `github` or `slack`.".to_owned(),
-                ],
-            }),
+            payload,
             exit_code: CliExitCode::Validation,
         });
     }
@@ -7739,6 +8481,7 @@ fn audit_gaps_dispatch(args: &audit_chain::GapsArgs) -> Result<DispatchOutcome> 
     });
     payload["toon"] = json!(format_audit_gaps_toon(&gap_reports, args.blocking_only));
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -7759,29 +8502,67 @@ fn audit_connectors_root() -> Result<PathBuf> {
     );
 }
 
+fn enforce_audit_required_truth_source(
+    subcommand: &'static str,
+    requirement: Option<RequiredTruthSource>,
+    actual: KnowledgeState,
+) -> Option<DispatchOutcome> {
+    requirement.and_then(|required| {
+        required.validate(actual).err().map(|error| {
+            let actual_source = error.actual.operator_truth_source();
+            let required_label = error.required.label();
+            DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "audit",
+                    "subcommand": subcommand,
+                    "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+                    "_truth_source": actual_source,
+                    "error": {
+                        "type": "truth-source-unavailable",
+                        "required": required_label,
+                        "actual": actual_source,
+                        "message": format!(
+                            "`fwc audit {subcommand}` resolved from `{actual_source}` truth, which does not satisfy `--require-source {required_label}`."
+                        ),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        "Retry after the required live truth source is reachable.".to_owned(),
+                        format!("Relax the requirement if `{actual_source}` truth is acceptable for this workflow."),
+                    ],
+                }),
+                exit_code: CliExitCode::Transport,
+            }
+        })
+    })
+}
+
 fn audit_connectors_root_error_dispatch(
     subcommand: &str,
     connector: Option<&str>,
     error: &anyhow::Error,
 ) -> DispatchOutcome {
+    let mut payload = json!({
+        "status": "error",
+        "command": "audit",
+        "subcommand": subcommand,
+        "error": {
+            "type": "connectors-root-not-found",
+            "message": error.to_string(),
+            "recoverable": true,
+        },
+        "filters": {
+            "connector": connector,
+        },
+        "next_actions": [
+            "Run `fwc audit matrix` from a repository that contains a top-level `connectors/` directory.".to_owned(),
+            "If you are inside a nested workspace, `cd` into the Flywheel connectors repo root first.".to_owned(),
+        ],
+    });
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     DispatchOutcome {
-        payload: json!({
-            "status": "error",
-            "command": "audit",
-            "subcommand": subcommand,
-            "error": {
-                "type": "connectors-root-not-found",
-                "message": error.to_string(),
-                "recoverable": true,
-            },
-            "filters": {
-                "connector": connector,
-            },
-            "next_actions": [
-                "Run `fwc audit matrix` from a repository that contains a top-level `connectors/` directory.".to_owned(),
-                "If you are inside a nested workspace, `cd` into the Flywheel connectors repo root first.".to_owned(),
-            ],
-        }),
+        payload,
         exit_code: CliExitCode::Validation,
     }
 }
@@ -7935,6 +8716,7 @@ fn mesh_dispatch(args: &MeshArgs, explicit_host: Option<&str>) -> Result<Dispatc
             mesh_availability_dispatch(args, explicit_host, false, true)
         }
         MeshCommand::CutoverGates(args) => mesh_cutover_gates_dispatch(args, explicit_host),
+        MeshCommand::Lease(args) => mesh_lease_dispatch(args, explicit_host),
     }
 }
 
@@ -7944,6 +8726,7 @@ fn connector_dispatch(
 ) -> Result<DispatchOutcome> {
     match &args.command {
         ConnectorCommand::State(args) => connector_state_dispatch(args, explicit_host),
+        ConnectorCommand::Lease(args) => connector_lease_dispatch(args, explicit_host),
     }
 }
 
@@ -7962,10 +8745,106 @@ fn connector_state_explain_dispatch(
     args: &ConnectorStateExplainArgs,
     explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
+    if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+        if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+            "connector",
+            "state explain",
+            args.require_source,
+            KnowledgeState::HostBacked,
+        ) {
+            return Ok(outcome);
+        }
+
+        let client = HostAdminClient::new(host)?;
+        let (catalog, discovery) = client.catalog(None)?;
+        let connector = match catalog.resolve_connector(&args.connector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                let mut outcome = connector_resolution_dispatch(
+                    "connector state explain",
+                    &args.connector,
+                    &error,
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
+            }
+        };
+        let mut payload =
+            client.connector_state_explain(connector.summary.id.as_str(), args.zone.as_deref())?;
+        let host_payload_source = payload
+            .get("source")
+            .cloned()
+            .unwrap_or_else(|| Value::String("host-admin-api".to_owned()));
+        let host_evidence_description = match host_payload_source.as_str() {
+            Some("host-canonical-state") => "live fcp-host canonical fcp-store state",
+            Some("host-cache-markers") => "live fcp-host cache-marker evidence",
+            _ => "live fcp-host admin API evidence",
+        };
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("command".to_owned(), Value::String("connector".to_owned()));
+            object.insert(
+                "subcommand".to_owned(),
+                Value::String("state explain".to_owned()),
+            );
+            object.insert(
+                "source".to_owned(),
+                Value::String("host-admin-api".to_owned()),
+            );
+            object.insert("host_payload_source".to_owned(), host_payload_source);
+            object.insert(
+                "message".to_owned(),
+                Value::String(format!(
+                    "Explained connector state storage for `{}` from {host_evidence_description}.",
+                    connector.slug,
+                )),
+            );
+            object.insert(
+                "connector".to_owned(),
+                json!({
+                    "requested_selector": &args.connector,
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                    "version": connector.summary.version.to_string(),
+                }),
+            );
+            object.insert(
+                "host_registry_version".to_owned(),
+                json!(discovery.registry_version),
+            );
+            if let Some(live_host) = object.get_mut("live_host").and_then(Value::as_object_mut) {
+                live_host.insert(
+                    "endpoint_hash".to_owned(),
+                    Value::String(sha256_prefixed(host.as_bytes())),
+                );
+            }
+        }
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "connector");
+        envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+        "connector",
+        "state explain",
+        args.require_source,
+        KnowledgeState::Offline,
+    ) {
+        return Ok(outcome);
+    }
+
     let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
-        Err(error) => return Ok(connector_state_resolution_dispatch(&args.connector, &error)),
+        Err(error) => {
+            let mut outcome = connector_state_resolution_dispatch(&args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
+        }
     };
     let request = connector_state::ConnectorStateExplainRequest {
         connector_selector: &args.connector,
@@ -7974,6 +8853,576 @@ fn connector_state_explain_dispatch(
         explicit_host,
     };
     let payload = connector_state::connector_state_explain_payload(connector, &request);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn connector_lease_dispatch(
+    args: &ConnectorLeaseArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    match &args.command {
+        ConnectorLeaseCommand::Status(args) => connector_lease_status_dispatch(args, explicit_host),
+    }
+}
+
+fn connector_lease_status_dispatch(
+    args: &ConnectorLeaseStatusArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+        if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+            "connector",
+            "lease status",
+            args.require_source,
+            KnowledgeState::HostBacked,
+        ) {
+            return Ok(outcome);
+        }
+
+        let client = HostAdminClient::new(host)?;
+        let (catalog, discovery) = client.catalog(None)?;
+        let connector = match catalog.resolve_connector(&args.connector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                let mut outcome = connector_lease_resolution_dispatch(
+                    "connector lease status",
+                    &args.connector,
+                    &error,
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
+            }
+        };
+        let (zone, effective_target) =
+            host_connector_lease_status_zone(args.zone.as_deref(), connector, &args.connector)?;
+        let mut payload =
+            client.connector_lease_status(connector.summary.id.as_str(), Some(zone.as_str()))?;
+        let host_payload_source = payload
+            .get("source")
+            .cloned()
+            .unwrap_or_else(|| Value::String("host-admin-api".to_owned()));
+        if let Some(object) = payload.as_object_mut() {
+            object
+                .entry("zone_id".to_owned())
+                .or_insert_with(|| Value::String(zone.clone()));
+            object.insert("command".to_owned(), Value::String("connector".to_owned()));
+            object.insert(
+                "subcommand".to_owned(),
+                Value::String("lease status".to_owned()),
+            );
+            object.insert(
+                "source".to_owned(),
+                Value::String("host-admin-api".to_owned()),
+            );
+            object.insert("host_payload_source".to_owned(), host_payload_source);
+            object.insert(
+                "message".to_owned(),
+                Value::String(format!(
+                    "Loaded singleton-writer lease status for `{}` from live fcp-host evidence.",
+                    connector.slug,
+                )),
+            );
+            object.insert(
+                "connector".to_owned(),
+                json!({
+                    "requested_selector": &args.connector,
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                    "version": connector.summary.version.to_string(),
+                }),
+            );
+            object.insert(
+                "host_registry_version".to_owned(),
+                json!(discovery.registry_version),
+            );
+            if !effective_target.is_null() {
+                object
+                    .entry("effective_target".to_owned())
+                    .or_insert(effective_target);
+            }
+            object
+                .entry("live_host".to_owned())
+                .or_insert_with(|| json!({}));
+            if let Some(live_host) = object.get_mut("live_host").and_then(Value::as_object_mut) {
+                live_host.insert(
+                    "endpoint_hash".to_owned(),
+                    Value::String(sha256_prefixed(host.as_bytes())),
+                );
+            }
+        }
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "connector");
+        envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+        "connector",
+        "lease status",
+        args.require_source,
+        KnowledgeState::Offline,
+    ) {
+        return Ok(outcome);
+    }
+
+    let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            let mut outcome = connector_lease_resolution_dispatch(
+                "connector lease status",
+                &args.connector,
+                &error,
+            );
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
+        }
+    };
+    let (path, config) = load_context_config()?;
+    let (context_name, context) = active_context_entry(&config)?;
+    let zone = mesh_connector_lease_zone(args.zone.as_deref(), context, connector, &args.connector);
+    let mut payload = offline_connector_lease_status_payload(
+        &path,
+        &context_name,
+        context,
+        connector,
+        &args.connector,
+        &zone,
+    )?;
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn connector_lease_resolution_dispatch(
+    command_name: &str,
+    selector: &str,
+    error: &SelectorError,
+) -> DispatchOutcome {
+    let error_type = match error.kind {
+        SelectorErrorKind::NotFound => "connector-not-found",
+        SelectorErrorKind::Ambiguous => "ambiguous-connector",
+    };
+    let message = match error.kind {
+        SelectorErrorKind::NotFound => {
+            format!("`{selector}` did not match any connector in the workspace catalog.")
+        }
+        SelectorErrorKind::Ambiguous => {
+            format!("`{selector}` matches multiple connectors; choose one explicit slug.")
+        }
+    };
+    let examples = if error.suggestions.is_empty() {
+        vec!["fwc list".to_owned()]
+    } else {
+        error
+            .suggestions
+            .iter()
+            .map(|suggestion| format!("fwc {command_name} --connector {suggestion} --json"))
+            .collect()
+    };
+
+    discovery_error(
+        "connector",
+        error_type,
+        message,
+        selector,
+        &error.suggestions,
+        &examples,
+    )
+}
+
+fn lease_node_id_hash_from_str(node: &str) -> String {
+    format!(
+        "blake3:{}",
+        hex::encode(blake3::hash(node.as_bytes()).as_bytes())
+    )
+}
+
+fn update_lease_hash_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn fwc_singleton_writer_connector_lease_subject_id(
+    connector_id: &str,
+    zone_id: &str,
+) -> fcp_core::ObjectId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FCP-HOST-SINGLETON-WRITER-HRW-LEASE-V2");
+    update_lease_hash_len_prefixed(&mut hasher, connector_id.as_bytes());
+    update_lease_hash_len_prefixed(&mut hasher, zone_id.as_bytes());
+    fcp_core::ObjectId::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn lease_ladder_snapshot(
+    connector_id: &str,
+    zone_id: &str,
+    eligible_nodes: &[MeshKnownNode],
+) -> Result<(fcp_core::ObjectId, Vec<Value>, Value)> {
+    let zone = zone_id.parse::<ZoneId>().with_context(|| {
+        format!("invalid connector lease status zone `{zone_id}` for connector `{connector_id}`")
+    })?;
+    let subject_id = fwc_singleton_writer_connector_lease_subject_id(connector_id, zone.as_str());
+    let eligible = eligible_nodes
+        .iter()
+        .map(|node| fcp_core::TailscaleNodeId::new(node.node.clone()))
+        .collect::<Vec<_>>();
+    let ranked = fcp_mesh::planner::rank_lease_holders_by_hrw(&zone, &subject_id, &eligible);
+    let holder = ranked
+        .first()
+        .map(|node| json!(lease_node_id_hash_from_str(node.as_str())))
+        .unwrap_or(Value::Null);
+    let ranked_holders = ranked
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            json!({
+                "rank": index + 1,
+                "node": node.as_str(),
+                "node_id_hash": lease_node_id_hash_from_str(node.as_str()),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok((subject_id, ranked_holders, holder))
+}
+
+fn mesh_connector_target_entry_for_candidates<'a>(
+    state: &'a MeshTargetState,
+    candidates: &[&str],
+) -> Option<(&'a str, &'a MeshConnectorTarget)> {
+    for &candidate in candidates {
+        if let Some((key, target)) = state.connector_targets.get_key_value(candidate) {
+            return Some((key.as_str(), target));
+        }
+    }
+
+    let normalized_candidates = candidates
+        .iter()
+        .map(|candidate| normalize_connector_selector(candidate))
+        .collect::<BTreeSet<_>>();
+    state.connector_targets.iter().find_map(|(key, target)| {
+        normalized_candidates
+            .contains(&normalize_connector_selector(key))
+            .then_some((key.as_str(), target))
+    })
+}
+
+fn mesh_connector_target_entry<'a>(
+    state: &'a MeshTargetState,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+) -> Option<(&'a str, &'a MeshConnectorTarget)> {
+    let candidates = [
+        requested_selector,
+        connector.slug.as_str(),
+        connector.detail.summary.id.as_str(),
+        connector.detail.summary.name.as_str(),
+    ];
+    mesh_connector_target_entry_for_candidates(state, &candidates)
+}
+
+fn host_connector_target_entry<'a>(
+    state: &'a MeshTargetState,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+) -> Option<(&'a str, &'a MeshConnectorTarget)> {
+    let mut candidates = vec![
+        requested_selector,
+        connector.slug.as_str(),
+        connector.summary.id.as_str(),
+        connector.summary.name.as_str(),
+    ];
+    candidates.extend(connector.aliases.iter().map(String::as_str));
+    mesh_connector_target_entry_for_candidates(state, &candidates)
+}
+
+fn mesh_connector_lease_zone(
+    explicit_zone: Option<&str>,
+    context: &MeshContextFile,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+) -> String {
+    explicit_zone
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            mesh_connector_target_entry(&context.mesh_targets, connector, requested_selector)
+                .and_then(|(_, target)| target.zone.clone())
+        })
+        .or_else(|| context.default_zone.clone())
+        .unwrap_or_else(|| ZoneId::work().to_string())
+}
+
+fn host_connector_lease_zone(
+    explicit_zone: Option<&str>,
+    context: &MeshContextFile,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+) -> String {
+    explicit_zone
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            host_connector_target_entry(&context.mesh_targets, connector, requested_selector)
+                .and_then(|(_, target)| target.zone.clone())
+        })
+        .or_else(|| context.default_zone.clone())
+        .unwrap_or_else(|| ZoneId::work().to_string())
+}
+
+fn mesh_resolved_effective_target_value(
+    state: &MeshTargetState,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+) -> Value {
+    if let Some((target_key, target)) =
+        mesh_connector_target_entry(state, connector, requested_selector)
+    {
+        return json!({
+            "connector": &connector.slug,
+            "requested_selector": requested_selector,
+            "target_key": target_key,
+            "node": &target.node,
+            "zone": &target.zone,
+            "source": "connector-target",
+            "persisted_at": &target.persisted_at,
+        });
+    }
+
+    state.active_node.as_ref().map_or(Value::Null, |node| {
+        json!({
+            "connector": &connector.slug,
+            "requested_selector": requested_selector,
+            "node": node,
+            "source": "active-default",
+        })
+    })
+}
+
+fn host_resolved_effective_target_value(
+    state: &MeshTargetState,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+) -> Value {
+    if let Some((target_key, target)) =
+        host_connector_target_entry(state, connector, requested_selector)
+    {
+        return json!({
+            "connector": &connector.slug,
+            "requested_selector": requested_selector,
+            "target_key": target_key,
+            "node": &target.node,
+            "zone": &target.zone,
+            "source": "connector-target",
+            "persisted_at": &target.persisted_at,
+        });
+    }
+
+    state.active_node.as_ref().map_or(Value::Null, |node| {
+        json!({
+            "connector": &connector.slug,
+            "requested_selector": requested_selector,
+            "node": node,
+            "source": "active-default",
+        })
+    })
+}
+
+fn host_connector_lease_status_zone(
+    explicit_zone: Option<&str>,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+) -> Result<(String, Value)> {
+    if let Some(zone) = explicit_zone
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+        .map(ToOwned::to_owned)
+    {
+        return Ok((zone, Value::Null));
+    }
+
+    let (_, config) = load_context_config()?;
+    let (_, context) = active_context_entry(&config)?;
+    Ok((
+        host_connector_lease_zone(None, context, connector, requested_selector),
+        host_resolved_effective_target_value(&context.mesh_targets, connector, requested_selector),
+    ))
+}
+
+fn offline_connector_lease_status_payload(
+    config_path: &std::path::Path,
+    context_name: &str,
+    context: &MeshContextFile,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+    zone: &str,
+) -> Result<Value> {
+    let known_nodes = mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+    let connector_id = connector.detail.summary.id.as_str();
+    let (subject_id, ranked_holders, holder_node_id_hash) =
+        lease_ladder_snapshot(connector_id, zone, &known_nodes)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "connector");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "connector",
+        "subcommand": "lease status",
+        "schema_version": "1.0.0",
+        "source": "offline-mesh-context",
+        "message": format!("Computed offline singleton-writer lease ladder for `{}` from persisted mesh context.", connector.slug),
+        "connector": {
+            "requested_selector": requested_selector,
+            "slug": &connector.slug,
+            "canonical_id": connector_id,
+            "name": &connector.detail.summary.name,
+            "version": connector.detail.summary.version.to_string(),
+        },
+        "config_path": config_path.display().to_string(),
+        "current_context": context_name,
+        "context": mesh_context_summary_value(context_name, context),
+        "zone_id": zone,
+        "subject_id": subject_id.to_string(),
+        "purpose": CoreLeasePurpose::ConnectorStateWrite,
+        "holder_node_id_hash": holder_node_id_hash,
+        "fencing_token": Value::Null,
+        "expiry": Value::Null,
+        "quorum_signers_count": 0_u64,
+        "ranked_holders": ranked_holders,
+        "effective_target": mesh_resolved_effective_target_value(&context.mesh_targets, connector, requested_selector),
+        "live_host": {
+            "requested": false,
+            "route_available": false,
+            "state": "offline",
+        },
+        "warnings": [
+            "Offline lease status is derived from persisted mesh target context only; it is not proof of a live durable lease object.".to_owned(),
+            "Durable signed lease expiry and quorum signatures require a live fcp-host lease status route.".to_owned(),
+        ],
+        "next_actions": [
+            format!("fwc --host <endpoint> connector lease status --connector {} --zone {zone} --json", connector.slug),
+            "fwc mesh lease ladder --json".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(payload)
+}
+
+fn mesh_lease_dispatch(
+    args: &MeshLeaseArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    match &args.command {
+        MeshLeaseCommand::Ladder(args) => mesh_lease_ladder_dispatch(args, explicit_host),
+    }
+}
+
+fn mesh_lease_ladder_dispatch(
+    args: &MeshLeaseLadderArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let (path, config) = load_context_config()?;
+    let (context_name, context) = active_context_entry(&config)?;
+    let catalog = DiscoveryCatalog::load_for_connector_filter(args.connector.as_deref())?;
+    let known_nodes = mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+    let connector_selectors = if let Some(connector) = args.connector.as_ref() {
+        vec![connector.clone()]
+    } else {
+        context
+            .mesh_targets
+            .connector_targets
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut warnings = Vec::new();
+    let mut ladders = Vec::new();
+
+    if connector_selectors.is_empty() {
+        warnings.push(
+            "No connector-specific mesh targets are persisted in the current context, so there is no per-connector lease ladder to report."
+                .to_owned(),
+        );
+    }
+
+    for selector in connector_selectors {
+        let connector = match catalog.resolve_connector(&selector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                warnings.push(format!(
+                    "Skipping `{selector}` because it could not be resolved for lease-ladder reporting: {error:?}"
+                ));
+                continue;
+            }
+        };
+        let zone = mesh_connector_lease_zone(args.zone.as_deref(), context, connector, &selector);
+        let connector_id = connector.detail.summary.id.as_str();
+        let (subject_id, ranked_holders, holder_node_id_hash) =
+            lease_ladder_snapshot(connector_id, &zone, &known_nodes)?;
+        ladders.push(json!({
+            "connector": {
+                "requested_selector": selector,
+                "slug": &connector.slug,
+                "canonical_id": connector_id,
+            },
+            "zone_id": zone,
+            "schema_version": "1.0.0",
+            "subject_id": subject_id.to_string(),
+            "purpose": CoreLeasePurpose::ConnectorStateWrite,
+            "holder_node_id_hash": holder_node_id_hash,
+            "fencing_token": Value::Null,
+            "expiry": Value::Null,
+            "quorum_signers_count": 0_u64,
+            "ranked_holders": ranked_holders,
+            "effective_target": mesh_resolved_effective_target_value(&context.mesh_targets, connector, &selector),
+        }));
+    }
+
+    if explicit_host.is_some() {
+        warnings.push(
+            "`fwc mesh lease ladder` is an offline context command; use `fwc connector lease status --host <endpoint>` for live host fencing state."
+                .to_owned(),
+        );
+    }
+    warnings.push(
+        "Lease ladders are deterministic HRW placement views; durable lease expiry and quorum signatures are only available from live lease status."
+            .to_owned(),
+    );
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "mesh",
+        "subcommand": "lease ladder",
+        "schema_version": "1.0.0",
+        "source": "offline-mesh-context",
+        "message": "Computed per-connector singleton-writer lease ladders from persisted mesh context.",
+        "config_path": path.display().to_string(),
+        "current_context": &context_name,
+        "context": mesh_context_summary_value(&context_name, context),
+        "connector_filter": &args.connector,
+        "zone_override": &args.zone,
+        "eligible_node_count": known_nodes.len(),
+        "eligible_nodes": known_nodes,
+        "connector_count": ladders.len(),
+        "connectors": ladders,
+        "warnings": warnings,
+        "next_actions": [
+            "fwc connector lease status --connector <connector> --json".to_owned(),
+            "fwc --host <endpoint> connector lease status --connector <connector> --json".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -8020,6 +9469,7 @@ const CUTOVER_GATE_TELEMETRY_BEAD_ID: &str = "flywheel_connectors-hr0rr.2.1";
 const CUTOVER_GATE_TELEMETRY_ACTOR: &str = "fwc";
 const CUTOVER_GATE_TELEMETRY_REDACTION_SCOPE: &str = "public";
 const CUTOVER_GATE_STATUS_METRIC_NAME: &str = "fcp_cutover_gate_status";
+const HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION: &str = "fcp-host-cutover-gates/v1";
 const MESH_CUTOVER_GATE_IDS: [&str; 4] = [
     "mesh-inventory-placement",
     "mesh-lifecycle-state-replication",
@@ -8280,6 +9730,20 @@ fn annotate_cutover_gates_with_live_telemetry(
 fn parse_direct_cutover_gate_snapshot(
     snapshot: &Value,
 ) -> std::result::Result<Vec<mesh_cmd::MeshCutoverGate>, String> {
+    let schema_version = snapshot
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "direct cutover-gate snapshot is missing `schema_version`; expected `{HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION}`"
+            )
+        })?;
+    if schema_version != HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION {
+        return Err(format!(
+            "direct cutover-gate snapshot schema_version `{schema_version}` does not match expected `{HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION}`"
+        ));
+    }
+
     let gates_value = snapshot
         .get("gates")
         .cloned()
@@ -8309,6 +9773,17 @@ fn parse_direct_cutover_gate_snapshot(
         return Err(format!(
             "direct cutover-gate snapshot gate ids {:?} do not match expected {:?}",
             actual_ids, expected_ids
+        ));
+    }
+
+    let snapshot_overall_status = snapshot
+        .get("overall_status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "direct cutover-gate snapshot is missing `overall_status`".to_owned())?;
+    let computed_overall_status = mesh_cmd::cutover_gate_overall_status(&gates).tag();
+    if snapshot_overall_status != computed_overall_status {
+        return Err(format!(
+            "direct cutover-gate snapshot overall_status `{snapshot_overall_status}` does not match gate records `{computed_overall_status}`"
         ));
     }
 
@@ -8567,6 +10042,11 @@ fn mesh_live_availability_fact(status: &HostConnectorAdminStatus) -> Value {
         .as_ref()
         .and_then(|artifact| artifact.placement.as_ref())
         .is_some();
+    let mesh_placement_explanation = if placement_tracked {
+        "A placement policy was recorded with the artifact, but the host route does not yet expose live replica coverage telemetry for the mesh-inventory-placement cutover gate."
+    } else {
+        "No placement policy was recorded, and the host route does not expose live replica coverage telemetry for the mesh-inventory-placement cutover gate."
+    };
     let source_state = status.artifact.as_ref().map_or(Value::Null, |artifact| {
         Value::String(artifact_source_kind_tag(artifact.provenance.source_kind.clone()).to_owned())
     });
@@ -8577,6 +10057,15 @@ fn mesh_live_availability_fact(status: &HostConnectorAdminStatus) -> Value {
         "observed_state": status.observed_state,
         "artifact_recorded": status.artifact.is_some(),
         "placement_tracked": placement_tracked,
+        "mesh_placement": {
+            "policy_recorded": placement_tracked,
+            "replica_telemetry_available": false,
+            "has_mesh_replica": null,
+            "replica_count": null,
+            "cutover_gate_eligible": false,
+            "cutover_gate_id": "mesh-inventory-placement",
+            "explanation": mesh_placement_explanation,
+        },
         "source_state": source_state,
         "silent_fallback": false,
         "explanation": match status.observed_state {
@@ -9104,7 +10593,7 @@ fn mesh_availability_dispatch(
             "Artifact provenance shows where the installed runtime bundle came from and whether hash/signature checks passed.".to_owned(),
             "Per-zone mesh inventory is still unavailable on the live host API, so node/zone-specific placement cannot be proven on this route yet.".to_owned(),
         ]);
-        let mut payload = serde_json::to_value(build_mesh_live_operator_contract(
+        let contract = build_mesh_live_operator_contract(
             &subcommand,
             &host.endpoint,
             connector,
@@ -9112,8 +10601,19 @@ fn mesh_availability_dispatch(
             &status,
             message,
             explanation,
-        ))?;
+        );
+        let truth_source = contract.resolution.operator_knowledge_state();
+        if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+            "mesh",
+            subcommand,
+            args.require_source,
+            truth_source,
+        ) {
+            return Ok(outcome);
+        }
+        let mut payload = serde_json::to_value(contract)?;
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, truth_source);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -9165,7 +10665,7 @@ fn mesh_availability_dispatch(
         "Workspace manifests can tell you what the connector declares, but not whether a live host has installed it or whether mesh placement currently satisfies offline SLOs.".to_owned(),
         "Use the same command with `--host <endpoint>` when you need authoritative host-backed runtime truth.".to_owned(),
     ]);
-    let mut payload = serde_json::to_value(build_mesh_offline_operator_contract(
+    let contract = build_mesh_offline_operator_contract(
         &subcommand,
         connector,
         &args.connector,
@@ -9175,8 +10675,19 @@ fn mesh_availability_dispatch(
         &mirror_path,
         message,
         explanation,
-    ))?;
+    );
+    let truth_source = contract.resolution.operator_knowledge_state();
+    if let Some(outcome) = enforce_required_truth_source_with_subcommand(
+        "mesh",
+        subcommand,
+        args.require_source,
+        truth_source,
+    ) {
+        return Ok(outcome);
+    }
+    let mut payload = serde_json::to_value(contract)?;
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, truth_source);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -9227,6 +10738,7 @@ fn mesh_status_dispatch(_args: &MeshStatusArgs) -> Result<DispatchOutcome> {
     });
     payload["warnings"] = json!(warnings);
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -9278,6 +10790,7 @@ fn mesh_nodes_dispatch(args: &MeshNodesArgs) -> Result<DispatchOutcome> {
     });
     payload["warnings"] = json!(warnings);
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -9340,6 +10853,7 @@ fn mesh_use_dispatch(args: &MeshUseArgs) -> Result<DispatchOutcome> {
         ]);
     }
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -9392,6 +10906,7 @@ fn mesh_target_dispatch(args: &MeshTargetArgs) -> Result<DispatchOutcome> {
             ],
         });
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -9472,6 +10987,7 @@ fn mesh_target_dispatch(args: &MeshTargetArgs) -> Result<DispatchOutcome> {
             ],
         });
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -9516,6 +11032,7 @@ fn mesh_target_dispatch(args: &MeshTargetArgs) -> Result<DispatchOutcome> {
             ],
         });
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -9699,7 +11216,15 @@ fn mesh_known_nodes(state: &MeshTargetState, default_zone: Option<&str>) -> Vec<
 #[allow(clippy::too_many_lines)]
 fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
     match &args.command {
-        ContextCommand::List => {
+        ContextCommand::List(args) => {
+            if let Some(outcome) = enforce_required_truth_source(
+                "context list",
+                args.require_source,
+                KnowledgeState::NodeLocal,
+            ) {
+                return Ok(outcome);
+            }
+
             let (path, config) = load_context_config()?;
             let contexts = config
                 .contexts
@@ -9731,12 +11256,21 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 ],
             });
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::NodeLocal);
             Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
             })
         }
-        ContextCommand::Current => {
+        ContextCommand::Current(args) => {
+            if let Some(outcome) = enforce_required_truth_source(
+                "context current",
+                args.require_source,
+                KnowledgeState::NodeLocal,
+            ) {
+                return Ok(outcome);
+            }
+
             let (path, config) = load_context_config()?;
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "context");
             let mut payload = json!({
@@ -9758,6 +11292,7 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 ],
             });
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::NodeLocal);
             Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
@@ -10715,6 +12250,112 @@ fn agent_dispatch(args: &AgentArgs) -> Result<DispatchOutcome> {
     }
 }
 
+fn agent_bootstrap_dispatch(args: &AgentBootstrapArgs) -> Result<DispatchOutcome> {
+    let scope = if args.scope == "none" {
+        None
+    } else {
+        Some(args.scope.clone())
+    };
+    let ready_beads = agent_bootstrap::ready_beads_from_jsonl(Path::new(".beads/issues.jsonl"), 5)
+        .unwrap_or_default();
+    let opts = agent_bootstrap::BootstrapOpts {
+        scope,
+        ttl_seconds: args.ttl_seconds,
+        reason: args
+            .reason
+            .clone()
+            .or_else(|| Some("flywheel_connectors-angoc.6.2.1".to_owned())),
+        owner_email: std::env::var("FWC_OPERATOR_EMAIL").ok(),
+        dry_run: args.dry_run,
+        agent_mail_reachable: std::env::var("FWC_AGENT_BOOTSTRAP_AGENT_MAIL")
+            .map_or(true, |value| value != "unreachable"),
+        agent_name_prefix: std::env::var("AGENT_NAME").ok(),
+        ready_beads,
+        now: Utc::now(),
+        state_path: std::env::var("FWC_AGENT_BOOTSTRAP_STATE")
+            .ok()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from),
+    };
+
+    match agent_bootstrap::run(&args.name, &opts) {
+        Ok(report) => {
+            let exit_code = match report.exit_code {
+                0 => CliExitCode::Success,
+                4 => CliExitCode::AmbiguousCorrection,
+                5 => CliExitCode::Validation,
+                _ => CliExitCode::Validation,
+            };
+            let mut payload = serde_json::to_value(&report)?;
+            payload["command"] = json!("agent-bootstrap");
+            payload["subcommand"] = json!("run");
+            payload["next_actions"] = json!([
+                format!(
+                    "AGENT_NAME={} git commit --only <owned-paths> -m '<bead-id>: <summary>'",
+                    args.name
+                ),
+                "After selecting a bead, send a start message with thread_id=<bead-id> when Agent Mail is reachable.",
+                "On closeout, cite accepted_remote_proof rows in the Beads reason; keep the bead open for refused_local_fallback, infra_blocked, failed_closed, not_proof, or dry-run-only proof plans.",
+                "Run `br close <id> --reason <reason>` and `br sync --flush-only` only when the Beads write path is available.",
+            ]);
+            Ok(DispatchOutcome { payload, exit_code })
+        }
+        Err(agent_bootstrap::AgentBootstrapError::IdentityConflict {
+            name,
+            existing_owner,
+            requested_owner,
+        }) => Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "agent-bootstrap",
+                "subcommand": "run",
+                "error": {
+                    "type": "identity-conflict",
+                    "message": format!(
+                        "Agent `{name}` is already registered by `{existing_owner}`, not `{requested_owner}`."
+                    ),
+                    "recoverable": false,
+                },
+                "agent_name": name,
+                "existing_owner": existing_owner,
+                "requested_owner": requested_owner,
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        }),
+        Err(agent_bootstrap::AgentBootstrapError::InvalidAgentName { name }) => {
+            Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "agent-bootstrap",
+                    "subcommand": "run",
+                    "error": {
+                        "type": "invalid-agent-name",
+                        "message": format!("Invalid agent name `{name}`; expected PascalCase."),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        "Use a PascalCase two-word agent persona such as `GreenLake`.",
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            })
+        }
+        Err(error) => Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "agent-bootstrap",
+                "subcommand": "run",
+                "error": {
+                    "type": "bootstrap-state-error",
+                    "message": error.to_string(),
+                    "recoverable": true,
+                },
+            }),
+            exit_code: CliExitCode::Internal,
+        }),
+    }
+}
+
 fn parse_coord_agent_id(
     raw: &str,
     subcommand: &str,
@@ -10935,6 +12576,7 @@ fn search_dispatch_host(args: &SearchArgs, host: &str) -> Result<DispatchOutcome
         catalog::DiscoveryDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -10945,12 +12587,25 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("search"));
+            let mut outcome = conflicting_catalog_mode_dispatch("search");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) =
+            enforce_required_truth_source("search", args.require_source, KnowledgeState::HostBacked)
+        {
+            return Ok(outcome);
+        }
         return search_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("search", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "search",
             json!({
                 "query": &args.query,
@@ -10965,12 +12620,21 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
                     "idempotent": args.idempotent,
                     "include_hidden": args.include_hidden,
                 },
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 "fwc search <query> --host <endpoint>".to_owned(),
                 "fwc search <query> --offline".to_owned(),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("search", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     let catalog = DiscoveryCatalog::load_for_connector_filter(args.connector.as_deref())?;
@@ -11027,6 +12691,24 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
     .into_iter()
     .flatten()
     .collect();
+    let cache_key = offline_manifest_set_cache_key(
+        "search",
+        catalog.connectors().iter(),
+        "json",
+        &json!({
+            "query": &args.query,
+            "connector": &args.connector,
+            "capability": &args.capability,
+            "risk": &args.risk,
+            "safety": &args.safety,
+            "archetype": &args.archetype,
+            "category": &args.category,
+            "zone": &args.zone,
+            "idempotent": args.idempotent,
+            "include_hidden": args.include_hidden,
+            "limit": args.limit,
+        }),
+    )?;
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "search");
     let mut payload = json!({
@@ -11052,7 +12734,9 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
         "search",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -11063,21 +12747,43 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("show"));
+            let mut outcome = conflicting_catalog_mode_dispatch("show");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) =
+            enforce_required_truth_source("show", args.require_source, KnowledgeState::HostBacked)
+        {
+            return Ok(outcome);
+        }
         return show_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("show", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "show",
             json!({
                 "connector": &args.connector,
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 format!("fwc show {} --host <endpoint>", args.connector),
                 format!("fwc show {} --offline", args.connector),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("show", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     // Try the exact-slug fast path first, but fall back to the full catalog so
@@ -11093,11 +12799,9 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "show",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("show", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     };
     let preview = connector
@@ -11121,6 +12825,14 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
         || "<operation>".to_owned(),
         |operation| operation.preferred_selector.clone(),
     );
+    let cache_key = offline_connector_cache_key(
+        "show",
+        connector,
+        "json",
+        &json!({
+            "requested_connector": &args.connector,
+        }),
+    )?;
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "show");
     let mut payload = serde_json::to_value(build_offline_show_operator_contract(
         connector,
@@ -11130,6 +12842,8 @@ fn show_dispatch(args: &ShowArgs, host: Option<&str>) -> Result<DispatchOutcome>
         &example_operation,
     ))?;
     envelope.inject_into(&mut payload);
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -11140,24 +12854,46 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("ops"));
+            let mut outcome = conflicting_catalog_mode_dispatch("ops");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) =
+            enforce_required_truth_source("ops", args.require_source, KnowledgeState::HostBacked)
+        {
+            return Ok(outcome);
+        }
         return ops_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("ops", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "ops",
             json!({
                 "connector": &args.connector,
                 "filters": {
                     "risk_at_most": args.risk_at_most,
                 },
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 format!("fwc ops {} --host <endpoint>", args.connector),
                 format!("fwc ops {} --offline", args.connector),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("ops", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     // Try the exact-slug fast path first, but fall back to the full catalog so
@@ -11173,11 +12909,9 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "ops",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("ops", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     };
     let slug = connector.slug.clone();
@@ -11187,6 +12921,15 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
         .filter(|operation| risk_filter_allows(operation, args.risk_at_most.as_deref()))
         .map(operation_summary_entry)
         .collect::<Vec<_>>();
+    let cache_key = offline_connector_cache_key(
+        "ops",
+        connector,
+        "json",
+        &json!({
+            "requested_connector": &args.connector,
+            "risk_at_most": &args.risk_at_most,
+        }),
+    )?;
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "ops");
     let mut payload = json!({
@@ -11214,7 +12957,9 @@ fn ops_dispatch(args: &OpsArgs, host: Option<&str>) -> Result<DispatchOutcome> {
         "ops",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -11226,12 +12971,25 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("schema"));
+            let mut outcome = conflicting_catalog_mode_dispatch("schema");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) =
+            enforce_required_truth_source("schema", args.require_source, KnowledgeState::HostBacked)
+        {
+            return Ok(outcome);
+        }
         return schema_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("schema", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "schema",
             json!({
                 "connector": &args.connector,
@@ -11240,6 +12998,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 "required_only": args.required_only,
                 "examples": args.examples,
                 "scaffold": args.scaffold,
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 format!(
@@ -11248,7 +13007,15 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 ),
                 format!("fwc schema {} <operation> --offline", args.connector),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("schema", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     // Try the exact-slug fast path first, but fall back to the full catalog so
@@ -11264,24 +13031,33 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "schema",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("schema", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     };
+    let cache_key = offline_connector_cache_key(
+        "schema",
+        connector,
+        "json",
+        &json!({
+            "requested_connector": &args.connector,
+            "operation": &args.operation,
+            "field": &args.field,
+            "required_only": args.required_only,
+            "examples": args.examples,
+            "scaffold": args.scaffold,
+        }),
+    )?;
 
     if let Some(operation_selector) = args.operation.as_deref() {
         let operation = match connector.resolve_operation(operation_selector) {
             Ok(operation) => operation,
             Err(error) => {
-                return Ok(operation_resolution_dispatch(
-                    "schema",
-                    connector,
-                    operation_selector,
-                    &error,
-                ));
+                let mut outcome =
+                    operation_resolution_dispatch("schema", connector, operation_selector, &error);
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+                return Ok(outcome);
             }
         };
 
@@ -11304,7 +13080,9 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 "schema",
                 catalog::DiscoveryDataSource::WorkspaceManifest,
             );
+            attach_metadata_cache_evidence(&mut payload, &cache_key, false);
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
             return Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
@@ -11354,7 +13132,9 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 "schema",
                 catalog::DiscoveryDataSource::WorkspaceManifest,
             );
+            attach_metadata_cache_evidence(&mut payload, &cache_key, false);
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
             return Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
@@ -11405,7 +13185,9 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
             "schema",
             catalog::DiscoveryDataSource::WorkspaceManifest,
         );
+        attach_metadata_cache_evidence(&mut payload, &cache_key, false);
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -11436,7 +13218,9 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
         "schema",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -11447,16 +13231,32 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("examples"));
+            let mut outcome = conflicting_catalog_mode_dispatch("examples");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) = enforce_required_truth_source(
+            "examples",
+            args.require_source,
+            KnowledgeState::HostBacked,
+        ) {
+            return Ok(outcome);
+        }
         return examples_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("examples", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "examples",
             json!({
                 "connector": &args.connector,
                 "operation": args.operation,
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 format!(
@@ -11465,7 +13265,15 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
                 ),
                 format!("fwc examples {} <operation> --offline", args.connector),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("examples", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     // Try the exact-slug fast path first, but fall back to the full catalog so
@@ -11481,24 +13289,33 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "examples",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("examples", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     };
+    let cache_key = offline_connector_cache_key(
+        "examples",
+        connector,
+        "json",
+        &json!({
+            "requested_connector": &args.connector,
+            "operation": &args.operation,
+        }),
+    )?;
 
     if let Some(operation_selector) = args.operation.as_deref() {
         let operation = match connector.resolve_operation(operation_selector) {
             Ok(operation) => operation,
             Err(error) => {
-                return Ok(operation_resolution_dispatch(
+                let mut outcome = operation_resolution_dispatch(
                     "examples",
                     connector,
                     operation_selector,
                     &error,
-                ));
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+                return Ok(outcome);
             }
         };
 
@@ -11534,7 +13351,9 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
             "examples",
             catalog::TemplateDataSource::WorkspaceManifest,
         );
+        attach_metadata_cache_evidence(&mut payload, &cache_key, false);
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -11587,7 +13406,9 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
         "examples",
         catalog::TemplateDataSource::WorkspaceManifest,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -11595,19 +13416,113 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
 }
 
 fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let uses_local_doctor_source = matches!(
+        args.check,
+        Some(
+            DoctorLocalCheck::Lean | DoctorLocalCheck::Migration | DoctorLocalCheck::RealityCadence
+        )
+    ) || args.probe.is_some()
+        || args.command.is_some();
+    if uses_local_doctor_source {
+        if let Some(outcome) =
+            enforce_required_truth_source("doctor", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+    }
+
+    if matches!(args.check, Some(DoctorLocalCheck::Audit)) {
+        return doctor_audit_dispatch(args, explicit_host);
+    }
+
+    if matches!(args.check, Some(DoctorLocalCheck::Lean)) {
+        return doctor_lean_dispatch();
+    }
+
+    if matches!(args.check, Some(DoctorLocalCheck::Migration)) {
+        return doctor_migration_probe_dispatch();
+    }
+
+    if matches!(args.check, Some(DoctorLocalCheck::RealityCadence)) {
+        return doctor_reality_cadence_dispatch();
+    }
+
+    if matches!(args.probe, Some(DoctorProbe::Hlc)) {
+        return doctor_hlc_probe_dispatch();
+    }
+
+    if matches!(args.probe, Some(DoctorProbe::Iblt)) {
+        return doctor_iblt_probe_dispatch();
+    }
+
+    if matches!(args.probe, Some(DoctorProbe::Migration)) {
+        return doctor_migration_probe_dispatch();
+    }
+
+    if matches!(args.probe, Some(DoctorProbe::SwarmPressure)) {
+        return doctor_swarm_pressure_probe_dispatch(args, explicit_host);
+    }
+
+    if let Some(command) = &args.command {
+        return doctor_subcommand_dispatch(command);
+    }
+
+    let Some(zone_arg) = args.zone.as_deref() else {
+        if let Some(outcome) =
+            enforce_required_truth_source("doctor", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "doctor",
+                "error": {
+                    "type": "missing-zone",
+                    "message": "`fwc doctor` requires `--zone` unless a local check or doctor subcommand such as `self-test` is used.",
+                    "recoverable": true,
+                },
+                "details": serde_json::to_value(args)?,
+                "next_actions": [
+                    "fwc doctor --zone z:work --host <endpoint>",
+                    "fwc doctor lean",
+                    "fwc doctor self-test --fixture crates/fwc/fixtures/healthy_env",
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        };
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    };
+
     let Some(host) = resolve_host_config(explicit_host)? else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("doctor", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "doctor",
             serde_json::to_value(args)?,
             vec![
-                format!("fwc doctor --zone {} --host <endpoint>", args.zone),
+                format!("fwc doctor --zone {zone_arg} --host <endpoint>"),
                 "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
                     .to_owned(),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
     };
+    if let Some(outcome) =
+        enforce_required_truth_source("doctor", args.require_source, KnowledgeState::HostBacked)
+    {
+        return Ok(outcome);
+    }
+
     if args.self_check && args.connector.is_empty() {
-        return Ok(DispatchOutcome {
+        let mut outcome = DispatchOutcome {
             payload: json!({
                 "status": "error",
                 "command": "doctor",
@@ -11618,28 +13533,30 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
                 },
                 "details": serde_json::to_value(args)?,
                 "next_actions": [
-                    format!("fwc doctor --zone {} --connector <connector> --host {}", args.zone, host.endpoint),
+                    format!("fwc doctor --zone {zone_arg} --connector <connector> --host {}", host.endpoint),
                     format!("fwc list --host {}", host.endpoint),
                 ],
             }),
             exit_code: CliExitCode::Validation,
-        });
+        };
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+        return Ok(outcome);
     }
 
-    let zone = match args.zone.parse::<ZoneId>() {
+    let zone = match zone_arg.parse::<ZoneId>() {
         Ok(zone) => zone,
         Err(error) => {
-            return Ok(DispatchOutcome {
+            let mut outcome = DispatchOutcome {
                 payload: json!({
                     "status": "error",
                     "command": "doctor",
                     "error": {
                         "type": "invalid-zone",
-                        "message": format!("`{}` is not a valid zone id: {error}", args.zone),
+                        "message": format!("`{zone_arg}` is not a valid zone id: {error}"),
                         "recoverable": true,
                     },
                     "details": {
-                        "zone": &args.zone,
+                        "zone": zone_arg,
                     },
                     "next_actions": [
                         format!("fwc doctor --zone z:work --host {}", host.endpoint),
@@ -11647,7 +13564,9 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
                     ],
                 }),
                 exit_code: CliExitCode::Validation,
-            });
+            };
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
 
@@ -11659,7 +13578,11 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         for selector in &args.connector {
             let connector = match catalog.resolve_connector(selector) {
                 Ok(connector) => connector,
-                Err(error) => return Ok(connector_resolution_dispatch("doctor", selector, &error)),
+                Err(error) => {
+                    let mut outcome = connector_resolution_dispatch("doctor", selector, &error);
+                    inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                    return Ok(outcome);
+                }
             };
             requested_connectors.push(json!({
                 "selector": selector,
@@ -11740,8 +13663,8 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
     }
     if !auto_fixes.is_empty() && !args.fix {
         next_actions.push(format!(
-            "fwc doctor --zone {} --all --fix --host {}",
-            args.zone, host.endpoint
+            "fwc doctor --zone {zone_arg} --all --fix --host {}",
+            host.endpoint
         ));
     }
 
@@ -11784,6 +13707,1267 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         })],
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+const AUDIT_DOCTOR_SCHEMA_VERSION: &str = "fcp.fwc.doctor.audit.v1";
+
+#[derive(Debug, Serialize)]
+struct AuditDoctorReport {
+    schema_version: &'static str,
+    healthy: bool,
+    coverage_scope: &'static str,
+    chain_status: Value,
+    checks: Vec<AuditDoctorCheck>,
+    deferred_checks: Vec<AuditDoctorDeferredCheck>,
+    warnings: Vec<String>,
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditDoctorCheck {
+    id: &'static str,
+    status: &'static str,
+    observed: Value,
+    target: Value,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditDoctorDeferredCheck {
+    id: &'static str,
+    reason: &'static str,
+    command: &'static str,
+}
+
+fn doctor_audit_dispatch(
+    args: &DoctorArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let (report, truth_source) = doctor_audit_report(args, explicit_host)?;
+    if let Some(outcome) =
+        enforce_required_truth_source("doctor", args.require_source, truth_source)
+    {
+        return Ok(outcome);
+    }
+
+    let status = if report.healthy { "ok" } else { "degraded" };
+    let exit_code = if report.healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+    let source = if matches!(truth_source, KnowledgeState::HostBacked) {
+        "host-audit-chain-status"
+    } else {
+        "local-audit-artifact"
+    };
+    let message = if report.healthy && matches!(truth_source, KnowledgeState::HostBacked) {
+        "Live audit-chain status meets the operator doctor thresholds."
+    } else if report.healthy {
+        "Audit-chain status artifact meets the operator doctor thresholds."
+    } else if matches!(truth_source, KnowledgeState::HostBacked) {
+        "Live audit-chain status is missing, stale, or below operator doctor thresholds."
+    } else {
+        "Audit-chain status artifact is missing, stale, or below operator doctor thresholds."
+    };
+    let availability = if matches!(truth_source, KnowledgeState::HostBacked) {
+        CommandAvailability::LiveRuntime
+    } else {
+        CommandAvailability::OfflineArtifact
+    };
+    let next_actions = vec![
+        report
+            .commands
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "fwc audit chain status --json".to_owned()),
+        "Run fwc telemetry otlp-readiness when validating the deferred OTLP collector portion of Phase M."
+            .to_owned(),
+        "Refresh quorum-signed audit-chain head artifacts when freshness or signer thresholds fail."
+            .to_owned(),
+    ];
+    let envelope = CommandEnvelope::new(availability, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "check": "audit",
+        "source": source,
+        "message": message,
+        "healthy": report.healthy,
+        "coverage_scope": report.coverage_scope,
+        "report": &report,
+        "next_actions": next_actions,
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, truth_source);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn doctor_audit_report(
+    args: &DoctorArgs,
+    explicit_host: Option<&str>,
+) -> Result<(AuditDoctorReport, KnowledgeState)> {
+    let now_unix_secs = args
+        .audit_now_unix_secs
+        .unwrap_or_else(|| u64::try_from(Utc::now().timestamp()).unwrap_or_default());
+    let chain_args = audit_chain::ChainStatusArgs {
+        head: args.audit_head.clone(),
+        events: args.audit_events.clone(),
+        zone: args.zone.clone(),
+        max_age_seconds: args.audit_max_age_seconds,
+        now_unix_secs: Some(now_unix_secs),
+        json: true,
+        require_source: None,
+    };
+    let (chain_status, truth_source) = audit_chain::build_chain_status_report_resolving_host(
+        &chain_args,
+        now_unix_secs,
+        explicit_host,
+    )?;
+    let chain_status_payload = serde_json::to_value(&chain_status)
+        .context("failed to serialize audit chain status report for doctor")?;
+    let schema_ok = chain_status.schema_version() == audit_chain::AUDIT_CHAIN_STATUS_SCHEMA_VERSION;
+    let freshness_ok = chain_status.status().is_healthy();
+    let checkpoint_ok = chain_status.quorum_signed_checkpoints() >= 1;
+    let signers_ok = chain_status.quorum_signers() >= args.audit_min_quorum_signers;
+    let hlc_drift_ok = chain_status
+        .hlc_physical_drift_ms()
+        .is_some_and(|drift| drift <= args.audit_max_hlc_drift_ms);
+
+    let checks = vec![
+        audit_doctor_check(
+            "audit_chain_status_schema",
+            schema_ok,
+            json!({"schema_version": chain_status.schema_version()}),
+            json!({"schema_version": audit_chain::AUDIT_CHAIN_STATUS_SCHEMA_VERSION}),
+            "audit chain status uses the expected schema".to_owned(),
+        ),
+        audit_doctor_check(
+            "audit_chain_freshness",
+            freshness_ok,
+            json!({"status": chain_status.status().to_string()}),
+            json!({"status": "fresh", "max_age_seconds": args.audit_max_age_seconds}),
+            "audit chain head is fresh enough for operator diagnosis".to_owned(),
+        ),
+        audit_doctor_check(
+            "quorum_signed_checkpoint",
+            checkpoint_ok,
+            json!({"quorum_signed_checkpoints": chain_status.quorum_signed_checkpoints()}),
+            json!({"quorum_signed_checkpoints_min": 1}),
+            "at least one quorum-signed checkpoint is present".to_owned(),
+        ),
+        audit_doctor_check(
+            "quorum_signers",
+            signers_ok,
+            json!({"quorum_signers": chain_status.quorum_signers()}),
+            json!({"quorum_signers_min": args.audit_min_quorum_signers}),
+            "quorum signer count meets the configured zone threshold".to_owned(),
+        ),
+        audit_doctor_check(
+            "hlc_physical_drift",
+            hlc_drift_ok,
+            json!({"hlc_physical_drift_ms": chain_status.hlc_physical_drift_ms()}),
+            json!({"hlc_physical_drift_ms_max": args.audit_max_hlc_drift_ms}),
+            "audit-chain HLC physical drift is within the operator threshold".to_owned(),
+        ),
+    ];
+    let healthy = checks.iter().all(|check| check.status == "pass");
+    let commands = vec![
+        audit_doctor_chain_status_command(args, explicit_host, truth_source),
+        "fwc telemetry otlp-readiness --json".to_owned(),
+        "fwc audit explain --bundle <bundle.json> --json".to_owned(),
+    ];
+    let coverage_scope = if matches!(truth_source, KnowledgeState::HostBacked) {
+        "live-host-audit-chain-status"
+    } else {
+        "audit-chain-status-artifact"
+    };
+
+    Ok((
+        AuditDoctorReport {
+            schema_version: AUDIT_DOCTOR_SCHEMA_VERSION,
+            healthy,
+            coverage_scope,
+            chain_status: chain_status_payload,
+            warnings: chain_status.warnings().to_vec(),
+            checks,
+            deferred_checks: audit_doctor_deferred_checks(truth_source),
+            commands,
+        },
+        truth_source,
+    ))
+}
+
+fn audit_doctor_check(
+    id: &'static str,
+    pass: bool,
+    observed: Value,
+    target: Value,
+    message: String,
+) -> AuditDoctorCheck {
+    AuditDoctorCheck {
+        id,
+        status: if pass { "pass" } else { "fail" },
+        observed,
+        target,
+        message,
+    }
+}
+
+fn audit_doctor_chain_status_command(
+    args: &DoctorArgs,
+    explicit_host: Option<&str>,
+    truth_source: KnowledgeState,
+) -> String {
+    if matches!(truth_source, KnowledgeState::HostBacked) {
+        let mut command = String::from("fwc");
+        if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+            command.push_str(" --host ");
+            command.push_str(host);
+        }
+        command.push_str(" audit chain status");
+        if let Some(zone) = args
+            .zone
+            .as_deref()
+            .map(str::trim)
+            .filter(|zone| !zone.is_empty())
+        {
+            command.push_str(" --zone ");
+            command.push_str(zone);
+        }
+        command.push_str(" --max-age-seconds ");
+        command.push_str(&args.audit_max_age_seconds.to_string());
+        command.push_str(" --require-source any-live --json");
+        return command;
+    }
+
+    let head = args
+        .audit_head
+        .as_ref()
+        .map_or("<head.json>".to_owned(), |path| path.display().to_string());
+    let events = args
+        .audit_events
+        .as_ref()
+        .map_or("<events.json>".to_owned(), |path| {
+            path.display().to_string()
+        });
+    format!("fwc audit chain status --head {head} --events {events} --json")
+}
+
+fn audit_doctor_deferred_checks(truth_source: KnowledgeState) -> Vec<AuditDoctorDeferredCheck> {
+    let artifact_only = !matches!(truth_source, KnowledgeState::HostBacked);
+    vec![
+        AuditDoctorDeferredCheck {
+            id: "otlp_collector",
+            reason: if artifact_only {
+                "validated by the telemetry readiness command, not by artifact-only doctor input"
+            } else {
+                "validated by the telemetry readiness command, not by the audit-chain status endpoint"
+            },
+            command: "fwc telemetry otlp-readiness --json",
+        },
+        AuditDoctorDeferredCheck {
+            id: "reservoir_compactor",
+            reason: if artifact_only {
+                "requires compactor runtime metadata that is not present in audit-chain status artifacts"
+            } else {
+                "requires compactor runtime metadata that is not exposed by host audit-chain status yet"
+            },
+            command: "fwc audit chain status --json",
+        },
+        AuditDoctorDeferredCheck {
+            id: "cep_nfa_runtime",
+            reason: "requires live CEP runtime telemetry and anomaly-pattern state",
+            command: "fwc audit explain --bundle <bundle.json> --json",
+        },
+    ]
+}
+
+fn doctor_lean_dispatch() -> Result<DispatchOutcome> {
+    let root = readiness::workspace_root();
+    let report = doctor::lean_doctor_report(&root, true, true);
+    let status = if report.healthy { "ok" } else { "degraded" };
+    let exit_code = if report.healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "check": "lean",
+        "source": "local-workspace",
+        "message": if report.healthy {
+            "Lean formal-proof gate is healthy."
+        } else {
+            "Lean formal-proof gate has missing or failing evidence."
+        },
+        "workspace_root": root.display().to_string(),
+        "report": report,
+    });
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+const REALITY_CADENCE_SCHEMA_VERSION: &str = "fcp.fwc.doctor.reality_cadence.v1";
+
+#[derive(Debug, Serialize)]
+struct RealityCadenceDoctorReport {
+    schema_version: &'static str,
+    healthy: bool,
+    date: String,
+    month: String,
+    quarter: String,
+    current_month_reality_check: CadenceArtifactCheck,
+    current_quarter_claims_vs_reality: CadenceArtifactCheck,
+    readme_drift: ReadmeDriftDoctorReport,
+    drift_ignore: DriftIgnoreDoctorReport,
+    missing_artifacts: Vec<String>,
+    drift_count: u64,
+    commands: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct CadenceArtifactCheck {
+    expected: String,
+    present: bool,
+    matched_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadmeDriftDoctorReport {
+    script: String,
+    status: &'static str,
+    exit_code: Option<i32>,
+    drift_count: u64,
+    paths_checked: u64,
+    paths_missing: u64,
+    paths_ignored: u64,
+    symbols_checked: u64,
+    symbols_missing: u64,
+    symbols_ignored: u64,
+    stderr_preview: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DriftIgnoreDoctorReport {
+    path: String,
+    present: bool,
+    entry_count: usize,
+    invalid_entries: Vec<DriftIgnoreInvalidEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct DriftIgnoreInvalidEntry {
+    line: usize,
+    reason: String,
+}
+
+fn doctor_reality_cadence_dispatch() -> Result<DispatchOutcome> {
+    let root = readiness::workspace_root();
+    let report = doctor_reality_cadence_report(&root, Utc::now().date_naive())?;
+    let status = if report.healthy { "ok" } else { "degraded" };
+    let exit_code = if report.healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+    let message = if report.healthy {
+        "Reality-check cadence artifacts and README drift hygiene are healthy."
+    } else {
+        "Reality-check cadence has missing artifacts or README drift findings."
+    };
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "check": "reality-cadence",
+        "source": "local-workspace",
+        "message": message,
+        "workspace_root": root.display().to_string(),
+        "healthy": report.healthy,
+        "missing_artifacts": &report.missing_artifacts,
+        "drift_count": report.drift_count,
+        "report": &report,
+        "next_actions": [
+            "Run /reality-check-for-project and persist docs/reality/<YYYY-MM>-reality-check.md when the monthly artifact is missing.",
+            "Publish docs/quarterly/<YYYY-QN>-claims-vs-reality.md when the quarterly artifact is missing.",
+            "Run bash scripts/ci/readme_drift_check.sh and fix or justify any README drift entries.",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn doctor_reality_cadence_report(
+    root: &Path,
+    today: NaiveDate,
+) -> Result<RealityCadenceDoctorReport> {
+    let month = format!("{:04}-{:02}", today.year(), today.month());
+    let quarter = calendar_quarter_key(today);
+    let monthly = current_month_reality_check(root, &month);
+    let quarterly = current_quarter_claims_vs_reality_check(root, &quarter);
+    let readme_drift = run_readme_drift_check(root);
+    let drift_ignore = check_readme_drift_ignore(root);
+
+    let mut missing_artifacts = Vec::new();
+    if !monthly.present {
+        missing_artifacts.push(monthly.expected.clone());
+    }
+    if !quarterly.present {
+        missing_artifacts.push(quarterly.expected.clone());
+    }
+    if !root.join(&readme_drift.script).is_file() {
+        missing_artifacts.push("scripts/ci/readme_drift_check.sh".to_owned());
+    }
+    missing_artifacts.extend(drift_ignore.invalid_entries.iter().map(|entry| {
+        format!(
+            "docs/.readme-drift-ignore:{} ({})",
+            entry.line, entry.reason
+        )
+    }));
+
+    let healthy = monthly.present
+        && quarterly.present
+        && readme_drift.status == "pass"
+        && readme_drift.drift_count == 0
+        && drift_ignore.invalid_entries.is_empty();
+
+    Ok(RealityCadenceDoctorReport {
+        schema_version: REALITY_CADENCE_SCHEMA_VERSION,
+        healthy,
+        date: today.to_string(),
+        month,
+        quarter,
+        current_month_reality_check: monthly,
+        current_quarter_claims_vs_reality: quarterly,
+        drift_count: readme_drift.drift_count,
+        readme_drift,
+        drift_ignore,
+        missing_artifacts,
+        commands: vec![
+            "fwc doctor reality-cadence --json",
+            "bash scripts/ci/readme_drift_check.sh",
+            "br ready --json",
+        ],
+    })
+}
+
+fn current_month_reality_check(root: &Path, month: &str) -> CadenceArtifactCheck {
+    let reality_dir = root.join("docs/reality");
+    let prefix = format!("{month}-");
+    let matched_path = std::fs::read_dir(&reality_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+        });
+
+    CadenceArtifactCheck {
+        expected: format!("docs/reality/{month}-*.md"),
+        present: matched_path.is_some(),
+        matched_path: matched_path.map(|path| relative_display(root, &path)),
+    }
+}
+
+fn current_quarter_claims_vs_reality_check(root: &Path, quarter: &str) -> CadenceArtifactCheck {
+    let expected = format!("docs/quarterly/{quarter}-claims-vs-reality.md");
+    let path = root.join(&expected);
+    CadenceArtifactCheck {
+        expected,
+        present: path.is_file(),
+        matched_path: path.is_file().then(|| relative_display(root, &path)),
+    }
+}
+
+fn calendar_quarter_key(date: NaiveDate) -> String {
+    let quarter = ((date.month() - 1) / 3) + 1;
+    format!("{}-Q{quarter}", date.year())
+}
+
+fn run_readme_drift_check(root: &Path) -> ReadmeDriftDoctorReport {
+    let script = root.join("scripts/ci/readme_drift_check.sh");
+    if !script.is_file() {
+        return ReadmeDriftDoctorReport {
+            script: relative_display(root, &script),
+            status: "error",
+            exit_code: None,
+            drift_count: 0,
+            paths_checked: 0,
+            paths_missing: 0,
+            paths_ignored: 0,
+            symbols_checked: 0,
+            symbols_missing: 0,
+            symbols_ignored: 0,
+            stderr_preview: "drift script is missing".to_owned(),
+        };
+    }
+
+    let output = Command::new("bash").arg(&script).current_dir(root).output();
+    let Ok(output) = output else {
+        return ReadmeDriftDoctorReport {
+            script: relative_display(root, &script),
+            status: "error",
+            exit_code: None,
+            drift_count: 0,
+            paths_checked: 0,
+            paths_missing: 0,
+            paths_ignored: 0,
+            symbols_checked: 0,
+            symbols_missing: 0,
+            symbols_ignored: 0,
+            stderr_preview: "failed to execute drift script".to_owned(),
+        };
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let log = stdout
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok());
+    let metric = |name: &str| -> u64 {
+        log.as_ref()
+            .and_then(|value| value.get(name))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    let paths_missing = metric("paths_missing");
+    let symbols_missing = metric("symbols_missing");
+    let drift_count = paths_missing + symbols_missing;
+    let status = if log.is_some() && output.status.success() && drift_count == 0 {
+        "pass"
+    } else {
+        "fail"
+    };
+
+    ReadmeDriftDoctorReport {
+        script: relative_display(root, &script),
+        status,
+        exit_code: output.status.code(),
+        drift_count,
+        paths_checked: metric("paths_checked"),
+        paths_missing,
+        paths_ignored: metric("paths_ignored"),
+        symbols_checked: metric("symbols_checked"),
+        symbols_missing,
+        symbols_ignored: metric("symbols_ignored"),
+        stderr_preview: preview_for_doctor(&stderr),
+    }
+}
+
+fn check_readme_drift_ignore(root: &Path) -> DriftIgnoreDoctorReport {
+    let path = root.join("docs/.readme-drift-ignore");
+    if !path.exists() {
+        return DriftIgnoreDoctorReport {
+            path: relative_display(root, &path),
+            present: false,
+            entry_count: 0,
+            invalid_entries: Vec::new(),
+        };
+    }
+
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut entry_count = 0;
+    let mut invalid_entries = Vec::new();
+    for (line_index, line) in raw.lines().enumerate() {
+        let line_no = line_index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, " -- ");
+        let selector = parts.next().unwrap_or_default().trim();
+        let justification = parts.next().unwrap_or_default().trim();
+        let has_supported_kind = selector.starts_with("path ") || selector.starts_with("symbol ");
+        if !has_supported_kind {
+            invalid_entries.push(DriftIgnoreInvalidEntry {
+                line: line_no,
+                reason: "entry must start with `path ` or `symbol `".to_owned(),
+            });
+        } else if justification.is_empty() {
+            invalid_entries.push(DriftIgnoreInvalidEntry {
+                line: line_no,
+                reason: "entry must include a non-empty justification after ` -- `".to_owned(),
+            });
+        } else {
+            entry_count += 1;
+        }
+    }
+
+    DriftIgnoreDoctorReport {
+        path: relative_display(root, &path),
+        present: true,
+        entry_count,
+        invalid_entries,
+    }
+}
+
+fn relative_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn preview_for_doctor(text: &str) -> String {
+    const MAX_PREVIEW_BYTES: usize = 512;
+    let compact = text.lines().take(8).collect::<Vec<_>>().join("\n");
+    if compact.len() <= MAX_PREVIEW_BYTES {
+        compact
+    } else {
+        let split_at = compact
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= MAX_PREVIEW_BYTES)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &compact[..split_at])
+    }
+}
+
+const HLC_PROBE_SKEW_WARN_MS: u64 = 2_000;
+const HLC_PROBE_HIERVV_SIZE_WARN_BYTES: usize = 4_096;
+const HLC_PROBE_COUNTER_WARN_WITHIN_1S: u32 = 1_000;
+
+fn doctor_swarm_pressure_probe_dispatch(
+    args: &DoctorArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let pressure_payload = swarm_evidence_cmd::pressure_with_host(
+        &swarm_evidence_cmd::SwarmPressureArgs {
+            fixture: args.swarm_pressure_fixture.clone(),
+            ..swarm_evidence_cmd::SwarmPressureArgs::default()
+        },
+        explicit_host,
+    )?;
+    let verdict = pressure_payload["verdict"]
+        .as_str()
+        .unwrap_or("yellow")
+        .to_owned();
+    let score = pressure_payload["pressure_score_0_100"]
+        .as_u64()
+        .unwrap_or(55);
+    let degraded_dependency_count = pressure_payload
+        .pointer("/telemetry_event/fields/degraded_dependency_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let recommended_agent_slots = pressure_payload["recommended_agent_slots"]
+        .as_u64()
+        .unwrap_or(0);
+    let recommended_cargo_lanes = pressure_payload["recommended_cargo_lanes"]
+        .as_u64()
+        .unwrap_or(0);
+    let healthy = verdict == "green";
+    let status = if healthy { "ok" } else { "warn" };
+    let message = if healthy {
+        "Swarm pressure is green; local resource-headroom thresholds are within doctor policy."
+    } else {
+        "Swarm pressure is not green; inspect degraded or warning signals before starting more work."
+    };
+    let warnings = if healthy {
+        Vec::new()
+    } else {
+        vec!["swarm_pressure_verdict_not_green"]
+    };
+    let exit_code = if healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "probe": "swarm-pressure",
+        "source": "local-swarm-pressure-probe",
+        "message": message,
+        "report": {
+            "schema_version": "fcp.fwc.doctor.swarm-pressure.v1",
+            "verdict": verdict,
+            "pressure_score_0_100": score,
+            "degraded_dependency_count": degraded_dependency_count,
+            "recommended_agent_slots": recommended_agent_slots,
+            "recommended_cargo_lanes": recommended_cargo_lanes,
+            "warnings": warnings,
+            "commands": [
+                "fwc swarm pressure --json",
+                "fwc doctor --probe swarm-pressure --json",
+                "rch status --json",
+            ],
+            "pressure": pressure_payload,
+        },
+        "next_actions": [
+            "fwc swarm pressure --json",
+            "fwc doctor --probe swarm-pressure --json",
+            "rch status --json",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+fn doctor_hlc_probe_dispatch() -> Result<DispatchOutcome> {
+    let report = doctor_hlc_probe_report()?;
+    let healthy = report.warnings.is_empty();
+    let status = if healthy { "ok" } else { "warn" };
+    let message = if healthy {
+        "HLC and HierVV local invariants are within doctor thresholds."
+    } else {
+        "HLC and HierVV local invariants crossed one or more doctor warning thresholds."
+    };
+    let exit_code = if healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "probe": "hlc",
+        "source": "local-algorithm-probe",
+        "message": message,
+        "report": {
+            "schema_version": "fcp.fwc.doctor.hlc.v1",
+            "metrics": {
+                "hlc_l_max": report.hlc_l_max,
+                "hlc_c_max": report.hlc_c_max,
+                "skew_observed_ms": report.skew_observed_ms,
+                "hiervv_size_bytes": report.hiervv_size_bytes,
+            },
+            "thresholds": {
+                "skew_observed_ms_warn": HLC_PROBE_SKEW_WARN_MS,
+                "hiervv_size_bytes_warn": HLC_PROBE_HIERVV_SIZE_WARN_BYTES,
+                "hlc_c_counter_within_1s_warn": HLC_PROBE_COUNTER_WARN_WITHIN_1S,
+            },
+            "warnings": report.warnings,
+            "commands": [
+                "fwc audit chain inspect --last 10",
+                "fwc mesh revocation freshness --zone <id>",
+            ],
+        },
+        "next_actions": [
+            "fwc audit chain inspect --last 10",
+            "fwc mesh revocation freshness --zone <id>",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+#[derive(Debug)]
+struct HlcDoctorProbeReport {
+    hlc_l_max: u64,
+    hlc_c_max: u32,
+    skew_observed_ms: u64,
+    hiervv_size_bytes: usize,
+    warnings: Vec<&'static str>,
+}
+
+fn doctor_hlc_probe_report() -> Result<HlcDoctorProbeReport> {
+    let mut clock = HybridLogicalClock::new("fwc-doctor-hlc");
+    let baseline_physical_ms = 1_700_000_000_000_u64;
+    let skewed_physical_ms = baseline_physical_ms.saturating_sub(500);
+
+    let first = clock.tick(baseline_physical_ms);
+    let second = clock.tick(skewed_physical_ms);
+    let third = clock.tick(skewed_physical_ms);
+    debug_assert!(second > first);
+    debug_assert!(third > second);
+
+    let hlc_l_max = first
+        .physical_ms
+        .max(second.physical_ms)
+        .max(third.physical_ms);
+    let hlc_c_max = first.logical.max(second.logical).max(third.logical);
+    let skew_observed_ms = baseline_physical_ms.saturating_sub(skewed_physical_ms);
+
+    let mut vector = HierarchicalVersionVector::new();
+    vector.set("z:doctor:hlc-probe", 42);
+    for index in 0..1024 {
+        debug_assert_eq!(
+            vector.counter_for(&format!("z:doctor:hlc-probe:zone-{index:04}")),
+            42
+        );
+    }
+    let hiervv_size_bytes = vector.canonical_len().map_err(anyhow::Error::msg)?;
+    let warnings = doctor_hlc_probe_warnings(hlc_c_max, skew_observed_ms, hiervv_size_bytes);
+
+    Ok(HlcDoctorProbeReport {
+        hlc_l_max,
+        hlc_c_max,
+        skew_observed_ms,
+        hiervv_size_bytes,
+        warnings,
+    })
+}
+
+fn doctor_hlc_probe_warnings(
+    hlc_c_max: u32,
+    skew_observed_ms: u64,
+    hiervv_size_bytes: usize,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if skew_observed_ms > HLC_PROBE_SKEW_WARN_MS {
+        warnings.push("skew_observed_ms_exceeds_2s");
+    }
+    if hiervv_size_bytes > HLC_PROBE_HIERVV_SIZE_WARN_BYTES {
+        warnings.push("hiervv_size_bytes_exceeds_4kb");
+    }
+    if hlc_c_max > HLC_PROBE_COUNTER_WARN_WITHIN_1S {
+        warnings.push("hlc_c_counter_exceeds_1000_within_1s");
+    }
+    warnings
+}
+
+const IBLT_PROBE_DECODE_P99_WARN_US: u64 = 20_000;
+const IBLT_PROBE_OVERFLOW_COUNT_WARN_1H: u64 = 5;
+const IBLT_PROBE_TARGET_FPR: f64 = 1.0e-4;
+const IBLT_PROBE_FPR_WARN_MULTIPLIER: f64 = 2.0;
+const IBLT_PROBE_SAMPLE_COUNT: usize = 32;
+const IBLT_PROBE_SHARED_OBJECTS: usize = 96;
+const IBLT_PROBE_FILTER_MEMBERS: usize = 1_000;
+const IBLT_PROBE_FILTER_QUERIES: usize = 10_000;
+
+fn doctor_iblt_probe_dispatch() -> Result<DispatchOutcome> {
+    let report = doctor_iblt_probe_report()?;
+    let healthy = report.warnings.is_empty();
+    let status = if healthy { "ok" } else { "warn" };
+    let message = if healthy {
+        "Masked IBLT and layered filter local invariants are within doctor thresholds."
+    } else {
+        "Masked IBLT or layered filter local invariants crossed one or more doctor warning thresholds."
+    };
+    let exit_code = if healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "probe": "iblt",
+        "source": "local-algorithm-probe",
+        "message": message,
+        "report": {
+            "schema_version": "fcp.fwc.doctor.iblt.v1",
+            "scheme_in_use": "masked",
+            "last_decode_p99_us": report.last_decode_p99_us,
+            "overflow_count_last_1h": report.overflow_count_last_1h,
+            "fpr_observed": report.fpr_observed,
+            "metrics": {
+                "last_decode_p99_us": report.last_decode_p99_us,
+                "overflow_count_last_1h": report.overflow_count_last_1h,
+                "fpr_observed": report.fpr_observed,
+                "decoded_change_count": report.decoded_change_count,
+                "filter_member_count": report.filter_member_count,
+                "filter_query_count": report.filter_query_count,
+            },
+            "thresholds": {
+                "last_decode_p99_us_warn": IBLT_PROBE_DECODE_P99_WARN_US,
+                "overflow_count_last_1h_warn": IBLT_PROBE_OVERFLOW_COUNT_WARN_1H,
+                "configured_fpr": IBLT_PROBE_TARGET_FPR,
+                "fpr_observed_warn": IBLT_PROBE_TARGET_FPR * IBLT_PROBE_FPR_WARN_MULTIPLIER,
+            },
+            "warnings": report.warnings,
+            "commands": [
+                "fwc mesh iblt resnap",
+                "fwc mesh peer demote --id <peer>",
+                "fwc doctor --probe iblt --json",
+            ],
+        },
+        "next_actions": [
+            "fwc mesh iblt resnap",
+            "fwc mesh peer demote --id <peer>",
+            "fwc doctor --probe iblt --json",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+#[derive(Debug)]
+struct IbltDoctorProbeReport {
+    last_decode_p99_us: u64,
+    overflow_count_last_1h: u64,
+    fpr_observed: f64,
+    decoded_change_count: usize,
+    filter_member_count: usize,
+    filter_query_count: usize,
+    warnings: Vec<&'static str>,
+}
+
+fn doctor_iblt_probe_report() -> Result<IbltDoctorProbeReport> {
+    let zone = "z:project:fwc-doctor-iblt-probe".parse::<ZoneId>()?;
+    let mask = IbltMask::for_zone(&zone);
+    let mut decode_samples_us = Vec::with_capacity(IBLT_PROBE_SAMPLE_COUNT);
+    let mut decoded_change_count = 0_usize;
+
+    for sample in 0..IBLT_PROBE_SAMPLE_COUNT {
+        let mut left = MaskedIblt::with_expected_difference(mask, 8);
+        let mut right = MaskedIblt::with_expected_difference(mask, 8);
+
+        for index in 0..IBLT_PROBE_SHARED_OBJECTS {
+            let object_id = doctor_iblt_probe_object_id(&format!("shared-{sample:02}-{index:04}"));
+            left.insert(object_id);
+            right.insert(object_id);
+        }
+
+        let left_only_a = doctor_iblt_probe_object_id(&format!("left-a-{sample:02}"));
+        let left_only_b = doctor_iblt_probe_object_id(&format!("left-b-{sample:02}"));
+        let right_only_a = doctor_iblt_probe_object_id(&format!("right-a-{sample:02}"));
+        let right_only_b = doctor_iblt_probe_object_id(&format!("right-b-{sample:02}"));
+        left.insert(left_only_a);
+        left.insert(left_only_b);
+        right.insert(right_only_a);
+        right.insert(right_only_b);
+
+        let started_at = std::time::Instant::now();
+        let decoded = left.subtract(&right)?.decode_complete()?;
+        let elapsed_us = started_at.elapsed().as_micros();
+        decode_samples_us.push(u64::try_from(elapsed_us).unwrap_or(u64::MAX));
+
+        debug_assert!(decoded.only_left.contains(&left_only_a));
+        debug_assert!(decoded.only_left.contains(&left_only_b));
+        debug_assert!(decoded.only_right.contains(&right_only_a));
+        debug_assert!(decoded.only_right.contains(&right_only_b));
+        decoded_change_count += decoded.only_left.len() + decoded.only_right.len();
+    }
+
+    decode_samples_us.sort_unstable();
+    let p99_index = decode_samples_us.len().saturating_sub(1);
+    let last_decode_p99_us = decode_samples_us.get(p99_index).copied().unwrap_or(0);
+
+    let filter_members = (0..IBLT_PROBE_FILTER_MEMBERS)
+        .map(|index| format!("member-{index:04}").into_bytes())
+        .collect::<Vec<_>>();
+    let filter_config = LayeredFilterConfig::default();
+    let filter = LayeredReconciliationFilter::from_items(
+        0x1b17_d0c7_0f1c_e001_u64,
+        filter_config,
+        filter_members.iter().map(Vec::as_slice),
+    );
+    for member in &filter_members {
+        debug_assert!(filter.may_contain(member));
+    }
+
+    let false_positive_count = (0..IBLT_PROBE_FILTER_QUERIES)
+        .filter(|index| filter.may_contain(format!("non-member-{index:04}").as_bytes()))
+        .count();
+    let false_positive_count =
+        u32::try_from(false_positive_count).expect("doctor probe query count fits u32");
+    let filter_query_count =
+        u32::try_from(IBLT_PROBE_FILTER_QUERIES).expect("doctor probe query count fits u32");
+    let fpr_observed = f64::from(false_positive_count) / f64::from(filter_query_count);
+    let overflow_count_last_1h = 0;
+    let warnings = doctor_iblt_probe_warnings(
+        last_decode_p99_us,
+        overflow_count_last_1h,
+        fpr_observed,
+        filter_config.target_fpr,
+    );
+
+    Ok(IbltDoctorProbeReport {
+        last_decode_p99_us,
+        overflow_count_last_1h,
+        fpr_observed,
+        decoded_change_count,
+        filter_member_count: filter.len(),
+        filter_query_count: IBLT_PROBE_FILTER_QUERIES,
+        warnings,
+    })
+}
+
+fn doctor_iblt_probe_object_id(label: &str) -> ObjectId {
+    ObjectId::from_unscoped_bytes(label.as_bytes())
+}
+
+fn doctor_iblt_probe_warnings(
+    last_decode_p99_us: u64,
+    overflow_count_last_1h: u64,
+    fpr_observed: f64,
+    configured_fpr: f64,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if last_decode_p99_us > IBLT_PROBE_DECODE_P99_WARN_US {
+        warnings.push("last_decode_p99_us_exceeds_20ms");
+    }
+    if overflow_count_last_1h > IBLT_PROBE_OVERFLOW_COUNT_WARN_1H {
+        warnings.push("overflow_count_last_1h_exceeds_5");
+    }
+    if fpr_observed > configured_fpr * IBLT_PROBE_FPR_WARN_MULTIPLIER {
+        warnings.push("fpr_observed_exceeds_2x_configured");
+    }
+    warnings
+}
+
+const MIGRATION_PROBE_PAGE_COUNT: u64 = 8;
+const MIGRATION_PROBE_PAGE_SIZE_BYTES: u64 = 4096;
+const MIGRATION_PROBE_BANDWIDTH_MIB_PER_SECOND: u64 = 100;
+const MIGRATION_PROBE_DIRTY_RATE_MIB_PER_SECOND: u64 = 85;
+const MIGRATION_PROBE_DIRTY_RATE_STOP_AND_CHECKPOINT_PCT: u8 = 80;
+const MIGRATION_PROBE_MAX_PRECOPY_ROUNDS: u8 = 5;
+const MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS: u64 = 100;
+
+fn doctor_migration_probe_dispatch() -> Result<DispatchOutcome> {
+    let report = doctor_migration_probe_report()?;
+    let healthy = report.warnings.is_empty();
+    let status = if healthy { "ok" } else { "warn" };
+    let message = if healthy {
+        "Migration local dirty-tracking, pre-copy, and post-copy thresholds are within doctor policy."
+    } else {
+        "Migration local probe crossed one or more doctor warning thresholds."
+    };
+    let exit_code = if healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "probe": "migration",
+        "source": "local-migration-probe",
+        "message": message,
+        "dirty_tracker_kernel_supports_soft_dirty": report.dirty_tracker_kernel_supports_soft_dirty,
+        "last_precopy_round_count": report.last_precopy_round_count,
+        "last_precopy_outcome": report.last_precopy_outcome,
+        "last_dirty_rate_pct": report.last_dirty_rate_pct,
+        "report": {
+            "schema_version": "fcp.fwc.doctor.migration.v1",
+            "dirty_tracker_kernel_supports_soft_dirty": report.dirty_tracker_kernel_supports_soft_dirty,
+            "dirty_tracker_mode": report.dirty_tracker_mode,
+            "last_precopy_round_count": report.last_precopy_round_count,
+            "last_precopy_outcome": report.last_precopy_outcome,
+            "last_dirty_rate_pct": report.last_dirty_rate_pct,
+            "postcopy_decision": report.postcopy_decision,
+            "postcopy_fallback": report.postcopy_fallback,
+            "metrics": {
+                "dirty_page_count": report.dirty_page_count,
+                "page_count": report.page_count,
+                "page_size_bytes": report.page_size_bytes,
+                "bandwidth_mib_per_second": MIGRATION_PROBE_BANDWIDTH_MIB_PER_SECOND,
+                "dirty_rate_mib_per_second": MIGRATION_PROBE_DIRTY_RATE_MIB_PER_SECOND,
+                "final_dirty_bytes": report.final_dirty_bytes,
+                "postcopy_timeout_ms": report.postcopy_timeout_ms,
+            },
+            "thresholds": {
+                "dirty_rate_stop_and_checkpoint_pct": MIGRATION_PROBE_DIRTY_RATE_STOP_AND_CHECKPOINT_PCT,
+                "postcopy_timeout_ms": MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS,
+                "max_precopy_rounds": MIGRATION_PROBE_MAX_PRECOPY_ROUNDS,
+            },
+            "warnings": report.warnings,
+            "commands": [
+                "fwc doctor --probe migration --json",
+                "fwc doctor --zone <zone> --host <endpoint>",
+            ],
+        },
+        "next_actions": [
+            "fwc doctor --probe migration --json",
+            "fwc doctor --zone <zone> --host <endpoint>",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+#[derive(Debug)]
+struct MigrationDoctorProbeReport {
+    dirty_tracker_kernel_supports_soft_dirty: bool,
+    dirty_tracker_mode: &'static str,
+    dirty_page_count: u64,
+    page_count: u64,
+    page_size_bytes: u64,
+    last_precopy_round_count: u8,
+    last_precopy_outcome: &'static str,
+    last_dirty_rate_pct: f64,
+    final_dirty_bytes: u64,
+    postcopy_timeout_ms: u64,
+    postcopy_decision: &'static str,
+    postcopy_fallback: &'static str,
+    warnings: Vec<&'static str>,
+}
+
+fn doctor_migration_probe_report() -> Result<MigrationDoctorProbeReport> {
+    let soft_dirty_probe = SoftDirtyProc::for_self(MIGRATION_PROBE_PAGE_SIZE_BYTES).probe();
+    let tracker = DirtyTracker::from_soft_dirty_probe(
+        MIGRATION_PROBE_PAGE_COUNT,
+        MIGRATION_PROBE_PAGE_SIZE_BYTES,
+        soft_dirty_probe,
+    );
+    let static_reader = StaticSoftDirtyReader::from_dirty_pages([1, 3, 5]);
+    tracker
+        .refresh_from_soft_dirty_reader(&static_reader, 0)
+        .map_err(anyhow::Error::msg)?;
+    let health = tracker.health();
+
+    let controller = PreCopyController::new(
+        Bandwidth::from_mib_per_second(MIGRATION_PROBE_BANDWIDTH_MIB_PER_SECOND),
+        MIGRATION_PROBE_DIRTY_RATE_STOP_AND_CHECKPOINT_PCT,
+        MIGRATION_PROBE_MAX_PRECOPY_ROUNDS,
+    );
+    let precopy_outcome = controller.run_precopy(&Workload::synthetic_mib(
+        256,
+        MIGRATION_PROBE_DIRTY_RATE_MIB_PER_SECOND,
+    ));
+    let precopy_report = precopy_outcome.report();
+
+    let postcopy_forwarder = PostCopyForwarder::new(std::time::Duration::from_millis(
+        MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS,
+    ))
+    .with_source(0x1000, "local-checkpoint");
+    let page_source = DoctorMigrationPageSource {
+        latency: std::time::Duration::from_millis(MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS + 1),
+    };
+    let postcopy_outcome = postcopy_forwarder.resolve_fault(0x1000, &page_source);
+    let postcopy_decision = postcopy_decision_label(postcopy_outcome.decision());
+    let postcopy_fallback = postcopy_fallback_label(&postcopy_outcome);
+    let warnings = doctor_migration_probe_warnings(
+        health.kernel_supports_soft_dirty,
+        &precopy_outcome,
+        postcopy_outcome.decision(),
+        postcopy_fallback,
+    );
+
+    Ok(MigrationDoctorProbeReport {
+        dirty_tracker_kernel_supports_soft_dirty: health.kernel_supports_soft_dirty,
+        dirty_tracker_mode: dirty_tracker_mode_label(health.mode),
+        dirty_page_count: health.dirty_page_count,
+        page_count: health.page_count,
+        page_size_bytes: health.page_size_bytes,
+        last_precopy_round_count: precopy_report.rounds,
+        last_precopy_outcome: precopy_outcome_label(&precopy_outcome),
+        last_dirty_rate_pct: f64::from(precopy_report.dirty_rate_pct_of_bandwidth),
+        final_dirty_bytes: precopy_report.final_dirty_bytes,
+        postcopy_timeout_ms: MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS,
+        postcopy_decision,
+        postcopy_fallback,
+        warnings,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DoctorMigrationPageSource {
+    latency: std::time::Duration,
+}
+
+impl PageFaultSource for DoctorMigrationPageSource {
+    fn fetch_page(&self, _page_addr: u64, _source_peer: &str) -> PageFetch {
+        PageFetch {
+            latency: self.latency,
+            bytes: vec![0; usize::try_from(MIGRATION_PROBE_PAGE_SIZE_BYTES).unwrap_or(4096)],
+        }
+    }
+}
+
+fn doctor_migration_probe_warnings(
+    kernel_supports_soft_dirty: bool,
+    precopy_outcome: &PreCopyOutcome,
+    postcopy_decision: PostCopyDecision,
+    postcopy_fallback: &'static str,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if !kernel_supports_soft_dirty {
+        warnings.push("soft_dirty_unavailable_uses_page_walker_fallback");
+    }
+    if !precopy_outcome.is_stop_and_checkpoint() {
+        warnings.push("precopy_threshold_policy_not_triggered");
+    }
+    if postcopy_decision != PostCopyDecision::Timeout {
+        warnings.push("postcopy_timeout_policy_not_triggered");
+    }
+    if postcopy_fallback != "FullReExecute" {
+        warnings.push("postcopy_timeout_fallback_not_full_reexecute");
+    }
+    warnings
+}
+
+const fn dirty_tracker_mode_label(mode: DirtyTrackerMode) -> &'static str {
+    match mode {
+        DirtyTrackerMode::SoftDirty => "SoftDirty",
+        DirtyTrackerMode::PageWalkerFallback => "PageWalkerFallback",
+    }
+}
+
+const fn precopy_outcome_label(outcome: &PreCopyOutcome) -> &'static str {
+    match outcome {
+        PreCopyOutcome::Converged(_) => "Converged",
+        PreCopyOutcome::StopAndCheckpoint(_) => "StopAndCheckpoint",
+        PreCopyOutcome::Aborted { .. } => "Aborted",
+    }
+}
+
+const fn postcopy_decision_label(decision: PostCopyDecision) -> &'static str {
+    match decision {
+        PostCopyDecision::Forwarded => "Forwarded",
+        PostCopyDecision::Timeout => "Timeout",
+        PostCopyDecision::SourceMissing => "SourceMissing",
+    }
+}
+
+const fn postcopy_fallback_label(outcome: &PostCopyOutcome) -> &'static str {
+    match outcome {
+        PostCopyOutcome::Timeout { fallback, .. } => match fallback {
+            PostCopyFallbackDecision::FullReExecute => "FullReExecute",
+        },
+        PostCopyOutcome::Forwarded { .. } | PostCopyOutcome::SourceMissing { .. } => "None",
+    }
+}
+
+fn doctor_subcommand_dispatch(command: &DoctorCommand) -> Result<DispatchOutcome> {
+    match command {
+        DoctorCommand::SelfTest(args) => doctor_self_test_dispatch(args),
+    }
+}
+
+fn doctor_self_test_dispatch(args: &DoctorSelfTestArgs) -> Result<DispatchOutcome> {
+    let report = doctor::self_test::run_self_test(&args.fixture)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor self-test");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "doctor self-test",
+        "source": "fixture",
+        "message": format!("Ran fwc doctor self-test against `{}`.", args.fixture.display()),
+        "summary": {
+            "score": report.score,
+            "status": report.status,
+            "check_count": report.checks.len(),
+            "remediation_count": report.remediation_messages.len(),
+            "executed_command_count": report.executed_commands.len(),
+        },
+        "report": report,
+        "next_actions": [
+            "fwc doctor self-test --fixture crates/fwc/fixtures/broken_env --json",
+            "fwc doctor --zone z:work --host <endpoint>",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -11816,19 +15000,35 @@ fn symptoms_from_connector_health(health: &ConnectorHealth, enabled: bool) -> do
 
 fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let Some(host) = resolve_host_config(explicit_host)? else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("status", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "status",
             json!({
                 "scope": if args.connector.is_some() { "connector" } else { "fleet" },
                 "connector": args.connector.as_deref(),
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 "fwc status --host <endpoint>".to_owned(),
                 "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
                     .to_owned(),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
     };
+
+    if let Some(outcome) =
+        enforce_required_truth_source("status", args.require_source, KnowledgeState::HostBacked)
+    {
+        return Ok(outcome);
+    }
+
     let client = HostAdminClient::new(&host.endpoint)?;
     let (catalog, discovery) = client.catalog(None)?;
     let health = client.health()?;
@@ -11836,7 +15036,11 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
     if let Some(selector) = args.connector.as_deref() {
         let connector = match catalog.resolve_connector(selector) {
             Ok(connector) => connector,
-            Err(error) => return Ok(connector_resolution_dispatch("status", selector, &error)),
+            Err(error) => {
+                let mut outcome = connector_resolution_dispatch("status", selector, &error);
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
+            }
         };
         let admin = client.connector_status(connector.summary.id.as_str())?;
         let pin = client.pin_status(connector.summary.id.as_str())?;
@@ -11853,6 +15057,7 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
             discovery.registry_version,
         ))?;
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -11911,6 +15116,7 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
         })],
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -12310,6 +15516,7 @@ fn telemetry_otlp_readiness_dispatch(args: &TelemetryOtlpReadinessArgs) -> Dispa
         "next_actions": telemetry_readiness_next_actions(status),
     });
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     DispatchOutcome { payload, exit_code }
 }
 
@@ -12361,6 +15568,7 @@ fn telemetry_config_error_dispatch(
         ],
     });
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     DispatchOutcome {
         payload,
         exit_code: CliExitCode::Validation,
@@ -14952,6 +18160,7 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "Live config-get answers are authoritative for the current node's config snapshot. Sanitized snapshots are degraded for replay because inline secrets are intentionally withheld.",
                 evidence_handles,
             );
+            inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -15087,6 +18296,7 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "Live config-set answers are authoritative for the current node's applied connector config mutation and record the exact mutation target for automation.",
                 evidence_handles,
             );
+            inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -15215,6 +18425,7 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "Live config-unset answers are authoritative for the current node's applied connector config mutation and record the exact mutation target for automation.",
                 evidence_handles,
             );
+            inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -15338,6 +18549,7 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "Live config-import answers are authoritative for the current node's applied connector config mutation and record the imported document target for automation.",
                 evidence_handles,
             );
+            inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -15442,6 +18654,7 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "Live config-export answers are authoritative for the current node's config snapshot. Sanitized exports are degraded for replay because inline secrets are intentionally withheld.",
                 evidence_handles,
             );
+            inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
             envelope.inject_into(&mut payload);
             Ok(DispatchOutcome {
                 payload,
@@ -15598,6 +18811,7 @@ fn config_dispatch(args: &ConfigArgs, explicit_host: Option<&str>) -> Result<Dis
                 "Live config-doctor answers are authoritative for the current node's config snapshot and validation preview. Sanitized snapshots and failed validations are explicitly marked as degraded.",
                 evidence_handles,
             );
+            inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
             if exit_code.is_success() {
                 envelope.inject_into(&mut payload);
             }
@@ -15729,6 +18943,7 @@ fn config_non_replayable_live_config_dispatch(
         "Live config mutation previews remain authoritative for the current node even when sanitized snapshots make partial mutation unsafe. The rejected mutation target is recorded explicitly for automation.",
         evidence_handles,
     );
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     DispatchOutcome {
         payload,
         exit_code: CliExitCode::Validation,
@@ -15792,6 +19007,7 @@ fn config_live_validation_dispatch(
         "Live config mutation previews are authoritative for the current node even when the candidate is rejected. Validation evidence and the rejected mutation target are recorded explicitly for automation.",
         evidence_handles,
     );
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     DispatchOutcome {
         payload,
         exit_code: CliExitCode::Validation,
@@ -15847,6 +19063,7 @@ fn config_redacted_placeholder_import_dispatch(
         "Live config-import preflight remains authoritative for the current node even when sanitized placeholder values make the requested import unsafe. The rejected import target is recorded explicitly for automation.",
         evidence_handles,
     );
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     DispatchOutcome {
         payload,
         exit_code: CliExitCode::Validation,
@@ -16564,14 +19781,17 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
     }
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "install");
-    let mut payload = serde_json::to_value(build_install_activation_operator_contract(
+    let contract = build_install_activation_operator_contract(
         &host.endpoint,
         &artifact,
         &candidate,
         applied,
         post_install_status.as_ref(),
         (!warnings.is_empty()).then_some(warnings),
-    ))?;
+    );
+    let truth_source = contract.resolution.operator_knowledge_state();
+    let mut payload = serde_json::to_value(contract)?;
+    inject_truth_source_metadata(&mut payload, truth_source);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -16767,6 +19987,7 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
         "Live update answers are authoritative for the current node's inventory preview or mutation result. They do not by themselves prove mesh-wide placement or post-update runtime convergence.",
         evidence_handles,
     );
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -17904,6 +21125,9 @@ fn managed_connector_from_artifact(
             .map_or(RuntimeNetworkEnforcement::LegacyUnspecified, |entry| {
                 entry.runtime_network_enforcement
             }),
+        prewarm: existing.map_or_else(ConnectorPrewarmConfig::default, |entry| {
+            entry.prewarm.clone()
+        }),
         operation_network_constraints: existing.map_or_else(BTreeMap::new, |entry| {
             entry.operation_network_constraints.clone()
         }),
@@ -18031,6 +21255,23 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             .len()
             .saturating_sub(connectors.len())
     };
+    let tool_format = args.tool_format.to_string();
+    let cache_key = offline_manifest_set_cache_key(
+        "export-tools",
+        connectors.iter().copied(),
+        &tool_format,
+        &json!({
+            "connector": &args.connector,
+            "format": tool_format,
+            "risk_max": &args.risk_max,
+            "capability": &args.capability,
+            "strip_prefix": &args.strip_prefix,
+            "no_safety": args.no_safety,
+            "no_hints": args.no_hints,
+            "no_examples": args.no_examples,
+            "include_hidden": args.include_hidden,
+        }),
+    )?;
 
     // Gather all operations with filters applied.
     let operations: Vec<&DiscoveredOperation> = connectors
@@ -18088,6 +21329,8 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
             catalog::ToolAvailability::Unknown,
             tool_provenance.clone(),
         );
+        attach_metadata_cache_evidence(&mut payload, &cache_key, false);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -18128,6 +21371,8 @@ fn export_tools_dispatch(args: &ExportToolsArgs, host: Option<&str>) -> Result<D
         catalog::ToolAvailability::Unknown,
         tool_provenance,
     );
+    attach_metadata_cache_evidence(&mut payload, &cache_key, false);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -18221,6 +21466,7 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
             catalog::ToolAvailability::Live,
             tool_provenance.clone(),
         );
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
@@ -18254,6 +21500,7 @@ fn export_tools_dispatch_host(args: &ExportToolsArgs, host: &str) -> Result<Disp
         catalog::ToolAvailability::Live,
         tool_provenance,
     );
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -20207,6 +23454,7 @@ fn invoke_dispatch_host(
             ),
             format!("fwc template {} {}", connector.slug, operation.name),
         ]);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Validation,
@@ -20277,6 +23525,7 @@ fn invoke_dispatch_host(
             CommandEnvelope::new(CommandAvailability::Denied, command)
         };
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: if preflight.allowed {
@@ -20322,6 +23571,7 @@ fn invoke_dispatch_host(
             ),
         ]);
         CommandEnvelope::new(CommandAvailability::Denied, command).inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::PolicyDenied,
@@ -20397,6 +23647,7 @@ fn invoke_dispatch_host(
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: match response.status {
@@ -20558,6 +23809,7 @@ fn invoke_dispatch_without_host(command: &str, args: &InvokeArgs) -> Result<Disp
         "recoverable": true,
     });
 
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome { payload, exit_code })
 }
 
@@ -20609,6 +23861,7 @@ fn host_invoke_input_error_dispatch(
         payload["error"]["details"] = details;
     }
 
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     DispatchOutcome {
         payload,
         exit_code: CliExitCode::Validation,
@@ -20668,6 +23921,7 @@ fn invoke_input_error_dispatch(
         payload["error"]["details"] = details;
     }
 
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     DispatchOutcome {
         payload,
         exit_code: CliExitCode::Validation,
@@ -21397,6 +24651,94 @@ fn missing_host_dispatch(
     }
 }
 
+fn inject_truth_source_metadata(payload: &mut Value, source: KnowledgeState) {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "_truth_source".to_owned(),
+            Value::String(source.operator_truth_source().to_owned()),
+        );
+        object
+            .entry("schema_version".to_owned())
+            .or_insert_with(|| Value::String(TRUTH_SOURCE_SCHEMA_VERSION.to_owned()));
+    }
+}
+
+fn truth_source_unavailable_dispatch(
+    command: &str,
+    error: TruthSourceUnavailable,
+) -> DispatchOutcome {
+    truth_source_unavailable_dispatch_with_context(command, None, error)
+}
+
+fn truth_source_unavailable_dispatch_with_context(
+    command: &str,
+    subcommand: Option<&str>,
+    error: TruthSourceUnavailable,
+) -> DispatchOutcome {
+    let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, command);
+    let display_command = subcommand.map_or_else(
+        || command.to_owned(),
+        |subcommand| format!("{command} {subcommand}"),
+    );
+    let mut payload = json!({
+        "status": "error",
+        "command": command,
+        "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+        "_truth_source": error.actual.operator_truth_source(),
+        "error": {
+            "type": "truth-source-unavailable",
+            "required": error.required.label(),
+            "actual": error.actual.operator_truth_source(),
+            "message": format!(
+                "`fwc {command}` resolved from `{}` truth, which does not satisfy `--require-source {}`.",
+                error.actual.operator_truth_source(),
+                error.required.label(),
+            ),
+            "recoverable": true,
+        },
+        "next_actions": [
+            "Retry after the required live truth source is reachable.".to_owned(),
+            format!("Relax the requirement if `{}` truth is acceptable for this workflow.", error.actual.operator_truth_source()),
+        ],
+    });
+    if let Some(subcommand) = subcommand {
+        payload["subcommand"] = Value::String(subcommand.to_owned());
+        payload["error"]["message"] = Value::String(format!(
+            "`fwc {display_command}` resolved from `{}` truth, which does not satisfy `--require-source {}`.",
+            error.actual.operator_truth_source(),
+            error.required.label(),
+        ));
+    }
+    envelope.inject_into(&mut payload);
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Transport,
+    }
+}
+
+fn enforce_required_truth_source(
+    command: &str,
+    requirement: Option<RequiredTruthSource>,
+    actual: KnowledgeState,
+) -> Option<DispatchOutcome> {
+    requirement
+        .and_then(|required| required.validate(actual).err())
+        .map(|error| truth_source_unavailable_dispatch(command, error))
+}
+
+fn enforce_required_truth_source_with_subcommand(
+    command: &str,
+    subcommand: &str,
+    requirement: Option<RequiredTruthSource>,
+    actual: KnowledgeState,
+) -> Option<DispatchOutcome> {
+    requirement
+        .and_then(|required| required.validate(actual).err())
+        .map(|error| {
+            truth_source_unavailable_dispatch_with_context(command, Some(subcommand), error)
+        })
+}
+
 fn conflicting_catalog_mode_dispatch(command: &str) -> DispatchOutcome {
     let envelope = CommandEnvelope::new(CommandAvailability::Denied, command);
     let mut payload = json!({
@@ -21769,22 +25111,30 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
 
 #[allow(clippy::option_if_let_else)]
 fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
+    if let Some(outcome) =
+        enforce_required_truth_source("history", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
+    }
+
     let store = cli_history_store()?;
 
     // Single entry lookup.
     if let Some(ref entry_id) = args.entry_id {
         return store.get(entry_id)?.map_or_else(
             || {
+                let mut payload = json!({
+                    "status": "error",
+                    "command": "history",
+                    "error": {
+                        "type": "not-found",
+                        "message": format!("No history entry with ID '{entry_id}'."),
+                    },
+                    "next_actions": ["fwc history"],
+                });
+                inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
                 Ok(DispatchOutcome {
-                    payload: json!({
-                        "status": "error",
-                        "command": "history",
-                        "error": {
-                            "type": "not-found",
-                            "message": format!("No history entry with ID '{entry_id}'."),
-                        },
-                        "next_actions": ["fwc history"],
-                    }),
+                    payload,
                     exit_code: CliExitCode::UnknownCommand,
                 })
             },
@@ -21798,6 +25148,7 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
                     "entry": entry,
                 });
                 envelope.inject_into(&mut payload);
+                inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
                 Ok(DispatchOutcome {
                     payload,
                     exit_code: CliExitCode::Success,
@@ -21844,6 +25195,7 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
         ],
     });
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -22481,6 +25833,116 @@ fn approvals_dispatch(args: &ApprovalsArgs) -> Result<DispatchOutcome> {
     })
 }
 
+fn capability_dispatch(args: &CapabilityArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        CapabilityCommand::Replay(args) => capability_replay_dispatch(args),
+    }
+}
+
+fn capability_replay_dispatch(args: &CapabilityReplayArgs) -> Result<DispatchOutcome> {
+    let result = capability_replay::build_replay_payload(
+        &args.token,
+        &args.since,
+        args.confirm,
+        args.audit_chain.as_deref(),
+        args.output.into(),
+        capability_replay::current_unix_seconds(),
+    );
+
+    match result {
+        Ok(mut payload) => {
+            let envelope =
+                CommandEnvelope::new(CommandAvailability::OfflineArtifact, "capability replay");
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        Err(error) => {
+            let mut payload = json!({
+                "status": "error",
+                "command": "capability",
+                "subcommand": "replay",
+                "error": {
+                    "type": error.error_type(),
+                    "message": error.to_string(),
+                    "recoverable": error.recoverable(),
+                    "token_hash": error.token_hash(),
+                },
+                "details": {
+                    "since": args.since,
+                    "confirm": args.confirm,
+                    "output": args.output,
+                    "default_window_seconds": fcp_audit::replay::DEFAULT_REPLAY_WINDOW_SECS,
+                },
+                "next_actions": capability_replay_next_actions(&error),
+            });
+            let envelope =
+                CommandEnvelope::new(CommandAvailability::OfflineArtifact, "capability replay");
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: capability_replay_exit_code(&error),
+            })
+        }
+    }
+}
+
+fn capability_replay_exit_code(error: &capability_replay::CapabilityReplayError) -> CliExitCode {
+    match error {
+        capability_replay::CapabilityReplayError::InvalidSince(_)
+        | capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::WideWindowRequiresConfirm { .. },
+        ) => CliExitCode::Parse,
+        capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::TokenNotFoundInAuditChain { .. },
+        ) => CliExitCode::UnknownCommand,
+        capability_replay::CapabilityReplayError::ReadAuditChain { .. }
+        | capability_replay::CapabilityReplayError::ParseAuditChain(_)
+        | capability_replay::CapabilityReplayError::Serialize(_)
+        | capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::AuditChainUnavailable(_)
+            | fcp_audit::replay::ReplayError::AuditChainCorrupted(_),
+        ) => CliExitCode::AmbiguousCorrection,
+    }
+}
+
+fn capability_replay_next_actions(error: &capability_replay::CapabilityReplayError) -> Vec<String> {
+    match error {
+        capability_replay::CapabilityReplayError::InvalidSince(_) => vec![
+            "Use a duration like `30s`, `5m`, `2h`, or `7d`.".to_owned(),
+            "Retry with `fwc capability replay <token> --since 7d`.".to_owned(),
+        ],
+        capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::WideWindowRequiresConfirm { .. },
+        ) => vec![
+            "Retry with `--confirm` if you intentionally need a wider audit-chain scan."
+                .to_owned(),
+            "Use the smallest useful `--since` window to keep replay bounded.".to_owned(),
+        ],
+        capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::TokenNotFoundInAuditChain { .. },
+        ) => vec![
+            "Check that the audit-chain artifact contains entries for this token hash.".to_owned(),
+            "Retry with a wider `--since` window and `--confirm` if the token is older than seven days."
+                .to_owned(),
+        ],
+        capability_replay::CapabilityReplayError::ReadAuditChain { .. }
+        | capability_replay::CapabilityReplayError::ParseAuditChain(_)
+        | capability_replay::CapabilityReplayError::Serialize(_)
+        | capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::AuditChainUnavailable(_)
+            | fcp_audit::replay::ReplayError::AuditChainCorrupted(_),
+        ) => vec![
+            "Inspect the audit-chain artifact and rerun with `--format json` for structured error details."
+                .to_owned(),
+            "Run `fwc doctor --probe audit_chain` when the live audit chain should be available."
+                .to_owned(),
+        ],
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CapabilityOperationMetadata {
     connector_slug: String,
@@ -22661,6 +26123,7 @@ fn capabilities_dispatch(
 
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "capabilities");
     let mut payload = payload;
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -26680,7 +30143,7 @@ fn normalize_args(
                 args.get(command_index).map(String::as_str),
                 args.get(command_index + 1).map(String::as_str),
             ),
-            (Some("connector"), Some("state"))
+            (Some("connector"), Some("state" | "lease"))
         )
     {
         if let Some(next) = args.get(command_index + 1) {
@@ -27595,11 +31058,16 @@ fn redact_sensitive_args(args: &[String]) -> Vec<String> {
                 .position(|arg| arg == "add")
                 .map(|relative| auth_index + 1 + relative)
         });
+    let capability_replay_token_index = capability_replay_positional_token_index(args);
     let mut redacted = Vec::with_capacity(args.len());
     let mut redact_next_value = false;
     let mut redact_next_field = false;
 
     for (index, arg) in args.iter().enumerate() {
+        if capability_replay_token_index == Some(index) {
+            redacted.push("<redacted>".to_owned());
+            continue;
+        }
         if redact_next_value {
             redacted.push("<redacted>".to_owned());
             redact_next_value = false;
@@ -27653,6 +31121,52 @@ fn redact_sensitive_args(args: &[String]) -> Vec<String> {
     }
 
     redacted
+}
+
+fn capability_replay_positional_token_index(args: &[String]) -> Option<usize> {
+    let capability_index = args.iter().position(|arg| arg == "capability")?;
+    let replay_index = args
+        .iter()
+        .enumerate()
+        .skip(capability_index + 1)
+        .find_map(|(index, arg)| (arg == "replay").then_some(index))?;
+
+    let mut skip_next_value = false;
+    for (index, arg) in args.iter().enumerate().skip(replay_index + 1) {
+        if skip_next_value {
+            skip_next_value = false;
+            continue;
+        }
+        if capability_replay_flag_takes_value(arg) {
+            skip_next_value = !arg.contains('=');
+            continue;
+        }
+        if arg == "--confirm" || arg.starts_with("--output=") || arg.starts_with("--since=") {
+            continue;
+        }
+        if !arg.starts_with('-') {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn capability_replay_flag_takes_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--since"
+            | "--output"
+            | "--audit-chain"
+            | "--format"
+            | "--template"
+            | "--template-file"
+            | "--extract"
+            | "--jq"
+            | "--columns"
+            | "--sort-by"
+            | "--limit"
+            | "--host"
+    )
 }
 
 fn redact_assignment_value(raw: &str) -> String {
@@ -27733,35 +31247,38 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use crate::supply_chain_cmd::{SignArgs, SupplyChainArgs, SupplyChainCommand};
+    use crate::truth::RequiredTruthSource;
 
     use super::{ExportToolsArgs, export_tools};
     use std::collections::BTreeMap as StdBTreeMap;
     use std::fs;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, HostConnectorCatalog,
-        LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch, MetadataField,
-        PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput, PrepareCliError,
-        ResolvedHostConfig, ResolvedHostOperation, catalog, execute, host_discovered_connector,
-        host_discovered_operation, host_mcp_tool_definitions, host_tool_summary_entry,
-        host_tool_when_to_use, live_pipeline_operation_metadata, mcp_tool_invoke_args,
-        normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
+        ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, DoctorLocalCheck, DoctorProbe,
+        FwcMetadataCacheKey, HostConnectorCatalog, KnowledgeState, LiveAuthArgs,
+        LiveTruthKnowledgeState, LiveTruthResolverBranch, MetadataField, PACKAGE_OUTPUT_FILENAME,
+        PackageBuildMetadata, PackageOutput, PrepareCliError, ResolvedHostConfig,
+        ResolvedHostOperation, TRUTH_SOURCE_SCHEMA_VERSION, catalog, doctor_hlc_probe_warnings,
+        doctor_iblt_probe_warnings, doctor_migration_probe_warnings, doctor_reality_cadence_report,
+        execute, host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
+        host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
+        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
         resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
         try_host_mcp_tool_definitions, try_host_tool_operation_info, validate_registry_binary_name,
     };
-    use chrono::{Duration as ChronoDuration, Utc};
-    use clap::CommandFactory;
+    use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
+    use clap::{CommandFactory, Parser};
     use fcp_crypto::Ed25519SigningKey;
     use fcp_host::{
         BudgetReportResponse as HostBudgetReportResponse,
         ConnectorAdminStatus as HostConnectorAdminStatus, ConnectorInventoryApplyReport,
-        ConnectorInventoryMutationKind, ConnectorInventoryMutationResponse,
+        ConnectorInventoryMutationKind, ConnectorInventoryMutationResponse, ConnectorPrewarmConfig,
         DiscoveryResponse as HostDiscoveryResponse, DoctorReport as HostDoctorReport,
         IntrospectionResponse as HostIntrospectionResponse, ManagedConnectorConfig,
         PreflightResponse as HostPreflightResponse, RuntimeNetworkEnforcement,
@@ -27805,7 +31322,192 @@ mod tests {
         (outcome.exit_code, outcome.text)
     }
 
+    #[test]
+    fn metadata_cache_key_separates_connector_manifest_format_and_truth_source() {
+        let base = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.github",
+            "blake3-256:manifest-a",
+            "json",
+            KnowledgeState::Offline,
+            "blake3-256:request-a",
+        );
+
+        let different_connector = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.slack",
+            "blake3-256:manifest-a",
+            "json",
+            KnowledgeState::Offline,
+            "blake3-256:request-a",
+        );
+        let different_manifest = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.github",
+            "blake3-256:manifest-b",
+            "json",
+            KnowledgeState::Offline,
+            "blake3-256:request-a",
+        );
+        let different_format = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.github",
+            "blake3-256:manifest-a",
+            "toon",
+            KnowledgeState::Offline,
+            "blake3-256:request-a",
+        );
+        let different_truth = FwcMetadataCacheKey::new(
+            "show",
+            "workspace-manifests",
+            "fcp.github",
+            "blake3-256:manifest-a",
+            "json",
+            KnowledgeState::HostBacked,
+            "blake3-256:request-a",
+        );
+
+        assert_ne!(base.etag(), different_connector.etag());
+        assert_ne!(base.etag(), different_manifest.etag());
+        assert_ne!(base.etag(), different_format.etag());
+        assert_ne!(base.etag(), different_truth.etag());
+    }
+
+    #[test]
+    fn truth_source_footer_appends_to_default_toon_output() {
+        let outcome = super::render_dispatch(
+            super::DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "history",
+                    "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+                    "_truth_source": "offline",
+                }),
+                exit_code: CliExitCode::Success,
+            },
+            super::OutputFormat::Toon,
+            false,
+            &super::RenderOptions::default(),
+        )
+        .expect("truth-source payload should render");
+
+        assert!(outcome.text.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn truth_source_footer_is_not_added_to_json_output() {
+        let outcome = super::render_dispatch(
+            super::DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "history",
+                    "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+                    "_truth_source": "offline",
+                }),
+                exit_code: CliExitCode::Success,
+            },
+            super::OutputFormat::Json,
+            false,
+            &super::RenderOptions::default(),
+        )
+        .expect("truth-source payload should render");
+
+        assert!(!outcome.text.contains("answer source"));
+        let payload: Value =
+            serde_json::from_str(&outcome.text).expect("json output should remain parseable");
+        assert_eq!(payload["_truth_source"], "offline");
+    }
+
+    #[test]
+    fn truth_source_footer_is_not_added_for_mesh_truth() {
+        let outcome = super::render_dispatch(
+            super::DispatchOutcome {
+                payload: json!({
+                    "status": "ok",
+                    "command": "list",
+                    "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+                    "_truth_source": "mesh",
+                }),
+                exit_code: CliExitCode::Success,
+            },
+            super::OutputFormat::Toon,
+            false,
+            &super::RenderOptions::default(),
+        )
+        .expect("mesh truth-source payload should render");
+
+        assert!(!outcome.text.contains("answer source"));
+    }
+
+    #[test]
+    fn internal_error_dispatch_maps_resolution_error_to_unavailable_truth_source() {
+        let args = vec![
+            "fwc".to_owned(),
+            "--json".to_owned(),
+            "--host".to_owned(),
+            "https://secret-host.example/internal".to_owned(),
+            "list".to_owned(),
+        ];
+        let error = anyhow::Error::new(crate::truth::ResolutionError {
+            strategy: crate::truth::ResolutionStrategy::BestAvailable,
+            attempts: vec![crate::truth::SourceAttempt {
+                source: crate::truth::KnowledgeState::MeshBacked,
+                outcome: crate::truth::SourceOutcome::Error,
+                elapsed: Duration::from_millis(7),
+                detail: Some("token=raw-secret-value".to_owned()),
+            }],
+            reason: "raw database path /private/tmp/secret-store.sqlite leaked upstream".to_owned(),
+        });
+
+        let outcome = super::internal_error_dispatch(&args, &error);
+
+        assert_eq!(outcome.exit_code, CliExitCode::Internal);
+        assert_eq!(outcome.payload["status"], "error");
+        assert_eq!(outcome.payload["command"], "list");
+        assert_eq!(
+            outcome.payload["schema_version"],
+            TRUTH_SOURCE_SCHEMA_VERSION
+        );
+        assert_eq!(outcome.payload["_truth_source"], "unavailable");
+        assert_eq!(
+            outcome.payload["error"]["type"],
+            "truth-resolver-internal-error"
+        );
+        assert_eq!(
+            outcome.payload["error"]["redacted_cause"],
+            "best-available strategy exhausted 1 source(s): mesh:error"
+        );
+        assert_eq!(
+            outcome.payload["error"]["log_event"],
+            "fcp.truth_resolver.internal_error"
+        );
+        assert_eq!(
+            outcome.payload["error"]["bead_reference"],
+            "flywheel_connectors-hr0rr.2.5"
+        );
+        assert!(
+            outcome.payload["error"]["correlation_id"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+
+        let serialized = outcome.payload.to_string();
+        assert!(!serialized.contains("raw-secret-value"));
+        assert!(!serialized.contains("/private/tmp/secret-store.sqlite"));
+        assert!(!serialized.contains("secret-host.example"));
+    }
+
     fn mock_direct_green_cutover_gate_snapshot() -> Value {
+        mock_direct_green_cutover_gate_snapshot_with_schema(
+            super::HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        )
+    }
+
+    fn mock_direct_green_cutover_gate_snapshot_with_schema(schema_version: &str) -> Value {
         let mut gates =
             super::mesh_cmd::mesh_cutover_gates(&super::mesh_cmd::MeshCutoverGateArgs::default());
         for gate in &mut gates {
@@ -27839,14 +31541,21 @@ mod tests {
                     "verified_owner_signatures": true,
                     "node_count": 3,
                 }),
-                unknown => panic!("unexpected cutover gate id {unknown}"),
+                unknown => json!({
+                    "telemetry_state": "unexpected-test-gate-id",
+                    "unexpected_gate_id": unknown,
+                    "node_count": 3,
+                }),
             };
         }
 
+        let overall_status = super::mesh_cmd::cutover_gate_overall_status(&gates).tag();
+
         json!({
-            "schema_version": "fcp-host-cutover-gates/v1",
+            "schema_version": schema_version,
             "catalog_connector_count": 3,
             "node_count": 3,
+            "overall_status": overall_status,
             "gates": gates,
         })
     }
@@ -28017,6 +31726,87 @@ mod tests {
     }
 
     #[test]
+    fn mesh_cutover_gates_rejects_wrong_direct_snapshot_schema() -> std::result::Result<(), String>
+    {
+        let mut routes = StdBTreeMap::new();
+        routes.insert(
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(),
+        );
+        routes.insert(
+            "GET /rpc/mesh/cutover-gates".to_owned(),
+            mock_direct_green_cutover_gate_snapshot_with_schema("fcp-host-cutover-gates/v0"),
+        );
+        let (host, server) = spawn_mock_host(routes, 2);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "mesh", "cutover-gates"]);
+
+        server
+            .join()
+            .map_err(|_| "mock host should complete".to_owned())?;
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(payload["schema_version"], "1.2.0");
+        assert_eq!(payload["overall_status"], "skip");
+        assert_eq!(
+            payload["live_telemetry"]["reason_code"],
+            "direct-cutover-telemetry-invalid"
+        );
+        assert_eq!(
+            payload["live_telemetry"]["direct_gate_telemetry_available"],
+            false
+        );
+        let missing_routes = payload["live_telemetry"]["missing_routes"]
+            .as_array()
+            .ok_or_else(|| "missing_routes must be an array".to_owned())?;
+        assert!(
+            missing_routes
+                .iter()
+                .any(|route| route.as_str() == Some("valid-cutover-gate-snapshot"))
+        );
+        let gates = payload["gates"]
+            .as_array()
+            .ok_or_else(|| "gates must be an array".to_owned())?;
+        assert!(gates.iter().all(|gate| gate["status"] == "skip"
+            && gate["measured_value"]["skip_reason"] == "direct-cutover-telemetry-invalid"));
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_cutover_gates_rejects_mismatched_direct_snapshot_overall_status()
+    -> std::result::Result<(), String> {
+        let mut routes = StdBTreeMap::new();
+        routes.insert(
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(),
+        );
+        let mut snapshot = mock_direct_green_cutover_gate_snapshot();
+        snapshot["overall_status"] = json!("skip");
+        routes.insert("GET /rpc/mesh/cutover-gates".to_owned(), snapshot);
+        let (host, server) = spawn_mock_host(routes, 2);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "mesh", "cutover-gates"]);
+
+        server
+            .join()
+            .map_err(|_| "mock host should complete".to_owned())?;
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(payload["schema_version"], "1.2.0");
+        assert_eq!(payload["overall_status"], "skip");
+        assert_eq!(
+            payload["live_telemetry"]["reason_code"],
+            "direct-cutover-telemetry-invalid"
+        );
+        let gates = payload["gates"]
+            .as_array()
+            .ok_or_else(|| "gates must be an array".to_owned())?;
+        assert!(gates.iter().all(|gate| gate["status"] == "skip"
+            && gate["measured_value"]["skip_reason"] == "direct-cutover-telemetry-invalid"));
+        Ok(())
+    }
+
+    #[test]
     fn mesh_cutover_gates_config_and_cli_overrides_targets() {
         let tempdir = tempfile::tempdir().expect("cutover config tempdir");
         let config_path = tempdir.path().join("fcp-host.toml");
@@ -28051,6 +31841,7 @@ max_state_replication_staleness_secs = 120
         ]);
 
         assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(payload["schema_version"], "1.2.0");
         assert_eq!(payload["targets"]["min_connectors"], 5);
         assert_eq!(payload["targets"]["replica_count"], 4);
         assert_eq!(payload["targets"]["state_staleness_seconds"], 120);
@@ -28078,6 +31869,7 @@ max_state_replication_staleness_secs = 120
         assert_eq!(payload["subcommand"], "cutover-gates");
         assert_eq!(payload["error"]["type"], "invalid-cutover-gates-config");
         assert_eq!(payload["error"]["recoverable"], true);
+        assert!(payload.get("schema_version").is_none());
     }
 
     fn temp_auth_store() -> (TempDir, super::CredentialStore) {
@@ -28327,6 +32119,88 @@ max_state_replication_staleness_secs = 120
     }
 
     #[test]
+    fn execute_context_current_returns_node_local_truth_source() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "context", "current"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "context");
+        assert_eq!(payload["subcommand"], "current");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["current_context"], "local");
+    }
+
+    #[test]
+    fn execute_context_list_returns_node_local_truth_source() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "context", "list"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "context");
+        assert_eq!(payload["subcommand"], "list");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["contexts"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn execute_context_current_text_footer_reports_answer_source() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, output) = execute_text(&["fwc", "context", "current"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: node-local)\n"));
+    }
+
+    #[test]
+    fn execute_context_current_require_any_live_fails_truth_source_unavailable() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "context",
+            "current",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "context current");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "node-local");
+    }
+
+    #[test]
+    fn execute_context_list_require_mesh_fails_truth_source_unavailable() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "context",
+            "list",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "context list");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "node-local");
+    }
+
+    #[test]
     fn context_create_rejects_endpoint_with_userinfo() {
         let (_tempdir, _path, _guard) = temp_context_config();
 
@@ -28342,6 +32216,7 @@ max_state_replication_staleness_secs = 120
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["error"]["type"], "invalid-host-endpoint");
+        assert!(payload.get("schema_version").is_none());
         assert!(
             payload["error"]["message"]
                 .as_str()
@@ -28359,6 +32234,60 @@ max_state_replication_staleness_secs = 120
                 .as_str()
                 .is_some_and(|caveat| !caveat.is_empty())
         );
+    }
+
+    fn assert_metadata_cache_evidence(payload: &Value, source: &str) {
+        assert_eq!(payload["_cache"]["hit"], false);
+        assert_eq!(payload["_cache"]["validated"], true);
+        assert_eq!(payload["_cache"]["age_ms"], 0);
+        assert_eq!(payload["_cache"]["source"], source);
+        assert!(
+            payload["_cache"]["etag"]
+                .as_str()
+                .is_some_and(|etag| etag.starts_with("blake3-256:"))
+        );
+    }
+
+    #[test]
+    fn execute_offline_metadata_commands_expose_cache_evidence_without_losing_truth_source() {
+        let cases = vec![
+            vec!["fwc", "--json", "list", "--offline"],
+            vec!["fwc", "--json", "search", "github issue", "--offline"],
+            vec!["fwc", "--json", "show", "github", "--offline"],
+            vec!["fwc", "--json", "ops", "github", "--offline"],
+            vec![
+                "fwc",
+                "--json",
+                "schema",
+                "github",
+                "issues.create",
+                "--offline",
+            ],
+            vec![
+                "fwc",
+                "--json",
+                "examples",
+                "github",
+                "issues.create",
+                "--offline",
+            ],
+            vec![
+                "fwc",
+                "--json",
+                "export-tools",
+                "--offline",
+                "--format",
+                "mcp",
+                "github",
+            ],
+        ];
+
+        for args in cases {
+            let (exit_code, payload) = execute_json(&args);
+            assert_eq!(exit_code, CliExitCode::Success.into(), "{args:?}");
+            assert_eq!(payload["_truth_source"], "offline", "{args:?}");
+            assert_metadata_cache_evidence(&payload, "workspace-manifests");
+        }
     }
 
     fn assert_template_provenance(payload: &Value, source: &str, authoritative: bool, mode: &str) {
@@ -30070,7 +33999,7 @@ deny_ptrace = true
 
         assert_eq!(outcome.exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]
@@ -30210,6 +34139,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["phase"], "execution");
         assert_eq!(payload["input_authoring"]["primary_source"], "binding-set");
         assert_eq!(payload["input_authoring"]["binding_count"], 3);
@@ -30239,6 +34170,8 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["status"], "error");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "invalid-input-payload");
         assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
         assert_eq!(payload["input_authoring"]["validation"]["error_count"], 3);
@@ -30271,6 +34204,8 @@ deny_ptrace = true
         ]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "conflicting-input-sources");
         assert_eq!(payload["error"]["recoverable"], true);
     }
@@ -30774,6 +34709,7 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "auth"]);
 
         assert_eq!(exit_code, CliExitCode::Parse.into());
+        assert!(payload.get("schema_version").is_none());
         assert_eq!(payload["error"]["type"], "missing-auth-subcommand");
         assert_eq!(payload["error"]["examples"][0], "fwc auth list");
     }
@@ -30783,6 +34719,7 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "auth", "rotate"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert!(payload.get("schema_version").is_none());
         // Error type may be "auth-subcommand" or "unknown-command" depending on dispatch path.
         let error_type = payload["error"]["type"].as_str().unwrap_or("");
         assert!(
@@ -31060,11 +34997,15 @@ deny_ptrace = true
             "z:work",
             "--category",
             "code",
+            "--require-source",
+            "mesh-or-host",
         ]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_discovery_provenance(&payload, "live_host_inventory", true, "live-inventory");
         assert_eq!(payload["filters"]["category"], "code");
         assert_eq!(payload["filters"]["zone"], "z:work");
@@ -31083,6 +35024,7 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+        assert!(payload.get("schema_version").is_none());
     }
 
     #[test]
@@ -31099,6 +35041,9 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_tool_inventory_provenance(
             &payload,
             "workspace_manifest",
@@ -31119,11 +35064,12 @@ deny_ptrace = true
             "--offline",
             "--format",
             "mcp",
-            "tlon",
+            "zalouser",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["error"]["type"], "hidden-connector-requires-opt-in");
+        assert!(payload.get("schema_version").is_none());
     }
 
     #[test]
@@ -31136,10 +35082,12 @@ deny_ptrace = true
             "--include-hidden",
             "--format",
             "mcp",
-            "tlon",
+            "zalouser",
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert!(
             payload["tools"]
                 .as_array()
@@ -31218,6 +35166,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["connector_count"], 1);
         assert_eq!(payload["tool_count"], 2);
         assert_eq!(payload["tools"][0]["name"], "github.create_issue");
@@ -31258,6 +35208,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_discovery_provenance(
             &payload,
             "live_host_introspection",
@@ -31273,6 +35225,28 @@ deny_ptrace = true
             "github.create_issue"
         );
         assert_eq!(payload["metadata_gaps"], json!([]));
+    }
+
+    #[test]
+    fn execute_show_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "show",
+            "github",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "show");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]
@@ -31338,6 +35312,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_discovery_provenance(
             &payload,
             "live_host_introspection",
@@ -31391,6 +35367,11 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(schema_exit, CliExitCode::Success.into());
         assert_eq!(schema_payload["source"], "host-admin-api");
+        assert_eq!(
+            schema_payload["schema_version"],
+            TRUTH_SOURCE_SCHEMA_VERSION
+        );
+        assert_eq!(schema_payload["_truth_source"], "host");
         assert_discovery_provenance(
             &schema_payload,
             "live_host_introspection",
@@ -31416,6 +35397,11 @@ deny_ptrace = true
 
         assert_eq!(examples_exit, CliExitCode::Success.into());
         assert_eq!(examples_payload["source"], "host-admin-api");
+        assert_eq!(
+            examples_payload["schema_version"],
+            TRUTH_SOURCE_SCHEMA_VERSION
+        );
+        assert_eq!(examples_payload["_truth_source"], "host");
         assert_discovery_provenance(
             &examples_payload,
             "live_host_introspection",
@@ -32147,6 +36133,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "telemetry");
         assert_eq!(payload["subcommand"], "otlp-readiness");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         let expected_status = if cfg!(feature = "otlp") {
             "ready"
         } else {
@@ -32176,6 +36164,8 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "telemetry");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["status"], "fail");
         assert_eq!(payload["readiness"]["status"], "fail");
         assert!(
@@ -32215,6 +36205,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "simulate");
         assert_eq!(payload["phase"], "preflight");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
     }
 
     #[test]
@@ -32234,6 +36226,7 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "simulate");
         assert_eq!(payload["error"]["type"], "missing-capability-token");
+        assert!(payload.get("schema_version").is_none());
     }
 
     #[test]
@@ -32250,9 +36243,756 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "doctor");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_live_host_admin_contract(&payload, "zone-diagnostics", false, "doctor-report");
         assert_eq!(payload["report"]["zone_id"], "z:work");
         assert_eq!(payload["summary"]["overall_status"], "OK");
+    }
+
+    #[test]
+    fn execute_doctor_without_zone_reports_offline_truth_metadata() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "missing-zone");
+    }
+
+    #[test]
+    fn execute_doctor_without_zone_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "doctor"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn execute_doctor_host_text_footer_reports_answer_source() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([("POST /doctor".to_owned(), mock_doctor_report_json())]),
+            1,
+        );
+        let (exit_code, output) =
+            execute_text(&["fwc", "--host", &host, "doctor", "--zone", "z:work"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: host)\n"));
+    }
+
+    #[test]
+    fn execute_doctor_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "doctor",
+            "--zone",
+            "z:work",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_doctor_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "doctor",
+            "--zone",
+            "z:work",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
+    }
+
+    #[test]
+    fn execute_doctor_local_probe_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "doctor",
+            "--probe",
+            "hlc",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+    }
+
+    #[test]
+    fn doctor_lean_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "lean"])
+            .expect("doctor lean should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.check, Some(DoctorLocalCheck::Lean)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_hlc_probe_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "--probe", "hlc"])
+            .expect("doctor --probe hlc should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.probe, Some(DoctorProbe::Hlc)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_iblt_probe_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "--probe", "iblt"])
+            .expect("doctor --probe iblt should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.probe, Some(DoctorProbe::Iblt)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_migration_probe_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "--probe", "migration"])
+            .expect("doctor --probe migration should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.probe, Some(DoctorProbe::Migration)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_swarm_pressure_probe_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "--probe", "swarm-pressure"])
+            .expect("doctor --probe swarm-pressure should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.probe, Some(DoctorProbe::SwarmPressure)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_migration_check_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "doctor", "migration", "--json"])
+            .expect("doctor migration should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.check, Some(DoctorLocalCheck::Migration)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_reality_cadence_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "reality-cadence"])
+            .expect("doctor reality-cadence should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.check, Some(DoctorLocalCheck::RealityCadence)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_audit_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "audit"])
+            .expect("doctor audit should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.check, Some(DoctorLocalCheck::Audit)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn execute_doctor_audit_flags_missing_chain_status() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor", "audit"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["status"], "degraded");
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["check"], "audit");
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(
+            payload["report"]["schema_version"],
+            "fcp.fwc.doctor.audit.v1"
+        );
+        assert_eq!(payload["report"]["healthy"], false);
+        assert_eq!(
+            payload["report"]["coverage_scope"],
+            "audit-chain-status-artifact"
+        );
+        assert_eq!(payload["report"]["chain_status"]["status"], "missing");
+        assert_eq!(
+            payload["report"]["chain_status"]["schema_version"],
+            "fcp.fwc.audit_chain_status.v1"
+        );
+        assert!(
+            payload["report"]["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| check["id"] == "audit_chain_freshness" && check["status"] == "fail")
+        );
+        assert_eq!(
+            payload["report"]["deferred_checks"]
+                .as_array()
+                .expect("deferred checks array")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn execute_doctor_audit_accepts_fresh_quorum_artifacts() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let head_path = tempdir.path().join("head.json");
+        let events_path = tempdir.path().join("events.json");
+        write_audit_json(
+            &head_path,
+            &json!({
+                "zone_id": "z:work",
+                "head_entry": "entry-work-head",
+                "head_seq": 42,
+                "coverage": 0.95,
+                "epoch_id": "epoch-7",
+                "signature_count": 2,
+                "signatures": [
+                    {"issuer_kid": "kid-a", "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                    {"issuer_kid": "kid-b", "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+                ]
+            }),
+        );
+        write_audit_json(
+            &events_path,
+            &json!([
+                {
+                    "id": "entry-work-head",
+                    "event_type": "audit.checkpoint",
+                    "severity": "info",
+                    "actor": "node-a",
+                    "zone_id": "z:work",
+                    "seq": 42,
+                    "occurred_at": 1_700_000_000_u64,
+                    "hlc": {
+                        "physical_ms": 1_700_000_000_123_u64,
+                        "logical": 0,
+                        "node_id": "node-a"
+                    }
+                }
+            ]),
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "doctor",
+            "audit",
+            "--audit-head",
+            head_path.to_str().expect("head path UTF-8"),
+            "--audit-events",
+            events_path.to_str().expect("events path UTF-8"),
+            "--audit-now-unix-secs",
+            "1700000030",
+            "--audit-max-age-seconds",
+            "60",
+            "--audit-min-quorum-signers",
+            "2",
+            "--audit-max-hlc-drift-ms",
+            "60000",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["healthy"], true);
+        assert_eq!(payload["report"]["healthy"], true);
+        assert_eq!(payload["report"]["chain_status"]["status"], "fresh");
+        assert_eq!(payload["report"]["chain_status"]["quorum_signers"], 2);
+        assert_eq!(
+            payload["report"]["chain_status"]["hlc_physical_drift_ms"],
+            29_877
+        );
+        assert!(
+            payload["report"]["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|check| check["status"] == "pass")
+        );
+        assert_eq!(
+            payload["report"]["commands"][0],
+            format!(
+                "fwc audit chain status --head {} --events {} --json",
+                head_path.display(),
+                events_path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn doctor_reality_cadence_report_accepts_current_artifacts() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        write_reality_cadence_artifact(root, "docs/reality/2026-05-12-reality-check.md");
+        write_reality_cadence_artifact(root, "docs/quarterly/2026-Q2-claims-vs-reality.md");
+        write_readme_drift_script(
+            root,
+            "printf '%s\\n' '{\"paths_checked\":4,\"paths_missing\":0,\"paths_ignored\":0,\"symbols_checked\":2,\"symbols_missing\":0,\"symbols_ignored\":0}'",
+        );
+
+        let report = doctor_reality_cadence_report(root, date(2026, 5, 28)).expect("report");
+
+        assert!(report.healthy);
+        assert_eq!(report.month, "2026-05");
+        assert_eq!(report.quarter, "2026-Q2");
+        assert!(report.missing_artifacts.is_empty());
+        assert_eq!(report.drift_count, 0);
+        assert_eq!(report.readme_drift.status, "pass");
+        assert_eq!(report.readme_drift.paths_checked, 4);
+        assert_eq!(report.readme_drift.symbols_checked, 2);
+        assert!(report.current_month_reality_check.present);
+        assert!(report.current_quarter_claims_vs_reality.present);
+        assert!(!report.drift_ignore.present);
+    }
+
+    #[test]
+    fn doctor_reality_cadence_report_flags_missing_docs_drift_and_bad_ignore() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        write_readme_drift_script(
+            root,
+            "printf '%s\\n' '{\"paths_checked\":4,\"paths_missing\":1,\"paths_ignored\":0,\"symbols_checked\":2,\"symbols_missing\":2,\"symbols_ignored\":0}'\nexit 1",
+        );
+        write_reality_cadence_artifact(root, "docs/.readme-drift-ignore");
+        fs::write(
+            root.join("docs/.readme-drift-ignore"),
+            "crates/fwc/src/main.rs -- missing kind\npath README.md\n",
+        )
+        .expect("write ignore fixture");
+
+        let report = doctor_reality_cadence_report(root, date(2026, 7, 1)).expect("report");
+
+        assert!(!report.healthy);
+        assert_eq!(report.month, "2026-07");
+        assert_eq!(report.quarter, "2026-Q3");
+        assert_eq!(report.drift_count, 3);
+        assert_eq!(report.readme_drift.status, "fail");
+        assert_eq!(report.readme_drift.paths_missing, 1);
+        assert_eq!(report.readme_drift.symbols_missing, 2);
+        assert_eq!(report.drift_ignore.invalid_entries.len(), 2);
+        assert!(
+            report
+                .missing_artifacts
+                .contains(&"docs/reality/2026-07-*.md".to_owned())
+        );
+        assert!(
+            report
+                .missing_artifacts
+                .contains(&"docs/quarterly/2026-Q3-claims-vs-reality.md".to_owned())
+        );
+        assert!(
+            report
+                .missing_artifacts
+                .iter()
+                .any(|artifact| artifact.starts_with("docs/.readme-drift-ignore:"))
+        );
+    }
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("test date is valid")
+    }
+
+    fn write_reality_cadence_artifact(root: &Path, relative: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create artifact parent");
+        }
+        fs::write(path, "# fixture\n").expect("write cadence fixture");
+    }
+
+    fn write_readme_drift_script(root: &Path, body: &str) {
+        let path = root.join("scripts/ci/readme_drift_check.sh");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create script parent");
+        }
+        fs::write(
+            path,
+            format!("#!/usr/bin/env bash\nset -euo pipefail\n{body}\n"),
+        )
+        .expect("write drift script fixture");
+    }
+
+    fn write_audit_json(path: &Path, value: &Value) {
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(value).expect("audit fixture serializes"),
+        )
+        .expect("write audit fixture");
+    }
+
+    #[test]
+    fn doctor_hlc_probe_reports_required_metrics_and_commands() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor", "--probe", "hlc"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["probe"], "hlc");
+        assert_eq!(payload["source"], "local-algorithm-probe");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["report"]["schema_version"], "fcp.fwc.doctor.hlc.v1");
+
+        let metrics = &payload["report"]["metrics"];
+        assert_eq!(metrics["hlc_l_max"], 1_700_000_000_000_u64);
+        assert_eq!(metrics["hlc_c_max"], 2);
+        assert_eq!(metrics["skew_observed_ms"], 500);
+        assert!(
+            metrics["hiervv_size_bytes"].as_u64().unwrap() <= 4_096,
+            "compressed HierVV probe should stay below warning threshold"
+        );
+
+        assert_eq!(
+            payload["report"]["thresholds"]["skew_observed_ms_warn"],
+            2_000
+        );
+        assert_eq!(
+            payload["report"]["thresholds"]["hiervv_size_bytes_warn"],
+            4_096
+        );
+        assert_eq!(
+            payload["report"]["thresholds"]["hlc_c_counter_within_1s_warn"],
+            1_000
+        );
+        assert!(payload["report"]["warnings"].as_array().unwrap().is_empty());
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc audit chain inspect --last 10")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc mesh revocation freshness --zone <id>")
+        );
+    }
+
+    #[test]
+    fn doctor_iblt_probe_reports_required_metrics_and_commands() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor", "--probe", "iblt"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["probe"], "iblt");
+        assert_eq!(payload["source"], "local-algorithm-probe");
+        assert_eq!(
+            payload["report"]["schema_version"],
+            "fcp.fwc.doctor.iblt.v1"
+        );
+        assert_eq!(payload["report"]["scheme_in_use"], "masked");
+
+        assert!(
+            payload["report"]["last_decode_p99_us"]
+                .as_u64()
+                .expect("decode p99 should be numeric")
+                <= 20_000,
+            "doctor probe decode p99 should stay below the warning threshold"
+        );
+        assert_eq!(payload["report"]["overflow_count_last_1h"], 0);
+        assert!(
+            payload["report"]["fpr_observed"]
+                .as_f64()
+                .expect("observed FPR should be numeric")
+                <= 0.0002,
+            "observed FPR should stay below the 2x configured warning threshold"
+        );
+
+        let metrics = &payload["report"]["metrics"];
+        assert!(metrics["decoded_change_count"].as_u64().unwrap() >= 128);
+        assert_eq!(metrics["filter_member_count"], 1_000);
+        assert_eq!(metrics["filter_query_count"], 10_000);
+        assert_eq!(
+            payload["report"]["thresholds"]["last_decode_p99_us_warn"],
+            20_000
+        );
+        assert_eq!(
+            payload["report"]["thresholds"]["overflow_count_last_1h_warn"],
+            5
+        );
+        assert_eq!(payload["report"]["thresholds"]["configured_fpr"], 0.0001);
+        assert!(payload["report"]["warnings"].as_array().unwrap().is_empty());
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc mesh iblt resnap")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc mesh peer demote --id <peer>")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc doctor --probe iblt --json")
+        );
+    }
+
+    #[test]
+    fn doctor_migration_probe_reports_required_metrics_and_commands() {
+        let (exit_code, payload) = execute_json(&["fwc", "doctor", "migration", "--json"]);
+
+        assert!(
+            matches!(
+                exit_code,
+                code if code == CliExitCode::Success.into() || code == CliExitCode::Validation.into()
+            ),
+            "migration probe may warn on hosts without Linux soft-dirty support"
+        );
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["probe"], "migration");
+        assert_eq!(payload["source"], "local-migration-probe");
+        assert!(payload["dirty_tracker_kernel_supports_soft_dirty"].is_boolean());
+        assert_eq!(payload["last_precopy_round_count"], 5);
+        assert_eq!(payload["last_precopy_outcome"], "StopAndCheckpoint");
+        assert_eq!(payload["last_dirty_rate_pct"], 85.0);
+        assert_eq!(
+            payload["report"]["schema_version"],
+            "fcp.fwc.doctor.migration.v1"
+        );
+
+        assert!(payload["report"]["dirty_tracker_kernel_supports_soft_dirty"].is_boolean());
+        assert!(
+            matches!(
+                payload["report"]["dirty_tracker_mode"].as_str(),
+                Some("SoftDirty" | "PageWalkerFallback")
+            ),
+            "migration probe should report the active dirty tracker mode"
+        );
+        assert_eq!(payload["report"]["last_precopy_round_count"], 5);
+        assert_eq!(
+            payload["report"]["last_precopy_outcome"],
+            "StopAndCheckpoint"
+        );
+        assert_eq!(payload["report"]["last_dirty_rate_pct"], 85.0);
+        assert_eq!(payload["report"]["postcopy_decision"], "Timeout");
+        assert_eq!(payload["report"]["postcopy_fallback"], "FullReExecute");
+
+        let metrics = &payload["report"]["metrics"];
+        assert_eq!(metrics["dirty_page_count"], 3);
+        assert_eq!(metrics["page_count"], 8);
+        assert_eq!(metrics["page_size_bytes"], 4096);
+        assert_eq!(metrics["bandwidth_mib_per_second"], 100);
+        assert_eq!(metrics["dirty_rate_mib_per_second"], 85);
+        assert_eq!(metrics["postcopy_timeout_ms"], 100);
+        assert!(
+            metrics["final_dirty_bytes"].as_u64().unwrap() > 0,
+            "high-dirty pre-copy should leave bytes for stop-and-checkpoint"
+        );
+
+        assert_eq!(
+            payload["report"]["thresholds"]["dirty_rate_stop_and_checkpoint_pct"],
+            80
+        );
+        assert_eq!(payload["report"]["thresholds"]["postcopy_timeout_ms"], 100);
+        assert_eq!(payload["report"]["thresholds"]["max_precopy_rounds"], 5);
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc doctor --probe migration --json")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc doctor --zone <zone> --host <endpoint>")
+        );
+    }
+
+    #[test]
+    fn doctor_swarm_pressure_probe_reports_fixture_pressure_and_commands() {
+        let mut fixture = tempfile::NamedTempFile::new().expect("swarm pressure fixture");
+        serde_json::to_writer(
+            &mut fixture,
+            &json!({
+                "logical_cpus": 64,
+                "active_agents": 4,
+                "active_connectors": 12,
+                "disk_free_percent": 80,
+                "inode_free_percent": 90,
+                "memory_free_percent": 70,
+                "rch_queued_jobs": 0
+            }),
+        )
+        .expect("write swarm pressure fixture");
+        let fixture_path = fixture
+            .path()
+            .to_str()
+            .expect("fixture path should be valid UTF-8");
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "doctor",
+            "--probe",
+            "swarm-pressure",
+            "--swarm-pressure-fixture",
+            fixture_path,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["probe"], "swarm-pressure");
+        assert_eq!(payload["source"], "local-swarm-pressure-probe");
+        assert_eq!(
+            payload["report"]["schema_version"],
+            "fcp.fwc.doctor.swarm-pressure.v1"
+        );
+        assert_eq!(payload["report"]["verdict"], "green");
+        assert_eq!(payload["report"]["pressure_score_0_100"], 10);
+        assert_eq!(payload["report"]["degraded_dependency_count"], 0);
+        assert_eq!(
+            payload["report"]["pressure"]["schema_version"],
+            "fwc.swarm-pressure/v1"
+        );
+        assert_eq!(payload["report"]["pressure"]["verdict"], "green");
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc swarm pressure --json")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc doctor --probe swarm-pressure --json")
+        );
+        assert!(payload["report"]["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn doctor_hlc_probe_warning_thresholds_classify_anomalies() {
+        assert!(doctor_hlc_probe_warnings(1_000, 2_000, 4_096).is_empty());
+        assert_eq!(
+            doctor_hlc_probe_warnings(1_001, 2_001, 4_097),
+            vec![
+                "skew_observed_ms_exceeds_2s",
+                "hiervv_size_bytes_exceeds_4kb",
+                "hlc_c_counter_exceeds_1000_within_1s"
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_iblt_probe_warning_thresholds_classify_anomalies() {
+        assert!(doctor_iblt_probe_warnings(20_000, 5, 0.0002, 0.0001).is_empty());
+        assert_eq!(
+            doctor_iblt_probe_warnings(20_001, 6, 0.000_200_1, 0.0001),
+            vec![
+                "last_decode_p99_us_exceeds_20ms",
+                "overflow_count_last_1h_exceeds_5",
+                "fpr_observed_exceeds_2x_configured"
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_migration_probe_warning_thresholds_classify_anomalies() {
+        use fcp_migrate::{PostCopyDecision, PreCopyDecision, PreCopyOutcome, PreCopyReport};
+
+        let stop_report = PreCopyReport {
+            rounds: 5,
+            final_dirty_bytes: 1,
+            dirty_rate_pct_of_bandwidth: 85,
+            logs: Vec::new(),
+        };
+        let stop = PreCopyOutcome::StopAndCheckpoint(stop_report);
+        assert!(
+            doctor_migration_probe_warnings(
+                true,
+                &stop,
+                PostCopyDecision::Timeout,
+                "FullReExecute"
+            )
+            .is_empty()
+        );
+
+        let converged_report = PreCopyReport {
+            rounds: 1,
+            final_dirty_bytes: 0,
+            dirty_rate_pct_of_bandwidth: 10,
+            logs: vec![fcp_migrate::PreCopyRoundLog {
+                round_idx: 1,
+                dirty_pages_this_round: 0,
+                bandwidth_estimate_bytes_per_second: 100,
+                dirty_rate_bytes_per_second: 10,
+                dirty_rate_pct_of_bandwidth: 10,
+                remaining_dirty_bytes: 0,
+                decision: PreCopyDecision::Converged,
+            }],
+        };
+        let converged = PreCopyOutcome::Converged(converged_report);
+        assert_eq!(
+            doctor_migration_probe_warnings(false, &converged, PostCopyDecision::Forwarded, "None"),
+            vec![
+                "soft_dirty_unavailable_uses_page_walker_fallback",
+                "precopy_threshold_policy_not_triggered",
+                "postcopy_timeout_policy_not_triggered",
+                "postcopy_timeout_fallback_not_full_reexecute"
+            ]
+        );
     }
 
     #[test]
@@ -32479,6 +37219,10 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "budget");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(
+            payload["schema_version"],
+            HostBudgetReportResponse::SCHEMA_VERSION
+        );
         assert_install_contract(
             &payload,
             "host-admin-api",
@@ -32509,6 +37253,10 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "budget");
+        assert_eq!(
+            payload["schema_version"],
+            HostBudgetReportResponse::SCHEMA_VERSION
+        );
         assert_eq!(payload["filter"]["zone"], "z:work");
         assert_evidence_handle(&payload, "budget-report");
         assert_evidence_handle(&payload, "budget-zone-filter");
@@ -32543,6 +37291,7 @@ deny_ptrace = true
                             enforce_operation_network_constraints: false,
                             runtime_network_enforcement:
                                 RuntimeNetworkEnforcement::LegacyUnspecified,
+                            prewarm: ConnectorPrewarmConfig::default(),
                             operation_network_constraints: StdBTreeMap::new(),
                         },
                         None,
@@ -32568,6 +37317,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "install");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "mesh");
         assert_eq!(payload["source"], "host-admin-api");
         assert_install_contract(
             &payload,
@@ -32653,6 +37404,7 @@ deny_ptrace = true
                             enforce_operation_network_constraints: false,
                             runtime_network_enforcement:
                                 RuntimeNetworkEnforcement::LegacyUnspecified,
+                            prewarm: ConnectorPrewarmConfig::default(),
                             operation_network_constraints: StdBTreeMap::new(),
                         },
                         None,
@@ -32677,6 +37429,8 @@ deny_ptrace = true
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "fallback-derived");
         assert_install_contract(
             &payload,
             "host-admin-api",
@@ -32744,6 +37498,7 @@ deny_ptrace = true
                         enforce_empty_allow_lists: false,
                         enforce_operation_network_constraints: false,
                         runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                        prewarm: ConnectorPrewarmConfig::default(),
                         operation_network_constraints: StdBTreeMap::new(),
                     },
                     None,
@@ -32764,6 +37519,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "install");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "fallback-derived");
         assert_eq!(payload["source"], "host-admin-api");
         assert_install_contract(
             &payload,
@@ -32840,6 +37597,7 @@ deny_ptrace = true
             enforce_empty_allow_lists: false,
             enforce_operation_network_constraints: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::default(),
             operation_network_constraints: StdBTreeMap::new(),
         };
         let planned = ManagedConnectorConfig {
@@ -32858,6 +37616,7 @@ deny_ptrace = true
             enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
             enforce_operation_network_constraints: previous.enforce_operation_network_constraints,
             runtime_network_enforcement: previous.runtime_network_enforcement,
+            prewarm: previous.prewarm.clone(),
             operation_network_constraints: previous.operation_network_constraints.clone(),
         };
         let (host, server) = spawn_mock_host(
@@ -32894,6 +37653,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "update");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["mode"], "dry-run");
         assert_install_contract(
             &payload,
@@ -32933,6 +37694,7 @@ deny_ptrace = true
             enforce_empty_allow_lists: false,
             enforce_operation_network_constraints: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::default(),
             operation_network_constraints: StdBTreeMap::new(),
         };
         let updated = ManagedConnectorConfig {
@@ -32951,6 +37713,7 @@ deny_ptrace = true
             enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
             enforce_operation_network_constraints: previous.enforce_operation_network_constraints,
             runtime_network_enforcement: previous.runtime_network_enforcement,
+            prewarm: previous.prewarm.clone(),
             operation_network_constraints: previous.operation_network_constraints.clone(),
         };
         let (host, server) = spawn_mock_host(
@@ -32986,6 +37749,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "update");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["mode"], "apply");
         assert_install_contract(
             &payload,
@@ -33030,6 +37795,8 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "get");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["config"]["profile"], "work");
         assert_eq!(payload["replayable"], true);
         assert_eq!(payload["snapshot"]["active_revision_id"], 41);
@@ -33062,6 +37829,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "export");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["replayable"], false);
         assert!(
             payload["message"]
@@ -33115,6 +37884,8 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "set");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_install_contract(
             &payload,
             "host-admin-api",
@@ -33168,6 +37939,8 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "unset");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_install_contract(
             &payload,
             "host-admin-api",
@@ -33209,6 +37982,8 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "set");
         assert_eq!(payload["error"]["type"], "non-replayable-live-config");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_install_contract(
             &payload,
             "host-admin-api",
@@ -33261,6 +38036,8 @@ deny_ptrace = true
         assert_eq!(payload["subcommand"], "doctor");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["validation"]["valid"], true);
     }
 
@@ -33305,6 +38082,8 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "import");
         assert_eq!(payload["error"]["type"], "redacted-placeholder-import");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_install_contract(
             &payload,
             "host-admin-api",
@@ -33376,6 +38155,8 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "import");
         assert_eq!(payload["error"]["type"], "config-validation-failed");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_install_contract(
             &payload,
             "host-admin-api",
@@ -33442,6 +38223,8 @@ deny_ptrace = true
         assert_eq!(payload["command"], "config");
         assert_eq!(payload["subcommand"], "import");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_install_contract(
             &payload,
             "host-admin-api",
@@ -33510,6 +38293,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "capabilities");
         assert_eq!(payload["subcommand"], "report");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["availability"]["availability"], "offline-artifact");
         assert_eq!(payload["availability"]["command"], "capabilities");
         assert_eq!(payload["availability"]["authoritative"], false);
@@ -33574,6 +38359,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "capabilities");
         assert_eq!(payload["subcommand"], "suggest");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["recommendations"][0]["suggestion"], "review_risky");
         assert_eq!(
             payload["recommendations"][0]["key"]["capability_id"],
@@ -33713,7 +38500,7 @@ deny_ptrace = true
 
         assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
         assert_eq!(payload["error"]["type"], "destructive-ambiguity");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]
@@ -33836,7 +38623,10 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "list");
         assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert!(
             payload["connectors"]
                 .as_array()
@@ -33854,16 +38644,56 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_list_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "list", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn execute_list_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "list",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "list");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
     fn execute_list_offline_hides_non_live_connectors_by_default() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "list", "--offline"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert!(payload["hidden_by_default_omitted"].as_u64().unwrap_or(0) >= 3);
-        assert!(payload["connectors"].as_array().unwrap().iter().all(
-            |connector| connector["slug"] != "tlon"
-                && connector["slug"] != "zalo"
-                && connector["slug"] != "zalouser"
-        ));
+        let connectors = payload["connectors"].as_array().unwrap();
+        assert!(
+            connectors
+                .iter()
+                .all(|connector| connector["hidden_by_default"] == false)
+        );
+        assert!(
+            connectors
+                .iter()
+                .all(|connector| connector["slug"] != "tlon" && connector["slug"] != "zalouser")
+        );
+        let zalo = connectors
+            .iter()
+            .find(|connector| connector["slug"] == "zalo")
+            .expect("experimental connectors should remain visible by default");
+        assert_eq!(zalo["status"], "experimental");
+        assert_eq!(zalo["hidden_by_default"], false);
     }
 
     #[test]
@@ -34000,6 +38830,8 @@ deny_ptrace = true
             "mesh".to_owned(),
             "availability".to_owned(),
             "github".to_owned(),
+            "--require-source".to_owned(),
+            "mesh-or-host".to_owned(),
         ])
         .expect("mesh availability command should parse");
 
@@ -34008,6 +38840,7 @@ deny_ptrace = true
                 super::MeshCommand::Availability(args) => {
                     assert_eq!(args.connector, "github");
                     assert!(args.zone.is_none());
+                    assert_eq!(args.require_source, Some(RequiredTruthSource::MeshOrHost));
                 }
                 command => panic!("expected mesh availability command, got {command:?}"),
             },
@@ -34024,6 +38857,8 @@ deny_ptrace = true
             "github".to_owned(),
             "--zone".to_owned(),
             "z:work".to_owned(),
+            "--require-source".to_owned(),
+            "any-live".to_owned(),
         ])
         .expect("mesh explain-availability command should parse");
 
@@ -34032,6 +38867,7 @@ deny_ptrace = true
                 super::MeshCommand::ExplainAvailability(args) => {
                     assert_eq!(args.connector, "github");
                     assert_eq!(args.zone.as_deref(), Some("z:work"));
+                    assert_eq!(args.require_source, Some(RequiredTruthSource::AnyLive));
                 }
                 command => panic!("expected mesh explain-availability command, got {command:?}"),
             },
@@ -34071,6 +38907,8 @@ deny_ptrace = true
             "github".to_owned(),
             "--zone".to_owned(),
             "z:work".to_owned(),
+            "--require-source".to_owned(),
+            "any-live".to_owned(),
         ])
         .expect("connector state explain command should parse");
 
@@ -34081,10 +38919,68 @@ deny_ptrace = true
                         assert_eq!(args.connector, "github");
                         assert_eq!(args.zone.as_deref(), Some("z:work"));
                         assert!(args.state_root.is_none());
+                        assert_eq!(args.require_source, Some(RequiredTruthSource::AnyLive));
                     }
                 },
+                command => panic!("expected connector state command, got {command:?}"),
             },
             command => panic!("expected connector command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_connector_lease_status_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "connector".to_owned(),
+            "lease".to_owned(),
+            "status".to_owned(),
+            "--connector".to_owned(),
+            "github".to_owned(),
+            "--zone".to_owned(),
+            "z:work".to_owned(),
+            "--require-source".to_owned(),
+            "mesh-or-host".to_owned(),
+        ])
+        .expect("connector lease status command should parse");
+
+        match prepared.cli.command {
+            Commands::Connector(args) => match args.command {
+                super::ConnectorCommand::Lease(args) => match args.command {
+                    super::ConnectorLeaseCommand::Status(args) => {
+                        assert_eq!(args.connector, "github");
+                        assert_eq!(args.zone.as_deref(), Some("z:work"));
+                        assert_eq!(args.require_source, Some(RequiredTruthSource::MeshOrHost));
+                    }
+                },
+                command => panic!("expected connector lease command, got {command:?}"),
+            },
+            command => panic!("expected connector command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_mesh_lease_ladder_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "mesh".to_owned(),
+            "lease".to_owned(),
+            "ladder".to_owned(),
+            "--connector".to_owned(),
+            "github".to_owned(),
+        ])
+        .expect("mesh lease ladder command should parse");
+
+        match prepared.cli.command {
+            Commands::Mesh(args) => match args.command {
+                super::MeshCommand::Lease(args) => match args.command {
+                    super::MeshLeaseCommand::Ladder(args) => {
+                        assert_eq!(args.connector.as_deref(), Some("github"));
+                    }
+                },
+                command => panic!("expected mesh lease command, got {command:?}"),
+            },
+            command => panic!("expected mesh command, got {command:?}"),
         }
     }
 
@@ -34110,6 +39006,7 @@ deny_ptrace = true
         assert_eq!(payload["command"], "connector");
         assert_eq!(payload["subcommand"], "state explain");
         assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
         assert_eq!(payload["canonical_storage"], "local");
@@ -34125,6 +39022,30 @@ deny_ptrace = true
         assert_eq!(payload["zone"]["requested"], "z:work");
         assert_eq!(payload["zone"]["supported_by_manifest"], true);
         assert_eq!(payload["zone"]["local_cache_marker_present"], false);
+    }
+
+    #[test]
+    fn execute_connector_state_explain_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "state explain");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]
@@ -34154,6 +39075,8 @@ deny_ptrace = true
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["canonical_storage"], "mesh");
         assert_eq!(payload["local_cache_present"], true);
         assert_eq!(payload["local_cache_marker_present"], true);
@@ -34172,6 +39095,674 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_connector_state_explain_with_host_queries_admin_route() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/admin/connectors/fcp.github:enterprise:v1/state/explain?zone=z%3Awork"
+                        .to_owned(),
+                    json!({
+                        "status": "ok",
+                        "command": "fcp-host",
+                        "subcommand": "connector state explain",
+                        "schema_version": "1.0.0",
+                        "source": "host-cache-markers",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "canonical_storage": "mesh",
+                        "last_canonical_seq": 17,
+                        "mesh_replica_count": 2,
+                        "canonical_state": {
+                            "root_present": true,
+                            "connector_id": "fcp.github:enterprise:v1",
+                            "zone_id": "z:work",
+                            "instance_id": Value::Null,
+                            "model": "singleton_writer",
+                            "root_object_id": "sha256:connector-state-root",
+                            "head_object_id": "sha256:connector-state-head",
+                            "state_schema_version": 1,
+                            "status_source": "fcp-store",
+                        },
+                        "local_cache_present": true,
+                        "local_cache_marker_present": true,
+                        "live_host": {
+                            "requested": true,
+                            "state": "queried",
+                            "route_available": true,
+                            "route": "/rpc/admin/connectors/{connector_id}/state/explain",
+                        },
+                        "zone": {
+                            "requested": "z:work",
+                            "local_cache_marker_present": true,
+                            "cache_marker_status": "present",
+                        },
+                        "warnings": [],
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--zone",
+            "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "state explain");
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["host_payload_source"], "host-cache-markers");
+        assert_eq!(
+            payload["message"],
+            "Explained connector state storage for `github` from live fcp-host cache-marker evidence."
+        );
+        assert_eq!(
+            payload["connector"]["canonical_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["last_canonical_seq"], 17);
+        assert_eq!(payload["mesh_replica_count"], 2);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], "z:work");
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            "sha256:connector-state-root"
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            "sha256:connector-state-head"
+        );
+        assert_eq!(payload["canonical_state"]["state_schema_version"], 1);
+        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
+        assert_eq!(payload["live_host"]["route_available"], true);
+        assert!(
+            payload["live_host"]["endpoint_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(payload["zone"]["requested"], "z:work");
+    }
+
+    #[test]
+    fn execute_connector_state_explain_host_require_mesh_fails_truth_source_unavailable() {
+        let (host, server) = spawn_mock_host(StdBTreeMap::new(), 0);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--require-source",
+            "mesh",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "state explain");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
+    }
+
+    #[test]
+    fn execute_connector_state_explain_with_host_preserves_canonical_state_evidence() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/admin/connectors/fcp.github:enterprise:v1/state/explain?zone=z%3Awork"
+                        .to_owned(),
+                    json!({
+                        "status": "ok",
+                        "command": "fcp-host",
+                        "subcommand": "connector state explain",
+                        "schema_version": "1.0.0",
+                        "source": "host-canonical-state",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "canonical_storage": "mesh",
+                        "last_canonical_seq": 7,
+                        "mesh_replica_count": 3,
+                        "canonical_state": {
+                            "root_present": true,
+                            "connector_id": "fcp.github:enterprise:v1",
+                            "zone_id": "z:work",
+                            "root_object_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                            "head_object_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                            "state_schema_version": 1,
+                            "status_source": "fcp-store",
+                        },
+                        "local_cache_present": true,
+                        "local_cache_marker_present": true,
+                        "live_host": {
+                            "requested": true,
+                            "state": "queried",
+                            "route_available": true,
+                            "route": "/rpc/admin/connectors/{connector_id}/state/explain",
+                        },
+                        "zone": {
+                            "requested": "z:work",
+                            "local_cache_marker_present": true,
+                            "cache_marker_status": "present",
+                        },
+                        "warnings": [],
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--zone",
+            "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["host_payload_source"], "host-canonical-state");
+        assert_eq!(payload["last_canonical_seq"], 7);
+        assert_eq!(payload["mesh_replica_count"], 3);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["message"],
+            "Explained connector state storage for `github` from live fcp-host canonical fcp-store state."
+        );
+    }
+
+    #[test]
+    fn execute_connector_lease_status_offline_reports_hrw_ladder_shape() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["source"], "offline-mesh-context");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["zone_id"], "z:work");
+        assert!(
+            payload["holder_node_id_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
+        assert!(payload["fencing_token"].is_null());
+        assert!(payload["expiry"].is_null());
+        assert_eq!(payload["quorum_signers_count"], 0);
+        assert!(
+            payload["ranked_holders"]
+                .as_array()
+                .is_some_and(|holders| holders.len() == 2)
+        );
+    }
+
+    #[test]
+    fn execute_connector_lease_status_offline_text_footer_reports_answer_source() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, output) = execute_text(&[
+            "fwc",
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn execute_connector_lease_status_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_connector_lease_status_offline_uses_connector_target_zone() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["zone_id"], "z:community");
+        assert_eq!(payload["effective_target"]["source"], "connector-target");
+        assert_eq!(payload["effective_target"]["zone"], "z:community");
+    }
+
+    #[test]
+    fn execute_connector_lease_status_with_host_queries_admin_route() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/admin/connectors/fcp.github:enterprise:v1/lease/status?zone=z%3Awork"
+                        .to_owned(),
+                    json!({
+                        "status": "ok",
+                        "command": "fcp-host",
+                        "subcommand": "connector lease status",
+                        "schema_version": "1.0.0",
+                        "source": "host-hrw-routing",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "zone_id": "z:work",
+                        "subject_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                        "purpose": "connector_state_write",
+                        "holder_node_id_hash": "blake3:holder",
+                        "fencing_token": 9,
+                        "durable_lease_seq": 9,
+                        "expiry": Value::Null,
+                        "quorum_signers_count": 2,
+                        "required_quorum_signers_count": 2,
+                        "quorum_satisfied": true,
+                        "durable_validation": {
+                            "status": "valid",
+                            "error": Value::Null,
+                            "validated_at_unix_secs": 1_800_200_000_u64,
+                        },
+                        "lease_object_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                        "lease_evidence_source": "canonical-fcp-store-lease-object",
+                        "ranked_holders": [],
+                        "live_host": {
+                            "requested": true,
+                            "route_available": true,
+                            "route": "/rpc/admin/connectors/{connector_id}/lease/status",
+                        },
+                        "warnings": [],
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+            "--zone",
+            "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["host_payload_source"], "host-hrw-routing");
+        assert_eq!(
+            payload["connector"]["canonical_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["fencing_token"], 9);
+        assert_eq!(payload["durable_lease_seq"], 9);
+        assert_eq!(payload["quorum_signers_count"], 2);
+        assert_eq!(payload["required_quorum_signers_count"], 2);
+        assert_eq!(payload["quorum_satisfied"], true);
+        assert_eq!(payload["durable_validation"]["status"], "valid");
+        assert_eq!(
+            payload["lease_evidence_source"],
+            "canonical-fcp-store-lease-object"
+        );
+        assert!(
+            payload["live_host"]["endpoint_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+    }
+
+    #[test]
+    fn execute_connector_lease_status_host_require_mesh_fails_truth_source_unavailable() {
+        let (host, server) = spawn_mock_host(StdBTreeMap::new(), 0);
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+            "--require-source",
+            "mesh",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
+    }
+
+    #[test]
+    fn execute_connector_lease_status_with_host_uses_context_target_zone() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/admin/connectors/fcp.github:enterprise:v1/lease/status?zone=z%3Acommunity"
+                        .to_owned(),
+                    json!({
+                        "status": "ok",
+                        "schema_version": "1.0.0",
+                        "source": "host-hrw-routing",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "zone_id": "z:community",
+                        "subject_id": "3333333333333333333333333333333333333333333333333333333333333333",
+                        "purpose": "connector_state_write",
+                        "holder_node_id_hash": "blake3:holder-community",
+                        "fencing_token": 10,
+                        "durable_lease_seq": 10,
+                        "expiry": Value::Null,
+                        "quorum_signers_count": 2,
+                        "required_quorum_signers_count": 2,
+                        "quorum_satisfied": true,
+                        "durable_validation": {
+                            "status": "valid",
+                            "error": Value::Null,
+                            "validated_at_unix_secs": 1_800_200_000_u64,
+                        },
+                        "lease_object_id": "4444444444444444444444444444444444444444444444444444444444444444",
+                        "lease_evidence_source": "canonical-fcp-store-lease-object",
+                        "ranked_holders": [],
+                        "live_host": {
+                            "requested": true,
+                            "route_available": true,
+                            "route": "/rpc/admin/connectors/{connector_id}/lease/status",
+                        },
+                        "warnings": [],
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["zone_id"], "z:community");
+        assert_eq!(payload["effective_target"]["source"], "connector-target");
+        assert_eq!(payload["effective_target"]["zone"], "z:community");
+        assert_eq!(payload["fencing_token"], 10);
+        assert_eq!(payload["durable_lease_seq"], 10);
+    }
+
+    #[test]
+    fn execute_mesh_lease_ladder_reports_per_connector_ladders() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        mesh_targets.connector_targets.insert(
+            "slack".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-gamma".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:01Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "lease", "ladder"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "mesh");
+        assert_eq!(payload["subcommand"], "lease ladder");
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["source"], "offline-mesh-context");
+        assert_eq!(payload["connector_count"], 2);
+        assert_eq!(payload["eligible_node_count"], 3);
+        assert!(
+            payload["connectors"]
+                .as_array()
+                .is_some_and(|connectors| connectors.iter().any(|connector| {
+                    connector["connector"]["slug"] == "github"
+                        && connector["holder_node_id_hash"]
+                            .as_str()
+                            .is_some_and(|hash| hash.starts_with("blake3:"))
+                        && connector["ranked_holders"]
+                            .as_array()
+                            .is_some_and(|holders| holders.len() == 3)
+                }))
+        );
+    }
+
+    #[test]
+    fn execute_mesh_lease_ladder_filter_uses_resolved_connector_target_zone() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "mesh",
+            "lease",
+            "ladder",
+            "--connector",
+            "fcp.github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["connector_count"], 1);
+        let connector = payload["connectors"]
+            .as_array()
+            .and_then(|connectors| connectors.first())
+            .expect("one connector ladder should be reported");
+        assert_eq!(connector["connector"]["requested_selector"], "fcp.github");
+        assert_eq!(connector["connector"]["slug"], "github");
+        assert_eq!(connector["zone_id"], "z:community");
+        assert_eq!(connector["effective_target"]["source"], "connector-target");
+        assert_eq!(connector["effective_target"]["target_key"], "github");
+    }
+
+    #[test]
     fn execute_mesh_status_reports_default_state_and_guidance() {
         let (tempdir, _path, _guard) = temp_context_config();
         let _session_guard = super::install_test_session_dir(tempdir.path().join("sessions"));
@@ -34181,6 +39772,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "mesh");
         assert_eq!(payload["subcommand"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["current_context"], "local");
         assert_eq!(payload["context"]["persistence_scope"], "host-context");
         assert!(payload["active_session"].is_null());
@@ -34222,6 +39815,8 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "status"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(
             payload["target_state"]["active_default_node"],
             "stale-laptop"
@@ -34263,6 +39858,8 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "use", "desktop"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["target_state"]["active_default_node"], "desktop");
         assert_eq!(payload["target_state"]["active_default_node_stale"], false);
         let (_, reloaded) = super::load_context_config().expect("context config should load");
@@ -34282,6 +39879,8 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "use", "laptop-work"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(
             payload["target_state"]["active_default_node"],
             "laptop-work"
@@ -34328,6 +39927,8 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "nodes"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["inventory_source"], "persisted-targets");
         assert_eq!(payload["node_count"], 2);
         let nodes = payload["nodes"]
@@ -34374,6 +39975,8 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "nodes", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["connector_filter"], "github");
         assert_eq!(payload["node_count"], 1);
         assert_eq!(payload["nodes"][0]["node"], "desktop");
@@ -34394,6 +39997,8 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "nodes", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["node_count"], 1);
         assert_eq!(payload["nodes"][0]["node"], "laptop");
         let warnings = payload["warnings"]
@@ -34413,6 +40018,8 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "nodes", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["node_count"], 0);
         let warnings = payload["warnings"]
             .as_array()
@@ -34439,6 +40046,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "mesh");
         assert_eq!(payload["subcommand"], "availability");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["source"], "workspace-manifests");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["connector"]["slug"], "github");
@@ -34460,6 +40069,36 @@ deny_ptrace = true
             false,
         );
         assert_evidence_handle(&payload, "workspace-manifest");
+    }
+
+    #[test]
+    fn execute_mesh_explain_availability_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "mesh", "explain-availability", "github"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn execute_mesh_explain_availability_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "mesh",
+            "explain-availability",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "mesh");
+        assert_eq!(payload["subcommand"], "explain-availability");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]
@@ -34492,6 +40131,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "mesh");
         assert_eq!(payload["subcommand"], "explain-availability");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "mesh");
         assert_eq!(payload["source"], "host-admin-api");
         assert_discovery_provenance(&payload, "live_host_inventory", true, "live-inventory");
         assert_eq!(
@@ -34500,6 +40141,22 @@ deny_ptrace = true
         );
         assert_eq!(payload["availability_fact"]["state"], "available");
         assert_eq!(payload["availability_fact"]["silent_fallback"], false);
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["policy_recorded"],
+            true
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["replica_telemetry_available"],
+            false
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["cutover_gate_eligible"],
+            false
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["replica_count"],
+            Value::Null
+        );
         assert_eq!(payload["source_selection"]["source_kind"], "registry");
         assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(
@@ -34523,6 +40180,40 @@ deny_ptrace = true
                 .as_array()
                 .is_some_and(|items| !items.is_empty())
         );
+    }
+
+    #[test]
+    fn execute_mesh_explain_availability_host_node_local_text_footer_reports_answer_source() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    mock_connector_admin_status_with_artifact(
+                        "local_path",
+                        "/opt/fcp/cache/github-enterprise",
+                        Value::Null,
+                    ),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, output) = execute_text(&[
+            "fwc",
+            "--host",
+            &host,
+            "mesh",
+            "explain-availability",
+            "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: node-local)\n"));
     }
 
     #[test]
@@ -34557,6 +40248,8 @@ deny_ptrace = true
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["source_selection"]["source_kind"], "local-path");
         assert_eq!(
@@ -34566,6 +40259,18 @@ deny_ptrace = true
         assert_eq!(
             payload["offline_readiness"]["state"],
             "artifact-recorded-without-placement-policy"
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["policy_recorded"],
+            false
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["replica_telemetry_available"],
+            false
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["cutover_gate_eligible"],
+            false
         );
         assert_live_truth_resolution(
             &payload,
@@ -34578,6 +40283,49 @@ deny_ptrace = true
         );
         assert_evidence_handle(&payload, "mesh-live-availability");
         assert_evidence_handle(&payload, "host-artifact-provenance");
+    }
+
+    #[test]
+    fn execute_mesh_explain_availability_node_local_require_any_live_fails() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    mock_connector_admin_status_with_artifact(
+                        "local_path",
+                        "/opt/fcp/cache/github-enterprise",
+                        Value::Null,
+                    ),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "mesh",
+            "explain-availability",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "mesh");
+        assert_eq!(payload["subcommand"], "explain-availability");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "node-local");
     }
 
     #[test]
@@ -34606,6 +40354,7 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "mesh");
         assert_eq!(payload["subcommand"], "availability");
+        assert!(payload.get("schema_version").is_none());
         assert_eq!(payload["error"]["type"], "unsupported-live-zone-filter");
     }
 
@@ -34638,6 +40387,8 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["subcommand"], "repair-hints");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "degraded");
         assert_eq!(payload["inventory"]["observed_state"], "missing");
         assert_eq!(payload["availability_fact"]["state"], "unavailable");
         assert_evidence_handle(&payload, "mesh-live-availability");
@@ -34679,6 +40430,8 @@ deny_ptrace = true
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "degraded");
         assert_eq!(payload["availability_fact"]["state"], "degraded");
         assert_eq!(payload["inventory"]["observed_state"], "degraded");
         assert_live_truth_resolution(
@@ -34711,6 +40464,8 @@ deny_ptrace = true
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["zone_source"], "context-default");
         assert_eq!(payload["effective_target"]["node"], "desktop");
         assert_eq!(payload["effective_target"]["zone"], "z:work");
@@ -34742,6 +40497,8 @@ deny_ptrace = true
         ]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["zone_source"], "explicit");
         assert_eq!(payload["effective_target"]["zone"], "z:private");
         let (_, reloaded) = super::load_context_config().expect("context config should load");
@@ -34776,6 +40533,8 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "target", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["effective_target"]["node"], "desktop");
         assert_eq!(payload["effective_target"]["source"], "connector-target");
     }
@@ -34804,6 +40563,8 @@ deny_ptrace = true
             execute_json(&["fwc", "--json", "mesh", "target", "github", "--clear"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert!(payload["effective_target"].is_null());
         let (_, reloaded) = super::load_context_config().expect("context config should load");
         assert!(
@@ -34821,6 +40582,7 @@ deny_ptrace = true
         let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "target", "github"]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert!(payload.get("schema_version").is_none());
         assert_eq!(payload["error"]["type"], "mesh-target-not-found");
         assert_eq!(payload["connector"], "github");
     }
@@ -34850,6 +40612,8 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "zones");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["source"], "workspace-manifests");
         assert_eq!(payload["mode"], "offline-artifact");
         assert!(
@@ -34876,6 +40640,8 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "zones");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["zone"]["zone_id"], "z:work");
         assert_eq!(payload["policy"]["policy_type"], "standard");
         assert_eq!(payload["policy"]["source"], "inferred-from-zone-id");
@@ -34895,6 +40661,7 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "zones");
+        assert!(payload.get("schema_version").is_none());
         assert_eq!(payload["error"]["type"], "missing-zone-selector");
     }
 
@@ -34904,6 +40671,8 @@ deny_ptrace = true
             execute_json(&["fwc", "--json", "zones", "z:totally-empty-test-zone"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["zone"]["zone_id"], "z:totally-empty-test-zone");
         assert_eq!(payload["zone"]["connector_count"], 0);
         assert_eq!(payload["zone"]["tool_count"], 0);
@@ -34918,6 +40687,8 @@ deny_ptrace = true
             "matrix".to_owned(),
             "github".to_owned(),
             "--json".to_owned(),
+            "--require-source".to_owned(),
+            "any-live".to_owned(),
         ])
         .expect("audit matrix command should parse");
 
@@ -34926,6 +40697,10 @@ deny_ptrace = true
                 super::audit_chain::AuditCommands::Matrix(matrix_args) => {
                     assert_eq!(matrix_args.connector.as_deref(), Some("github"));
                     assert!(matrix_args.json);
+                    assert_eq!(
+                        matrix_args.require_source,
+                        Some(RequiredTruthSource::AnyLive)
+                    );
                 }
                 command => panic!("expected audit matrix command, got {command:?}"),
             },
@@ -34967,6 +40742,46 @@ deny_ptrace = true
     }
 
     #[test]
+    fn prepare_cli_parses_agent_readiness_fixture_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "agent-readiness".to_owned(),
+            "fixture".to_owned(),
+            "--agent".to_owned(),
+            "GreenLake".to_owned(),
+            "--run-id".to_owned(),
+            "agent-readiness-test".to_owned(),
+            "--scenario".to_owned(),
+            "agent-mail-unavailable".to_owned(),
+            "--owned-path-glob".to_owned(),
+            "crates/fcp-evidence/**".to_owned(),
+            "--out-dir".to_owned(),
+            "bundle".to_owned(),
+        ])
+        .expect("agent readiness fixture command should parse");
+
+        match prepared.cli.command {
+            Commands::AgentReadiness(args) => match args.command {
+                super::agent_readiness_cmd::AgentReadinessCommand::Fixture(fixture_args) => {
+                    assert_eq!(fixture_args.agent.as_deref(), Some("GreenLake"));
+                    assert_eq!(fixture_args.run_id.as_deref(), Some("agent-readiness-test"));
+                    assert_eq!(
+                        fixture_args.scenario,
+                        super::agent_readiness_cmd::FixtureScenarioArg::AgentMailUnavailable
+                    );
+                    assert_eq!(fixture_args.out_dir, PathBuf::from("bundle"));
+                    assert_eq!(
+                        fixture_args.owned_path_globs,
+                        vec!["crates/fcp-evidence/**".to_owned()]
+                    );
+                }
+                command => panic!("expected agent readiness fixture command, got {command:?}"),
+            },
+            command => panic!("expected agent readiness command, got {command:?}"),
+        }
+    }
+
+    #[test]
     fn audit_matrix_skips_passthrough_execution() {
         let prepared = prepare_cli(&["fwc".to_owned(), "audit".to_owned(), "matrix".to_owned()])
             .expect("audit matrix command should parse");
@@ -34986,6 +40801,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "audit");
         assert_eq!(payload["subcommand"], "matrix");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["source"], "workspace-manifests");
         assert_eq!(payload["mode"], "offline-artifact");
         assert!(
@@ -35013,7 +40830,30 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "audit");
         assert_eq!(payload["subcommand"], "matrix");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "connector-not-found");
+    }
+
+    #[test]
+    fn execute_audit_matrix_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "audit",
+            "matrix",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "audit");
+        assert_eq!(payload["subcommand"], "matrix");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]
@@ -35024,6 +40864,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "audit");
         assert_eq!(payload["subcommand"], "gaps");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["filters"]["blocking_only"], true);
         assert!(payload["gaps"].as_array().is_some());
         assert!(
@@ -35041,16 +40883,89 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_audit_gaps_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "audit",
+            "gaps",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "audit");
+        assert_eq!(payload["subcommand"], "gaps");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
     fn execute_search_offline_surfaces_github_issue_matches() {
         let (exit_code, payload) =
             execute_json(&["fwc", "--json", "search", "github issue", "--offline"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "search");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert!(payload["results"].as_array().unwrap().iter().any(|result| {
             result["connector"] == "github" && result["operation"] == "github.create_issue"
         }));
+    }
+
+    #[test]
+    fn execute_search_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "search", "github issue", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn execute_search_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "search",
+            "github issue",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "search");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_search_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "search",
+            "github issue",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "search");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]
@@ -35103,6 +41018,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "search");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_discovery_provenance(
             &payload,
             "live_host_introspection",
@@ -35115,13 +41032,38 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_search_host_require_mesh_fails_truth_source_unavailable_without_network() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:9",
+            "search",
+            "github issue",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "search");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
+    }
+
+    #[test]
     fn execute_show_github_offline_returns_manifest_detail() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "show", "github", "--offline"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "show");
         assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
         assert_eq!(payload["connector"]["format"], "wasi");
@@ -35143,6 +41085,53 @@ deny_ptrace = true
                 .as_array()
                 .is_some_and(|preview| !preview.is_empty())
         );
+    }
+
+    #[test]
+    fn execute_show_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "show", "github", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn execute_show_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "github",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "show");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_show_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "show",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "show");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
     }
 
     #[test]
@@ -35169,7 +41158,10 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_eq!(payload["connector"]["slug"], "github");
         assert!(
             payload["operations"]
@@ -35185,6 +41177,100 @@ deny_ptrace = true
                 .iter()
                 .any(|operation| { operation["canonical_id"] == "github.get_issue" })
         );
+    }
+
+    #[test]
+    fn execute_ops_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "ops", "github", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn execute_ops_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "ops",
+            "github",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_ops_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "ops",
+            "github",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_ops_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "ops",
+            "github",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "ops");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
+    }
+
+    #[test]
+    fn execute_schema_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "schema",
+            "github",
+            "issues.create",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]
@@ -35210,7 +41296,10 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["requested_selector"], "issues.create");
         assert_eq!(payload["operation"]["selector"], "issues.create");
@@ -35223,6 +41312,15 @@ deny_ptrace = true
             payload["guidance"]["when_to_use"],
             "Create a new issue in a GitHub repository."
         );
+    }
+
+    #[test]
+    fn execute_schema_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) =
+            execute_text(&["fwc", "schema", "github", "issues.create", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
     }
 
     #[test]
@@ -35243,6 +41341,47 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_schema_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "schema",
+            "github",
+            "issues.create",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_schema_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "schema",
+            "github",
+            "issues.create",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+    }
+
+    #[test]
     fn execute_examples_offline_resolves_friendly_operation_selector() {
         let (exit_code, payload) = execute_json(&[
             "fwc",
@@ -35255,7 +41394,10 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
+        assert_metadata_cache_evidence(&payload, "workspace-manifests");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["selector"], "issues.create");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
@@ -35265,6 +41407,15 @@ deny_ptrace = true
                 .and_then(Value::as_str)
                 .is_some_and(|example| example.contains("\"title\": \"Bug report\""))
         }));
+    }
+
+    #[test]
+    fn execute_examples_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) =
+            execute_text(&["fwc", "examples", "github", "issues.create", "--offline"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
     }
 
     #[test]
@@ -35282,6 +41433,72 @@ deny_ptrace = true
         assert_eq!(payload["command"], "examples");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
+    }
+
+    #[test]
+    fn execute_examples_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "examples",
+            "github",
+            "issues.create",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_examples_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "examples",
+            "github",
+            "issues.create",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_examples_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "examples",
+            "github",
+            "issues.create",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "examples");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]
@@ -37609,7 +43826,8 @@ depends_on = ["missing"]
                 .expect("mock introspection response should deserialize");
         let tools = try_host_mcp_tool_definitions(connector, &introspection)
             .expect("live MCP tool definitions should build");
-        let state = serve_mcp::state_from_tools(tools, super::serve_mcp_config(Some(connector)));
+        let state =
+            serve_mcp::state_from_tools(tools, super::serve_mcp_config(Some(connector), None));
         let response = serve_mcp::handle_request(
             &state,
             &serve_mcp::JsonRpcRequest {
@@ -37626,6 +43844,16 @@ depends_on = ["missing"]
         assert_eq!(state.config.connector_filter.as_deref(), Some("github"));
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["name"], "github.create_issue");
+    }
+
+    #[test]
+    fn serve_mcp_config_applies_risk_max() {
+        let config = super::serve_mcp_config(None, Some("medium"));
+        assert_eq!(config.risk_max.as_deref(), Some("medium"));
+        assert!(config.connector_filter.is_none());
+
+        let config = super::serve_mcp_config(None, None);
+        assert!(config.risk_max.is_none());
     }
 
     #[test]
@@ -37983,6 +44211,8 @@ depends_on = ["missing"]
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["operation"]["requested_selector"], "issues.create");
         assert_eq!(payload["input_authoring"]["validation"]["valid"], true);
@@ -38032,6 +44262,8 @@ depends_on = ["missing"]
         ]);
 
         let preview = &payload["input_authoring"]["payload_preview"];
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(preview["shape"], "object");
         assert!(preview["field_count"].as_u64().unwrap() >= 3);
         assert!(preview["bytes"].as_u64().unwrap() > 0);
@@ -38054,6 +44286,8 @@ depends_on = ["missing"]
         ]);
 
         let op = &payload["operation"];
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert!(op["capability"].as_str().is_some_and(|c| !c.is_empty()));
         assert!(op["risk_level"].as_str().is_some_and(|r| !r.is_empty()));
         assert!(op["safety_tier"].as_str().is_some_and(|s| !s.is_empty()));
@@ -38073,6 +44307,8 @@ depends_on = ["missing"]
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["status"], "error");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "invalid-input-payload");
         assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
         assert!(
@@ -38100,6 +44336,8 @@ depends_on = ["missing"]
         // Without a host, simulate dispatches through the same offline path as invoke
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
     }
 
@@ -38117,6 +44355,8 @@ depends_on = ["missing"]
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["command"], "simulate");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "invalid-input-payload");
         assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
     }
@@ -38150,6 +44390,8 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
         assert_eq!(payload["status"], "denied");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["phase"], "preflight");
         assert_eq!(payload["error"]["type"], "policy-denied");
         assert_eq!(payload["error"]["recoverable"], true);
@@ -38183,6 +44425,8 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::PolicyDenied.into());
         assert_eq!(payload["status"], "denied");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["phase"], "preflight");
         assert_eq!(payload["command"], "simulate");
     }
@@ -38214,6 +44458,8 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["phase"], "preflight");
         assert_eq!(payload["command"], "simulate");
         assert_eq!(payload["preflight"]["allowed"], true);
@@ -38300,6 +44546,8 @@ depends_on = ["missing"]
             execute_json(&["fwc", "--json", "invoke", "github", "issues.create"]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "missing-input-source");
         assert_eq!(payload["error"]["recoverable"], true);
     }
@@ -38601,6 +44849,8 @@ depends_on = ["missing"]
 
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["input_authoring"]["primary_source"], "file");
         assert_eq!(payload["input_authoring"]["validation"]["valid"], true);
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
@@ -38654,6 +44904,8 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["phase"], "execution");
         assert_eq!(payload["response"]["result"]["number"], 99);
     }
@@ -38671,6 +44923,8 @@ depends_on = ["missing"]
         ]);
 
         assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "unreadable-input-file");
     }
 
@@ -38970,10 +45224,12 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["phase"], "execution");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["response"]["result"]["number"], 77);
-        assert!(payload["connector"]["slug"] == "github");
+        assert_eq!(payload["connector"]["slug"], "github");
         assert!(
             payload["next_actions"]
                 .as_array()
@@ -39107,7 +45363,7 @@ depends_on = ["missing"]
         assert!(payload["operation"]["safety_tier"].is_string());
         assert!(payload["risk_analysis"]["risk_level"].is_string());
         assert!(payload["risk_analysis"]["safety_tier"].is_string());
-        assert!(payload["risk_analysis"]["source"] == "manifest");
+        assert_eq!(payload["risk_analysis"]["source"], "manifest");
         assert!(
             payload["risk_analysis"]["caveat"]
                 .as_str()
@@ -39310,8 +45566,8 @@ depends_on = ["missing"]
         assert_eq!(payload["phase"], "execution");
         assert_eq!(payload["command"], "invoke");
         assert_eq!(payload["source"], "host-admin-api");
-        assert!(payload["response"]["result"]["issue_id"] == 42);
-        assert!(payload["response"]["result"]["created"] == true);
+        assert_eq!(payload["response"]["result"]["issue_id"], 42);
+        assert_eq!(payload["response"]["result"]["created"], true);
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["operation"]["requested_selector"], "issues.create");
     }
@@ -39494,6 +45750,8 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["status"], "error");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["phase"], "input-authoring");
         assert_eq!(payload["error"]["type"], "invalid-input-payload");
         assert_eq!(payload["input_authoring"]["validation"]["valid"], false);
@@ -39849,7 +46107,7 @@ depends_on = ["missing"]
             ])),
             4,
         );
-        let (exit_code, _) = execute_json(&[
+        let (exit_code, payload) = execute_json(&[
             "fwc",
             "--json",
             "--host",
@@ -39865,6 +46123,10 @@ depends_on = ["missing"]
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["phase"], "execution");
+        assert_eq!(payload["input_authoring"]["validation"]["valid"], true);
+        assert_eq!(payload["response"]["result"]["number"], 7);
 
         // Now query history and verify there is at least one entry for github.
         let (history_exit, history_payload) = execute_json(&[
@@ -39933,6 +46195,8 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
         assert_eq!(payload["details"]["scope"], "fleet");
@@ -39946,9 +46210,54 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert_eq!(payload["details"]["scope"], "connector");
         assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn status_fleet_offline_text_footer_reports_answer_source() {
+        let (exit_code, output) = execute_text(&["fwc", "status"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
+    }
+
+    #[test]
+    fn status_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "status", "--require-source", "any-live"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn status_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "status",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]
@@ -39980,6 +46289,8 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "status");
         assert_eq!(payload["scope"], "fleet");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_live_host_admin_contract(&payload, "fleet-status", false, "fleet-status");
         assert!(
             payload["connectors"]
@@ -39989,6 +46300,35 @@ depends_on = ["missing"]
         assert_eq!(payload["connectors"][0]["slug"], "github");
         assert_eq!(payload["host_health"]["status"], "healthy");
         assert_eq!(payload["registry_version"], 7);
+    }
+
+    #[test]
+    fn status_fleet_host_text_footer_reports_answer_source() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/health".to_owned(),
+                    json!({
+                        "status": "healthy",
+                        "connectors": {},
+                        "uptime_seconds": 3600,
+                        "active_connections": 2,
+                        "timestamp": "2026-03-12T00:00:00Z",
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, output) = execute_text(&["fwc", "--host", &host, "status"]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: host)\n"));
     }
 
     #[test]
@@ -40063,6 +46403,8 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "status");
         assert_eq!(payload["scope"], "connector");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_live_host_admin_contract(&payload, "connector-status", false, "connector-status");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], cid);
@@ -40106,6 +46448,8 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["status"], "error");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["error"]["type"], "connector-not-found");
     }
 
@@ -40661,6 +47005,7 @@ require_attestation_types = ["in-toto"]"#,
                             enforce_operation_network_constraints: false,
                             runtime_network_enforcement:
                                 RuntimeNetworkEnforcement::LegacyUnspecified,
+                            prewarm: ConnectorPrewarmConfig::default(),
                             operation_network_constraints: StdBTreeMap::new(),
                         },
                         None,
@@ -40766,6 +47111,7 @@ require_attestation_types = ["in-toto"]"#,
             enforce_empty_allow_lists: false,
             enforce_operation_network_constraints: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::default(),
             operation_network_constraints: StdBTreeMap::new(),
         };
         let updated = ManagedConnectorConfig {
@@ -40784,6 +47130,7 @@ require_attestation_types = ["in-toto"]"#,
             enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
             enforce_operation_network_constraints: previous.enforce_operation_network_constraints,
             runtime_network_enforcement: previous.runtime_network_enforcement,
+            prewarm: previous.prewarm.clone(),
             operation_network_constraints: previous.operation_network_constraints.clone(),
         };
         let (host, host_server) = spawn_mock_host(
@@ -42314,6 +48661,8 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["command"], "history");
         assert_eq!(payload["scope"], "list");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["total_entries"], 0);
         assert_eq!(payload["returned"], 0);
         assert!(
@@ -42496,7 +48845,47 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "history");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "not-found");
+    }
+
+    #[test]
+    fn history_require_any_live_fails_truth_source_unavailable() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-require-live-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "--require-source", "any-live"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "history");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn history_text_footer_reports_answer_source() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-footer-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, output) = execute_text(&["fwc", "history"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert!(output.ends_with("(answer source: offline)\n"));
     }
 
     #[test]
@@ -43233,7 +49622,7 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "invoke");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-        assert!(payload["captures"]["deadline_ms"].as_u64() == Some(5000));
+        assert_eq!(payload["captures"]["deadline_ms"].as_u64(), Some(5000));
     }
 
     #[test]
@@ -43924,7 +50313,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
         // The error message should mention the unrecognised token.
         assert!(
             payload["error"]["message"]
@@ -43939,7 +50328,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
         assert!(
             payload["error"]["message"]
                 .as_str()
@@ -43955,7 +50344,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]
@@ -43964,7 +50353,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
         assert!(
             payload["error"]["message"]
                 .as_str()
@@ -43978,7 +50367,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
         assert!(
             payload["error"]["message"]
                 .as_str()
@@ -44110,7 +50499,7 @@ require_attestation_types = ["in-toto"]"#,
             "error type should be connector-not-found, got: {}",
             payload["error"]["type"]
         );
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]
@@ -44349,9 +50738,18 @@ require_attestation_types = ["in-toto"]"#,
             .to_owned();
 
         // Resolve the task so it becomes ready for execution.
-        let (_resolve_exit, _resolve_payload) = execute_json(&[
+        let (resolve_exit, resolve_payload) = execute_json(&[
             "fwc", "--json", "task", "resolve", &task_id, "--until", "ready",
         ]);
+        assert_eq!(resolve_exit, CliExitCode::Success.into());
+        assert_eq!(resolve_payload["command"], "task");
+        assert_eq!(resolve_payload["subcommand"], "resolve");
+        assert!(
+            resolve_payload["task"]["capsule_status"]
+                .as_str()
+                .is_some_and(|status| !status.is_empty()),
+            "task resolve output should include capsule_status"
+        );
 
         // List tasks and find the one we created.
         let (list_exit, list_payload) = execute_json(&["fwc", "--json", "task", "list"]);
@@ -45317,6 +51715,7 @@ require_attestation_types = ["in-toto"]"#,
             execute_json(&["fwc", "--json", "auth", "bootstrap", "nonexistent-xyz"]);
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
+        assert!(payload.get("schema_version").is_none());
         let error_type = payload["error"]["type"].as_str().unwrap_or("");
         assert!(
             error_type.contains("auth") || error_type.contains("unknown"),
@@ -45607,6 +52006,8 @@ require_attestation_types = ["in-toto"]"#,
         // `pipe` without required positional args (source, target) should error
         let (pipe_exit, pipe_payload) = execute_json(&["fwc", "--json", "pipe"]);
         assert_ne!(pipe_exit, CliExitCode::Success.into());
+        assert_eq!(pipe_payload["status"], "error");
+        assert!(pipe_payload["error"]["type"].as_str().is_some());
         // The error should reference "pipe", not "pipeline"
         let pipe_text = serde_json::to_string(&pipe_payload).unwrap_or_default();
         // The raw error or command field should distinguish the two
@@ -45618,6 +52019,8 @@ require_attestation_types = ["in-toto"]"#,
         // `pipeline` without required subcommand should also error
         let (pipeline_exit, pipeline_payload) = execute_json(&["fwc", "--json", "pipeline"]);
         assert_ne!(pipeline_exit, CliExitCode::Success.into());
+        assert_eq!(pipeline_payload["status"], "error");
+        assert!(pipeline_payload["error"]["type"].as_str().is_some());
         let pipeline_text = serde_json::to_string(&pipeline_payload).unwrap_or_default();
         assert!(
             pipeline_text.contains("pipeline"),
@@ -47121,6 +53524,26 @@ require_attestation_types = ["in-toto"]"#,
                 "top-level help should mention `{command_name}` but did not.\nHelp:\n{help}"
             );
         }
+    }
+
+    #[test]
+    fn catalog_commands_match_clap_top_level_commands() {
+        let mut clap_commands = Cli::command()
+            .get_subcommands()
+            .map(|command| command.get_name().to_owned())
+            .collect::<Vec<_>>();
+        clap_commands.sort_unstable();
+
+        let mut catalog_commands = catalog::COMMANDS
+            .iter()
+            .map(|command| (*command).to_owned())
+            .collect::<Vec<_>>();
+        catalog_commands.sort_unstable();
+
+        assert_eq!(
+            catalog_commands, clap_commands,
+            "fwc catalog::COMMANDS must cover every Clap top-level command exactly"
+        );
     }
 
     #[test]

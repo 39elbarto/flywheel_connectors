@@ -15,8 +15,10 @@
 3. Use the **Consolidated Rerun Commands** to spot-check the current tree.
 4. Check the **Tooling Prerequisites** before running anything remotely.
 5. Walk the **Artifact Manifest** to confirm every referenced file exists.
-6. Consult `docs/FCP3_Final_Closure_Checklist.md` for the gate-by-gate status.
-7. Read `docs/FCP3_Go_No_Go_Review_Record.md` for the final published
+6. Run the **Proof Freshness Gate** before treating static artifact tables as
+   current proof.
+7. Consult `docs/FCP3_Final_Closure_Checklist.md` for the gate-by-gate status.
+8. Read `docs/FCP3_Go_No_Go_Review_Record.md` for the final published
    go/no-go record.
 
 ---
@@ -46,6 +48,38 @@ These must be satisfied before remote rerun commands will succeed.
 | `.rchignore` | 16 patterns covering `.beads/recovery_*` paths | `wc -l .rchignore` (expect 16) | r4x01 |
 | Rust toolchain | Nightly, as pinned by `rust-toolchain.toml` | `rustup show active-toolchain` | -- |
 | `CARGO_TARGET_DIR` | Set to isolated path to avoid lock contention | `echo $CARGO_TARGET_DIR` | -- |
+
+---
+
+## Proof Freshness Gate
+
+Static tables in this manifest and the section indexes are review inventory.
+They are not, by themselves, proof that an artifact is fresh on the current
+tree. For proof-bearing closeout, materialize registry rows that conform to
+`docs/proof-ops/proof_bundle_registry.schema.json`, source the row origins from
+`docs/proof-ops/proof_bundle_source_inventory.md`, and run:
+
+```bash
+fwc proof status --registry <proof-registry.json> --artifacts <observed-artifacts.json> --now-unix-ms <capture-ms>
+```
+
+The status output is the mechanical gate before final go/no-go:
+
+- `green`: live or host-backed proof is fresh, required artifacts exist, digests
+  match, rerun and owner metadata are present, and the verifier passed.
+- `yellow`: evidence remains reviewable but cannot count as final PASS without
+  human judgment. This includes stale warn-mode rows, structured skips,
+  replay-only evidence, offline evidence, and static proof rows.
+- `red`: fail-closed proof failure. Missing owner/source/rerun/verifier data,
+  missing required artifacts, digest mismatches, stale fail-closed rows, and
+  verifier failures are blockers.
+- `infra_blocked`: the verifier could not run because required infrastructure,
+  such as an `rch` worker selector or preflight, was unavailable. Record the
+  blocker and rerun later; do not rewrite this as green or as a code failure.
+
+If Agent Mail or `rch` are unavailable, follow the repository safety rules:
+record the blocked proof state and continue with Beads/docs evidence. Do not
+repair, restart, or kill shared services as part of proof review.
 
 ---
 
@@ -247,7 +281,9 @@ For each proof section:
   or evidence contradicts the section claim
 
 The final cutover decision should require PASS on all 7 proof sections listed
-in the Proof Sections table above.
+in the Proof Sections table above, plus a `fwc proof status` aggregate green
+result for proof-bearing rows. Any yellow or `infra_blocked` row must be called
+out explicitly in the go/no-go record. Any red row blocks PASS.
 
 ---
 

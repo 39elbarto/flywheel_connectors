@@ -11,8 +11,13 @@ BIN_DIR="${BIN_DIR:-${REPO_ROOT}/target/debug}"
 RETENTION_DAYS="${RETENTION_DAYS:-90}"
 SKIP_BUILD=false
 STEP_COUNTER=0
+CARGO_STEP_COUNTER=0
 RUN_ID=""
 SUITE_FAILED=0
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+LIVE_SMOKE_TARGET_DIR="${LIVE_SMOKE_TARGET_DIR:-${CARGO_TARGET_DIR:-/tmp/fcp-live-connector-smoke}}"
+export RCH_FORCE_REMOTE=1
 
 usage() {
   cat <<'EOF'
@@ -68,8 +73,29 @@ require_cmd() {
 }
 
 run_cargo() {
-  require_cmd rch
-  rch exec -- cargo "$@"
+  require_cmd "${RCH_BIN}"
+  mkdir -p "${OUT_ROOT}/logs"
+
+  CARGO_STEP_COUNTER=$((CARGO_STEP_COUNTER + 1))
+  local log_path="${OUT_ROOT}/logs/cargo_${CARGO_STEP_COUNTER}.log"
+  local remote_error=""
+
+  if ! "${RCH_BIN}" exec -- env \
+    CARGO_TARGET_DIR="${LIVE_SMOKE_TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    cargo "$@" >"${log_path}" 2>&1; then
+    cat "${log_path}" >&2
+    return 1
+  fi
+
+  cat "${log_path}"
+  if remote_error="$(rch_remote_summary_present "${log_path}" 2>&1)"; then
+    return 0
+  fi
+
+  printf '%s\n' "${remote_error}" >> "${log_path}"
+  printf '%s\n' "${remote_error}" >&2
+  return 1
 }
 
 run_fcp_e2e() {
@@ -130,6 +156,26 @@ hash256() {
   fi
   echo "Missing required command: sha256sum/shasum/openssl" >&2
   exit 1
+}
+
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
 }
 
 correlation_id_for_step() {

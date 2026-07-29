@@ -23,14 +23,16 @@ workspace = true
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
-fcp-sdk = { path = "../../crates/fcp-sdk" }
+fcp-sdk = { path = "../../crates/fcp-sdk", features = ["connector-http"] }
 fcp-google-discovery = { path = "../../crates/fcp-google-discovery" }
 
 anyhow.workspace = true
 async-trait.workspace = true
+hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

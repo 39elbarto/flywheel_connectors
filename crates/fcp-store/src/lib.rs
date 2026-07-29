@@ -56,8 +56,8 @@ pub use connector_state::{
     CONNECTOR_STATE_COMPACT_EVENT, CONNECTOR_STATE_FALL_THROUGH_EVENT,
     CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC, CONNECTOR_STATE_LATENCY_SECONDS_METRIC,
     CONNECTOR_STATE_READ_EVENT, CONNECTOR_STATE_SNAPSHOT_EVENT, CONNECTOR_STATE_TRACING_TARGET,
-    CONNECTOR_STATE_WRITE_EVENT, CONNECTOR_STATE_WRITES_TOTAL_METRIC, ConnectorStateStoreError,
-    FcpStoreConnectorStateStore,
+    CONNECTOR_STATE_WRITE_EVENT, CONNECTOR_STATE_WRITES_TOTAL_METRIC,
+    ConnectorStateLeaseYieldFlush, ConnectorStateStoreError, FcpStoreConnectorStateStore,
 };
 pub use coverage::{CoverageEvaluation, CoverageHealth, SymbolDistribution};
 pub use durable::{
@@ -93,7 +93,7 @@ pub use symbol_store::{
     StoredSymbol, SymbolMeta, SymbolStore, validate_source_symbols,
 };
 
-pub use fcp_prelude::ConnectorStateAppendOutcome;
+pub use fcp_prelude::{ConnectorStateAppendOutcome, ConnectorStateCanonicalStatus};
 
 pub use offline::{
     AccessPatternTracker, OfflineAccess, OfflineCapability, OfflineStatus, OfflineSummary,

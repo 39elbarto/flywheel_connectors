@@ -1,5 +1,5 @@
 //! Pin `SupplyChainAttestation` serde + signing-bytes roundtrip — the closest
-//! analogue to "SignedAttestation" (flywheel_connectors-o0grt).
+//! analogue to "`SignedAttestation`" (flywheel_connectors-o0grt).
 //!
 //! Bead asks for `SignedAttestation` serde + verify roundtrip pinning. No type
 //! literally named `SignedAttestation` exists in fcp-core. The closest analogue
@@ -14,7 +14,8 @@
 //!   * `signing_bytes()` determinism (same struct → same bytes, mutation → different bytes),
 //!   * `builder_allowlist` skip-when-empty serialization,
 //!   * `metadata.invocation_id` skip-when-None serialization,
-//! is caught loudly at the integration boundary.
+//!
+//! This is caught loudly at the integration boundary.
 
 use chrono::{TimeZone, Utc};
 use ciborium::Value as CborValue;
@@ -119,9 +120,9 @@ fn predicate_type_serde_uses_uri_renames() {
     assert_ne!(slsa, intoto);
 
     // Round-trip both directions.
-    let slsa_back: AttestationPredicateType = serde_json::from_value(slsa.clone()).unwrap();
+    let slsa_back: AttestationPredicateType = serde_json::from_value(slsa).unwrap();
     assert_eq!(slsa_back, AttestationPredicateType::SlsaProvenanceV1);
-    let intoto_back: AttestationPredicateType = serde_json::from_value(intoto.clone()).unwrap();
+    let intoto_back: AttestationPredicateType = serde_json::from_value(intoto).unwrap();
     assert_eq!(intoto_back, AttestationPredicateType::InTotoStatementV1);
 }
 
@@ -308,7 +309,7 @@ fn signing_bytes_change_when_signed_field_mutates() {
     );
 
     // Mutate builder_allowlist.
-    let mut d = base.clone();
+    let mut d = base;
     d.builder_allowlist = vec![
         "builder://github/actions".to_string(),
         "builder://gitlab/runners".to_string(),

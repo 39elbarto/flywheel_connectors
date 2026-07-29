@@ -49,6 +49,10 @@ impl BrowserConnectorAdapter {
             id: ConnectorId::from_static("browser"),
         }
     }
+
+    fn instance_id(&self) -> &str {
+        self.connector.instance_id()
+    }
 }
 
 fcp_core::impl_fcp_sealed!(BrowserConnectorAdapter);
@@ -212,7 +216,12 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // dja9u typestate ratchet: connector verifier binds to this id; the
+        // capability token's target_instance must match it (see build_token).
+        requested_instance_id: Some(
+            InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
+        ),
     }
 }
 
@@ -220,6 +229,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -240,7 +250,11 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        // dja9u typestate ratchet: the connector verifies bound tokens against
+        // its own base.instance_id, so target_instance must be that id.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -248,21 +262,21 @@ fn build_token(
 
 fn build_execution_approval(method_pattern: &str) -> ApprovalToken {
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    ApprovalToken {
-        token_id: format!("approval-{method_pattern}-{now_ms}"),
-        issued_at_ms: now_ms.saturating_sub(1_000),
-        expires_at_ms: now_ms + 300_000,
-        issuer: "owner:test".to_string(),
-        scope: ApprovalScope::Execution(ExecutionScope {
+    ApprovalToken::approved(
+        format!("approval-{method_pattern}-{now_ms}"),
+        now_ms.saturating_sub(1_000),
+        now_ms + 300_000,
+        "owner:test",
+        ApprovalScope::Execution(ExecutionScope {
             connector_id: "fcp.browser".to_string(),
             method_pattern: method_pattern.to_string(),
             request_object_id: None,
             input_hash: None,
             input_constraints: Vec::new(),
         }),
-        zone_id: ZoneId::work(),
-        signature: None,
-    }
+        ZoneId::work(),
+        None,
+    )
 }
 
 fn invoke_request(
@@ -346,6 +360,7 @@ async fn browser_default_deny_compliance_suite_passes() {
         &signing_key,
         "browser.extract_text",
         &["browser.extract_text"],
+        connector.instance_id(),
     );
     let invoke = invoke_request(
         "browser.navigate",
@@ -406,7 +421,12 @@ async fn browser_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["browser.navigate"],
     );
-    let token = build_token(&signing_key, "browser.navigate", &["browser.navigate"]);
+    let token = build_token(
+        &signing_key,
+        "browser.navigate",
+        &["browser.navigate"],
+        connector.instance_id(),
+    );
     let invoke = invoke_request(
         "browser.navigate",
         json!({ "url": "https://docs.github.com" }),
@@ -558,7 +578,12 @@ async fn browser_dangerous_operations_require_approval_tokens() {
     ];
 
     for (operation, expected_capability, input) in cases {
-        let token = build_token(&signing_key, expected_capability, &[operation]);
+        let token = build_token(
+            &signing_key,
+            expected_capability,
+            &[operation],
+            adapter.instance_id(),
+        );
         let req = invoke_request(operation, input, token, Vec::new());
         let result = adapter.invoke(req).await;
         assert!(result.is_err(), "{operation} should require approval token");
@@ -598,7 +623,12 @@ async fn browser_dangerous_operation_allows_with_approval_token() {
         .await
         .expect("handshake");
 
-    let token = build_token(&signing_key, "browser.execute", &["browser.evaluate_js"]);
+    let token = build_token(
+        &signing_key,
+        "browser.execute",
+        &["browser.evaluate_js"],
+        adapter.instance_id(),
+    );
     let approval = build_execution_approval("browser.evaluate_js");
     let req = invoke_request(
         "browser.evaluate_js",

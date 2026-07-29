@@ -4,7 +4,8 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use tracing::debug;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 
 use crate::error::{PerplexityError, PerplexityResult};
 use crate::types::{
@@ -53,7 +54,7 @@ impl PerplexityClient {
             .build()
             .map_err(PerplexityError::Http)?;
 
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
 
         Ok(Self {
             http,

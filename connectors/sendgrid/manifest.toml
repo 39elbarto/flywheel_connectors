@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:a70876e5fbdeb908a5567993f3085faf382c2282c9bd167ff54a3d026af3a650"
+interface_hash = "blake3-256:fcp.interface.v2:ef7c899e275bc60969e8228d003285294eee1dfd21628a119b59d25122ef9f19"
 
 [connector]
 id = "fcp.sendgrid"
@@ -63,7 +63,7 @@ capability = "sendgrid.lists.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
-idempotency = "strict"
+idempotency = "none"
 
 [provides.operations."sendgrid.lists.delete".input_schema]
 required = ["list_id"]
@@ -116,10 +116,10 @@ required = []
 type = "object"
 
 [provides.operations."sendgrid.contacts.list".output_schema]
-required = ["result"]
+required = ["contacts"]
 type = "object"
 
-[provides.operations."sendgrid.contacts.list".output_schema.properties.result]
+[provides.operations."sendgrid.contacts.list".output_schema.properties.contacts]
 type = "array"
 
 [provides.operations."sendgrid.contacts.list".network_constraints]
@@ -149,8 +149,104 @@ common_mistakes = [
 examples = ["{}"]
 related = ["sendgrid.lists.delete"]
 
+[provides.operations."sendgrid.contacts.search"]
+description = "Search marketing contacts by query"
+capability = "sendgrid.contacts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sendgrid.contacts.search".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."sendgrid.contacts.search".input_schema.properties.query]
+description = "SGQL search query"
+type = "string"
+
+[provides.operations."sendgrid.contacts.search".output_schema]
+required = ["contacts"]
+type = "object"
+
+[provides.operations."sendgrid.contacts.search".output_schema.properties.contacts]
+type = "array"
+
+[provides.operations."sendgrid.contacts.search".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sendgrid.contacts.search".ai_hints]
+when_to_use = "Search contacts using SGQL query syntax."
+common_mistakes = ["Using SQL syntax instead of SGQL."]
+examples = ["{\"query\": \"email LIKE '%@example.com'\"}"]
+related = ["sendgrid.contacts.list"]
+
+[provides.operations."sendgrid.contacts.get"]
+description = "Get a single contact by ID"
+capability = "sendgrid.contacts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sendgrid.contacts.get".input_schema]
+required = ["contact_id"]
+type = "object"
+
+[provides.operations."sendgrid.contacts.get".input_schema.properties.contact_id]
+description = "Contact UUID"
+type = "string"
+
+[provides.operations."sendgrid.contacts.get".output_schema]
+type = "object"
+
+[provides.operations."sendgrid.contacts.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."sendgrid.contacts.get".output_schema.properties.email]
+type = "string"
+
+[provides.operations."sendgrid.contacts.get".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sendgrid.contacts.get".ai_hints]
+when_to_use = "Retrieve a single contact by its UUID."
+common_mistakes = []
+examples = ['{"contact_id": "abc123-def456"}']
+related = ["sendgrid.contacts.list"]
+
 [provides.operations."sendgrid.mail.send"]
-description = "Send an email"
+description = "Send a transactional email"
 capability = "sendgrid.mail.write"
 risk_level = "high"
 safety_tier = "risky"
@@ -267,8 +363,100 @@ common_mistakes = [
 examples = ['{"start_date": "2026-01-01", "end_date": "2026-01-31"}']
 related = ["sendgrid.mail.send"]
 
+[provides.operations."sendgrid.lists.list"]
+description = "List marketing lists"
+capability = "sendgrid.lists.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sendgrid.lists.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."sendgrid.lists.list".output_schema]
+required = ["lists"]
+type = "object"
+
+[provides.operations."sendgrid.lists.list".output_schema.properties.lists]
+type = "array"
+
+[provides.operations."sendgrid.lists.list".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sendgrid.lists.list".ai_hints]
+when_to_use = "List all marketing contact lists."
+common_mistakes = []
+examples = ["{}"]
+related = ["sendgrid.lists.create"]
+
+[provides.operations."sendgrid.lists.create"]
+description = "Create a marketing list"
+capability = "sendgrid.lists.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."sendgrid.lists.create".input_schema]
+required = ["name"]
+type = "object"
+
+[provides.operations."sendgrid.lists.create".input_schema.properties.name]
+description = "Name for the new list"
+type = "string"
+
+[provides.operations."sendgrid.lists.create".output_schema]
+type = "object"
+
+[provides.operations."sendgrid.lists.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."sendgrid.lists.create".output_schema.properties.name]
+type = "string"
+
+[provides.operations."sendgrid.lists.create".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sendgrid.lists.create".ai_hints]
+when_to_use = "Create a new marketing contact list."
+common_mistakes = []
+examples = ['{"name": "Newsletter Subscribers"}']
+related = ["sendgrid.lists.list"]
+
 [provides.operations."sendgrid.templates.list"]
-description = "List email templates"
+description = "List dynamic email templates"
 capability = "sendgrid.templates.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -317,6 +505,58 @@ common_mistakes = [
 examples = ['{"generations": "dynamic"}']
 related = ["sendgrid.mail.send"]
 
+[provides.operations."sendgrid.templates.get"]
+description = "Get a single template by ID"
+capability = "sendgrid.templates.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sendgrid.templates.get".input_schema]
+required = ["template_id"]
+type = "object"
+
+[provides.operations."sendgrid.templates.get".input_schema.properties.template_id]
+description = "Template UUID"
+type = "string"
+
+[provides.operations."sendgrid.templates.get".output_schema]
+type = "object"
+
+[provides.operations."sendgrid.templates.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."sendgrid.templates.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."sendgrid.templates.get".output_schema.properties.versions]
+type = "array"
+
+[provides.operations."sendgrid.templates.get".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sendgrid.templates.get".ai_hints]
+when_to_use = "Get a specific email template by its ID."
+common_mistakes = []
+examples = ['{"template_id": "d-abc123"}']
+related = ["sendgrid.templates.list"]
+
 [sandbox]
 profile = "strict"
 memory_mb = 256
@@ -359,6 +599,20 @@ burst = 5
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "sendgrid.lists.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sendgrid.lists.write"
+requests = 50
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "sendgrid.templates.read"
 requests = 100
 window_ms = 60000
@@ -375,6 +629,11 @@ scope = "instance"
 [rate_limits.operation_pools]
 "sendgrid.stats.get" = ["sendgrid.stats.read"]
 "sendgrid.contacts.list" = ["sendgrid.contacts.read"]
+"sendgrid.contacts.search" = ["sendgrid.contacts.read"]
+"sendgrid.contacts.get" = ["sendgrid.contacts.read"]
 "sendgrid.mail.send" = ["sendgrid.mail.write"]
+"sendgrid.lists.list" = ["sendgrid.lists.read"]
+"sendgrid.lists.create" = ["sendgrid.lists.write"]
 "sendgrid.lists.delete" = ["sendgrid.lists.delete"]
 "sendgrid.templates.list" = ["sendgrid.templates.read"]
+"sendgrid.templates.get" = ["sendgrid.templates.read"]

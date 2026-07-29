@@ -7,17 +7,17 @@
 //! `DecisionReasonCode` (policy.rs:2060) — the 35-variant NORMATIVE
 //! reason-code enum produced by `PolicyEngine::evaluate_invoke`
 //! and surfaced in audit logs. Many decision-shaped types are
-//! already pinned (Decision by qyq9l, CheckOutcome by qyq9l,
-//! PolicyPreviewDecision by zncpi, VerificationDecision by zncpi,
+//! already pinned (Decision by qyq9l, `CheckOutcome` by qyq9l,
+//! `PolicyPreviewDecision` by zncpi, `VerificationDecision` by zncpi,
 //! ResumeDecision-shaped by zncpi); a 7-variant subset of
-//! DecisionReasonCode is pinned by `policy_match_result_variants.rs`.
+//! `DecisionReasonCode` is pinned by `policy_match_result_variants.rs`.
 //! This test pins the FULL 35-variant matrix and the critical
 //! dual-encoding contract:
 //!
 //! **DISPLAY vs SERDE diverge**: `DecisionReasonCode::as_str` /
 //! `Display` returns dotted tokens (`"capability.insufficient"`,
 //! `"zone_policy.principal_denied"`) but the serde wire form uses
-//! `#[serde(rename_all = "snake_case")]` which produces snake_case
+//! `#[serde(rename_all = "snake_case")]` which produces `snake_case`
 //! WITHOUT dots (`"capability_insufficient"`,
 //! `"zone_policy_principal_denied"`). Operator dashboards reading
 //! audit logs MUST know which channel uses which form.
@@ -25,20 +25,20 @@
 //! Targets:
 //!
 //!   1. **Per-variant Display token** (dotted) for all 35 variants.
-//!   2. **Per-variant serde JSON tag** (snake_case, no dots).
+//!   2. **Per-variant serde JSON tag** (`snake_case`, no dots).
 //!   3. **Display ≠ serde tag for every variant with a `.` in
 //!      Display** — pin the divergence loud.
 //!   4. **JSON + CBOR round-trip** per variant.
 //!   5. **CBOR encodes as Text** (cross-language).
 //!   6. **35-variant count + pairwise distinct**.
-//!   7. **PascalCase + dotted-form rejected on the wire** — drift
+//!   7. **`PascalCase` + dotted-form rejected on the wire** — drift
 //!      sentinel.
 //!   8. **Hash + Eq + Copy correctness** for HashMap-key usage.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::DecisionReasonCode;
 
-/// (variant, Display token from as_str, serde JSON tag from rename_all).
+/// (variant, Display token from `as_str`, serde JSON tag).
 /// For variants where Display contains `.`, the serde form replaces
 /// it with `_`. For dot-free variants the two forms agree.
 const ALL_REASON_CODES: &[(DecisionReasonCode, &str, &str)] = &[
@@ -46,172 +46,172 @@ const ALL_REASON_CODES: &[(DecisionReasonCode, &str, &str)] = &[
     (
         DecisionReasonCode::CapabilityInsufficient,
         "capability.insufficient",
-        "capability_insufficient",
+        "capability.insufficient",
     ),
     (
         DecisionReasonCode::CheckpointStaleFrontier,
         "checkpoint.stale_frontier",
-        "checkpoint_stale_frontier",
+        "checkpoint.stale_frontier",
     ),
     (
         DecisionReasonCode::RevocationStaleFrontier,
         "revocation.stale_frontier",
-        "revocation_stale_frontier",
+        "revocation.stale_frontier",
     ),
     (
         DecisionReasonCode::TaintPublicInputDangerous,
         "taint.public_input_dangerous",
-        "taint_public_input_dangerous",
+        "taint.public_input_dangerous",
     ),
     (
         DecisionReasonCode::TaintUnverifiedLinkRisky,
         "taint.unverified_link_risky",
-        "taint_unverified_link_risky",
+        "taint.unverified_link_risky",
     ),
     (
         DecisionReasonCode::TaintMaliciousInput,
         "taint.malicious_input",
-        "taint_malicious_input",
+        "taint.malicious_input",
     ),
     (
         DecisionReasonCode::TaintRiskyRequiresElevation,
         "taint.risky_requires_elevation",
-        "taint_risky_requires_elevation",
+        "taint.risky_requires_elevation",
     ),
     (
         DecisionReasonCode::TaintCrossZoneUnapproved,
         "taint.cross_zone_unapproved",
-        "taint_cross_zone_unapproved",
+        "taint.cross_zone_unapproved",
     ),
     (
         DecisionReasonCode::IntegrityInsufficient,
         "integrity.insufficient",
-        "integrity_insufficient",
+        "integrity.insufficient",
     ),
     (
         DecisionReasonCode::ZonePolicyPrincipalDenied,
         "zone_policy.principal_denied",
-        "zone_policy_principal_denied",
+        "zone_policy.principal_denied",
     ),
     (
         DecisionReasonCode::ZonePolicyConnectorDenied,
         "zone_policy.connector_denied",
-        "zone_policy_connector_denied",
+        "zone_policy.connector_denied",
     ),
     (
         DecisionReasonCode::ZonePolicyCapabilityDenied,
         "zone_policy.capability_denied",
-        "zone_policy_capability_denied",
+        "zone_policy.capability_denied",
     ),
     (
         DecisionReasonCode::ZonePolicyPrincipalNotAllowed,
         "zone_policy.principal_not_allowed",
-        "zone_policy_principal_not_allowed",
+        "zone_policy.principal_not_allowed",
     ),
     (
         DecisionReasonCode::ZonePolicyConnectorNotAllowed,
         "zone_policy.connector_not_allowed",
-        "zone_policy_connector_not_allowed",
+        "zone_policy.connector_not_allowed",
     ),
     (
         DecisionReasonCode::ZonePolicyCapabilityNotAllowed,
         "zone_policy.capability_not_allowed",
-        "zone_policy_capability_not_allowed",
+        "zone_policy.capability_not_allowed",
     ),
     (
         DecisionReasonCode::ApprovalMissingElevation,
         "approval.missing_elevation",
-        "approval_missing_elevation",
+        "approval.missing_elevation",
     ),
     (
         DecisionReasonCode::ApprovalMissingDeclassification,
         "approval.missing_declassification",
-        "approval_missing_declassification",
+        "approval.missing_declassification",
     ),
     (
         DecisionReasonCode::ApprovalMissingExecution,
         "approval.missing_execution",
-        "approval_missing_execution",
+        "approval.missing_execution",
     ),
     (
         DecisionReasonCode::ApprovalElevationScopeMismatch,
         "approval.elevation_scope_mismatch",
-        "approval_elevation_scope_mismatch",
+        "approval.elevation_scope_mismatch",
     ),
     (
         DecisionReasonCode::ApprovalExecutionScopeMismatch,
         "approval.execution_scope_mismatch",
-        "approval_execution_scope_mismatch",
+        "approval.execution_scope_mismatch",
     ),
     (
         DecisionReasonCode::ApprovalExpired,
         "approval.expired",
-        "approval_expired",
+        "approval.expired",
     ),
     (
         DecisionReasonCode::ApprovalZoneMismatch,
         "approval.zone_mismatch",
-        "approval_zone_mismatch",
+        "approval.zone_mismatch",
     ),
     (
         DecisionReasonCode::ApprovalTokenInvalid,
         "approval.token_invalid",
-        "approval_token_invalid",
+        "approval.token_invalid",
     ),
     (
         DecisionReasonCode::TransportDerpForbidden,
         "transport.derp_forbidden",
-        "transport_derp_forbidden",
+        "transport.derp_forbidden",
     ),
     (
         DecisionReasonCode::TransportFunnelForbidden,
         "transport.funnel_forbidden",
-        "transport_funnel_forbidden",
+        "transport.funnel_forbidden",
     ),
     (
         DecisionReasonCode::TransportLanForbidden,
         "transport.lan_forbidden",
-        "transport_lan_forbidden",
+        "transport.lan_forbidden",
     ),
     (
         DecisionReasonCode::SanitizerReceiptInvalid,
         "taint.sanitizer_invalid",
-        "sanitizer_receipt_invalid",
+        "taint.sanitizer_invalid",
     ),
     (
         DecisionReasonCode::SanitizerCoverageInsufficient,
         "taint.sanitizer_coverage_insufficient",
-        "sanitizer_coverage_insufficient",
+        "taint.sanitizer_coverage_insufficient",
     ),
     (
         DecisionReasonCode::PostureAttestationMissing,
         "posture.attestation_missing",
-        "posture_attestation_missing",
+        "posture.attestation_missing",
     ),
     (
         DecisionReasonCode::PostureAttestationExpired,
         "posture.attestation_expired",
-        "posture_attestation_expired",
+        "posture.attestation_expired",
     ),
     (
         DecisionReasonCode::PostureAttestationInvalid,
         "posture.attestation_invalid",
-        "posture_attestation_invalid",
+        "posture.attestation_invalid",
     ),
     (
         DecisionReasonCode::PostureRequirementNotMet,
         "posture.requirement_not_met",
-        "posture_requirement_not_met",
+        "posture.requirement_not_met",
     ),
     (
         DecisionReasonCode::PostureVerifierNotAllowed,
         "posture.verifier_not_allowed",
-        "posture_verifier_not_allowed",
+        "posture.verifier_not_allowed",
     ),
     (
         DecisionReasonCode::OperationForbidden,
         "operation.forbidden",
-        "operation_forbidden",
+        "operation.forbidden",
     ),
 ];
 
@@ -243,55 +243,35 @@ fn serde_json_tag_pinned_per_variant() {
             json,
             format!("\"{expected_serde}\""),
             "POLICY-DECISION REGRESSION: DecisionReasonCode serde tag drift on {variant:?} — \
-             serde wire form uses snake_case (NOT the dotted Display form)"
+             serde wire form must use dotted Display form"
         );
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Display ≠ serde tag for every variant with a `.` in Display
+// 3. Display == serde tag for every variant
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn display_and_serde_diverge_on_dotted_variants() {
-    // Loud pin: Display form uses dots (`capability.insufficient`)
-    // but the serde wire form uses underscores
-    // (`capability_insufficient`). Operator dashboards MUST know
-    // which channel emits which form.
-    let mut divergent_count = 0;
+fn display_and_serde_agree_on_dotted_variants() {
+    // Both Display form and the serde wire form use dots (`capability.insufficient`).
     for (variant, display, serde_tag) in ALL_REASON_CODES {
-        if display.contains('.') {
-            assert_ne!(
-                display, serde_tag,
-                "{variant:?}: Display ({display}) and serde tag ({serde_tag}) MUST diverge \
-                 when Display contains a dot"
-            );
-            divergent_count += 1;
-        } else {
-            // Dot-free Display tokens (Allow only) MUST agree with
-            // serde tag.
-            assert_eq!(
-                display, serde_tag,
-                "{variant:?}: dot-free Display MUST equal serde tag"
-            );
-        }
+        assert_eq!(
+            display, serde_tag,
+            "{variant:?}: Display ({display}) and serde tag ({serde_tag}) MUST agree"
+        );
     }
-    // 34 of 35 variants have a dot in Display (only Allow doesn't).
-    assert_eq!(
-        divergent_count, 34,
-        "34 variants MUST have divergent Display/serde forms; got {divergent_count}"
-    );
 }
 
 #[test]
-fn capability_insufficient_dual_encoding_pinned_explicitly() {
-    // Pin the canonical example loud: Display = "capability.insufficient",
-    // serde = "capability_insufficient".
+fn capability_insufficient_encoding_pinned_explicitly() {
+    // Pin the canonical example: Display = "capability.insufficient",
+    // serde = "capability.insufficient".
     let variant = DecisionReasonCode::CapabilityInsufficient;
     assert_eq!(variant.to_string(), "capability.insufficient");
     assert_eq!(
         serde_json::to_string(&variant).unwrap(),
-        r#""capability_insufficient""#
+        r#""capability.insufficient""#
     );
 }
 
@@ -370,12 +350,12 @@ fn variants_pairwise_distinct_in_both_encodings() {
 
 #[test]
 fn variants_pairwise_unequal() {
-    for i in 0..ALL_REASON_CODES.len() {
-        for j in (i + 1)..ALL_REASON_CODES.len() {
+    for (i, left) in ALL_REASON_CODES.iter().enumerate() {
+        for right in ALL_REASON_CODES.iter().skip(i + 1) {
             assert_ne!(
-                ALL_REASON_CODES[i].0, ALL_REASON_CODES[j].0,
+                left.0, right.0,
                 "{:?} and {:?} MUST be distinct",
-                ALL_REASON_CODES[i].0, ALL_REASON_CODES[j].0
+                left.0, right.0
             );
         }
     }
@@ -398,22 +378,34 @@ fn rejects_pascal_case_variant_name() {
 }
 
 #[test]
-fn rejects_dotted_display_form_on_wire() {
-    // The Display form ("capability.insufficient") is NOT the wire
-    // form. Pin that the dotted form is rejected even though
-    // operators see it in audit logs — only the snake_case serde
-    // form decodes.
+fn rejects_legacy_snake_case_form_on_wire() {
+    // Since a258d6976 the dotted Display form IS the wire form; the
+    // pre-alignment snake_case tags are legacy and must be rejected so
+    // old payloads cannot silently decode to the wrong contract.
     for bad in [
-        r#""capability.insufficient""#,
-        r#""zone_policy.principal_denied""#,
-        r#""approval.expired""#,
-        r#""posture.requirement_not_met""#,
+        r#""capability_insufficient""#,
+        r#""zone_policy_principal_denied""#,
+        r#""approval_expired""#,
+        r#""posture_requirement_not_met""#,
     ] {
         let parsed = serde_json::from_str::<DecisionReasonCode>(bad);
         assert!(
             parsed.is_err(),
-            "{bad} MUST be rejected — dotted Display form is NOT the wire form"
+            "{bad} MUST be rejected — legacy snake_case form is no longer the wire form"
         );
+    }
+
+    // And the dotted form decodes.
+    for good in [
+        (r#""capability.insufficient""#, "capability.insufficient"),
+        (
+            r#""zone_policy.principal_denied""#,
+            "zone_policy.principal_denied",
+        ),
+    ] {
+        let parsed: DecisionReasonCode =
+            serde_json::from_str(good.0).expect("dotted wire form decodes");
+        assert_eq!(parsed.as_str(), good.1);
     }
 }
 

@@ -1,5 +1,8 @@
 # Anthropic Vertex Connector
 
+> **Status**: PROVEN
+> **Verification script**: `scripts/e2e/anthropic_vertex_connector_verification.sh`
+
 `fcp-anthropic-vertex` is a separate FCP connector for Claude on Google Vertex AI. It is not an extension of the direct `connectors/anthropic` API-key connector: Vertex uses Google auth, Google project/location routing, and model-in-URL `rawPredict` / `streamRawPredict` endpoints.
 
 ## Supported Runtime Auth
@@ -40,10 +43,27 @@ The connector inserts `anthropic_version = "vertex-2023-10-16"` into the JSON bo
 
 ## Verification
 
+The tracked verification entry point is `scripts/e2e/anthropic_vertex_connector_verification.sh`. It runs the Anthropic Vertex crate check, formatting check, local no-mock test, full connector test suite, clippy, and a redaction scan over its JSONL/log artifacts.
+
+`connectors/anthropic-vertex/tests/local_non_mock.rs` covers the production connector boundary against a raw TCP loopback server. It exercises `messages.create`, `messages.stream`, `models.normalize`, Google bearer and quota-project headers, model-in-path routing, SSE decoding, rate-limit mapping, retry-after preservation, and redaction-safe evidence logs without live Google credentials.
+
 Focused proof for this connector:
 
 ```bash
+OUT_ROOT=/tmp/fcp-anthropic-vertex-e2e bash scripts/e2e/anthropic_vertex_connector_verification.sh
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-anthropic-vertex-swiftwren cargo test -p fcp-anthropic-vertex --test integration -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-anthropic-vertex-swiftwren cargo test -p fcp-anthropic-vertex --test local_non_mock -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-anthropic-vertex-swiftwren cargo clippy -p fcp-anthropic-vertex --all-targets --no-deps -- -D warnings
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-anthropic-vertex-swiftwren cargo fmt -p fcp-anthropic-vertex -- --check
 ```
+
+## Operator Guidance
+
+Use host-materialized Google credentials for live calls. Runtime configuration accepts local `base_url` overrides only for deterministic loopback proof; production endpoints must use HTTPS Vertex AI hosts and should not route through localhost, private-range, or tailnet endpoints.
+
+Rerun commands:
+
+- `bash scripts/e2e/anthropic_vertex_connector_verification.sh`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-anthropic-vertex-readme cargo test -p fcp-anthropic-vertex --test local_non_mock -- --nocapture`
+- `scripts/graduation/run_gauntlet.sh --jsonl /tmp/fcp-anthropic-vertex-gauntlet.jsonl connectors/anthropic-vertex`
+- `ubs connectors/anthropic-vertex/src/connector.rs connectors/anthropic-vertex/src/client.rs connectors/anthropic-vertex/tests/integration.rs connectors/anthropic-vertex/tests/local_non_mock.rs connectors/anthropic-vertex/README.md scripts/e2e/anthropic_vertex_connector_verification.sh`

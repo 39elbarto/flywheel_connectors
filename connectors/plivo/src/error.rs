@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 
 /// Plivo API error.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +30,9 @@ pub enum PlivoError {
 
     #[error("not found: {resource}")]
     NotFound { resource: String },
+
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 pub type PlivoResult<T> = Result<T, PlivoError>;
@@ -43,7 +46,9 @@ impl PlivoError {
             Self::Api { status_code, .. } => {
                 matches!(status_code, Some(408 | 425 | 429 | 500..=599))
             }
-            Self::Json(_) | Self::Unauthorized | Self::NotFound { .. } => false,
+            Self::Json(_) | Self::Unauthorized | Self::NotFound { .. } | Self::InvalidInput(_) => {
+                false
+            }
         }
     }
 
@@ -104,6 +109,10 @@ impl PlivoError {
             },
             Self::NotFound { resource } => FcpError::ResourceNotFound {
                 resource: resource.clone(),
+            },
+            Self::InvalidInput(message) => FcpError::InvalidRequest {
+                code: 1003,
+                message: message.clone(),
             },
         }
     }

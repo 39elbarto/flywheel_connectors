@@ -2684,11 +2684,55 @@ pub struct SwarmPrewarmLatencyPercentiles {
     pub mean_ms: u64,
 }
 
+const SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY: &str =
+    "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout";
+const PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX: &str = "fcp-host::";
+const PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX: &str = "fcp-sandbox::";
+
+fn is_synthetic_prewarm_host_boundary(host_boundary: &str) -> bool {
+    let trimmed = host_boundary.trim();
+    trimmed == SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY
+        || trimmed.contains("ConnectorPrewarmConfig::decide_checkout")
+}
+
+fn is_canonical_prewarm_boundary_label(boundary: &str) -> bool {
+    !boundary.is_empty()
+        && boundary.trim() == boundary
+        && boundary
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-' | b'.'))
+}
+
+fn has_prewarm_boundary_component(boundary: &str, prefix: &str) -> bool {
+    boundary
+        .strip_prefix(prefix)
+        .is_some_and(|component| component.bytes().any(|byte| byte.is_ascii_alphanumeric()))
+}
+
+fn is_production_prewarm_host_boundary(host_boundary: &str) -> bool {
+    let trimmed = host_boundary.trim();
+    trimmed == host_boundary
+        && is_canonical_prewarm_boundary_label(trimmed)
+        && has_prewarm_boundary_component(trimmed, PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX)
+        && !is_synthetic_prewarm_host_boundary(trimmed)
+}
+
+fn is_production_prewarm_sandbox_boundary(sandbox_boundary: &str) -> bool {
+    let trimmed = sandbox_boundary.trim();
+    trimmed == sandbox_boundary
+        && is_canonical_prewarm_boundary_label(trimmed)
+        && has_prewarm_boundary_component(trimmed, PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX)
+}
+
 /// Replayable JSONL evidence for connector prewarm cold-start behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmPrewarmColdStartEvidence {
     /// Evidence schema version.
     pub schema_version: String,
+    /// Smoke or soak execution mode for this evidence record.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Whether the evidence came from offline fixtures, a controlled host, or live services.
+    pub source_kind: SwarmEvidenceSourceKind,
     /// Stable scenario identifier.
     pub scenario_id: String,
     /// Connector identifier.
@@ -2701,6 +2745,10 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub worker_id: String,
     /// Cargo target directory used by the proof run.
     pub cargo_target_dir: String,
+    /// Coarse classification of the Cargo target directory for redaction-safe summaries.
+    pub cargo_target_dir_class: String,
+    /// Redaction-safe hash of the Cargo target directory.
+    pub cargo_target_dir_hash: String,
     /// Connector fixture activated by the host-backed proof.
     pub connector_fixture_id: String,
     /// Host boundary that made the checkout decision.
@@ -2761,6 +2809,111 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub shutdown_cleanup_verified: bool,
 }
 
+const SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS: [&str; 10] = [
+    "prewarm_empty_pool",
+    "prewarm_warm_hit",
+    "prewarm_stale_entry",
+    "prewarm_crash_before_checkout",
+    "prewarm_shutdown_cleanup",
+    "prewarm_concurrent_swarm_startup",
+    "prewarm_exhausted_under_burst",
+    "prewarm_sandbox_limits_unavailable",
+    "prewarm_checkout_cancelled_before_admit",
+    "prewarm_zygote_rejected_without_security_proof",
+];
+
+const SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS: [&str; 3] = [
+    "prewarm_warm_hit",
+    "prewarm_shutdown_cleanup",
+    "prewarm_concurrent_swarm_startup",
+];
+
+const SWARM_PREWARM_CARGO_TARGET_DIR_CLASSES: [&str; 3] = ["tmp", "absolute", "relative"];
+
+const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 33] = [
+    ("sk-live-", "sk-live-"),
+    ("bearer ", "Bearer token"),
+    ("authorization:", "authorization header"),
+    ("token=", "token assignment"), // ubs:ignore - redaction denylist literal, not a credential
+    ("access_token", "access token field"),
+    ("refresh_token", "refresh token field"),
+    ("id_token", "id token field"),
+    ("client_secret", "client secret field"),
+    ("api_key", "api key field"),
+    ("super-secret-value", "super-secret-value"),
+    ("secret_seed", "secret_seed"),
+    ("private_key", "private_key"),
+    ("secret_key", "secret_key"),
+    ("password", "password field"),
+    ("cookie", "cookie field"),
+    ("credential=", "credential assignment"),
+    ("credential:", "credential header"),
+    ("/users/", "private user path"),
+    ("/home/", "private user path"),
+    ("/data/projects/", "private project path"),
+    ("/private/var/", "private var path"),
+    ("/var/folders/", "private var path"),
+    ("/volumes/", "mounted volume path"),
+    ("c:\\users\\", "windows private user path"),
+    ("operation:", "raw operation label"),
+    ("principal:", "raw principal label"),
+    ("zone:", "raw zone label"),
+    ("z:", "raw zone label"),
+    ("provider_body", "provider payload"),
+    ("provider_response_body", "provider response payload"),
+    ("provider_payload_body", "provider payload body"),
+    ("reviewer_email", "reviewer private contact"),
+    ("reviewer_phone", "reviewer private contact"),
+];
+
+fn validate_prewarm_execution_source(
+    execution_mode: SwarmEvidenceExecutionMode,
+    source_kind: SwarmEvidenceSourceKind,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if execution_mode == SwarmEvidenceExecutionMode::Soak
+        && source_kind == SwarmEvidenceSourceKind::Offline
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::SoakRequiresHostBackedSource { source_kind },
+        );
+    }
+    Ok(())
+}
+
+fn validate_prewarm_soak_boundaries(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.execution_mode != SwarmEvidenceExecutionMode::Soak {
+        return Ok(());
+    }
+
+    if !is_production_prewarm_host_boundary(&evidence.host_boundary) {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                host_boundary: evidence.host_boundary.clone(),
+            },
+        );
+    }
+    if !is_production_prewarm_sandbox_boundary(&evidence.sandbox_boundary) {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                sandbox_boundary: evidence.sandbox_boundary.clone(),
+            },
+        );
+    }
+    if let Some(skip_reason) = evidence
+        .skip_reason
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Err(SwarmPrewarmColdStartEvidenceError::ProductionSoakSkipped {
+            scenario_id: evidence.scenario_id.clone(),
+            skip_reason: skip_reason.to_string(),
+        });
+    }
+    Ok(())
+}
+
 const fn validate_prewarm_latency_percentiles(latency: &SwarmPrewarmLatencyPercentiles) -> bool {
     latency.p50_ms != 0
         && latency.p50_ms <= latency.p95_ms
@@ -2768,6 +2921,852 @@ const fn validate_prewarm_latency_percentiles(latency: &SwarmPrewarmLatencyPerce
         && latency.p99_ms <= latency.p999_ms
         && latency.p999_ms <= latency.max_ms
         && latency.mean_ms != 0
+}
+
+fn is_redaction_safe_blake3_hash(hash: &str) -> bool {
+    let Some(hex) = hash.strip_prefix("blake3:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn prewarm_cargo_target_dir_hash(cargo_target_dir: &str) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(cargo_target_dir.as_bytes()).to_hex()
+    )
+}
+
+#[cfg(test)]
+fn prewarm_zone_hash(zone: &str) -> String {
+    format!("blake3:{}", blake3::hash(zone.as_bytes()).to_hex())
+}
+
+fn is_resolved_git_revision(git_revision: &str) -> bool {
+    (7..=40).contains(&git_revision.len())
+        && git_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_canonical_prewarm_worker_id(worker_id: &str) -> bool {
+    (1..=128).contains(&worker_id.len())
+        && worker_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn validate_prewarm_scenario_id(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS.contains(&evidence.scenario_id.as_str()) {
+        return Ok(());
+    }
+
+    Err(SwarmPrewarmColdStartEvidenceError::InvalidScenario {
+        scenario_id: evidence.scenario_id.clone(),
+    })
+}
+
+fn validate_prewarm_required_fields(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    for (field, value) in [
+        ("scenario_id", evidence.scenario_id.as_str()),
+        ("connector_id", evidence.connector_id.as_str()),
+        ("git_revision", evidence.git_revision.as_str()),
+        ("worker_id", evidence.worker_id.as_str()),
+        ("cargo_target_dir", evidence.cargo_target_dir.as_str()),
+        (
+            "cargo_target_dir_class",
+            evidence.cargo_target_dir_class.as_str(),
+        ),
+        (
+            "cargo_target_dir_hash",
+            evidence.cargo_target_dir_hash.as_str(),
+        ),
+        (
+            "connector_fixture_id",
+            evidence.connector_fixture_id.as_str(),
+        ),
+        ("host_boundary", evidence.host_boundary.as_str()),
+        ("manifest_hash", evidence.manifest_hash.as_str()),
+        ("zone", evidence.zone.as_str()),
+        ("strategy", evidence.strategy.as_str()),
+        ("pool_state", evidence.pool_state.as_str()),
+        ("admission_decision", evidence.admission_decision.as_str()),
+        ("sandbox_layer", evidence.sandbox_layer.as_str()),
+        ("sandbox_profile", evidence.sandbox_profile.as_str()),
+        ("sandbox_boundary", evidence.sandbox_boundary.as_str()),
+        ("credential_mode", evidence.credential_mode.as_str()),
+        ("error_mapping", evidence.error_mapping.as_str()),
+        ("cleanup_result", evidence.cleanup_result.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(SwarmPrewarmColdStartEvidenceError::EmptyField { field });
+        }
+    }
+    if evidence.git_revision.eq_ignore_ascii_case("unknown") {
+        return Err(SwarmPrewarmColdStartEvidenceError::UnknownGitRevision {
+            git_revision: evidence.git_revision.clone(),
+        });
+    }
+    if !is_resolved_git_revision(&evidence.git_revision) {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidGitRevision {
+            git_revision: evidence.git_revision.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_prewarm_worker_id(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if !is_canonical_prewarm_worker_id(&evidence.worker_id) {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidWorkerId {
+            worker_id: evidence.worker_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_prewarm_redaction(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.cargo_target_dir_class == "private_absolute" {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::PrivateCargoTargetDirClass {
+                cargo_target_dir_class: evidence.cargo_target_dir_class.clone(),
+            },
+        );
+    }
+    if !SWARM_PREWARM_CARGO_TARGET_DIR_CLASSES.contains(&evidence.cargo_target_dir_class.as_str()) {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirClass {
+                cargo_target_dir_class: evidence.cargo_target_dir_class.clone(),
+            },
+        );
+    }
+    if is_unsafe_prewarm_target_root(&evidence.cargo_target_dir) {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                field: "cargo_target_dir",
+                marker: "shared target dir root",
+            },
+        );
+    }
+
+    for (field, value) in prewarm_redaction_fields(evidence) {
+        if let Some(marker) = prewarm_sensitive_marker(value) {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker { field, marker },
+            );
+        }
+    }
+
+    for value in &evidence.command_line {
+        if let Some(marker) = prewarm_sensitive_marker(value) {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "command_line",
+                    marker,
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn prewarm_redaction_fields(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> [(&'static str, &str); 24] {
+    [
+        ("scenario_id", evidence.scenario_id.as_str()),
+        ("connector_id", evidence.connector_id.as_str()),
+        ("git_revision", evidence.git_revision.as_str()),
+        ("worker_id", evidence.worker_id.as_str()),
+        ("cargo_target_dir", evidence.cargo_target_dir.as_str()),
+        (
+            "cargo_target_dir_class",
+            evidence.cargo_target_dir_class.as_str(),
+        ),
+        (
+            "cargo_target_dir_hash",
+            evidence.cargo_target_dir_hash.as_str(),
+        ),
+        (
+            "connector_fixture_id",
+            evidence.connector_fixture_id.as_str(),
+        ),
+        ("host_boundary", evidence.host_boundary.as_str()),
+        ("manifest_hash", evidence.manifest_hash.as_str()),
+        ("zone", evidence.zone.as_str()),
+        ("strategy", evidence.strategy.as_str()),
+        ("pool_state", evidence.pool_state.as_str()),
+        ("admission_decision", evidence.admission_decision.as_str()),
+        ("sandbox_layer", evidence.sandbox_layer.as_str()),
+        ("sandbox_profile", evidence.sandbox_profile.as_str()),
+        ("sandbox_boundary", evidence.sandbox_boundary.as_str()),
+        ("credential_mode", evidence.credential_mode.as_str()),
+        ("error_mapping", evidence.error_mapping.as_str()),
+        ("cleanup_result", evidence.cleanup_result.as_str()),
+        (
+            "restart_reason",
+            evidence.restart_reason.as_deref().unwrap_or(""),
+        ),
+        (
+            "fallback_reason",
+            evidence.fallback_reason.as_deref().unwrap_or(""),
+        ),
+        (
+            "unsafe_rejection_reason",
+            evidence.unsafe_rejection_reason.as_deref().unwrap_or(""),
+        ),
+        ("skip_reason", evidence.skip_reason.as_deref().unwrap_or("")),
+    ]
+}
+
+fn prewarm_sensitive_marker(value: &str) -> Option<&'static str> {
+    let normalized = value.to_ascii_lowercase();
+    if normalized.contains("bearer\t")
+        || normalized.contains("bearer\n")
+        || normalized.contains("bearer\r")
+    {
+        return Some("Bearer token");
+    }
+    for (needle, marker) in SWARM_PREWARM_REDACTION_MARKERS {
+        if normalized.contains(needle) {
+            return Some(marker);
+        }
+    }
+    None
+}
+
+fn normalized_prewarm_target_root(mut cargo_target_dir: &str) -> &str {
+    loop {
+        let without_trailing_slash = cargo_target_dir.trim_end_matches('/');
+        if without_trailing_slash.len() != cargo_target_dir.len() {
+            cargo_target_dir = if without_trailing_slash.is_empty() {
+                "/"
+            } else {
+                without_trailing_slash
+            };
+            continue;
+        }
+
+        if let Some(parent) = cargo_target_dir.strip_suffix("/.") {
+            cargo_target_dir = if parent.is_empty() { "/" } else { parent };
+            continue;
+        }
+
+        return cargo_target_dir;
+    }
+}
+
+fn prewarm_target_dir_has_parent_segment(cargo_target_dir: &str) -> bool {
+    cargo_target_dir
+        .split(['/', '\\'])
+        .any(|segment| segment == "..")
+}
+
+fn is_unsafe_prewarm_target_root(cargo_target_dir: &str) -> bool {
+    if prewarm_target_dir_has_parent_segment(cargo_target_dir) {
+        return true;
+    }
+
+    matches!(
+        normalized_prewarm_target_root(cargo_target_dir),
+        "/tmp" | "/private/tmp" | "target" | "./target"
+    )
+}
+
+fn validate_prewarm_command_and_target(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.command_line.is_empty()
+        || evidence
+            .command_line
+            .iter()
+            .any(|part| part.trim().is_empty())
+    {
+        return Err(SwarmPrewarmColdStartEvidenceError::EmptyCommandLine);
+    }
+    let command_line = &evidence.command_line;
+    let Some(separator_index) = command_line.iter().position(|part| part == "--") else {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                command_line: command_line.clone(),
+            },
+        );
+    };
+    let Some(cargo_index) = command_line.iter().position(|part| part == "cargo") else {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                command_line: command_line.clone(),
+            },
+        );
+    };
+    if command_line.first().map(String::as_str) != Some("rch")
+        || command_line.get(1).map(String::as_str) != Some("exec")
+        || cargo_index <= separator_index
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                command_line: command_line.clone(),
+            },
+        );
+    }
+    let expected_target_dir_arg = format!("CARGO_TARGET_DIR={}", evidence.cargo_target_dir);
+    if command_line
+        .iter()
+        .position(|part| part == &expected_target_dir_arg)
+        .is_none_or(|target_dir_index| {
+            target_dir_index <= separator_index || target_dir_index >= cargo_index
+        })
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CommandLineTargetDirMismatch {
+                cargo_target_dir: evidence.cargo_target_dir.clone(),
+                command_line: command_line.clone(),
+            },
+        );
+    }
+    if !is_redaction_safe_blake3_hash(&evidence.cargo_target_dir_hash) {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                hash: evidence.cargo_target_dir_hash.clone(),
+            },
+        );
+    }
+    let expected_target_dir_hash = prewarm_cargo_target_dir_hash(&evidence.cargo_target_dir);
+    if evidence.cargo_target_dir_hash != expected_target_dir_hash {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CargoTargetDirHashMismatch {
+                cargo_target_dir: evidence.cargo_target_dir.clone(),
+                expected_hash: expected_target_dir_hash,
+                actual_hash: evidence.cargo_target_dir_hash.clone(),
+            },
+        );
+    }
+    if !is_redaction_safe_blake3_hash(&evidence.manifest_hash) {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
+            hash: evidence.manifest_hash.clone(),
+        });
+    }
+    if !is_redaction_safe_blake3_hash(&evidence.zone) {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidZoneHash {
+            zone: evidence.zone.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_prewarm_latency(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.activation_latency_ms == 0 || evidence.baseline_on_demand_latency_ms == 0 {
+        return Err(SwarmPrewarmColdStartEvidenceError::MissingLatencyMeasurement);
+    }
+    if evidence.activation_latency_ms > evidence.baseline_on_demand_latency_ms {
+        return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+            activation_ms: evidence.activation_latency_ms,
+            baseline_ms: evidence.baseline_on_demand_latency_ms,
+        });
+    }
+    if !validate_prewarm_latency_percentiles(&evidence.latency)
+        || !validate_prewarm_latency_percentiles(&evidence.baseline_latency)
+    {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles);
+    }
+    for (activation_ms, baseline_ms) in [
+        (evidence.latency.p50_ms, evidence.baseline_latency.p50_ms),
+        (evidence.latency.p95_ms, evidence.baseline_latency.p95_ms),
+        (evidence.latency.p99_ms, evidence.baseline_latency.p99_ms),
+    ] {
+        if activation_ms > baseline_ms {
+            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+                activation_ms,
+                baseline_ms,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_prewarm_promotion_improvement_scenario(scenario_id: &str) -> bool {
+    SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS.contains(&scenario_id)
+}
+
+fn is_measured_prewarm_rejection(evidence: &SwarmPrewarmColdStartEvidence) -> bool {
+    if evidence.warm_checkout {
+        return false;
+    }
+
+    match evidence.admission_decision.as_str() {
+        "fallback_on_demand" => {
+            evidence
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+                && evidence.unsafe_rejection_reason.is_none()
+        }
+        "reject_unsafe" => {
+            evidence.fallback_reason.is_none()
+                && evidence
+                    .unsafe_rejection_reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.trim().is_empty())
+        }
+        _ => false,
+    }
+}
+
+fn validate_prewarm_production_improvement(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.execution_mode != SwarmEvidenceExecutionMode::Soak
+        || evidence.source_kind == SwarmEvidenceSourceKind::Offline
+        || !is_prewarm_promotion_improvement_scenario(&evidence.scenario_id)
+    {
+        return Ok(());
+    }
+
+    if is_measured_prewarm_rejection(evidence) {
+        return Ok(());
+    }
+
+    for (percentile, activation_ms, baseline_ms) in [
+        (
+            "p50",
+            evidence.latency.p50_ms,
+            evidence.baseline_latency.p50_ms,
+        ),
+        (
+            "p95",
+            evidence.latency.p95_ms,
+            evidence.baseline_latency.p95_ms,
+        ),
+        (
+            "p99",
+            evidence.latency.p99_ms,
+            evidence.baseline_latency.p99_ms,
+        ),
+    ] {
+        if activation_ms >= baseline_ms {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::MissingProductionImprovement {
+                    scenario_id: evidence.scenario_id.clone(),
+                    percentile,
+                    activation_ms,
+                    baseline_ms,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_prewarm_error_mapping(
+    evidence: &SwarmPrewarmColdStartEvidence,
+    expected_error_mapping: &str,
+    reason: &'static str,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.error_mapping == expected_error_mapping {
+        return Ok(());
+    }
+    Err(
+        SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+            decision: evidence.admission_decision.clone(),
+            reason,
+        },
+    )
+}
+
+fn validate_prewarm_expected_field(
+    evidence: &SwarmPrewarmColdStartEvidence,
+    actual: &str,
+    expected: &str,
+    reason: &'static str,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(
+        SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+            decision: evidence.admission_decision.clone(),
+            reason,
+        },
+    )
+}
+
+fn validate_prewarm_admit_warm(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    validate_prewarm_expected_field(
+        evidence,
+        &evidence.pool_state,
+        "warm_hit",
+        "admit_warm requires pool_state=warm_hit",
+    )?;
+    if !evidence.warm_checkout {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "admit_warm requires warm_checkout=true",
+            },
+        );
+    }
+    if evidence.fallback_reason.is_some() {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "admit_warm must not carry fallback_reason",
+            },
+        );
+    }
+    if evidence.unsafe_rejection_reason.is_some() {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "admit_warm must not carry unsafe_rejection_reason",
+            },
+        );
+    }
+    validate_prewarm_error_mapping(evidence, "ok", "admit_warm requires error_mapping=ok")?;
+    Ok(())
+}
+
+fn validate_prewarm_fallback_reason_consistency(
+    evidence: &SwarmPrewarmColdStartEvidence,
+    fallback_reason: &str,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    match fallback_reason {
+        "empty_pool" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.pool_state,
+            "empty",
+            "fallback_on_demand empty_pool requires pool_state=empty",
+        ),
+        "warm_entry_stale" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.pool_state,
+            "stale",
+            "fallback_on_demand warm_entry_stale requires pool_state=stale",
+        ),
+        "crash_before_checkout" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.pool_state,
+            "crash_before_checkout",
+            "fallback_on_demand crash_before_checkout requires pool_state=crash_before_checkout",
+        ),
+        "sandbox_limits_unavailable" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.sandbox_layer,
+            "limits_unavailable",
+            "fallback_on_demand sandbox_limits_unavailable requires sandbox_layer=limits_unavailable",
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn validate_prewarm_fallback_on_demand(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.warm_checkout {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "fallback_on_demand requires warm_checkout=false",
+            },
+        );
+    }
+    if evidence
+        .fallback_reason
+        .as_deref()
+        .is_none_or(|reason| reason.trim().is_empty())
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "fallback_on_demand requires non-empty fallback_reason",
+            },
+        );
+    }
+    if evidence.unsafe_rejection_reason.is_some() {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "fallback_on_demand must not carry unsafe_rejection_reason",
+            },
+        );
+    }
+    let fallback_reason = evidence.fallback_reason.as_deref().unwrap_or_default();
+    validate_prewarm_fallback_reason_consistency(evidence, fallback_reason)?;
+    let expected_error_mapping = format!("fallback_on_demand:{fallback_reason}");
+    validate_prewarm_error_mapping(
+        evidence,
+        &expected_error_mapping,
+        "fallback_on_demand requires error_mapping=fallback_on_demand:<fallback_reason>",
+    )
+}
+
+fn validate_prewarm_unsafe_reason_consistency(
+    evidence: &SwarmPrewarmColdStartEvidence,
+    unsafe_rejection_reason: &str,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    match unsafe_rejection_reason {
+        "warm_entry_rejected" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.pool_state,
+            "rejected",
+            "reject_unsafe warm_entry_rejected requires pool_state=rejected",
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn validate_prewarm_reject_unsafe(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.warm_checkout {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "reject_unsafe requires warm_checkout=false",
+            },
+        );
+    }
+    if evidence.fallback_reason.is_some() {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "reject_unsafe must not carry fallback_reason",
+            },
+        );
+    }
+    if evidence
+        .unsafe_rejection_reason
+        .as_deref()
+        .is_none_or(|reason| reason.trim().is_empty())
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "reject_unsafe requires non-empty unsafe_rejection_reason",
+            },
+        );
+    }
+    let unsafe_rejection_reason = evidence
+        .unsafe_rejection_reason
+        .as_deref()
+        .unwrap_or_default();
+    validate_prewarm_unsafe_reason_consistency(evidence, unsafe_rejection_reason)?;
+    let expected_error_mapping = format!("reject_unsafe:{unsafe_rejection_reason}");
+    validate_prewarm_error_mapping(
+        evidence,
+        &expected_error_mapping,
+        "reject_unsafe requires error_mapping=reject_unsafe:<unsafe_rejection_reason>",
+    )
+}
+
+fn validate_prewarm_admission_decision(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    match evidence.admission_decision.as_str() {
+        "admit_warm" => validate_prewarm_admit_warm(evidence),
+        "fallback_on_demand" => validate_prewarm_fallback_on_demand(evidence),
+        "reject_unsafe" => validate_prewarm_reject_unsafe(evidence),
+        decision => Err(
+            SwarmPrewarmColdStartEvidenceError::InvalidAdmissionDecision {
+                decision: decision.to_string(),
+            },
+        ),
+    }
+}
+
+fn validate_prewarm_cleanup(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if !evidence.shutdown_cleanup_verified {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::ShutdownCleanupUnverified {
+                scenario_id: evidence.scenario_id.clone(),
+                cleanup_result: evidence.cleanup_result.clone(),
+            },
+        );
+    }
+    if evidence.cleanup_result != "verified" {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidCleanupResult {
+            scenario_id: evidence.scenario_id.clone(),
+            cleanup_result: evidence.cleanup_result.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_prewarm_resources(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    for (field, value) in [
+        ("rss_bytes", evidence.rss_bytes),
+        ("pool_size", u64::from(evidence.pool_size)),
+        ("process_count", u64::from(evidence.process_count)),
+    ] {
+        if value == 0 {
+            return Err(SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement { field });
+        }
+    }
+    if evidence.concurrent_startups == 0 {
+        return Err(SwarmPrewarmColdStartEvidenceError::EmptyConcurrentStartupCount);
+    }
+    Ok(())
+}
+
+fn put_prewarm_json<T: Serialize>(
+    record: &mut serde_json::Map<String, Value>,
+    key: &'static str,
+    value: T,
+) -> Result<(), serde_json::Error> {
+    record.insert(key.to_string(), serde_json::to_value(value)?);
+    Ok(())
+}
+
+fn put_prewarm_identity_json(
+    record: &mut serde_json::Map<String, Value>,
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), serde_json::Error> {
+    put_prewarm_json(record, "schema_version", &evidence.schema_version)?;
+    put_prewarm_json(record, "execution_mode", evidence.execution_mode)?;
+    put_prewarm_json(record, "source_kind", evidence.source_kind)?;
+    put_prewarm_json(record, "scenario_id", &evidence.scenario_id)?;
+    put_prewarm_json(record, "connector_id", &evidence.connector_id)?;
+    put_prewarm_json(record, "command_line", &evidence.command_line)?;
+    put_prewarm_json(record, "git_revision", &evidence.git_revision)?;
+    put_prewarm_json(record, "worker_id", &evidence.worker_id)?;
+    put_prewarm_json(record, "cargo_target_dir", &evidence.cargo_target_dir)?;
+    put_prewarm_json(
+        record,
+        "cargo_target_dir_class",
+        &evidence.cargo_target_dir_class,
+    )?;
+    put_prewarm_json(
+        record,
+        "cargo_target_dir_hash",
+        &evidence.cargo_target_dir_hash,
+    )?;
+    put_prewarm_json(
+        record,
+        "connector_fixture_id",
+        &evidence.connector_fixture_id,
+    )?;
+    put_prewarm_json(record, "host_boundary", &evidence.host_boundary)?;
+    put_prewarm_json(record, "manifest_hash", &evidence.manifest_hash)?;
+    put_prewarm_json(record, "zone", &evidence.zone)?;
+    Ok(())
+}
+
+fn put_prewarm_checkout_json(
+    record: &mut serde_json::Map<String, Value>,
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), serde_json::Error> {
+    put_prewarm_json(record, "strategy", &evidence.strategy)?;
+    put_prewarm_json(record, "pool_state", &evidence.pool_state)?;
+    put_prewarm_json(record, "pool_size", evidence.pool_size)?;
+    put_prewarm_json(record, "admission_decision", &evidence.admission_decision)?;
+    put_prewarm_json(record, "warm_checkout", evidence.warm_checkout)?;
+    Ok(())
+}
+
+fn put_prewarm_latency_json(
+    record: &mut serde_json::Map<String, Value>,
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), serde_json::Error> {
+    put_prewarm_json(
+        record,
+        "activation_latency_ms",
+        evidence.activation_latency_ms,
+    )?;
+    put_prewarm_json(
+        record,
+        "baseline_on_demand_latency_ms",
+        evidence.baseline_on_demand_latency_ms,
+    )?;
+    put_prewarm_json(record, "p50_activation_latency_ms", evidence.latency.p50_ms)?;
+    put_prewarm_json(record, "p95_activation_latency_ms", evidence.latency.p95_ms)?;
+    put_prewarm_json(record, "p99_activation_latency_ms", evidence.latency.p99_ms)?;
+    put_prewarm_json(
+        record,
+        "baseline_p50_activation_latency_ms",
+        evidence.baseline_latency.p50_ms,
+    )?;
+    put_prewarm_json(
+        record,
+        "baseline_p95_activation_latency_ms",
+        evidence.baseline_latency.p95_ms,
+    )?;
+    put_prewarm_json(
+        record,
+        "baseline_p99_activation_latency_ms",
+        evidence.baseline_latency.p99_ms,
+    )?;
+    put_prewarm_json(
+        record,
+        "p50_activation_latency_improvement_ms",
+        evidence
+            .baseline_latency
+            .p50_ms
+            .saturating_sub(evidence.latency.p50_ms),
+    )?;
+    put_prewarm_json(
+        record,
+        "p95_activation_latency_improvement_ms",
+        evidence
+            .baseline_latency
+            .p95_ms
+            .saturating_sub(evidence.latency.p95_ms),
+    )?;
+    put_prewarm_json(
+        record,
+        "p99_activation_latency_improvement_ms",
+        evidence
+            .baseline_latency
+            .p99_ms
+            .saturating_sub(evidence.latency.p99_ms),
+    )?;
+    Ok(())
+}
+
+fn put_prewarm_runtime_json(
+    record: &mut serde_json::Map<String, Value>,
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), serde_json::Error> {
+    put_prewarm_json(record, "sandbox_layer", &evidence.sandbox_layer)?;
+    put_prewarm_json(record, "sandbox_profile", &evidence.sandbox_profile)?;
+    put_prewarm_json(record, "sandbox_boundary", &evidence.sandbox_boundary)?;
+    put_prewarm_json(record, "credential_mode", &evidence.credential_mode)?;
+    put_prewarm_json(record, "rss_bytes", evidence.rss_bytes)?;
+    put_prewarm_json(record, "process_count", evidence.process_count)?;
+    put_prewarm_json(record, "concurrent_startups", evidence.concurrent_startups)?;
+    put_prewarm_json(record, "error_mapping", &evidence.error_mapping)?;
+    put_prewarm_json(record, "cleanup_result", &evidence.cleanup_result)?;
+    put_prewarm_json(record, "restart_reason", &evidence.restart_reason)?;
+    put_prewarm_json(record, "fallback_reason", &evidence.fallback_reason)?;
+    put_prewarm_json(
+        record,
+        "unsafe_rejection_reason",
+        &evidence.unsafe_rejection_reason,
+    )?;
+    put_prewarm_json(record, "skip_reason", &evidence.skip_reason)?;
+    put_prewarm_json(
+        record,
+        "shutdown_cleanup_verified",
+        evidence.shutdown_cleanup_verified,
+    )?;
+    Ok(())
 }
 
 impl SwarmPrewarmColdStartEvidence {
@@ -2785,91 +3784,18 @@ impl SwarmPrewarmColdStartEvidence {
                 actual: self.schema_version.clone(),
             });
         }
-        for (field, value) in [
-            ("scenario_id", self.scenario_id.as_str()),
-            ("connector_id", self.connector_id.as_str()),
-            ("git_revision", self.git_revision.as_str()),
-            ("worker_id", self.worker_id.as_str()),
-            ("cargo_target_dir", self.cargo_target_dir.as_str()),
-            ("connector_fixture_id", self.connector_fixture_id.as_str()),
-            ("host_boundary", self.host_boundary.as_str()),
-            ("manifest_hash", self.manifest_hash.as_str()),
-            ("zone", self.zone.as_str()),
-            ("strategy", self.strategy.as_str()),
-            ("pool_state", self.pool_state.as_str()),
-            ("admission_decision", self.admission_decision.as_str()),
-            ("sandbox_layer", self.sandbox_layer.as_str()),
-            ("sandbox_profile", self.sandbox_profile.as_str()),
-            ("sandbox_boundary", self.sandbox_boundary.as_str()),
-            ("credential_mode", self.credential_mode.as_str()),
-            ("error_mapping", self.error_mapping.as_str()),
-            ("cleanup_result", self.cleanup_result.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return Err(SwarmPrewarmColdStartEvidenceError::EmptyField { field });
-            }
-        }
-        if self.command_line.is_empty()
-            || self.command_line.iter().any(|part| part.trim().is_empty())
-        {
-            return Err(SwarmPrewarmColdStartEvidenceError::EmptyCommandLine);
-        }
-        if self.activation_latency_ms == 0 || self.baseline_on_demand_latency_ms == 0 {
-            return Err(SwarmPrewarmColdStartEvidenceError::MissingLatencyMeasurement);
-        }
-        if self.activation_latency_ms > self.baseline_on_demand_latency_ms {
-            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
-                activation_ms: self.activation_latency_ms,
-                baseline_ms: self.baseline_on_demand_latency_ms,
-            });
-        }
-        if !validate_prewarm_latency_percentiles(&self.latency)
-            || !validate_prewarm_latency_percentiles(&self.baseline_latency)
-        {
-            return Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles);
-        }
-        if self.latency.p50_ms > self.baseline_latency.p50_ms {
-            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
-                activation_ms: self.latency.p50_ms,
-                baseline_ms: self.baseline_latency.p50_ms,
-            });
-        }
-        if self.latency.p95_ms > self.baseline_latency.p95_ms {
-            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
-                activation_ms: self.latency.p95_ms,
-                baseline_ms: self.baseline_latency.p95_ms,
-            });
-        }
-        if self.latency.p99_ms > self.baseline_latency.p99_ms {
-            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
-                activation_ms: self.latency.p99_ms,
-                baseline_ms: self.baseline_latency.p99_ms,
-            });
-        }
-        if self.rss_bytes == 0 {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
-                    field: "rss_bytes",
-                },
-            );
-        }
-        if self.pool_size == 0 {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
-                    field: "pool_size",
-                },
-            );
-        }
-        if self.process_count == 0 {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
-                    field: "process_count",
-                },
-            );
-        }
-        if self.concurrent_startups == 0 {
-            return Err(SwarmPrewarmColdStartEvidenceError::EmptyConcurrentStartupCount);
-        }
+        validate_prewarm_execution_source(self.execution_mode, self.source_kind)?;
+        validate_prewarm_required_fields(self)?;
+        validate_prewarm_scenario_id(self)?;
+        validate_prewarm_redaction(self)?;
+        validate_prewarm_worker_id(self)?;
+        validate_prewarm_soak_boundaries(self)?;
+        validate_prewarm_command_and_target(self)?;
+        validate_prewarm_latency(self)?;
+        validate_prewarm_production_improvement(self)?;
+        validate_prewarm_admission_decision(self)?;
+        validate_prewarm_cleanup(self)?;
+        validate_prewarm_resources(self)?;
         Ok(())
     }
 
@@ -2881,58 +3807,178 @@ impl SwarmPrewarmColdStartEvidence {
     /// serde error when the typed evidence cannot be converted into JSON.
     pub fn to_jsonl_value(&self) -> Result<Value, SwarmPrewarmColdStartEvidenceJsonError> {
         self.validate()?;
-        Ok(json!({
-            "record_type": "swarm_prewarm_cold_start_evidence",
-            "schema_version": self.schema_version,
-            "scenario_id": self.scenario_id,
-            "connector_id": self.connector_id,
-            "command_line": self.command_line,
-            "cargo_target_dir": self.cargo_target_dir,
-            "connector_fixture_id": self.connector_fixture_id,
-            "host_boundary": self.host_boundary,
-            "manifest_hash": self.manifest_hash,
-            "zone": self.zone,
-            "strategy": self.strategy,
-            "pool_state": self.pool_state,
-            "pool_size": self.pool_size,
-            "admission_decision": self.admission_decision,
-            "warm_checkout": self.warm_checkout,
-            "activation_latency_ms": self.activation_latency_ms,
-            "baseline_on_demand_latency_ms": self.baseline_on_demand_latency_ms,
-            "p50_activation_latency_ms": self.latency.p50_ms,
-            "p95_activation_latency_ms": self.latency.p95_ms,
-            "p99_activation_latency_ms": self.latency.p99_ms,
-            "baseline_p50_activation_latency_ms": self.baseline_latency.p50_ms,
-            "baseline_p95_activation_latency_ms": self.baseline_latency.p95_ms,
-            "baseline_p99_activation_latency_ms": self.baseline_latency.p99_ms,
-            "p50_activation_latency_improvement_ms": self
-                .baseline_latency
-                .p50_ms
-                .saturating_sub(self.latency.p50_ms),
-            "p95_activation_latency_improvement_ms": self
-                .baseline_latency
-                .p95_ms
-                .saturating_sub(self.latency.p95_ms),
-            "p99_activation_latency_improvement_ms": self
-                .baseline_latency
-                .p99_ms
-                .saturating_sub(self.latency.p99_ms),
-            "sandbox_layer": self.sandbox_layer,
-            "sandbox_profile": self.sandbox_profile,
-            "sandbox_boundary": self.sandbox_boundary,
-            "credential_mode": self.credential_mode,
-            "rss_bytes": self.rss_bytes,
-            "process_count": self.process_count,
-            "concurrent_startups": self.concurrent_startups,
-            "error_mapping": self.error_mapping,
-            "cleanup_result": self.cleanup_result,
-            "restart_reason": self.restart_reason,
-            "fallback_reason": self.fallback_reason,
-            "unsafe_rejection_reason": self.unsafe_rejection_reason,
-            "skip_reason": self.skip_reason,
-            "shutdown_cleanup_verified": self.shutdown_cleanup_verified,
-            "evidence": serde_json::to_value(self)?,
-        }))
+        let mut record = serde_json::Map::new();
+        put_prewarm_json(
+            &mut record,
+            "record_type",
+            "swarm_prewarm_cold_start_evidence",
+        )?;
+        put_prewarm_identity_json(&mut record, self)?;
+        put_prewarm_checkout_json(&mut record, self)?;
+        put_prewarm_latency_json(&mut record, self)?;
+        put_prewarm_runtime_json(&mut record, self)?;
+        put_prewarm_json(&mut record, "evidence", serde_json::to_value(self)?)?;
+        Ok(Value::Object(record))
+    }
+}
+
+/// Validate a complete connector prewarm cold-start evidence bundle.
+///
+/// # Errors
+///
+/// Returns [`SwarmPrewarmColdStartEvidenceBundleError`] when any row is invalid,
+/// a required scenario is missing, a scenario is duplicated, or production-soak
+/// evidence is required but the bundle still contains smoke/offline records.
+pub fn validate_swarm_prewarm_cold_start_evidence_bundle(
+    records: &[SwarmPrewarmColdStartEvidence],
+    require_production_soak: bool,
+) -> Result<(), SwarmPrewarmColdStartEvidenceBundleError> {
+    if records.is_empty() {
+        return Err(SwarmPrewarmColdStartEvidenceBundleError::EmptyBundle);
+    }
+
+    let mut seen = BTreeSet::new();
+    for record in records {
+        if !SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS.contains(&record.scenario_id.as_str()) {
+            return Err(
+                SwarmPrewarmColdStartEvidenceBundleError::UnexpectedScenario {
+                    scenario_id: record.scenario_id.clone(),
+                },
+            );
+        }
+
+        if !seen.insert(record.scenario_id.clone()) {
+            return Err(
+                SwarmPrewarmColdStartEvidenceBundleError::DuplicateScenario {
+                    scenario_id: record.scenario_id.clone(),
+                },
+            );
+        }
+
+        record.validate().map_err(|source| {
+            SwarmPrewarmColdStartEvidenceBundleError::InvalidRecord {
+                scenario_id: record.scenario_id.clone(),
+                source,
+            }
+        })?;
+
+        if require_production_soak
+            && (record.execution_mode != SwarmEvidenceExecutionMode::Soak
+                || !matches!(
+                    record.source_kind,
+                    SwarmEvidenceSourceKind::HostBacked | SwarmEvidenceSourceKind::Live
+                ))
+        {
+            return Err(
+                SwarmPrewarmColdStartEvidenceBundleError::ProductionSoakRequired {
+                    scenario_id: record.scenario_id.clone(),
+                    execution_mode: record.execution_mode,
+                    source_kind: record.source_kind,
+                },
+            );
+        }
+    }
+
+    for scenario_id in SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS {
+        if !seen.contains(scenario_id) {
+            return Err(SwarmPrewarmColdStartEvidenceBundleError::MissingScenario { scenario_id });
+        }
+    }
+
+    Ok(())
+}
+
+/// Validation error for complete prewarm cold-start evidence bundles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmPrewarmColdStartEvidenceBundleError {
+    /// The bundle did not contain any evidence rows.
+    EmptyBundle,
+    /// A single evidence row failed validation.
+    InvalidRecord {
+        /// Scenario associated with the invalid row.
+        scenario_id: String,
+        /// Underlying row validation error.
+        source: SwarmPrewarmColdStartEvidenceError,
+    },
+    /// A required scenario was absent.
+    MissingScenario {
+        /// Missing scenario id.
+        scenario_id: &'static str,
+    },
+    /// A scenario appeared more than once.
+    DuplicateScenario {
+        /// Duplicated scenario id.
+        scenario_id: String,
+    },
+    /// The bundle contained a scenario outside the required prewarm contract.
+    UnexpectedScenario {
+        /// Unexpected scenario id.
+        scenario_id: String,
+    },
+    /// Final acceptance was requested but a row was not production-soak evidence.
+    ProductionSoakRequired {
+        /// Scenario associated with the invalid row.
+        scenario_id: String,
+        /// Observed execution mode.
+        execution_mode: SwarmEvidenceExecutionMode,
+        /// Observed source kind.
+        source_kind: SwarmEvidenceSourceKind,
+    },
+}
+
+impl fmt::Display for SwarmPrewarmColdStartEvidenceBundleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyBundle => write!(f, "swarm prewarm evidence bundle is empty"),
+            Self::InvalidRecord {
+                scenario_id,
+                source,
+            } => write!(
+                f,
+                "swarm prewarm scenario '{scenario_id}' failed validation: {source}"
+            ),
+            Self::MissingScenario { scenario_id } => {
+                write!(
+                    f,
+                    "swarm prewarm evidence bundle is missing scenario '{scenario_id}'"
+                )
+            }
+            Self::DuplicateScenario { scenario_id } => {
+                write!(
+                    f,
+                    "swarm prewarm evidence bundle duplicates scenario '{scenario_id}'"
+                )
+            }
+            Self::UnexpectedScenario { scenario_id } => {
+                write!(
+                    f,
+                    "swarm prewarm evidence bundle contains unexpected scenario '{scenario_id}'"
+                )
+            }
+            Self::ProductionSoakRequired {
+                scenario_id,
+                execution_mode,
+                source_kind,
+            } => write!(
+                f,
+                "swarm prewarm scenario '{scenario_id}' must be production soak evidence, got mode '{}' and source '{}'",
+                execution_mode.as_str(),
+                source_kind.as_str()
+            ),
+        }
+    }
+}
+
+impl Error for SwarmPrewarmColdStartEvidenceBundleError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidRecord { source, .. } => Some(source),
+            Self::EmptyBundle
+            | Self::MissingScenario { .. }
+            | Self::DuplicateScenario { .. }
+            | Self::UnexpectedScenario { .. }
+            | Self::ProductionSoakRequired { .. } => None,
+        }
     }
 }
 
@@ -2946,13 +3992,103 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed schema.
         actual: String,
     },
+    /// Soak records must be produced by host-backed or live evidence.
+    SoakRequiresHostBackedSource {
+        /// Observed source kind.
+        source_kind: SwarmEvidenceSourceKind,
+    },
+    /// Soak records must come through a real production host boundary.
+    SoakRequiresProductionHostBoundary {
+        /// Observed host boundary.
+        host_boundary: String,
+    },
+    /// Soak records must name a real fcp-sandbox enforcement boundary.
+    SoakRequiresSandboxBoundary {
+        /// Observed sandbox boundary.
+        sandbox_boundary: String,
+    },
+    /// Production soak records cannot represent skipped proof rows.
+    ProductionSoakSkipped {
+        /// Scenario carrying the skip marker.
+        scenario_id: String,
+        /// Observed skip reason.
+        skip_reason: String,
+    },
+    /// Scenario was not one of the required prewarm evidence scenarios.
+    InvalidScenario {
+        /// Observed scenario id.
+        scenario_id: String,
+    },
     /// A required string field was empty.
     EmptyField {
         /// Field name.
         field: &'static str,
     },
+    /// Git revision provenance could not be resolved.
+    UnknownGitRevision {
+        /// Observed git revision label.
+        git_revision: String,
+    },
+    /// Git revision provenance was not a short or full lowercase hex object id.
+    InvalidGitRevision {
+        /// Observed git revision label.
+        git_revision: String,
+    },
+    /// Worker identity was not a stable redaction-safe label.
+    InvalidWorkerId {
+        /// Observed worker identity.
+        worker_id: String,
+    },
     /// Reproduction command line was empty or contained an empty part.
     EmptyCommandLine,
+    /// Reproduction command line did not prove Cargo was run through rch.
+    CommandLineDoesNotUseRch {
+        /// Observed command line.
+        command_line: Vec<String>,
+    },
+    /// Reproduction command line did not include the recorded Cargo target directory.
+    CommandLineTargetDirMismatch {
+        /// Recorded Cargo target directory.
+        cargo_target_dir: String,
+        /// Observed command line.
+        command_line: Vec<String>,
+    },
+    /// Cargo target directory hash did not use the expected redaction-safe form.
+    InvalidCargoTargetDirHash {
+        /// Observed hash value.
+        hash: String,
+    },
+    /// Cargo target directory hash did not match the recorded target directory.
+    CargoTargetDirHashMismatch {
+        /// Recorded Cargo target directory.
+        cargo_target_dir: String,
+        /// Expected hash for the recorded target directory.
+        expected_hash: String,
+        /// Observed hash value.
+        actual_hash: String,
+    },
+    /// Connector manifest hash did not use the expected redaction-safe form.
+    InvalidManifestHash {
+        /// Observed hash value.
+        hash: String,
+    },
+    /// Zone evidence did not use a redaction-safe hash reference.
+    InvalidZoneHash {
+        /// Observed zone value.
+        zone: String,
+    },
+    /// Admission decision was not one of the stable evidence states.
+    InvalidAdmissionDecision {
+        /// Observed decision label.
+        decision: String,
+    },
+    /// Admission decision and checkout/reason fields disagree.
+    InconsistentAdmissionDecision {
+        /// Observed decision label.
+        decision: String,
+        /// Human-readable invariant that was violated.
+        reason: &'static str,
+    },
     /// A latency measurement was absent or zero.
     MissingLatencyMeasurement,
     /// Percentiles were absent or out of order.
@@ -2964,6 +4100,48 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Conservative baseline latency.
         baseline_ms: u64,
     },
+    /// Production soak promotion scenarios must prove positive p50/p95/p99 improvement.
+    MissingProductionImprovement {
+        /// Scenario that lacked positive improvement.
+        scenario_id: String,
+        /// Percentile that did not improve.
+        percentile: &'static str,
+        /// Observed activation latency.
+        activation_ms: u64,
+        /// Conservative baseline latency.
+        baseline_ms: u64,
+    },
+    /// Shutdown cleanup was not positively verified.
+    ShutdownCleanupUnverified {
+        /// Scenario that lacked cleanup verification.
+        scenario_id: String,
+        /// Cleanup result label attached to the record.
+        cleanup_result: String,
+    },
+    /// Cleanup was marked verified with a contradictory cleanup result label.
+    InvalidCleanupResult {
+        /// Scenario with an invalid cleanup result label.
+        scenario_id: String,
+        /// Cleanup result label attached to the record.
+        cleanup_result: String,
+    },
+    /// Cargo target directory was classified as a private absolute path.
+    PrivateCargoTargetDirClass {
+        /// Observed target directory class.
+        cargo_target_dir_class: String,
+    },
+    /// Cargo target directory class was not one of the stable evidence labels.
+    InvalidCargoTargetDirClass {
+        /// Observed target directory class.
+        cargo_target_dir_class: String,
+    },
+    /// Evidence contained a marker that must be redacted before export.
+    SensitiveRedactionMarker {
+        /// Field that contained the marker.
+        field: &'static str,
+        /// Stable marker class.
+        marker: &'static str,
+    },
     /// A required resource field was absent or zero.
     MissingResourceMeasurement {
         /// Field name.
@@ -2973,6 +4151,85 @@ pub enum SwarmPrewarmColdStartEvidenceError {
     EmptyConcurrentStartupCount,
 }
 
+fn fmt_prewarm_command_target_dir_mismatch(
+    f: &mut fmt::Formatter<'_>,
+    cargo_target_dir: &str,
+    command_line: &[String],
+) -> fmt::Result {
+    write!(
+        f,
+        "swarm prewarm command line must include CARGO_TARGET_DIR='{cargo_target_dir}', got '{}'",
+        command_line.join(" ")
+    )
+}
+
+fn fmt_prewarm_measurement_error(
+    err: &SwarmPrewarmColdStartEvidenceError,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match err {
+        SwarmPrewarmColdStartEvidenceError::MissingLatencyMeasurement => {
+            write!(f, "swarm prewarm latency measurement is missing")
+        }
+        SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles => {
+            write!(f, "swarm prewarm latency percentiles are invalid")
+        }
+        SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+            activation_ms,
+            baseline_ms,
+        } => write!(
+            f,
+            "swarm prewarm activation latency {activation_ms} exceeds baseline {baseline_ms}"
+        ),
+        SwarmPrewarmColdStartEvidenceError::MissingProductionImprovement {
+            scenario_id,
+            percentile,
+            activation_ms,
+            baseline_ms,
+        } => write!(
+            f,
+            "swarm prewarm production scenario '{scenario_id}' requires positive {percentile} improvement, got activation {activation_ms} and baseline {baseline_ms}"
+        ),
+        SwarmPrewarmColdStartEvidenceError::ShutdownCleanupUnverified {
+            scenario_id,
+            cleanup_result,
+        } => write!(
+            f,
+            "swarm prewarm scenario '{scenario_id}' requires verified shutdown cleanup, got '{cleanup_result}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::InvalidCleanupResult {
+            scenario_id,
+            cleanup_result,
+        } => write!(
+            f,
+            "swarm prewarm scenario '{scenario_id}' requires cleanup_result='verified', got '{cleanup_result}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::PrivateCargoTargetDirClass {
+            cargo_target_dir_class,
+        } => write!(
+            f,
+            "swarm prewarm cargo target directory class must be export-safe, got '{cargo_target_dir_class}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirClass {
+            cargo_target_dir_class,
+        } => write!(
+            f,
+            "swarm prewarm cargo target directory class must be tmp, absolute, or relative, got '{cargo_target_dir_class}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker { field, marker } => write!(
+            f,
+            "swarm prewarm field '{field}' contains unredacted marker '{marker}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement { field } => {
+            write!(f, "swarm prewarm resource field '{field}' is missing")
+        }
+        SwarmPrewarmColdStartEvidenceError::EmptyConcurrentStartupCount => {
+            write!(f, "swarm prewarm concurrent startup count is zero")
+        }
+        _ => unreachable!("prewarm measurement formatter called with structural error"),
+    }
+}
+
 impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2980,29 +4237,94 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
                 f,
                 "swarm prewarm schema mismatch: expected '{expected}', got '{actual}'"
             ),
+            Self::SoakRequiresHostBackedSource { source_kind } => write!(
+                f,
+                "swarm prewarm soak evidence requires host-backed or live source, got '{}'",
+                source_kind.as_str()
+            ),
+            Self::SoakRequiresProductionHostBoundary { host_boundary } => write!(
+                f,
+                "swarm prewarm soak evidence requires production host boundary, got '{host_boundary}'"
+            ),
+            Self::SoakRequiresSandboxBoundary { sandbox_boundary } => write!(
+                f,
+                "swarm prewarm soak evidence requires fcp-sandbox boundary, got '{sandbox_boundary}'"
+            ),
+            Self::ProductionSoakSkipped {
+                scenario_id,
+                skip_reason,
+            } => write!(
+                f,
+                "swarm prewarm production scenario '{scenario_id}' cannot carry skip_reason '{skip_reason}'"
+            ),
+            Self::InvalidScenario { scenario_id } => write!(
+                f,
+                "swarm prewarm scenario '{scenario_id}' is not in the required prewarm evidence set"
+            ),
             Self::EmptyField { field } => {
                 write!(f, "swarm prewarm field '{field}' is empty")
             }
+            Self::UnknownGitRevision { git_revision } => write!(
+                f,
+                "swarm prewarm git revision must be resolved before evidence export, got '{git_revision}'"
+            ),
+            Self::InvalidGitRevision { git_revision } => write!(
+                f,
+                "swarm prewarm git revision must be a lowercase hex Git object id between 7 and 40 characters, got '{git_revision}'"
+            ),
+            Self::InvalidWorkerId { worker_id } => write!(
+                f,
+                "swarm prewarm worker_id must use only ASCII letters, digits, '.', '_', and '-' and be at most 128 bytes, got '{worker_id}'"
+            ),
             Self::EmptyCommandLine => write!(f, "swarm prewarm command line is empty"),
-            Self::MissingLatencyMeasurement => {
-                write!(f, "swarm prewarm latency measurement is missing")
-            }
-            Self::InvalidLatencyPercentiles => {
-                write!(f, "swarm prewarm latency percentiles are invalid")
-            }
-            Self::LatencyRegression {
-                activation_ms,
-                baseline_ms,
+            Self::CommandLineDoesNotUseRch { command_line } => write!(
+                f,
+                "swarm prewarm command line must run Cargo through 'rch exec --', got '{}'",
+                command_line.join(" ")
+            ),
+            Self::CommandLineTargetDirMismatch {
+                cargo_target_dir,
+                command_line,
+            } => fmt_prewarm_command_target_dir_mismatch(f, cargo_target_dir, command_line),
+            Self::InvalidCargoTargetDirHash { hash } => write!(
+                f,
+                "swarm prewarm cargo target directory hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
+            ),
+            Self::CargoTargetDirHashMismatch {
+                cargo_target_dir,
+                expected_hash,
+                actual_hash,
             } => write!(
                 f,
-                "swarm prewarm activation latency {activation_ms} exceeds baseline {baseline_ms}"
+                "swarm prewarm cargo target directory hash for '{cargo_target_dir}' must be '{expected_hash}', got '{actual_hash}'"
             ),
-            Self::MissingResourceMeasurement { field } => {
-                write!(f, "swarm prewarm resource field '{field}' is missing")
-            }
-            Self::EmptyConcurrentStartupCount => {
-                write!(f, "swarm prewarm concurrent startup count is zero")
-            }
+            Self::InvalidManifestHash { hash } => write!(
+                f,
+                "swarm prewarm manifest hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
+            ),
+            Self::InvalidZoneHash { zone } => write!(
+                f,
+                "swarm prewarm zone evidence must be 'blake3:' followed by 64 lowercase hex characters, got '{zone}'"
+            ),
+            Self::InvalidAdmissionDecision { decision } => write!(
+                f,
+                "swarm prewarm admission decision must be admit_warm, fallback_on_demand, or reject_unsafe, got '{decision}'"
+            ),
+            Self::InconsistentAdmissionDecision { decision, reason } => write!(
+                f,
+                "swarm prewarm admission decision '{decision}' is inconsistent: {reason}"
+            ),
+            Self::MissingLatencyMeasurement
+            | Self::InvalidLatencyPercentiles
+            | Self::LatencyRegression { .. }
+            | Self::MissingProductionImprovement { .. }
+            | Self::ShutdownCleanupUnverified { .. }
+            | Self::InvalidCleanupResult { .. }
+            | Self::PrivateCargoTargetDirClass { .. }
+            | Self::InvalidCargoTargetDirClass { .. }
+            | Self::SensitiveRedactionMarker { .. }
+            | Self::MissingResourceMeasurement { .. }
+            | Self::EmptyConcurrentStartupCount => fmt_prewarm_measurement_error(self, f),
         }
     }
 }
@@ -8613,7 +9935,14 @@ mod tests {
 
     #[test]
     fn swarm_gauntlet_manifest_rejects_missing_phase() {
-        let mut manifest = SwarmGauntletManifest::smoke(vec!["cargo".to_string()]);
+        let mut manifest = SwarmGauntletManifest::smoke(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+            "--test".to_string(),
+            "swarm_gauntlet_e2e".to_string(),
+        ]);
         manifest
             .required_phases
             .retain(|phase| *phase != SwarmGauntletPhase::Backpressure);
@@ -8990,14 +10319,24 @@ mod tests {
     }
 
     fn prewarm_cold_start_evidence_fixture() -> SwarmPrewarmColdStartEvidence {
+        let cargo_target_dir = "/tmp/fcp-prewarm-e2e";
+        let cargo_target_dir_hash = prewarm_cargo_target_dir_hash(cargo_target_dir);
+        let manifest_hash = format!(
+            "blake3:{}",
+            blake3::hash(b"fcp-test-connector:request-response:strict-prewarm").to_hex()
+        );
         SwarmPrewarmColdStartEvidence {
             schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+            execution_mode: SwarmEvidenceExecutionMode::Smoke,
+            source_kind: SwarmEvidenceSourceKind::Offline,
             scenario_id: "prewarm_warm_hit".to_string(),
             connector_id: "fcp.github:utility:1.0.0".to_string(),
             command_line: vec![
                 "rch".to_string(),
                 "exec".to_string(),
                 "--".to_string(),
+                "env".to_string(),
+                format!("CARGO_TARGET_DIR={cargo_target_dir}"),
                 "cargo".to_string(),
                 "test".to_string(),
                 "-p".to_string(),
@@ -9006,14 +10345,16 @@ mod tests {
                 "swarm_gauntlet_e2e".to_string(),
                 "prewarm".to_string(),
             ],
-            git_revision: "abc123".to_string(),
+            git_revision: "abc1234".to_string(),
             worker_id: "rch-worker-64c".to_string(),
-            cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+            cargo_target_dir: cargo_target_dir.to_string(),
+            cargo_target_dir_class: "tmp".to_string(),
+            cargo_target_dir_hash,
             connector_fixture_id: "fcp-test-connector:request-response".to_string(),
             host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
                 .to_string(),
-            manifest_hash: "blake3:manifest".to_string(),
-            zone: "z:project:swarm".to_string(),
+            manifest_hash,
+            zone: prewarm_zone_hash("z:project:swarm"),
             strategy: "warm_pool".to_string(),
             pool_state: "warm_hit".to_string(),
             pool_size: 256,
@@ -9054,6 +10395,181 @@ mod tests {
         }
     }
 
+    fn prewarm_command_line(cargo_target_dir: &str) -> Vec<String> {
+        vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "--".to_string(),
+            "env".to_string(),
+            format!("CARGO_TARGET_DIR={cargo_target_dir}"),
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+        ]
+    }
+
+    fn assert_prewarm_target_root_rejected(target_dir: &str) {
+        let mut unsafe_target_root = prewarm_cold_start_evidence_fixture();
+        unsafe_target_root.cargo_target_dir = target_dir.to_string();
+        unsafe_target_root.cargo_target_dir_class = if target_dir.starts_with('/') {
+            "tmp".to_string()
+        } else {
+            "relative".to_string()
+        };
+        unsafe_target_root.command_line = prewarm_command_line(target_dir);
+        unsafe_target_root.cargo_target_dir_hash = prewarm_cargo_target_dir_hash(target_dir);
+        assert_eq!(
+            unsafe_target_root.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "cargo_target_dir",
+                    marker: "shared target dir root"
+                }
+            ),
+            "{target_dir} should not be accepted as an evidence target root"
+        );
+    }
+
+    fn prewarm_bundle_record(
+        scenario_id: &str,
+        pool_state: &str,
+        admission_decision: &str,
+        warm_checkout: bool,
+        fallback_reason: Option<&str>,
+        unsafe_rejection_reason: Option<&str>,
+    ) -> SwarmPrewarmColdStartEvidence {
+        let mut record = prewarm_cold_start_evidence_fixture();
+        record.scenario_id = scenario_id.to_string();
+        record.pool_state = pool_state.to_string();
+        record.admission_decision = admission_decision.to_string();
+        record.warm_checkout = warm_checkout;
+        record.fallback_reason = fallback_reason.map(str::to_string);
+        record.unsafe_rejection_reason = unsafe_rejection_reason.map(str::to_string);
+        record.error_mapping = match (fallback_reason, unsafe_rejection_reason) {
+            (Some(reason), None) => format!("fallback_on_demand:{reason}"),
+            (None, Some(reason)) => format!("reject_unsafe:{reason}"),
+            (None, None) => "ok".to_string(),
+            (Some(fallback), Some(rejection)) => format!("ambiguous:{fallback}:{rejection}"),
+        };
+        record
+    }
+
+    fn prewarm_cold_start_bundle_fixture() -> Vec<SwarmPrewarmColdStartEvidence> {
+        let mut crash = prewarm_bundle_record(
+            "prewarm_crash_before_checkout",
+            "crash_before_checkout",
+            "fallback_on_demand",
+            false,
+            Some("crash_before_checkout"),
+            None,
+        );
+        crash.restart_reason = Some("exit_code_1".to_string());
+
+        let mut concurrent = prewarm_bundle_record(
+            "prewarm_concurrent_swarm_startup",
+            "warm_hit",
+            "admit_warm",
+            true,
+            None,
+            None,
+        );
+        concurrent.concurrent_startups = 10_000;
+        concurrent.process_count = 256;
+
+        let mut exhausted = prewarm_bundle_record(
+            "prewarm_exhausted_under_burst",
+            "empty",
+            "fallback_on_demand",
+            false,
+            Some("empty_pool"),
+            None,
+        );
+        exhausted.concurrent_startups = 4_096;
+        exhausted.process_count = 256;
+        exhausted.skip_reason = Some("pool_exhausted_by_burst".to_string());
+
+        let mut sandbox_limits = prewarm_bundle_record(
+            "prewarm_sandbox_limits_unavailable",
+            "empty",
+            "fallback_on_demand",
+            false,
+            Some("sandbox_limits_unavailable"),
+            None,
+        );
+        sandbox_limits.sandbox_layer = "limits_unavailable".to_string();
+        sandbox_limits.skip_reason = Some("sandbox_limits_unverified".to_string());
+
+        let mut cancelled = prewarm_bundle_record(
+            "prewarm_checkout_cancelled_before_admit",
+            "starting",
+            "fallback_on_demand",
+            false,
+            Some("warm_entry_still_starting"),
+            None,
+        );
+        cancelled.skip_reason = Some("checkout_cancelled_before_admit".to_string());
+
+        vec![
+            prewarm_bundle_record(
+                "prewarm_empty_pool",
+                "empty",
+                "fallback_on_demand",
+                false,
+                Some("empty_pool"),
+                None,
+            ),
+            prewarm_bundle_record(
+                "prewarm_warm_hit",
+                "warm_hit",
+                "admit_warm",
+                true,
+                None,
+                None,
+            ),
+            prewarm_bundle_record(
+                "prewarm_stale_entry",
+                "stale",
+                "fallback_on_demand",
+                false,
+                Some("warm_entry_stale"),
+                None,
+            ),
+            crash,
+            prewarm_bundle_record(
+                "prewarm_shutdown_cleanup",
+                "warm_hit",
+                "admit_warm",
+                true,
+                None,
+                None,
+            ),
+            concurrent,
+            exhausted,
+            sandbox_limits,
+            cancelled,
+            prewarm_bundle_record(
+                "prewarm_zygote_rejected_without_security_proof",
+                "warm_hit",
+                "reject_unsafe",
+                false,
+                None,
+                Some("zygote_without_security_proof"),
+            ),
+        ]
+    }
+
+    fn promote_prewarm_bundle_to_production_soak(records: &mut [SwarmPrewarmColdStartEvidence]) {
+        for record in records {
+            record.execution_mode = SwarmEvidenceExecutionMode::Soak;
+            record.source_kind = SwarmEvidenceSourceKind::HostBacked;
+            record.host_boundary =
+                "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+            record.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
+            record.skip_reason = None;
+        }
+    }
+
     #[test]
     fn swarm_prewarm_cold_start_evidence_serializes_required_jsonl_fields()
     -> Result<(), Box<dyn Error>> {
@@ -9068,6 +10584,8 @@ mod tests {
             record["schema_version"],
             SWARM_PREWARM_COLD_START_SCHEMA_VERSION
         );
+        assert_eq!(record["execution_mode"], "smoke");
+        assert_eq!(record["source_kind"], "offline");
         assert_eq!(record["connector_id"], "fcp.github:utility:1.0.0");
         assert_eq!(
             record["command_line"],
@@ -9075,6 +10593,8 @@ mod tests {
                 "rch",
                 "exec",
                 "--",
+                "env",
+                "CARGO_TARGET_DIR=/tmp/fcp-prewarm-e2e",
                 "cargo",
                 "test",
                 "-p",
@@ -9085,6 +10605,14 @@ mod tests {
             ])
         );
         assert_eq!(record["cargo_target_dir"], "/tmp/fcp-prewarm-e2e");
+        assert_eq!(record["cargo_target_dir_class"], "tmp");
+        assert!(
+            record["cargo_target_dir_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
+        assert_eq!(record["git_revision"], "abc1234");
+        assert_eq!(record["worker_id"], "rch-worker-64c");
         assert_eq!(
             record["connector_fixture_id"],
             "fcp-test-connector:request-response"
@@ -9093,8 +10621,15 @@ mod tests {
             record["host_boundary"],
             "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
         );
-        assert_eq!(record["manifest_hash"], "blake3:manifest");
-        assert_eq!(record["zone"], "z:project:swarm");
+        assert!(
+            record["manifest_hash"]
+                .as_str()
+                .is_some_and(is_redaction_safe_blake3_hash)
+        );
+        let zone_hash = record["zone"]
+            .as_str()
+            .expect("zone evidence should be recorded");
+        assert!(is_redaction_safe_blake3_hash(zone_hash));
         assert_eq!(record["pool_state"], "warm_hit");
         assert_eq!(record["pool_size"], 256);
         assert_eq!(record["admission_decision"], "admit_warm");
@@ -9134,7 +10669,25 @@ mod tests {
     }
 
     #[test]
-    fn swarm_prewarm_cold_start_evidence_rejects_incomplete_or_regressed_records() {
+    fn swarm_prewarm_cold_start_evidence_rejects_unexpected_scenario_id() {
+        let mut unexpected = prewarm_cold_start_evidence_fixture();
+        unexpected.scenario_id = "prewarm_partial_bundle".to_string();
+        assert_eq!(
+            unexpected.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidScenario {
+                scenario_id: "prewarm_partial_bundle".to_string()
+            })
+        );
+        assert!(matches!(
+            unexpected.to_jsonl_value(),
+            Err(SwarmPrewarmColdStartEvidenceJsonError::Validation(
+                SwarmPrewarmColdStartEvidenceError::InvalidScenario { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_latency_and_resource_regressions() {
         let mut regressed = prewarm_cold_start_evidence_fixture();
         regressed.activation_latency_ms = 120;
         assert_eq!(
@@ -9167,6 +10720,197 @@ mod tests {
             )
         );
 
+        let mut unknown_git_revision = prewarm_cold_start_evidence_fixture();
+        unknown_git_revision.git_revision = "unknown".to_string();
+        assert_eq!(
+            unknown_git_revision.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::UnknownGitRevision {
+                git_revision: "unknown".to_string()
+            })
+        );
+
+        let mut branch_name_git_revision = prewarm_cold_start_evidence_fixture();
+        branch_name_git_revision.git_revision = "main".to_string();
+        assert_eq!(
+            branch_name_git_revision.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidGitRevision {
+                git_revision: "main".to_string()
+            })
+        );
+
+        let mut short_git_revision = prewarm_cold_start_evidence_fixture();
+        short_git_revision.git_revision = "abc123".to_string();
+        assert_eq!(
+            short_git_revision.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidGitRevision {
+                git_revision: "abc123".to_string()
+            })
+        );
+
+        let mut unverified_shutdown_cleanup = prewarm_cold_start_evidence_fixture();
+        unverified_shutdown_cleanup.shutdown_cleanup_verified = false;
+        assert_eq!(
+            unverified_shutdown_cleanup.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::ShutdownCleanupUnverified {
+                    scenario_id: "prewarm_warm_hit".to_string(),
+                    cleanup_result: "verified".to_string()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_noncanonical_worker_ids() {
+        for worker_id in [
+            "worker 1",
+            "worker:1",
+            "worker/1",
+            "worker@1",
+            "worker\t1",
+            "worker\n1",
+        ] {
+            let mut bad_worker = prewarm_cold_start_evidence_fixture();
+            bad_worker.worker_id = worker_id.to_string();
+            assert_eq!(
+                bad_worker.validate(),
+                Err(SwarmPrewarmColdStartEvidenceError::InvalidWorkerId {
+                    worker_id: worker_id.to_string()
+                }),
+                "{worker_id:?} should not be accepted as a worker_id"
+            );
+        }
+
+        let too_long_worker_id = format!("{}x", "w".repeat(128));
+        let mut too_long_worker = prewarm_cold_start_evidence_fixture();
+        too_long_worker.worker_id = too_long_worker_id.clone();
+        assert_eq!(
+            too_long_worker.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidWorkerId {
+                worker_id: too_long_worker_id
+            })
+        );
+
+        let mut max_length_worker = prewarm_cold_start_evidence_fixture();
+        max_length_worker.worker_id = "w".repeat(128);
+        assert_eq!(max_length_worker.validate(), Ok(()));
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_hashes_and_percentiles() {
+        let mut bad_target_dir_hash = prewarm_cold_start_evidence_fixture();
+        bad_target_dir_hash.cargo_target_dir_hash = "raw-target-dir".to_string();
+        assert_eq!(
+            bad_target_dir_hash.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                    hash: "raw-target-dir".to_string()
+                }
+            )
+        );
+
+        let mut short_target_dir_hash = prewarm_cold_start_evidence_fixture();
+        short_target_dir_hash.cargo_target_dir_hash = "blake3:abc123".to_string();
+        assert_eq!(
+            short_target_dir_hash.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                    hash: "blake3:abc123".to_string()
+                }
+            )
+        );
+
+        let uppercase_hash =
+            "blake3:ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD".to_string();
+        let mut uppercase_target_dir_hash = prewarm_cold_start_evidence_fixture();
+        uppercase_target_dir_hash.cargo_target_dir_hash = uppercase_hash.clone();
+        assert_eq!(
+            uppercase_target_dir_hash.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                    hash: uppercase_hash
+                }
+            )
+        );
+
+        let mut mismatched_target_dir_hash = prewarm_cold_start_evidence_fixture();
+        let actual_hash = prewarm_cargo_target_dir_hash("/tmp/other-prewarm-target");
+        mismatched_target_dir_hash.cargo_target_dir_hash = actual_hash.clone();
+        assert_eq!(
+            mismatched_target_dir_hash.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CargoTargetDirHashMismatch {
+                    cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+                    expected_hash: prewarm_cargo_target_dir_hash("/tmp/fcp-prewarm-e2e"),
+                    actual_hash
+                }
+            )
+        );
+
+        let mut bad_manifest_hash = prewarm_cold_start_evidence_fixture();
+        bad_manifest_hash.manifest_hash = "blake3:manifest".to_string();
+        assert_eq!(
+            bad_manifest_hash.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
+                hash: "blake3:manifest".to_string()
+            })
+        );
+
+        let mut short_manifest_hash = prewarm_cold_start_evidence_fixture();
+        short_manifest_hash.manifest_hash = "blake3:abc123".to_string();
+        assert_eq!(
+            short_manifest_hash.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
+                hash: "blake3:abc123".to_string()
+            })
+        );
+
+        let uppercase_manifest_hash =
+            "blake3:ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD".to_string();
+        let mut uppercase_manifest_hash_evidence = prewarm_cold_start_evidence_fixture();
+        uppercase_manifest_hash_evidence.manifest_hash = uppercase_manifest_hash.clone();
+        assert_eq!(
+            uppercase_manifest_hash_evidence.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
+                hash: uppercase_manifest_hash
+            })
+        );
+
+        let mut raw_zone = prewarm_cold_start_evidence_fixture();
+        raw_zone.zone = "z:project:swarm".to_string();
+        assert_eq!(
+            raw_zone.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "zone",
+                    marker: "raw zone label"
+                }
+            )
+        );
+
+        let mut short_zone_hash = prewarm_cold_start_evidence_fixture();
+        short_zone_hash.zone = "blake3:abc123".to_string();
+        assert_eq!(
+            short_zone_hash.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidZoneHash {
+                zone: "blake3:abc123".to_string()
+            })
+        );
+
+        let uppercase_zone_hash =
+            "blake3:ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD".to_string();
+        let mut uppercase_zone_hash_evidence = prewarm_cold_start_evidence_fixture();
+        uppercase_zone_hash_evidence.zone = uppercase_zone_hash.clone();
+        assert_eq!(
+            uppercase_zone_hash_evidence.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidZoneHash {
+                zone: uppercase_zone_hash
+            })
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_invalid_percentiles() {
         let mut bad_percentiles = prewarm_cold_start_evidence_fixture();
         bad_percentiles.latency.p99_ms = 10;
         assert_eq!(
@@ -9192,6 +10936,857 @@ mod tests {
                 activation_ms: 26,
                 baseline_ms: 24
             })
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_enforces_admission_decision_shape() {
+        let mut unknown_decision = prewarm_cold_start_evidence_fixture();
+        unknown_decision.admission_decision = "reuse_prewarmer".to_string();
+        assert_eq!(
+            unknown_decision.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidAdmissionDecision {
+                    decision: "reuse_prewarmer".to_string()
+                }
+            )
+        );
+
+        let mut warm_without_checkout = prewarm_cold_start_evidence_fixture();
+        warm_without_checkout.warm_checkout = false;
+        assert_eq!(
+            warm_without_checkout.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "admit_warm".to_string(),
+                    reason: "admit_warm requires warm_checkout=true"
+                }
+            )
+        );
+
+        let mut warm_with_fallback_reason = prewarm_cold_start_evidence_fixture();
+        warm_with_fallback_reason.fallback_reason = Some("pool_empty".to_string());
+        assert_eq!(
+            warm_with_fallback_reason.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "admit_warm".to_string(),
+                    reason: "admit_warm must not carry fallback_reason"
+                }
+            )
+        );
+
+        let mut fallback = prewarm_cold_start_evidence_fixture();
+        fallback.admission_decision = "fallback_on_demand".to_string();
+        fallback.warm_checkout = false;
+        fallback.fallback_reason = Some("pool_empty".to_string());
+        fallback.error_mapping = "fallback_on_demand:pool_empty".to_string();
+        assert_eq!(fallback.validate(), Ok(()));
+
+        let mut fallback_without_reason = fallback;
+        fallback_without_reason.fallback_reason = None;
+        assert_eq!(
+            fallback_without_reason.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "fallback_on_demand".to_string(),
+                    reason: "fallback_on_demand requires non-empty fallback_reason"
+                }
+            )
+        );
+
+        let mut unsafe_rejection = prewarm_cold_start_evidence_fixture();
+        unsafe_rejection.admission_decision = "reject_unsafe".to_string();
+        unsafe_rejection.warm_checkout = false;
+        unsafe_rejection.unsafe_rejection_reason =
+            Some("zygote_startup_without_security_proof".to_string());
+        unsafe_rejection.error_mapping =
+            "reject_unsafe:zygote_startup_without_security_proof".to_string();
+        assert_eq!(unsafe_rejection.validate(), Ok(()));
+
+        let mut unsafe_rejection_with_fallback = unsafe_rejection;
+        unsafe_rejection_with_fallback.fallback_reason = Some("pool_empty".to_string());
+        assert_eq!(
+            unsafe_rejection_with_fallback.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "reject_unsafe".to_string(),
+                    reason: "reject_unsafe must not carry fallback_reason"
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_enforces_pool_state_consistency() {
+        let mut warm_without_warm_pool_state = prewarm_cold_start_evidence_fixture();
+        warm_without_warm_pool_state.pool_state = "empty".to_string();
+        assert_eq!(
+            warm_without_warm_pool_state.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "admit_warm".to_string(),
+                    reason: "admit_warm requires pool_state=warm_hit"
+                }
+            )
+        );
+
+        let mut mapped_empty_pool_fallback = prewarm_cold_start_evidence_fixture();
+        mapped_empty_pool_fallback.pool_state = "empty".to_string();
+        mapped_empty_pool_fallback.admission_decision = "fallback_on_demand".to_string();
+        mapped_empty_pool_fallback.warm_checkout = false;
+        mapped_empty_pool_fallback.fallback_reason = Some("empty_pool".to_string());
+        mapped_empty_pool_fallback.error_mapping = "fallback_on_demand:empty_pool".to_string();
+        assert_eq!(mapped_empty_pool_fallback.validate(), Ok(()));
+
+        let mut empty_pool_fallback_wrong_state = mapped_empty_pool_fallback;
+        empty_pool_fallback_wrong_state.pool_state = "warm_hit".to_string();
+        assert_eq!(
+            empty_pool_fallback_wrong_state.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "fallback_on_demand".to_string(),
+                    reason: "fallback_on_demand empty_pool requires pool_state=empty"
+                }
+            )
+        );
+
+        let mut sandbox_fallback_wrong_layer = prewarm_cold_start_evidence_fixture();
+        sandbox_fallback_wrong_layer.admission_decision = "fallback_on_demand".to_string();
+        sandbox_fallback_wrong_layer.warm_checkout = false;
+        sandbox_fallback_wrong_layer.fallback_reason =
+            Some("sandbox_limits_unavailable".to_string());
+        sandbox_fallback_wrong_layer.error_mapping =
+            "fallback_on_demand:sandbox_limits_unavailable".to_string();
+        assert_eq!(
+            sandbox_fallback_wrong_layer.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "fallback_on_demand".to_string(),
+                    reason: "fallback_on_demand sandbox_limits_unavailable requires sandbox_layer=limits_unavailable"
+                }
+            )
+        );
+
+        let mut rejected_entry_wrong_pool_state = prewarm_cold_start_evidence_fixture();
+        rejected_entry_wrong_pool_state.admission_decision = "reject_unsafe".to_string();
+        rejected_entry_wrong_pool_state.warm_checkout = false;
+        rejected_entry_wrong_pool_state.unsafe_rejection_reason =
+            Some("warm_entry_rejected".to_string());
+        rejected_entry_wrong_pool_state.error_mapping =
+            "reject_unsafe:warm_entry_rejected".to_string();
+        assert_eq!(
+            rejected_entry_wrong_pool_state.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "reject_unsafe".to_string(),
+                    reason: "reject_unsafe warm_entry_rejected requires pool_state=rejected"
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_enforces_error_mapping() {
+        let mut warm_with_wrong_error_mapping = prewarm_cold_start_evidence_fixture();
+        warm_with_wrong_error_mapping.error_mapping = "fallback_on_demand:pool_empty".to_string();
+        assert_eq!(
+            warm_with_wrong_error_mapping.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "admit_warm".to_string(),
+                    reason: "admit_warm requires error_mapping=ok"
+                }
+            )
+        );
+
+        let mut fallback_with_wrong_error_mapping = prewarm_cold_start_evidence_fixture();
+        fallback_with_wrong_error_mapping.admission_decision = "fallback_on_demand".to_string();
+        fallback_with_wrong_error_mapping.warm_checkout = false;
+        fallback_with_wrong_error_mapping.fallback_reason = Some("pool_empty".to_string());
+        fallback_with_wrong_error_mapping.error_mapping = "ok".to_string();
+        assert_eq!(
+            fallback_with_wrong_error_mapping.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "fallback_on_demand".to_string(),
+                    reason: "fallback_on_demand requires error_mapping=fallback_on_demand:<fallback_reason>"
+                }
+            )
+        );
+
+        let mut unsafe_rejection_with_wrong_error_mapping = prewarm_cold_start_evidence_fixture();
+        unsafe_rejection_with_wrong_error_mapping.admission_decision = "reject_unsafe".to_string();
+        unsafe_rejection_with_wrong_error_mapping.warm_checkout = false;
+        unsafe_rejection_with_wrong_error_mapping.unsafe_rejection_reason =
+            Some("zygote_startup_without_security_proof".to_string());
+        unsafe_rejection_with_wrong_error_mapping.error_mapping = "ok".to_string();
+        assert_eq!(
+            unsafe_rejection_with_wrong_error_mapping.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "reject_unsafe".to_string(),
+                    reason: "reject_unsafe requires error_mapping=reject_unsafe:<unsafe_rejection_reason>"
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_requires_rch_command_line() {
+        let mut direct_cargo = prewarm_cold_start_evidence_fixture();
+        direct_cargo.command_line = vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+        ];
+        assert_eq!(
+            direct_cargo.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                    command_line: direct_cargo.command_line
+                }
+            )
+        );
+
+        let mut mismatched_target_dir = prewarm_cold_start_evidence_fixture();
+        mismatched_target_dir.command_line = vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "--".to_string(),
+            "env".to_string(),
+            "CARGO_TARGET_DIR=/tmp/other-prewarm-target".to_string(),
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+        ];
+        assert_eq!(
+            mismatched_target_dir.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CommandLineTargetDirMismatch {
+                    cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+                    command_line: mismatched_target_dir.command_line
+                }
+            )
+        );
+
+        let mut inert_target_dir_arg = prewarm_cold_start_evidence_fixture();
+        inert_target_dir_arg.command_line = vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "--".to_string(),
+            "cargo".to_string(),
+            "test".to_string(),
+            "CARGO_TARGET_DIR=/tmp/fcp-prewarm-e2e".to_string(),
+        ];
+        assert_eq!(
+            inert_target_dir_arg.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CommandLineTargetDirMismatch {
+                    cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+                    command_line: inert_target_dir_arg.command_line
+                }
+            )
+        );
+
+        let mut missing_separator = prewarm_cold_start_evidence_fixture();
+        missing_separator.command_line = vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "cargo".to_string(),
+            "test".to_string(),
+        ];
+        assert_eq!(
+            missing_separator.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                    command_line: missing_separator.command_line
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_requires_production_improvement() {
+        let mut no_improvement = prewarm_cold_start_evidence_fixture();
+        no_improvement.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        no_improvement.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        no_improvement.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        no_improvement.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
+        no_improvement.baseline_latency.p50_ms = no_improvement.latency.p50_ms;
+        no_improvement.baseline_latency.p95_ms = no_improvement.latency.p95_ms;
+        no_improvement.baseline_latency.p99_ms = no_improvement.latency.p99_ms;
+        no_improvement.baseline_latency.p999_ms = no_improvement.latency.p999_ms;
+        no_improvement.baseline_latency.max_ms = no_improvement.latency.max_ms;
+        no_improvement.baseline_latency.mean_ms = no_improvement.latency.mean_ms;
+        no_improvement.baseline_on_demand_latency_ms = no_improvement.activation_latency_ms;
+        assert_eq!(
+            no_improvement.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::MissingProductionImprovement {
+                    scenario_id: "prewarm_warm_hit".to_string(),
+                    percentile: "p50",
+                    activation_ms: 18,
+                    baseline_ms: 18
+                }
+            )
+        );
+
+        let mut fallback_soak = no_improvement;
+        fallback_soak.scenario_id = "prewarm_sandbox_limits_unavailable".to_string();
+        fallback_soak.admission_decision = "fallback_on_demand".to_string();
+        fallback_soak.warm_checkout = false;
+        fallback_soak.sandbox_layer = "limits_unavailable".to_string();
+        fallback_soak.fallback_reason = Some("sandbox_limits_unavailable".to_string());
+        fallback_soak.error_mapping = "fallback_on_demand:sandbox_limits_unavailable".to_string();
+        assert_eq!(fallback_soak.validate(), Ok(()));
+
+        let mut production_rejection = fallback_soak;
+        production_rejection.scenario_id = "prewarm_warm_hit".to_string();
+        production_rejection.pool_state = "warm_hit".to_string();
+        production_rejection.sandbox_layer = "wasi_sandbox".to_string();
+        production_rejection.fallback_reason = Some("production_warm_pool_disabled".to_string());
+        production_rejection.error_mapping =
+            "fallback_on_demand:production_warm_pool_disabled".to_string();
+        assert_eq!(production_rejection.validate(), Ok(()));
+
+        let mut unsafe_rejection = production_rejection;
+        unsafe_rejection.admission_decision = "reject_unsafe".to_string();
+        unsafe_rejection.fallback_reason = None;
+        unsafe_rejection.unsafe_rejection_reason =
+            Some("zygote_without_security_proof".to_string());
+        unsafe_rejection.error_mapping = "reject_unsafe:zygote_without_security_proof".to_string();
+        assert_eq!(unsafe_rejection.validate(), Ok(()));
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_requires_shutdown_cleanup_verification() {
+        let mut unverified_cleanup = prewarm_cold_start_evidence_fixture();
+        unverified_cleanup.shutdown_cleanup_verified = false;
+        unverified_cleanup.cleanup_result = "not_verified".to_string();
+        assert_eq!(
+            unverified_cleanup.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::ShutdownCleanupUnverified {
+                    scenario_id: "prewarm_warm_hit".to_string(),
+                    cleanup_result: "not_verified".to_string()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_contradictory_cleanup_result() {
+        let mut contradictory_cleanup = prewarm_cold_start_evidence_fixture();
+        contradictory_cleanup.cleanup_result = "pending".to_string();
+        assert_eq!(
+            contradictory_cleanup.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidCleanupResult {
+                scenario_id: "prewarm_warm_hit".to_string(),
+                cleanup_result: "pending".to_string()
+            })
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Keep the redaction marker matrix visible in one audit fixture.
+    fn swarm_prewarm_cold_start_evidence_rejects_unredacted_fields() {
+        let mut live_token_leak = prewarm_cold_start_evidence_fixture();
+        live_token_leak.credential_mode = "deferred Bearer sk-live-example".to_string();
+        assert_eq!(
+            live_token_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "credential_mode",
+                    marker: "sk-live-"
+                }
+            )
+        );
+
+        let mut command_leak = prewarm_cold_start_evidence_fixture();
+        command_leak
+            .command_line
+            .push("TOKEN=Bearer\tsecret".to_string()); // ubs:ignore - redaction test fixture, not a credential
+        assert_eq!(
+            command_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "command_line",
+                    marker: "Bearer token"
+                }
+            )
+        );
+
+        let mut mounted_volume_leak = prewarm_cold_start_evidence_fixture();
+        mounted_volume_leak.worker_id = "worker:/Volumes/ProdSSD/fcp".to_string();
+        assert_eq!(
+            mounted_volume_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "worker_id",
+                    marker: "mounted volume path"
+                }
+            )
+        );
+
+        let mut linux_home_leak = prewarm_cold_start_evidence_fixture();
+        linux_home_leak.worker_id = "worker:/home/ubuntu/fcp".to_string();
+        assert_eq!(
+            linux_home_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "worker_id",
+                    marker: "private user path"
+                }
+            )
+        );
+
+        let mut linux_project_leak = prewarm_cold_start_evidence_fixture();
+        linux_project_leak.worker_id = "worker:/data/projects/flywheel_connectors".to_string();
+        assert_eq!(
+            linux_project_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "worker_id",
+                    marker: "private project path"
+                }
+            )
+        );
+
+        let mut windows_user_leak = prewarm_cold_start_evidence_fixture();
+        windows_user_leak.worker_id = r"worker:C:\Users\builder\fcp".to_string();
+        assert_eq!(
+            windows_user_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "worker_id",
+                    marker: "windows private user path"
+                }
+            )
+        );
+
+        let mut auth_header_leak = prewarm_cold_start_evidence_fixture();
+        auth_header_leak
+            .command_line
+            .push("Authorization: Bearer redacted".to_string());
+        assert_eq!(
+            auth_header_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "command_line",
+                    marker: "Bearer token"
+                }
+            )
+        );
+
+        let mut credential_field_leak = prewarm_cold_start_evidence_fixture();
+        let credential_field = ["client", "_", "sec", "ret"].concat();
+        credential_field_leak.credential_mode = format!("{credential_field}=redacted");
+        assert_eq!(
+            credential_field_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "credential_mode",
+                    marker: "client secret field"
+                }
+            )
+        );
+
+        let mut api_key_leak = prewarm_cold_start_evidence_fixture();
+        api_key_leak.sandbox_profile = "sandbox api_key leaked".to_string();
+        assert_eq!(
+            api_key_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "sandbox_profile",
+                    marker: "api key field"
+                }
+            )
+        );
+
+        let mut provider_payload_leak = prewarm_cold_start_evidence_fixture();
+        provider_payload_leak.restart_reason = Some("provider_response_body present".to_string());
+        assert_eq!(
+            provider_payload_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "restart_reason",
+                    marker: "provider response payload"
+                }
+            )
+        );
+
+        let mut reviewer_contact_leak = prewarm_cold_start_evidence_fixture();
+        reviewer_contact_leak.skip_reason = Some("reviewer_email leaked".to_string());
+        assert_eq!(
+            reviewer_contact_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "skip_reason",
+                    marker: "reviewer private contact"
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_raw_labels_and_target_dir_classes() {
+        let mut raw_operation_leak = prewarm_cold_start_evidence_fixture();
+        raw_operation_leak.error_mapping = "operation:prewarm_checkout".to_string();
+        assert_eq!(
+            raw_operation_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "error_mapping",
+                    marker: "raw operation label"
+                }
+            )
+        );
+
+        let mut raw_principal_leak = prewarm_cold_start_evidence_fixture();
+        raw_principal_leak.skip_reason = Some("principal:agent-alpha".to_string());
+        assert_eq!(
+            raw_principal_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "skip_reason",
+                    marker: "raw principal label"
+                }
+            )
+        );
+
+        let mut raw_zone_leak = prewarm_cold_start_evidence_fixture();
+        raw_zone_leak.skip_reason = Some("zone:z:owner".to_string());
+        assert_eq!(
+            raw_zone_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "skip_reason",
+                    marker: "raw zone label"
+                }
+            )
+        );
+
+        for target_dir in [
+            "/tmp",
+            "/tmp/",
+            "/tmp//",
+            "/tmp/.",
+            "/private/tmp",
+            "/private/tmp/",
+            "/private/tmp//.",
+            "/tmp/../tmp",
+            "/tmp/fcp-prewarm/..",
+            "/private/tmp/../tmp",
+            "target",
+            "target/",
+            "target/.",
+            "target/..",
+            "target/../target",
+            "./target",
+            "./target/",
+            "./target//.",
+            "./target/..",
+            "./target/../target",
+            "../target",
+            "relative/../target",
+            "C:\\tmp\\..\\target",
+        ] {
+            assert_prewarm_target_root_rejected(target_dir);
+        }
+
+        let mut private_target_dir = prewarm_cold_start_evidence_fixture();
+        private_target_dir.cargo_target_dir = "/Users/alice/fcp-target".to_string();
+        private_target_dir.cargo_target_dir_class = "private_absolute".to_string();
+        private_target_dir.cargo_target_dir_hash =
+            prewarm_cargo_target_dir_hash(&private_target_dir.cargo_target_dir);
+        assert_eq!(
+            private_target_dir.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::PrivateCargoTargetDirClass {
+                    cargo_target_dir_class: "private_absolute".to_string()
+                }
+            )
+        );
+
+        let mut unknown_target_dir_class = prewarm_cold_start_evidence_fixture();
+        unknown_target_dir_class.cargo_target_dir_class = "export_safe".to_string();
+        assert_eq!(
+            unknown_target_dir_class.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirClass {
+                    cargo_target_dir_class: "export_safe".to_string()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_enforces_soak_boundaries() {
+        let mut offline_soak = prewarm_cold_start_evidence_fixture();
+        offline_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        assert_eq!(
+            offline_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresHostBackedSource {
+                    source_kind: SwarmEvidenceSourceKind::Offline
+                }
+            )
+        );
+
+        let mut missing_sandbox_boundary = prewarm_cold_start_evidence_fixture();
+        missing_sandbox_boundary.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        missing_sandbox_boundary.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        missing_sandbox_boundary.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        missing_sandbox_boundary.sandbox_boundary = "strict-profile-limits".to_string();
+        assert_eq!(
+            missing_sandbox_boundary.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                    sandbox_boundary: "strict-profile-limits".to_string()
+                }
+            )
+        );
+
+        let mut wrapped_sandbox_boundary = prewarm_cold_start_evidence_fixture();
+        wrapped_sandbox_boundary.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        wrapped_sandbox_boundary.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        wrapped_sandbox_boundary.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        wrapped_sandbox_boundary.sandbox_boundary =
+            "collected-via fcp-sandbox::strict-profile-limits".to_string();
+        assert_eq!(
+            wrapped_sandbox_boundary.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                    sandbox_boundary: "collected-via fcp-sandbox::strict-profile-limits"
+                        .to_string()
+                }
+            )
+        );
+
+        let mut prose_sandbox_boundary = prewarm_cold_start_evidence_fixture();
+        prose_sandbox_boundary.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        prose_sandbox_boundary.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        prose_sandbox_boundary.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        prose_sandbox_boundary.sandbox_boundary =
+            "fcp-sandbox::strict-profile-limits verified".to_string();
+        assert_eq!(
+            prose_sandbox_boundary.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                    sandbox_boundary: "fcp-sandbox::strict-profile-limits verified".to_string()
+                }
+            )
+        );
+
+        let mut bare_sandbox_boundary = prewarm_cold_start_evidence_fixture();
+        bare_sandbox_boundary.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        bare_sandbox_boundary.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        bare_sandbox_boundary.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        bare_sandbox_boundary.sandbox_boundary =
+            PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX.to_string();
+        assert_eq!(
+            bare_sandbox_boundary.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                    sandbox_boundary: PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX.to_string()
+                }
+            )
+        );
+
+        let mut production_soak = prewarm_cold_start_evidence_fixture();
+        production_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        production_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        production_soak.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        production_soak.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
+        assert_eq!(production_soak.validate(), Ok(()));
+
+        let mut skipped_production_soak = production_soak;
+        skipped_production_soak.skip_reason =
+            Some("rch_remote_prerequisite_unavailable".to_string());
+        assert_eq!(
+            skipped_production_soak.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::ProductionSoakSkipped {
+                scenario_id: "prewarm_warm_hit".to_string(),
+                skip_reason: "rch_remote_prerequisite_unavailable".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_bundle_enforces_exact_scenario_set() {
+        let bundle = prewarm_cold_start_bundle_fixture();
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&bundle, false),
+            Ok(())
+        );
+
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&[], false),
+            Err(SwarmPrewarmColdStartEvidenceBundleError::EmptyBundle)
+        );
+
+        let mut missing = bundle.clone();
+        missing.retain(|record| record.scenario_id != "prewarm_stale_entry");
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&missing, false),
+            Err(SwarmPrewarmColdStartEvidenceBundleError::MissingScenario {
+                scenario_id: "prewarm_stale_entry"
+            })
+        );
+
+        let mut duplicated = bundle.clone();
+        duplicated.push(bundle[0].clone());
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&duplicated, false),
+            Err(
+                SwarmPrewarmColdStartEvidenceBundleError::DuplicateScenario {
+                    scenario_id: "prewarm_empty_pool".to_string()
+                }
+            )
+        );
+
+        let mut unexpected = bundle;
+        unexpected[0].scenario_id = "prewarm_partial_bundle".to_string();
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&unexpected, false),
+            Err(
+                SwarmPrewarmColdStartEvidenceBundleError::UnexpectedScenario {
+                    scenario_id: "prewarm_partial_bundle".to_string()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_bundle_enforces_production_soak_mode() {
+        let mut production = prewarm_cold_start_bundle_fixture();
+        promote_prewarm_bundle_to_production_soak(&mut production);
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&production, true),
+            Ok(())
+        );
+
+        let smoke = prewarm_cold_start_bundle_fixture();
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&smoke, true),
+            Err(
+                SwarmPrewarmColdStartEvidenceBundleError::ProductionSoakRequired {
+                    scenario_id: "prewarm_empty_pool".to_string(),
+                    execution_mode: SwarmEvidenceExecutionMode::Smoke,
+                    source_kind: SwarmEvidenceSourceKind::Offline
+                }
+            )
+        );
+
+        let warm_hit = production
+            .iter_mut()
+            .find(|record| record.scenario_id == "prewarm_warm_hit")
+            .expect("bundle fixture should include warm-hit scenario");
+        warm_hit.baseline_latency.p50_ms = warm_hit.latency.p50_ms;
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&production, true),
+            Err(SwarmPrewarmColdStartEvidenceBundleError::InvalidRecord {
+                scenario_id: "prewarm_warm_hit".to_string(),
+                source: SwarmPrewarmColdStartEvidenceError::MissingProductionImprovement {
+                    scenario_id: "prewarm_warm_hit".to_string(),
+                    percentile: "p50",
+                    activation_ms: 18,
+                    baseline_ms: 18
+                }
+            })
+        );
+
+        let warm_hit = production
+            .iter_mut()
+            .find(|record| record.scenario_id == "prewarm_warm_hit")
+            .expect("bundle fixture should include warm-hit scenario");
+        warm_hit.admission_decision = "fallback_on_demand".to_string();
+        warm_hit.warm_checkout = false;
+        warm_hit.fallback_reason = Some("production_warm_pool_disabled".to_string());
+        warm_hit.error_mapping = "fallback_on_demand:production_warm_pool_disabled".to_string();
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&production, true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_non_production_host_boundaries() {
+        let mut synthetic_host_soak = prewarm_cold_start_evidence_fixture();
+        synthetic_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        synthetic_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        assert_eq!(
+            synthetic_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY.to_string()
+                }
+            )
+        );
+
+        let mut wrapped_host_soak = prewarm_cold_start_evidence_fixture();
+        wrapped_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        wrapped_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        wrapped_host_soak.host_boundary =
+            "collected-via fcp-host::supervisor::ConnectorSupervisor::activate_connector"
+                .to_string();
+        assert_eq!(
+            wrapped_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: wrapped_host_soak.host_boundary
+                }
+            )
+        );
+
+        let mut suffix_prose_host_soak = prewarm_cold_start_evidence_fixture();
+        suffix_prose_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        suffix_prose_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        suffix_prose_host_soak.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector via-wrapper".to_string();
+        assert_eq!(
+            suffix_prose_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: suffix_prose_host_soak.host_boundary
+                }
+            )
+        );
+
+        let mut bare_host_soak = prewarm_cold_start_evidence_fixture();
+        bare_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        bare_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        bare_host_soak.host_boundary = PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX.to_string();
+        assert_eq!(
+            bare_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX.to_string()
+                }
+            )
+        );
+
+        let mut annotated_synthetic_host_soak = prewarm_cold_start_evidence_fixture();
+        annotated_synthetic_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        annotated_synthetic_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        annotated_synthetic_host_soak.host_boundary =
+            format!("collected-via {SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY} with production wrapper");
+        assert_eq!(
+            annotated_synthetic_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: annotated_synthetic_host_soak.host_boundary
+                }
+            )
         );
     }
 

@@ -6,12 +6,12 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::utf8_percent_encode;
 use reqwest::{Client, StatusCode, header};
 use tracing::debug;
+use uuid::Uuid;
 
 /// Percent-encoding set for Stripe path segments. Encodes everything that
 /// could enable path traversal or query injection while preserving characters
@@ -221,7 +221,7 @@ impl StripeClient {
             body["name"] = serde_json::Value::String(n.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -252,7 +252,7 @@ impl StripeClient {
             body["name"] = serde_json::Value::String(n.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -320,7 +320,7 @@ impl StripeClient {
             body["customer"] = serde_json::Value::String(c.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -347,7 +347,7 @@ impl StripeClient {
             body["payment_method"] = serde_json::Value::String(pm.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -366,7 +366,7 @@ impl StripeClient {
             body["amount_to_capture"] = serde_json::Value::Number(amount.into());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -385,7 +385,7 @@ impl StripeClient {
             body["cancellation_reason"] = serde_json::Value::String(reason.to_string());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -415,7 +415,7 @@ impl StripeClient {
             body["amount"] = serde_json::Value::Number(a.into());
         }
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -445,7 +445,7 @@ impl StripeClient {
             "items": [{ "price": price }],
         });
         let data = self
-            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .post_form_with_idempotency(&url, &body, idempotency_key)
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -562,26 +562,55 @@ impl StripeClient {
         self.execute(|| self.apply_auth(self.http.get(url))).await
     }
 
-    async fn post_json(
+    async fn post_form(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> StripeResult<serde_json::Value> {
-        self.post_json_with_idempotency(url, body, None).await
+        self.post_form_with_idempotency(url, body, None).await
     }
 
-    async fn post_json_with_idempotency(
+    async fn post_form_with_idempotency(
         &self,
         url: &str,
         body: &serde_json::Value,
         idempotency_key: Option<&str>,
     ) -> StripeResult<serde_json::Value> {
+        // Stripe's REST API only accepts `application/x-www-form-urlencoded`
+        // request bodies (with bracket notation for nested fields); it does not
+        // parse JSON. Encode the body here rather than sending `.json()`.
+        let encoded = stripe_form_encode(body);
+        // EVERY POST carries an Idempotency-Key (br-kxd3e).
+        //
+        // `execute` retries on 5xx and on a transport timeout. Both of those
+        // can be reported AFTER Stripe already accepted the request, so
+        // replaying an unkeyed POST creates a second charge, refund, or
+        // subscription from one invoke. Stripe deduplicates on this header for
+        // 24h, which makes the retry genuinely safe rather than merely refused
+        // — strictly better than declining to retry.
+        //
+        // The key is resolved ONCE here, outside the retry closure, so every
+        // attempt of this call presents the same value. A per-attempt key would
+        // be worse than none: it would look like protection while providing
+        // exactly zero.
+        //
+        // A generated key is deliberately NOT reported in the invoke audit
+        // payload. That field means "the caller's idempotency key", which
+        // dedupes across invokes; this one only dedupes across the retry
+        // attempts of a single invoke. Conflating the two would tell an
+        // operator they have a cross-invoke guarantee they do not have.
+        let key = match idempotency_key {
+            Some(key) => key.to_string(),
+            None => format!("fcp2:retry:{}", Uuid::new_v4()),
+        };
         self.execute(|| {
-            let mut req = self.apply_auth(self.http.post(url).json(body));
-            if let Some(key) = idempotency_key {
-                req = req.header("Idempotency-Key", key);
-            }
-            req
+            self.apply_auth(
+                self.http
+                    .post(url)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .header("Idempotency-Key", key.as_str())
+                    .body(encoded.clone()),
+            )
         })
         .await
     }
@@ -710,109 +739,317 @@ impl StripeClient {
     }
 }
 
+/// Serialize a Stripe request body into an `application/x-www-form-urlencoded`
+/// string using Stripe's bracket notation for nested objects and arrays.
+///
+/// Stripe's REST API does not accept JSON request bodies; structured parameters
+/// are expressed with bracketed keys, e.g. a subscription's
+/// `items: [{ "price": "price_123" }]` becomes `items[0][price]=price_123`.
+/// Scalars render to their natural string form; `null` values are omitted.
+fn stripe_form_encode(body: &serde_json::Value) -> String {
+    let mut pairs: Vec<String> = Vec::new();
+    encode_form_field("", body, &mut pairs);
+    pairs.join("&")
+}
+
+/// Recursively flatten one JSON value into `key=value` form pairs under `prefix`.
+fn encode_form_field(prefix: &str, value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Null => {}
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let nested = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}[{key}]")
+                };
+                encode_form_field(&nested, child, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let nested = format!("{prefix}[{index}]");
+                encode_form_field(&nested, child, out);
+            }
+        }
+        serde_json::Value::String(s) => out.push(stripe_form_pair(prefix, s)),
+        serde_json::Value::Bool(b) => out.push(stripe_form_pair(prefix, &b.to_string())),
+        serde_json::Value::Number(n) => out.push(stripe_form_pair(prefix, &n.to_string())),
+    }
+}
+
+/// Percent-encode a single `key=value` form pair. Keys (which may contain
+/// bracket characters) and values are both encoded with the same set used for
+/// query values, so reserved separators (`&`, `=`, `+`, space, `%`) cannot
+/// break the body framing; Stripe urldecodes the bracketed keys server-side.
+fn stripe_form_pair(key: &str, value: &str) -> String {
+    let key = utf8_percent_encode(key, STRIPE_QUERY_SET);
+    let value = utf8_percent_encode(value, STRIPE_QUERY_SET);
+    format!("{key}={value}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Option<serde_json::Value>,
+        expected_headers: Vec<(&'static str, &'static str)>,
+        expected_header_prefixes: Vec<(&'static str, &'static str)>,
+        absent_headers: Vec<&'static str>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: Some(body),
+                expected_headers: Vec::new(),
+                expected_header_prefixes: Vec::new(),
+                absent_headers: Vec::new(),
+            }
+        }
+
+        fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: None,
+                expected_headers: Vec::new(),
+                expected_header_prefixes: Vec::new(),
+                absent_headers: Vec::new(),
+            }
+        }
+
+        fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.expected_headers.push((name, value));
+            self
+        }
+
+        fn with_header_prefix(mut self, name: &'static str, prefix: &'static str) -> Self {
+            self.expected_header_prefixes.push((name, prefix));
+            self
+        }
+
+        fn without_header(mut self, name: &'static str) -> Self {
+            self.absent_headers.push(name);
+            self
+        }
+    }
+
+    struct TestApiServer {
+        uri: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestApiServer {
+        fn start(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().unwrap();
+                    serve_response(stream, response);
+                }
+            });
+            Self {
+                uri: format!("http://{addr}"),
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test API server thread finished");
+            }
+        }
+    }
+
+    fn serve_response(mut stream: TcpStream, response: TestHttpResponse) {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default();
+        let target = parts.next().unwrap_or_default();
+        assert_eq!(method, response.method);
+        assert_eq!(target.split('?').next().unwrap_or(target), response.path);
+
+        let mut headers = HashMap::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            let trimmed = header.trim_end();
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                let normalized = name.to_ascii_lowercase();
+                let value = value.trim().to_string();
+                if normalized == "content-length" {
+                    content_length = value.parse().unwrap();
+                }
+                headers.insert(normalized, value);
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+        }
+
+        for (name, value) in response.expected_headers {
+            let normalized = name.to_ascii_lowercase();
+            assert_eq!(headers.get(&normalized).map(String::as_str), Some(value));
+        }
+        for (name, prefix) in response.expected_header_prefixes {
+            let normalized = name.to_ascii_lowercase();
+            let actual = headers.get(&normalized).map(String::as_str);
+            assert!(
+                actual.is_some_and(|value| value.starts_with(prefix)),
+                "expected header {name} to start with {prefix}, got {actual:?}"
+            );
+        }
+        for name in response.absent_headers {
+            let normalized = name.to_ascii_lowercase();
+            assert!(!headers.contains_key(&normalized));
+        }
+
+        let body = response
+            .body
+            .map(|body| body.to_string())
+            .unwrap_or_default();
+        let reason = match response.status {
+            200 => "OK",
+            401 => "Unauthorized",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            _ => "Test Status",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response.status,
+            reason,
+            body.len(),
+            body
+        )
+        .unwrap();
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_customer() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers/cus_123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/customers/cus_123",
+            200,
+            serde_json::json!({
                 "id": "cus_123",
                 "object": "customer",
                 "email": "test@example.com",
                 "name": "Test User"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let customer = client.get_customer("cus_123").await.unwrap();
         assert_eq!(customer.id, "cus_123");
         assert_eq!(customer.email.as_deref(), Some("test@example.com"));
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_create_customer() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/customers"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/customers",
+            200,
+            serde_json::json!({
                 "id": "cus_new",
                 "object": "customer",
                 "email": "new@example.com",
                 "name": "New User"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let customer = client
             .create_customer("new@example.com", Some("New User"))
             .await
             .unwrap();
         assert_eq!(customer.id, "cus_new");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_list_customers() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/customers",
+            200,
+            serde_json::json!({
                 "object": "list",
                 "data": [
                     { "id": "cus_1", "object": "customer" },
                     { "id": "cus_2", "object": "customer" }
                 ],
                 "has_more": false
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let result = client.list_customers(Some(10), None).await.unwrap();
         assert_eq!(result.data.len(), 2);
         assert!(!result.has_more);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_create_payment_intent() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/payment_intents",
+            200,
+            serde_json::json!({
                 "id": "pi_123",
                 "object": "payment_intent",
                 "amount": 2000,
                 "currency": "usd",
                 "status": "requires_payment_method"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .create_payment_intent(2000, "usd", None)
@@ -820,85 +1057,79 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_123");
         assert_eq!(pi.amount, 2000);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_balance() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/balance"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/balance",
+            200,
+            serde_json::json!({
                 "object": "balance",
                 "available": [{ "amount": 50000, "currency": "usd" }],
                 "pending": [{ "amount": 10000, "currency": "usd" }]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let balance = client.get_balance().await.unwrap();
         assert_eq!(balance.available[0].amount, 50000);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers/cus_123"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::start(vec![TestHttpResponse::empty(
+            "GET",
+            "/v1/customers/cus_123",
+            401,
+        )]);
 
         let client = StripeClient::new("bad_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
+            .with_api_url(&format!("{}/v1", server.uri()))
             .with_retry_config(0);
 
         let result = client.get_customer("cus_123").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), StripeError::Unauthorized));
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers/missing"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/customers/missing",
+            404,
+            serde_json::json!({
                 "error": { "type": "invalid_request_error", "message": "No such customer" }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
+            .with_api_url(&format!("{}/v1", server.uri()))
             .with_retry_config(0);
 
         let result = client.get_customer("missing").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), StripeError::NotFound { .. }));
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/balance"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::start(vec![TestHttpResponse::empty("GET", "/v1/balance", 429)]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
+            .with_api_url(&format!("{}/v1", server.uri()))
             .with_retry_config(0);
 
         let result = client.get_balance().await;
@@ -907,6 +1138,7 @@ mod tests {
             result.unwrap_err(),
             StripeError::RateLimited { .. }
         ));
+        server.finish();
     }
 
     #[test]
@@ -931,23 +1163,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_confirm_payment_intent() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents/pi_123/confirm"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/payment_intents/pi_123/confirm",
+            200,
+            serde_json::json!({
                 "id": "pi_123",
                 "object": "payment_intent",
                 "amount": 2000,
                 "currency": "usd",
                 "status": "succeeded"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .confirm_payment_intent("pi_123", Some("pm_card_visa"), None)
@@ -955,27 +1186,27 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_123");
         assert_eq!(pi.status, "succeeded");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_capture_payment_intent() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents/pi_456/capture"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/payment_intents/pi_456/capture",
+            200,
+            serde_json::json!({
                 "id": "pi_456",
                 "object": "payment_intent",
                 "amount": 5000,
                 "currency": "usd",
                 "status": "succeeded"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .capture_payment_intent("pi_456", Some(3000), None)
@@ -983,27 +1214,27 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_456");
         assert_eq!(pi.amount, 5000);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_cancel_payment_intent() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents/pi_789/cancel"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/payment_intents/pi_789/cancel",
+            200,
+            serde_json::json!({
                 "id": "pi_789",
                 "object": "payment_intent",
                 "amount": 1000,
                 "currency": "usd",
                 "status": "canceled"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .cancel_payment_intent("pi_789", Some("requested_by_customer"), None)
@@ -1011,115 +1242,129 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_789");
         assert_eq!(pi.status, "canceled");
+        server.finish();
     }
 
     // ── Idempotency key tests ─────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
     async fn test_create_payment_intent_with_idempotency_key() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents"))
-            .and(header("Idempotency-Key", "idem-pi-create-001"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/payment_intents",
+                200,
+                serde_json::json!({
                 "id": "pi_idem",
                 "object": "payment_intent",
                 "amount": 2500,
                 "currency": "eur",
                 "status": "requires_payment_method"
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_header("Idempotency-Key", "idem-pi-create-001"),
+        ]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .create_payment_intent_with_idempotency(2500, "eur", None, Some("idem-pi-create-001"))
             .await
             .unwrap();
         assert_eq!(pi.id, "pi_idem");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_confirm_with_idempotency_key() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents/pi_100/confirm"))
-            .and(header("Idempotency-Key", "idem-confirm-100"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/payment_intents/pi_100/confirm",
+                200,
+                serde_json::json!({
                 "id": "pi_100",
                 "object": "payment_intent",
                 "amount": 3000,
                 "currency": "usd",
                 "status": "succeeded"
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_header("Idempotency-Key", "idem-confirm-100"),
+        ]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .confirm_payment_intent("pi_100", None, Some("idem-confirm-100"))
             .await
             .unwrap();
         assert_eq!(pi.id, "pi_100");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_refund_with_idempotency_key() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/refunds"))
-            .and(header("Idempotency-Key", "idem-refund-001"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/refunds",
+                200,
+                serde_json::json!({
                 "id": "re_idem",
                 "object": "refund",
                 "amount": 1000,
                 "currency": "usd",
                 "status": "succeeded"
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_header("Idempotency-Key", "idem-refund-001"),
+        ]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let refund = client
             .create_refund_with_idempotency("pi_pay", Some(1000), Some("idem-refund-001"))
             .await
             .unwrap();
         assert_eq!(refund.id, "re_idem");
+        server.finish();
     }
 
+    /// A POST with no caller-supplied key still carries a GENERATED one.
+    ///
+    /// This test previously asserted the opposite (`without_header`), pinning
+    /// the behaviour that made `execute`'s 5xx/timeout retry able to create a
+    /// second payment intent from one call. A 5xx means Stripe received the
+    /// request; the only safe way to keep retrying it is to give Stripe
+    /// something to deduplicate on. See br-kxd3e.
     #[fcp_async_core::runtime::test]
-    async fn test_no_idempotency_header_when_none() {
-        let mock_server = MockServer::start().await;
-
-        // This mock requires NO Idempotency-Key header. If the header were sent,
-        // a separate mock with the header matcher would match instead.
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+    async fn test_generated_idempotency_header_when_caller_supplies_none() {
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/payment_intents",
+                200,
+                serde_json::json!({
                 "id": "pi_no_idem",
                 "object": "payment_intent",
                 "amount": 500,
                 "currency": "usd",
                 "status": "requires_payment_method"
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_header_prefix("Idempotency-Key", "fcp2:retry:"),
+        ]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         // Calling without idempotency key should still work
         let pi = client
@@ -1127,6 +1372,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pi.id, "pi_no_idem");
+        server.finish();
     }
 
     // --- StripeAuth tests ---
@@ -1322,21 +1568,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_customers_email_with_special_chars() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/customers",
+            200,
+            serde_json::json!({
                 "object": "list",
                 "data": [],
                 "has_more": false
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         // Should not panic or produce malformed URL with special chars in email
         let result = client
@@ -1344,25 +1589,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data.len(), 0);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_list_subscriptions_status_encoded() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/subscriptions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/subscriptions",
+            200,
+            serde_json::json!({
                 "object": "list",
                 "data": [],
                 "has_more": false
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         // Malicious status value should be safely encoded
         let result = client
@@ -1370,5 +1615,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data.len(), 0);
+        server.finish();
+    }
+
+    #[test]
+    fn stripe_form_encode_flat_scalars() {
+        let body = serde_json::json!({
+            "amount": 2000,
+            "currency": "usd",
+            "customer": "cus_123",
+        });
+        // serde_json maps are sorted, so order is deterministic.
+        assert_eq!(
+            stripe_form_encode(&body),
+            "amount=2000&currency=usd&customer=cus_123"
+        );
+    }
+
+    #[test]
+    fn stripe_form_encode_nested_array_of_objects() {
+        // The subscription create payload: items is an array of objects.
+        let body = serde_json::json!({
+            "customer": "cus_123",
+            "items": [{ "price": "price_123" }],
+        });
+        assert_eq!(
+            stripe_form_encode(&body),
+            "customer=cus_123&items%5B0%5D%5Bprice%5D=price_123"
+        );
+    }
+
+    #[test]
+    fn stripe_form_encode_omits_null_and_encodes_reserved() {
+        let body = serde_json::json!({
+            "keep": "a b&c",
+            "drop": serde_json::Value::Null,
+        });
+        // null is omitted; space and `&` in the value are percent-encoded so
+        // they cannot break body framing.
+        assert_eq!(stripe_form_encode(&body), "keep=a%20b%26c");
+        assert_eq!(stripe_form_encode(&serde_json::json!({})), "");
     }
 }

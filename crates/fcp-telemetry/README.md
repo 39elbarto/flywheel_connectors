@@ -16,6 +16,7 @@ The public boundary is:
 - `shutdown_telemetry()`: best-effort shutdown and flush for OTLP metrics, traces, and logs.
 - `otlp_readiness(&config)`: redaction-safe readiness summary for host/admin surfaces.
 - `init_otlp_*_with_options_and_timeout(...)`: lower-level trace, metric, and log exporter initializers used by focused tests and host integrations.
+- `OtlpRetryPolicy` plus `init_otlp_*_with_options_timeout_and_retry(...)`: explicit bounded retry/backoff for transient collector failures. The default initializer path keeps one-attempt OpenTelemetry SDK behavior unless callers opt into this policy.
 
 ## Feature Flag
 
@@ -23,6 +24,7 @@ Build OTLP support with:
 
 ```bash
 cargo test -p fcp-telemetry --features otlp
+cargo check -p fcp-host --features otlp
 ```
 
 Without the `otlp` feature, `TelemetryConfig` and `otlp_readiness` are still available, but exporter initialization reports that the feature is unavailable. This keeps host/admin diagnostics honest in builds that intentionally omit OpenTelemetry exporter dependencies.
@@ -64,6 +66,16 @@ fwc telemetry otlp-readiness --endpoint http://127.0.0.1:4317 --json
 
 The command reads `TelemetryConfig::from_env()` and applies optional CLI overrides for the endpoint, service name, sample rate, collector headers, and resource attributes. Its JSON output carries the readiness status, endpoint class, signal support, header/resource counts, and next actions, but never the raw endpoint or metadata values.
 
+`fcp-host` initializes through `TelemetryConfig::from_env()` at startup and exposes the same redaction-safe contract through the protected admin route:
+
+```bash
+GET /rpc/admin/telemetry/otlp/readiness
+Authorization: Bearer <admin token>
+x-fcp-zone: z:owner
+```
+
+The host route reports `source = "host-admin-api"` and never returns collector hostnames, bearer headers, resource attribute values, prompts, completions, or local paths. If OTLP variables are configured but the host binary was not built with `--features otlp`, host startup keeps local JSON logging available and the admin route reports `status = "unavailable"` until the binary is rebuilt with exporter support.
+
 ## Failure Behavior
 
 Configuration is validated before side effects. Malformed endpoints, unsafe collector headers, unsafe resource attributes, or zero export timeouts return `TelemetryError::Config`.
@@ -76,6 +88,11 @@ Exporter failures map by signal type:
 
 Unavailable collector tests use timeout-bounded initializers and force flushes so operators get bounded failure behavior instead of an unbounded wait.
 
+The OpenTelemetry SDK leaves retry behavior to exporters. `fcp-telemetry`
+therefore exposes an explicit `OtlpRetryPolicy` for transient collector errors
+such as gRPC `Unavailable`, `ResourceExhausted`, and `DeadlineExceeded`; this is
+opt-in so existing one-attempt exporter behavior remains stable.
+
 ## Proof Lanes
 
 The current no-live-credential OTLP proof entrypoint is:
@@ -85,6 +102,7 @@ scripts/e2e/telemetry_otlp_exporter_verification.sh
 ```
 
 It runs the loopback collector fixture, the unavailable-collector fixture, the
+trace/metric/log transient-unavailable retry fixture, the trace/metric/log
 collector-backpressure fixture, and the slow-collector timeout fixture through
 `rch`.
 
@@ -98,6 +116,9 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp \
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-unavailable \
   cargo test -p fcp-telemetry --test otlp_unavailable_fixture --features otlp -- --nocapture
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-retry \
+  cargo test -p fcp-telemetry --test otlp_retry_fixture --features otlp -- --nocapture
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-backpressure \
   cargo test -p fcp-telemetry --test otlp_backpressure_fixture --features otlp -- --nocapture
@@ -116,11 +137,18 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-telemetry-readiness \
   cargo test -p fwc execute_telemetry_otlp_readiness -- --nocapture
 ```
 
+host admin readiness surface:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-host-telemetry-readiness \
+  cargo test -p fcp-host host_telemetry_otlp_readiness --bin fcp-host -- --nocapture
+```
+
 ## Current Limits
 
-This crate provides the OTLP exporter and proof fixtures. Host/fwc admin wiring is still tracked by the OTLP bead and should not be implied complete until an operator can query the host readiness surface and see the same redaction-safe readiness contract.
+This crate provides the OTLP exporter and proof fixtures. `fwc telemetry otlp-readiness` and the protected `fcp-host` admin readiness route expose the same redaction-safe configuration contract for operators.
 
 The current fixtures cover successful trace, metric, and log export,
-unavailable collector mapping, collector backpressure/drop-accounting, and
-timeout-bounded slow-collector cancellation behavior. Remaining closeout work
-includes broader retry policy and host/admin integration evidence.
+unavailable collector mapping, explicit trace/metric/log retry after transient
+collector unavailability, trace/metric/log collector backpressure/drop-accounting,
+and timeout-bounded slow-collector cancellation behavior.

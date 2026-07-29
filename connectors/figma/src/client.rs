@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tracing::instrument;
 
@@ -22,6 +23,35 @@ use crate::{
 
 /// Default Figma API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.figma.com/v1";
+
+/// Validate a caller-supplied id before it is interpolated into a request path.
+///
+/// Figma resource ids (team/project/file/comment/webhook) are opaque tokens but
+/// arrive as connector input. The request helpers build the URL with a plain
+/// `format!("{base}/{path}")`, and `reqwest` normalizes `..` segments while
+/// building the request, so an unsanitized id could traverse to a sibling
+/// endpoint under `api.figma.com` or inject extra path segments. Rejecting
+/// slashes, `..`, and their percent-encoded forms closes that vector.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> FigmaResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(FigmaError::InvalidInput {
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(FigmaError::InvalidInput {
+            message: format!("{field} contains path traversal characters"),
+        });
+    }
+    Ok(trimmed)
+}
 
 /// Authentication mode for the Figma client.
 #[derive(Clone)]
@@ -187,6 +217,7 @@ impl FigmaClient {
     /// List projects within a team.
     #[instrument(skip(self))]
     pub async fn list_team_projects(&self, team_id: &str) -> FigmaResult<TeamProjectsResponse> {
+        let team_id = sanitize_path_segment(team_id, "team_id")?;
         self.get_with_params::<TeamProjectsResponse>(&format!("teams/{team_id}/projects"), &[])
             .await
     }
@@ -194,6 +225,7 @@ impl FigmaClient {
     /// List files within a project.
     #[instrument(skip(self))]
     pub async fn list_project_files(&self, project_id: &str) -> FigmaResult<ProjectFilesResponse> {
+        let project_id = sanitize_path_segment(project_id, "project_id")?;
         self.get_with_params::<ProjectFilesResponse>(&format!("projects/{project_id}/files"), &[])
             .await
     }
@@ -224,6 +256,7 @@ impl FigmaClient {
             params.push(("plugin_data", plugin_data.to_string()));
         }
 
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
         self.get_with_params(&format!("files/{file_key}"), &params)
             .await
     }
@@ -241,6 +274,7 @@ impl FigmaClient {
             params.push(("depth", depth.to_string()));
         }
 
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
         self.get_with_params(&format!("files/{file_key}/nodes"), &params)
             .await
     }
@@ -248,6 +282,7 @@ impl FigmaClient {
     /// Get all components in a file.
     #[instrument(skip(self))]
     pub async fn get_file_components(&self, file_key: &str) -> FigmaResult<ComponentsResponse> {
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
         self.get_with_params::<ComponentsResponse>(&format!("files/{file_key}/components"), &[])
             .await
     }
@@ -255,6 +290,7 @@ impl FigmaClient {
     /// Get all styles in a file.
     #[instrument(skip(self))]
     pub async fn get_file_styles(&self, file_key: &str) -> FigmaResult<StylesResponse> {
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
         self.get_with_params::<StylesResponse>(&format!("files/{file_key}/styles"), &[])
             .await
     }
@@ -287,6 +323,7 @@ impl FigmaClient {
             params.push(("use_absolute_bounds", v.to_string()));
         }
 
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
         self.get_with_params(&format!("images/{file_key}"), &params)
             .await
     }
@@ -296,6 +333,7 @@ impl FigmaClient {
     /// List version history for a file.
     #[instrument(skip(self))]
     pub async fn list_file_versions(&self, file_key: &str) -> FigmaResult<VersionsResponse> {
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
         self.get_with_params::<VersionsResponse>(&format!("files/{file_key}/versions"), &[])
             .await
     }
@@ -314,6 +352,7 @@ impl FigmaClient {
             params.push(("as_md", "true".to_string()));
         }
 
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
         self.get_with_params(&format!("files/{file_key}/comments"), &params)
             .await
     }
@@ -333,6 +372,7 @@ impl FigmaClient {
             client_meta,
         };
 
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
         self.post_json(&format!("files/{file_key}/comments"), &body)
             .await
     }
@@ -340,6 +380,8 @@ impl FigmaClient {
     /// Delete a comment from a file.
     #[instrument(skip(self))]
     pub async fn delete_comment(&self, file_key: &str, comment_id: &str) -> FigmaResult<()> {
+        let file_key = sanitize_path_segment(file_key, "file_key")?;
+        let comment_id = sanitize_path_segment(comment_id, "comment_id")?;
         self.delete(&format!("files/{file_key}/comments/{comment_id}"))
             .await
     }
@@ -349,7 +391,10 @@ impl FigmaClient {
     /// List webhooks for a team.
     #[instrument(skip(self))]
     pub async fn list_webhooks(&self, team_id: &str) -> FigmaResult<WebhooksListResponse> {
-        // Webhooks use v2 API
+        // Webhooks use v2 API. The `../v2/` prefix is a deliberate version switch
+        // relative to the v1 base; only the id is caller-controlled, so sanitize
+        // it (not the literal prefix) to keep the version hop intact.
+        let team_id = sanitize_path_segment(team_id, "team_id")?;
         let path = format!("../v2/webhooks/{team_id}");
         self.get_with_params(&path, &[]).await
     }
@@ -379,6 +424,8 @@ impl FigmaClient {
     /// Delete a webhook.
     #[instrument(skip(self))]
     pub async fn delete_webhook(&self, webhook_id: &str) -> FigmaResult<()> {
+        // `../v2/` is a deliberate version switch; only the id is caller-controlled.
+        let webhook_id = sanitize_path_segment(webhook_id, "webhook_id")?;
         self.delete(&format!("../v2/webhooks/{webhook_id}")).await
     }
 
@@ -506,6 +553,13 @@ impl FigmaClient {
         }
     }
 
+    /// Execute one POST attempt.
+    ///
+    /// br-kxd3e: NOT replay-safe. Both callers CREATE — a file comment and a
+    /// webhook — and Figma offers no idempotency key, so a replay posts a
+    /// second comment or registers a second webhook. Only the rate-limit arm
+    /// (refused WITHOUT creating) and a connect-phase transport failure retry.
+    /// A converging POST added later needs its own path.
     async fn execute_post_once<T: serde::de::DeserializeOwned>(
         req: RequestBuilder,
         _path: &str,
@@ -533,14 +587,9 @@ impl FigmaClient {
                         status: status.as_u16(),
                         message: body_text,
                     };
-                    return if status.is_server_error() {
-                        AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        }
-                    } else {
-                        AttemptOutcome::Terminal(err)
-                    };
+                    // A 5xx means Figma received the request and may already
+                    // have created the comment or webhook.
+                    return AttemptOutcome::Terminal(err);
                 }
 
                 match resp.json::<T>().await {
@@ -549,15 +598,10 @@ impl FigmaClient {
                 }
             }
             Err(e) => {
-                let err: FigmaError = e.into();
-                if err.is_retryable() {
-                    AttemptOutcome::Retryable {
-                        retry_after: None,
-                        error: err,
-                    }
-                } else {
-                    AttemptOutcome::Terminal(err)
-                }
+                // Only a connect-phase failure proves the request never
+                // reached Figma.
+                let replayable = !transport_error_reached_service(&e);
+                AttemptOutcome::retryable_if_replayable(e.into(), None, replayable)
             }
         }
     }
@@ -640,301 +684,39 @@ impl FigmaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    #[fcp_async_core::runtime::test]
-    async fn test_get_file() {
-        let mock_server = MockServer::start().await;
-
-        let file_response = serde_json::json!({
-            "name": "Test File",
-            "document": { "id": "0:0", "type": "DOCUMENT", "children": [] },
-            "lastModified": "2025-01-01T00:00:00Z",
-            "version": "123456",
-            "components": {},
-            "styles": {}
-        });
-
-        Mock::given(method("GET"))
-            .and(path("/files/abc123"))
-            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&file_response))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let result = client.get_file("abc123", None, None, None, None).await;
-        assert!(result.is_ok());
-        let file = result.unwrap();
-        assert_eq!(file.name, "Test File");
-        assert_eq!(file.version, "123456");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_file_nodes() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/files/abc123/nodes"))
-            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "nodes": { "1:2": { "document": { "id": "1:2" } } }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let result = client.get_file_nodes("abc123", "1:2", None).await;
-        assert!(result.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_comments() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/files/abc123/comments"))
-            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "comments": [
-                    {
-                        "id": "c1",
-                        "message": "Looks good!",
-                        "created_at": "2025-01-01T00:00:00Z"
-                    }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let result = client.list_comments("abc123", None).await;
-        assert!(result.is_ok());
-        let resp = result.unwrap();
-        assert_eq!(resp.comments.len(), 1);
-        assert_eq!(resp.comments[0].message, "Looks good!");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_post_comment() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/files/abc123/comments"))
-            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "c2",
-                "message": "New comment",
-                "created_at": "2025-01-01T12:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let result = client
-            .post_comment("abc123", "New comment", None, None)
-            .await;
-        assert!(result.is_ok());
-        let comment = result.unwrap();
-        assert_eq!(comment.id, "c2");
-        assert_eq!(comment.message, "New comment");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/files/abc123"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
-                "status": 403,
-                "err": "Forbidden"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("bad-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let result = client.get_file("abc123", None, None, None, None).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), FigmaError::Unauthorized));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limit_no_retry() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/files/abc123"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(0, 100, 200);
-
-        let result = client.get_file("abc123", None, None, None, None).await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            FigmaError::RateLimited {
-                retry_after_secs: 30
-            }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/files/nonexistent"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "status": 404,
-                "err": "Not found"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let result = client.get_file("nonexistent", None, None, None, None).await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            FigmaError::Api { status: 404, .. }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_export_images() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/images/abc123"))
-            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "images": { "1:2": "https://figma-alpha.s3.amazonaws.com/img/abc.png" }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let result = client
-            .export_images("abc123", "1:2", "png", Some(2.0), None, None, None)
-            .await;
-        assert!(result.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_delete_comment() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("DELETE"))
-            .and(path("/files/abc123/comments/c1"))
-            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let result = client.delete_comment("abc123", "c1").await;
-        assert!(result.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limit_retries_multiple_times() {
-        // Verify that the client retries on 429 and increments the request counter
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/files/abc123"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(2, 10, 50); // max 2 retries, fast
-
-        let result = client.get_file("abc123", None, None, None, None).await;
-        assert!(result.is_err());
-        // With max_retries=2, we expect 3 total requests (1 initial + 2 retries)
+    #[test]
+    fn sanitize_path_segment_accepts_opaque_ids() {
         assert_eq!(
-            client.total_requests(),
-            1,
-            "total_requests counts invocations not HTTP attempts"
+            sanitize_path_segment("abc123DEF456", "file_key").unwrap(),
+            "abc123DEF456"
+        );
+        assert_eq!(sanitize_path_segment("12345", "team_id").unwrap(), "12345");
+        assert_eq!(
+            sanitize_path_segment("  67890 ", "project_id").unwrap(),
+            "67890"
         );
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limit_exhausts_retries() {
-        // All 429s, exceeds max retries
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/files/abc123"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(2, 10, 50); // max 2 retries, fast
-
-        let result = client.get_file("abc123", None, None, None, None).await;
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), FigmaError::RateLimited { .. }),
-            "should return RateLimited after exhausting retries"
-        );
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("   ", "file_key").is_err());
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_total_requests_counter() {
-        let mock_server = MockServer::start().await;
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("abc/../admin", "file_key").is_err());
+        assert!(sanitize_path_segment("..", "team_id").is_err());
+        assert!(sanitize_path_segment("a/b", "file_key").is_err());
+        assert!(sanitize_path_segment("a\\b", "webhook_id").is_err());
+        assert!(sanitize_path_segment("a%2Fb", "comment_id").is_err());
+        assert!(sanitize_path_segment("a%5Cb", "comment_id").is_err());
+    }
 
-        Mock::given(method("GET"))
-            .and(path("/files/abc123/components"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "meta": { "components": [] }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FigmaClient::new("test-auth-value")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        assert_eq!(client.total_requests(), 0);
-        let _ = client.get_file_components("abc123").await;
-        assert_eq!(client.total_requests(), 1);
+    #[test]
+    fn sanitize_path_segment_blocks_v2_version_escape() {
+        // A file_key like "../v2/webhooks" must not let a v1 file operation hop
+        // to the v2 webhook surface.
+        assert!(sanitize_path_segment("../v2/webhooks", "file_key").is_err());
     }
 }

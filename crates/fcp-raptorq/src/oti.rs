@@ -12,18 +12,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectTransmissionInformation {
     /// Total length of the original object in bytes.
-    transfer_length: u64,
+    pub transfer_length: u64,
     /// Size of each encoding symbol in bytes.
-    symbol_size: u16,
+    pub symbol_size: u16,
     /// Number of source blocks (always 1 for FCP).
-    source_blocks: u8,
+    pub source_blocks: u8,
     /// Number of sub-blocks per source block.
-    sub_blocks: u16,
+    pub sub_blocks: u16,
     /// Symbol alignment in bytes.
-    alignment: u8,
+    pub alignment: u8,
     /// Optional end-to-end payload hash used to reject false-positive decodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    payload_hash: Option<[u8; 32]>,
+    pub payload_hash: Option<[u8; 32]>,
 }
 
 impl ObjectTransmissionInformation {
@@ -50,6 +50,18 @@ impl ObjectTransmissionInformation {
     #[must_use]
     pub const fn with_payload_hash(mut self, payload_hash: [u8; 32]) -> Self {
         self.payload_hash = Some(payload_hash);
+        self
+    }
+
+    /// Preserve legacy store call sites that previously wrapped the canonical OTI.
+    #[must_use]
+    pub const fn from_oti(oti: Self) -> Self {
+        oti
+    }
+
+    /// Return this canonical OTI without allocating or re-wrapping.
+    #[must_use]
+    pub const fn to_oti(self) -> Self {
         self
     }
 

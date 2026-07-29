@@ -7,8 +7,9 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use reqwest::{Client, Response, StatusCode};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
+use reqwest::{Client, Response, StatusCode, Url};
 use tracing::{debug, instrument};
 
 use crate::{
@@ -18,6 +19,8 @@ use crate::{
 
 /// Default `PostHog` REST API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://app.posthog.com/api";
+/// Default `PostHog` event capture endpoint for US Cloud.
+pub const DEFAULT_CAPTURE_URL: &str = "https://us.i.posthog.com/i/v0/e/";
 
 /// Authentication mode for the `PostHog` API.
 #[derive(Clone)]
@@ -57,6 +60,7 @@ pub struct PostHogClient {
     client: Client,
     auth: PostHogAuth,
     base_url: String,
+    capture_url: String,
     project_id: String,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
@@ -67,6 +71,7 @@ impl fmt::Debug for PostHogClient {
         f.debug_struct("PostHogClient")
             .field("auth", &self.auth)
             .field("base_url", &self.base_url)
+            .field("capture_url", &self.capture_url)
             .field("project_id", &self.project_id)
             .finish()
     }
@@ -75,18 +80,32 @@ impl fmt::Debug for PostHogClient {
 impl PostHogClient {
     /// Create a new `PostHog` client.
     pub fn new(auth: PostHogAuth, project_id: &str, base_url: Option<&str>) -> PostHogResult<Self> {
+        Self::new_with_capture_url(auth, project_id, base_url, None)
+    }
+
+    /// Create a new `PostHog` client with an explicit capture endpoint.
+    pub fn new_with_capture_url(
+        auth: PostHogAuth,
+        project_id: &str,
+        base_url: Option<&str>,
+        capture_url: Option<&str>,
+    ) -> PostHogResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-posthog/0.1.0 (FCP connector)")
             .build()?;
+        let base_url = base_url
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/')
+            .to_string();
+        let capture_url =
+            capture_url.map_or_else(|| capture_url_from_host(&base_url), normalize_capture_url);
 
         Ok(Self {
             client,
             auth,
-            base_url: base_url
-                .unwrap_or(DEFAULT_BASE_URL)
-                .trim_end_matches('/')
-                .to_string(),
+            base_url,
+            capture_url,
             project_id: project_id.to_string(),
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
@@ -114,10 +133,7 @@ impl PostHogClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -211,6 +227,31 @@ impl PostHogClient {
             .await
     }
 
+    /// Capture a namespaced event through PostHog's public ingestion endpoint.
+    pub async fn capture_event(
+        &self,
+        project_api_key: &str,
+        event: &str,
+        distinct_id: &str,
+        properties: serde_json::Value,
+    ) -> PostHogResult<serde_json::Value> {
+        let body = serde_json::json!({
+            "api_key": project_api_key,
+            "event": event,
+            "distinct_id": distinct_id,
+            "properties": properties,
+        });
+        debug!(url = %redact_url(&self.capture_url), "POST capture request");
+        let req = self
+            .client
+            .post(&self.capture_url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(&body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
     // -- Insights --
 
     /// List saved insights.
@@ -254,6 +295,68 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PostHogResult<&'a s
     Ok(trimmed)
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> PostHogResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(PostHogError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
+/// Build the REST API base URL from a PostHog host/root URL.
+#[must_use]
+pub fn api_base_url_from_host(host: &str) -> String {
+    let trimmed = host.trim().trim_end_matches('/');
+    if trimmed.ends_with("/api") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/api")
+    }
+}
+
+/// Build the event capture URL from a PostHog host/root URL.
+#[must_use]
+pub fn capture_url_from_host(host: &str) -> String {
+    let trimmed = host.trim().trim_end_matches('/');
+    if trimmed.ends_with("/i/v0/e") {
+        return normalize_capture_url(trimmed);
+    }
+
+    let Ok(parsed) = Url::parse(trimmed) else {
+        return format!("{trimmed}/i/v0/e/");
+    };
+    let Some(host_name) = parsed.host_str() else {
+        return format!("{trimmed}/i/v0/e/");
+    };
+
+    match host_name {
+        "app.posthog.com" | "us.posthog.com" => DEFAULT_CAPTURE_URL.to_string(),
+        "eu.posthog.com" => "https://eu.i.posthog.com/i/v0/e/".to_string(),
+        "us.i.posthog.com" | "eu.i.posthog.com" => {
+            format!("{}/i/v0/e/", url_origin(&parsed))
+        }
+        _ => format!("{}/i/v0/e/", url_origin(&parsed)),
+    }
+}
+
+fn normalize_capture_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    format!("{trimmed}/")
+}
+
+fn url_origin(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    match url.port() {
+        Some(port) => format!("{}://{}:{port}", url.scheme(), host),
+        None => format!("{}://{}", url.scheme(), host),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,10 +391,43 @@ mod tests {
     }
 
     #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            PostHogError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            PostHogError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
     fn client_new_default_url() {
         let client =
             PostHogClient::new(PostHogAuth::ApiKey("phx_key".into()), "12345", None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
+        assert_eq!(client.capture_url, DEFAULT_CAPTURE_URL);
         assert_eq!(client.project_id, "12345");
     }
 
@@ -304,6 +440,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.base_url, "https://posthog.example.com/api");
+        assert_eq!(client.capture_url, "https://posthog.example.com/i/v0/e/");
+    }
+
+    #[test]
+    fn client_new_with_capture_url_uses_explicit_capture_endpoint() {
+        let client = PostHogClient::new_with_capture_url(
+            PostHogAuth::ApiKey("phx_key".into()),
+            "99",
+            Some("https://posthog.example.com/api"),
+            Some("https://ingest.posthog.example.com/i/v0/e/"),
+        )
+        .unwrap();
+        assert_eq!(
+            client.capture_url,
+            "https://ingest.posthog.example.com/i/v0/e/"
+        );
     }
 
     #[test]
@@ -377,6 +529,11 @@ mod tests {
     }
 
     #[test]
+    fn default_capture_url_value() {
+        assert_eq!(DEFAULT_CAPTURE_URL, "https://us.i.posthog.com/i/v0/e/");
+    }
+
+    #[test]
     fn client_stores_project_id() {
         let client =
             PostHogClient::new(PostHogAuth::ApiKey("phx_key".into()), "my_project", None).unwrap();
@@ -430,6 +587,46 @@ mod tests {
     #[test]
     fn default_base_url_starts_with_https() {
         assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn api_base_url_from_host_appends_api_path() {
+        assert_eq!(
+            api_base_url_from_host("https://us.posthog.com"),
+            "https://us.posthog.com/api"
+        );
+    }
+
+    #[test]
+    fn api_base_url_from_host_preserves_api_path() {
+        assert_eq!(
+            api_base_url_from_host("https://us.posthog.com/api/"),
+            "https://us.posthog.com/api"
+        );
+    }
+
+    #[test]
+    fn capture_url_from_host_maps_us_cloud_to_ingest_domain() {
+        assert_eq!(
+            capture_url_from_host("https://us.posthog.com"),
+            "https://us.i.posthog.com/i/v0/e/"
+        );
+    }
+
+    #[test]
+    fn capture_url_from_host_maps_eu_cloud_to_ingest_domain() {
+        assert_eq!(
+            capture_url_from_host("https://eu.posthog.com"),
+            "https://eu.i.posthog.com/i/v0/e/"
+        );
+    }
+
+    #[test]
+    fn capture_url_from_host_derives_loopback_capture_path() {
+        assert_eq!(
+            capture_url_from_host("http://127.0.0.1:8080/api"),
+            "http://127.0.0.1:8080/i/v0/e/"
+        );
     }
 
     #[test]

@@ -288,7 +288,11 @@ fn deterministic_node_secret_key(index: u8) -> X25519SecretKey {
 
 fn assert_secret_debug_redacted(secret: &ZeroizingSecret, plaintext: &[u8]) {
     let debug = format!("{secret:?}");
-    assert!(debug.contains("[redacted]"));
+    // ZeroizingSecret Debug emits "ZeroizingSecret(<redacted, len=N>)".
+    assert!(
+        debug.contains("<redacted"),
+        "ZeroizingSecret debug output must mark the material redacted, got: {debug}"
+    );
     if let Ok(raw) = std::str::from_utf8(plaintext) {
         assert!(
             !debug.contains(raw),

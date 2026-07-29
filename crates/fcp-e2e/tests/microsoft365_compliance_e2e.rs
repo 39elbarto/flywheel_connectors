@@ -205,6 +205,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -217,6 +218,8 @@ fn build_token(
         "m365.calendar.list_events" => "m365.calendar.read",
         _ => capability,
     };
+    // dja9u typestate ratchet: connector verifies with verify_bound(), so tokens
+    // MUST carry target_instance matching the connector instance.
     let cose = CapabilityTokenBuilder::new()
         .capability_id(resolved_capability)
         .zone_id("z:work")
@@ -224,7 +227,9 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -315,7 +320,12 @@ async fn m365_default_deny_compliance_suite_passes() {
     let mut connector = M365ConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["m365.mail.send"]);
-    let token = build_token(&signing_key, "m365.mail.send", &["m365.mail.send"]);
+    let token = build_token(
+        &signing_key,
+        "m365.mail.send",
+        &["m365.mail.send"],
+        connector.connector.instance_id(),
+    );
     let invoke = invoke_request(
         "m365.calendar.list_events",
         json!({ "user_id": "me" }),
@@ -383,6 +393,7 @@ async fn m365_allow_valid_token_connector_suite_passes() {
         &signing_key,
         "m365.calendar.list_events",
         &["m365.calendar.list_events"],
+        connector.connector.instance_id(),
     );
     let invoke = invoke_request(
         "m365.calendar.list_events",

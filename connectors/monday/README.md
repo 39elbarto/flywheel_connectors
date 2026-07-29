@@ -1,6 +1,6 @@
 # Monday.com Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: runtime contract documented; operation metadata is manifest-derived
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -90,15 +90,13 @@ Input validation is intentionally narrow:
 - `column_values` is accepted as JSON, converted with `to_string()`, then string-escaped into the GraphQL mutation.
 - `item_name` and update `body` are string-escaped with `serde_json::to_string()` before GraphQL embedding.
 
-## Drift Visible In This Checkout
+## Remaining Drift Visible In This Checkout
 
-This README documents runtime truth and keeps current drift visible:
+This README documents runtime truth and keeps the remaining drift visible:
 
-- Manifest defines only four operations: `monday.boards.list`, `monday.items.create`, `monday.items.delete`, and `monday.items.list`.
-- Runtime introspection and invoke define seven operations, adding `monday.boards.get`, `monday.updates.list`, and `monday.updates.create`.
-- Runtime handshake advertises `monday.updates.read` and `monday.updates.write`, but the manifest optional capabilities omit those update capabilities.
-- Manifest rate-limit pools do not include `monday.boards.get`, `monday.updates.list`, or `monday.updates.create`.
-- Manifest marks `monday.items.create` with policy approval and `monday.items.delete` with interactive approval; runtime operation metadata sets `requires_approval = None` for all operations and runtime checks no approval token.
+- Manifest and runtime introspection define the same seven-operation catalog.
+- Runtime operation metadata is derived from `manifest.toml`, including manifest approval modes for `monday.items.create`, `monday.items.delete`, and `monday.updates.create`.
+- Runtime still checks no approval token before executing `monday.items.create`, `monday.items.delete`, or `monday.updates.create`.
 - Runtime does not verify capability tokens or bind operations to resource URIs.
 - Runtime direct API-token mode enforces `api.monday.com`, while credential-id mode permits custom HTTPS hosts for egress-proxy injection.
 - Runtime request helper stores retry config but does not apply it.
@@ -112,7 +110,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime shutdown clears base lifecycle flags but leaves `session_id` populated.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align manifest and runtime operation catalogs, add update capabilities and rate-limit pools to the manifest or remove runtime update operations, enforce approval tokens for mutation operations, wire capability-token verification into invoke, decide whether custom credential-id hosts are acceptable in production, apply or remove retry configuration, send an explicit API version header, expose pagination where needed, and clear `session_id` during shutdown.
+A follow-up enforcement bead should enforce approval tokens for mutation operations, wire capability-token verification into invoke, decide whether custom credential-id hosts are acceptable in production, apply or remove retry configuration, send an explicit API version header, expose pagination where needed, and clear `session_id` during shutdown.
 
 ## First-Slice Scope
 
@@ -123,7 +121,7 @@ The current Monday.com README slice documents the existing runtime surface:
 - provider host policy, timeout, provider error mapping, and retry drift
 - board, item, and update operations
 - lifecycle, doctor, health, self-check, simulate, introspect, invoke, and shutdown behavior
-- runtime/manifest drift around operations, capabilities, approval policy, API versioning, simulation, and capability-token verification
+- remaining runtime/manifest drift around approval enforcement, API versioning, simulation, and capability-token verification
 - deterministic WireMock integration tests and the connector-suite happy path
 
 ## Auth And Zone Boundary
@@ -259,6 +257,24 @@ rch exec -- cargo check -p fcp-monday --all-targets
 rch exec -- cargo clippy -p fcp-monday --all-targets -- -D warnings
 rch exec -- cargo fmt --check
 ```
+
+Live sandbox verification is gated by `FCP_LIVE_SANDBOX=1`; default CI must emit
+a structured skip. The live suite expects `MONDAY_SANDBOX_TOKEN`,
+`MONDAY_SANDBOX_BOARD_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. It accepts optional
+`MONDAY_SANDBOX_BASE_URL`, defaulting to `https://api.monday.com/v2`. The
+focused lane is:
+
+```bash
+rch exec -- cargo test -p fcp-monday --test live_verification -- --nocapture
+```
+
+The live suite emits `MONDAY_LIVE_SANDBOX_JSONL` evidence for
+`monday.boards.list`, `monday.boards.get`, `monday.items.create`, and
+`monday.items.delete`. It creates one synthetic item named with the shared
+`FCP_SANDBOX_RUN_NAMESPACE`, deletes that same item before passing, and performs
+a bad-token denial check. Evidence redacts the token, base URL, configured board
+ID, synthetic item name, and provider item ID while recording cleanup and auth
+denial status.
 
 ## Operator Guidance
 

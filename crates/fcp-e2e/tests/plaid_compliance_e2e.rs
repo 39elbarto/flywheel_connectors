@@ -206,6 +206,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -225,7 +226,10 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -324,7 +328,12 @@ async fn plaid_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["plaid.link"]);
     // Token grants "plaid.link" but invoke targets "plaid.accounts_get" -> denial
-    let token = build_token(&signing_key, "plaid.link", &["plaid.link"]);
+    let token = build_token(
+        &signing_key,
+        "plaid.link",
+        &["plaid.link"],
+        connector.connector.instance_id(),
+    );
     let invoke = invoke_request(
         "plaid.accounts_get",
         json!({ "access_token": "access-sandbox-test" }),
@@ -335,6 +344,7 @@ async fn plaid_default_deny_compliance_suite_passes() {
         config: json!({
             "client_id": "test-plaid-client",
             "secret": "test-plaid-secret",
+            "environment": "sandbox",
             "base_url": "http://localhost:9999"
         }),
         handshake: handshake.clone(),
@@ -383,7 +393,12 @@ async fn plaid_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["plaid.accounts_get"],
     );
-    let token = build_token(&signing_key, "plaid.accounts_get", &["plaid.accounts_get"]);
+    let token = build_token(
+        &signing_key,
+        "plaid.accounts_get",
+        &["plaid.accounts_get"],
+        connector.connector.instance_id(),
+    );
     let invoke = invoke_request(
         "plaid.accounts_get",
         json!({ "access_token": "access-sandbox-e2e" }),
@@ -394,6 +409,7 @@ async fn plaid_allow_valid_token_connector_suite_passes() {
         config: json!({
             "client_id": "test-plaid-client",
             "secret": "test-plaid-secret",
+            "environment": "sandbox",
             "base_url": mock.base_url(),
         }),
         handshake,

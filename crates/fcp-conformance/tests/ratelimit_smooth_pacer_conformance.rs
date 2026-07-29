@@ -13,18 +13,18 @@
 //! Unique invariants pinned here:
 //!
 //! 1. **First acquire always succeeds.** No prior request → nothing
-//!    to wait for, regardless of how short min_interval is.
-//! 2. **Acquire within min_interval is rejected.**
-//! 3. **Acquire after min_interval succeeds.**
+//!    to wait for, regardless of how short `min_interval` is.
+//! 2. **Acquire within `min_interval` is rejected.**
+//! 3. **Acquire after `min_interval` succeeds.**
 //! 4. **`from_rate(NaN | <=0)` → never-acquirable pacer.** The
-//!    saturating Duration::MAX construction prevents a misconfigured
+//!    saturating `Duration::MAX` construction prevents a misconfigured
 //!    rate from collapsing to "always allow".
 //! 5. **`from_rate(infinite)` → no-delay pacer.**
 //! 6. **`wait_time` decreases as elapsed time approaches
-//!    min_interval.**
+//!    `min_interval`.**
 //! 7. **`reset()` clears the last-request timestamp.**
 //! 8. **`acquire(max_wait)` honours the deadline contract** —
-//!    surfaces WaitExceeded when the projected wait > max_wait.
+//!    surfaces `WaitExceeded` when the projected wait > `max_wait`.
 
 use std::time::Duration;
 

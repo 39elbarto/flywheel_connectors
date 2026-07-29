@@ -27,6 +27,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
+ciborium.workspace = true
 fcp-audit.workspace = true
 fcp-async-core.workspace = true
 fcp-bootstrap.workspace = true
@@ -39,6 +40,7 @@ fcp-host.workspace = true
 fcp-kernel = { path = "../fcp-kernel" }
 fcp-raptorq.workspace = true
 fcp-manifest.workspace = true
+fcp-migrate.workspace = true
 fcp-mesh.workspace = true
 fcp-policy.workspace = true
 fcp-registry.workspace = true
@@ -70,6 +72,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }
+jsonschema.workspace = true
 tempfile = "3"
 
 [[bench]]

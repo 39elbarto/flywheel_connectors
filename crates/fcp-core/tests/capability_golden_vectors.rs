@@ -662,8 +662,9 @@ mod identifier_canonicity {
 
     #[test]
     fn zone_id_custom() {
-        let zone: ZoneId = "z:custom_zone".parse().unwrap();
-        assert_eq!(zone.as_str(), "z:custom_zone");
+        let zone: ZoneId = "z:custom-zone".parse().unwrap();
+        assert_eq!(zone.as_str(), "z:custom-zone");
+        // Hash removed due to underscore-to-hyphen validation fix
     }
 
     #[test]
@@ -1137,14 +1138,14 @@ mod grant_verification {
             assert!(
                 matches!(&arr[0], ciborium::Value::Bytes(bytes) if bytes.as_slice() ==grant_id_1),
                 "first grant object ID mismatch: {:?}",
-                &arr[0]
+                arr[0]
             );
 
             // Verify second grant ID
             assert!(
                 matches!(&arr[1], ciborium::Value::Bytes(bytes) if bytes.as_slice() ==grant_id_2),
                 "second grant object ID mismatch: {:?}",
-                &arr[1]
+                arr[1]
             );
         } else {
             assert!(
@@ -1206,7 +1207,7 @@ mod grant_verification {
             assert!(
                 matches!(&arr[0], ciborium::Value::Bytes(bytes) if bytes.as_slice() ==grant_id),
                 "grant object ID mismatch: {:?}",
-                &arr[0]
+                arr[0]
             );
         } else {
             assert!(

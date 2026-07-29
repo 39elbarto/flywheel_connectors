@@ -6,8 +6,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tracing::{debug, instrument};
@@ -395,21 +396,30 @@ impl GitHubClient {
                             Ok(b) => b,
                             Err(e) => return AttemptOutcome::Terminal(GitHubError::Http(e)),
                         };
+                        // `workflow_dispatch` CREATES a workflow run and takes
+                        // no idempotency key. A 5xx means GitHub received the
+                        // request — an edge 502 returned after the origin
+                        // already accepted the dispatch would, on replay,
+                        // produce a second run from one invoke.
                         let err = parse_error_response(status, &bytes, retry_after_secs);
                         if err.is_retryable() {
-                            AttemptOutcome::Retryable {
-                                retry_after: err.retry_after(),
-                                error: err,
-                            }
+                            let retry_after = err.retry_after();
+                            AttemptOutcome::retryable_if_replayable(err, retry_after, false)
                         } else {
                             AttemptOutcome::Terminal(err)
                         }
                     }
-                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
-                        error: GitHubError::Http(e),
-                        retry_after: None,
-                    },
-                    Err(e) => AttemptOutcome::Terminal(GitHubError::Http(e)),
+                    // Only a connect-phase failure proves the dispatch never
+                    // left the client; a timeout can fire after the body was
+                    // fully sent.
+                    Err(e) => {
+                        let replayable = !transport_error_reached_service(&e);
+                        AttemptOutcome::retryable_if_replayable(
+                            GitHubError::Http(e),
+                            None,
+                            replayable,
+                        )
+                    }
                 }
             }
         })
@@ -515,19 +525,28 @@ impl GitHubClient {
                     .send()
                     .await
                 {
+                    // POST is not idempotent and GitHub's REST API takes no
+                    // idempotency key, so a failure that the service may
+                    // already have acted on must NOT be replayed — a 5xx means
+                    // the request was received, and a total-request timeout
+                    // fires after the body was sent. Retrying either one can
+                    // create the resource N times from one invoke.
                     Ok(response) => match self.handle_response(response).await {
                         Ok(data) => AttemptOutcome::Success(data),
-                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
-                            retry_after: e.retry_after(),
-                            error: e,
-                        },
+                        Err(e) if e.is_retryable() => {
+                            let retry_after = e.retry_after();
+                            AttemptOutcome::retryable_if_replayable(e, retry_after, false)
+                        }
                         Err(e) => AttemptOutcome::Terminal(e),
                     },
-                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
-                        error: GitHubError::Http(e),
-                        retry_after: None,
-                    },
-                    Err(e) => AttemptOutcome::Terminal(GitHubError::Http(e)),
+                    Err(e) => {
+                        let replayable = !transport_error_reached_service(&e);
+                        AttemptOutcome::retryable_if_replayable(
+                            GitHubError::Http(e),
+                            None,
+                            replayable,
+                        )
+                    }
                 }
             }
         })
@@ -716,43 +735,198 @@ mod urlencoding {
 mod tests {
     use super::*;
     use fcp_testkit::LogCapture;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        thread::{self, JoinHandle},
+        time::Duration,
     };
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: serde_json::Value,
+        expected_headers: Vec<(&'static str, &'static str)>,
+        response_headers: Vec<(&'static str, &'static str)>,
+        request_count: usize,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body,
+                expected_headers: Vec::new(),
+                response_headers: Vec::new(),
+                request_count: 1,
+            }
+        }
+
+        fn with_expected_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.expected_headers.push((name, value));
+            self
+        }
+
+        fn with_response_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.response_headers.push((name, value));
+            self
+        }
+
+        fn with_request_count(mut self, request_count: usize) -> Self {
+            self.request_count = request_count;
+            self
+        }
+    }
+
+    struct TestApiServer {
+        base_url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestApiServer {
+        fn respond(response: TestHttpResponse) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let handle = thread::spawn(move || {
+                for _ in 0..response.request_count {
+                    let (stream, _) = listener.accept().expect("accept GitHub client request");
+                    handle_test_request(stream, &response);
+                }
+            });
+
+            Self {
+                base_url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test server thread panicked");
+            }
+        }
+    }
+
+    fn handle_test_request(mut stream: TcpStream, response: &TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let request_method = parts.next().expect("request method");
+        let raw_path = parts.next().expect("request path");
+        let request_path = raw_path.split('?').next().expect("path before query");
+        assert_eq!(request_method, response.method);
+        assert_eq!(request_path, response.path);
+
+        let mut headers = Vec::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim().to_owned();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().expect("content-length parses");
+            }
+            headers.push((name.to_owned(), value));
+        }
+
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        for (name, expected) in &response.expected_headers {
+            let actual = headers
+                .iter()
+                .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str());
+            assert_eq!(actual, Some(*expected), "unexpected {name} header");
+        }
+
+        let body = response.body.to_string();
+        let status_text = match response.status {
+            200 => "OK",
+            201 => "Created",
+            401 => "Unauthorized",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            _ => "OK",
+        };
+
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            status_text,
+            body.len()
+        )
+        .expect("write response headers");
+        for (name, value) in &response.response_headers {
+            write!(stream, "{name}: {value}\r\n").expect("write response header");
+        }
+        write!(stream, "\r\n{body}").expect("write response body");
+        stream.flush().expect("flush response");
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_repo_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/octocat/hello-world"))
-            .and(header("Authorization", "Bearer test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": 1296269,
-                "name": "hello-world",
-                "full_name": "octocat/hello-world",
-                "owner": { "login": "octocat", "id": 1, "avatar_url": "", "type": "User" },
-                "description": "Test repo",
-                "private": false,
-                "fork": false,
-                "html_url": "https://github.com/octocat/hello-world",
-                "default_branch": "main",
-                "language": "Rust",
-                "stargazers_count": 42,
-                "forks_count": 10,
-                "open_issues_count": 5,
-                "created_at": "2024-01-01T00:00:00Z",
-                "updated_at": "2024-06-01T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::respond(
+            TestHttpResponse::json(
+                "GET",
+                "/repos/octocat/hello-world",
+                200,
+                serde_json::json!({
+                    "id": 1296269,
+                    "name": "hello-world",
+                    "full_name": "octocat/hello-world",
+                    "owner": { "login": "octocat", "id": 1, "avatar_url": "", "type": "User" },
+                    "description": "Test repo",
+                    "private": false,
+                    "fork": false,
+                    "html_url": "https://github.com/octocat/hello-world",
+                    "default_branch": "main",
+                    "language": "Rust",
+                    "stargazers_count": 42,
+                    "forks_count": 10,
+                    "open_issues_count": 5,
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "updated_at": "2024-06-01T00:00:00Z"
+                }),
+            )
+            .with_expected_header("Authorization", "Bearer test_token"),
+        );
 
         let client = GitHubClient::new("test_token")
             .unwrap()
-            .with_base_url(mock_server.uri());
+            .with_base_url(server.uri());
 
         let repo = client.get_repo("octocat", "hello-world").await.unwrap();
+        server.finish();
         assert_eq!(repo.name, "hello-world");
         assert_eq!(repo.full_name, "octocat/hello-world");
         assert_eq!(repo.stargazers_count, 42);
@@ -760,11 +934,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_issue_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/octocat/hello-world/issues/42"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/repos/octocat/hello-world/issues/42",
+            200,
+            serde_json::json!({
                 "id": 1,
                 "number": 42,
                 "title": "Found a bug",
@@ -777,18 +951,18 @@ mod tests {
                 "updated_at": "2024-01-01T00:00:00Z",
                 "html_url": "https://github.com/octocat/hello-world/issues/42",
                 "comments": 3
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = GitHubClient::new("test_token")
             .unwrap()
-            .with_base_url(mock_server.uri());
+            .with_base_url(server.uri());
 
         let issue = client
             .get_issue("octocat", "hello-world", 42)
             .await
             .unwrap();
+        server.finish();
         assert_eq!(issue.number, 42);
         assert_eq!(issue.title, "Found a bug");
         assert_eq!(issue.state, "open");
@@ -796,11 +970,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_create_issue_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/repos/octocat/hello-world/issues"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "POST",
+            "/repos/octocat/hello-world/issues",
+            201,
+            serde_json::json!({
                 "id": 2,
                 "number": 43,
                 "title": "New issue",
@@ -812,13 +986,12 @@ mod tests {
                 "updated_at": "2024-01-01T00:00:00Z",
                 "html_url": "https://github.com/octocat/hello-world/issues/43",
                 "comments": 0
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = GitHubClient::new("test_token")
             .unwrap()
-            .with_base_url(mock_server.uri());
+            .with_base_url(server.uri());
 
         let issue = client
             .create_issue(
@@ -834,77 +1007,78 @@ mod tests {
             )
             .await
             .unwrap();
+        server.finish();
         assert_eq!(issue.number, 43);
         assert_eq!(issue.title, "New issue");
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/octocat/hello-world"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/repos/octocat/hello-world",
+            401,
+            serde_json::json!({
                 "message": "Bad credentials",
                 "documentation_url": "https://docs.github.com"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = GitHubClient::new("bad_token")
             .unwrap()
-            .with_base_url(mock_server.uri())
+            .with_base_url(server.uri())
             .with_retry_config(1, 10, 100);
 
         let result = client.get_repo("octocat", "hello-world").await;
+        server.finish();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), GitHubError::Unauthorized));
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/octocat/nonexistent"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/repos/octocat/nonexistent",
+            404,
+            serde_json::json!({
                 "message": "Not Found"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = GitHubClient::new("test_token")
             .unwrap()
-            .with_base_url(mock_server.uri())
+            .with_base_url(server.uri())
             .with_retry_config(1, 10, 100);
 
         let result = client.get_repo("octocat", "nonexistent").await;
+        server.finish();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), GitHubError::NotFound { .. }));
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/octocat/hello-world"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "1")
-                    .set_body_json(serde_json::json!({
-                        "message": "API rate limit exceeded"
-                    })),
+        let server = TestApiServer::respond(
+            TestHttpResponse::json(
+                "GET",
+                "/repos/octocat/hello-world",
+                429,
+                serde_json::json!({
+                    "message": "API rate limit exceeded"
+                }),
             )
-            .mount(&mock_server)
-            .await;
+            .with_response_header("retry-after", "1")
+            .with_request_count(2),
+        );
 
         let client = GitHubClient::new("test_token")
             .unwrap()
-            .with_base_url(mock_server.uri())
+            .with_base_url(server.uri())
             .with_retry_config(1, 10, 100);
 
         let result = client.get_repo("octocat", "hello-world").await;
+        server.finish();
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -914,11 +1088,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_pull_request_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/octocat/hello-world/pulls/1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/repos/octocat/hello-world/pulls/1",
+            200,
+            serde_json::json!({
                 "id": 100,
                 "number": 1,
                 "title": "Fix typo",
@@ -933,18 +1107,18 @@ mod tests {
                 "updated_at": "2024-01-01T00:00:00Z",
                 "html_url": "https://github.com/octocat/hello-world/pull/1",
                 "draft": false
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = GitHubClient::new("test_token")
             .unwrap()
-            .with_base_url(mock_server.uri());
+            .with_base_url(server.uri());
 
         let pr = client
             .get_pull_request("octocat", "hello-world", 1)
             .await
             .unwrap();
+        server.finish();
         assert_eq!(pr.number, 1);
         assert_eq!(pr.title, "Fix typo");
         assert_eq!(pr.head.ref_name, "fix-typo");
@@ -952,11 +1126,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_search_issues_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/search/issues"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/search/issues",
+            200,
+            serde_json::json!({
                 "total_count": 1,
                 "incomplete_results": false,
                 "items": [{
@@ -972,18 +1146,18 @@ mod tests {
                     "html_url": "https://github.com/octocat/hello-world/issues/42",
                     "comments": 0
                 }]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = GitHubClient::new("test_token")
             .unwrap()
-            .with_base_url(mock_server.uri());
+            .with_base_url(server.uri());
 
         let results = client
             .search_issues("is:open is:issue repo:octocat/hello-world")
             .await
             .unwrap();
+        server.finish();
         assert_eq!(results.total_count, 1);
         assert_eq!(results.items.len(), 1);
         assert_eq!(results.items[0].title, "Found a bug");
@@ -995,25 +1169,25 @@ mod tests {
         let _guard = capture.install_json_with_filter("debug");
         tracing::debug!("log_capture_ready");
 
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/octocat/hello-world"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/repos/octocat/hello-world",
+            200,
+            serde_json::json!({
                 "id": 1, "name": "hello-world", "full_name": "octocat/hello-world",
                 "owner": { "login": "octocat", "id": 1, "avatar_url": "", "type": "User" },
                 "private": false, "fork": false,
                 "html_url": "https://github.com/octocat/hello-world",
                 "default_branch": "main",
                 "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = GitHubClient::new("ghp_SECRET_TOKEN_12345")
             .unwrap()
-            .with_base_url(mock_server.uri());
+            .with_base_url(server.uri());
         let _ = client.get_repo("octocat", "hello-world").await.unwrap();
+        server.finish();
 
         let logs = capture.jsonl();
         assert!(
@@ -1356,22 +1530,25 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_server_error_500() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/repos/octocat/hello-world"))
-            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
-                "message": "Internal Server Error"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::respond(
+            TestHttpResponse::json(
+                "GET",
+                "/repos/octocat/hello-world",
+                500,
+                serde_json::json!({
+                    "message": "Internal Server Error"
+                }),
+            )
+            .with_request_count(2),
+        );
 
         let client = GitHubClient::new("test_token")
             .unwrap()
-            .with_base_url(mock_server.uri())
+            .with_base_url(server.uri())
             .with_retry_config(1, 10, 100);
 
         let result = client.get_repo("octocat", "hello-world").await;
+        server.finish();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.is_retryable());

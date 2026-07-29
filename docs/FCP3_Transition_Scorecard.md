@@ -2,22 +2,22 @@
 
 > **Bead**: `flywheel_connectors-mm3q4` — [FCP3/P1.5]
 > **Author**: WhiteCompass (SunnyMoose session, 2026-03-27)
-> **Last reconciled**: SunnyMoose, 2026-04-07 (pl7pj.3)
+> **Last reconciled**: Codex, 2026-05-14 (`flywheel_connectors-angoc.3`)
 > **Purpose**: Living scorecard tracking legacy buckets, shims, mesh-first cutover holdouts, and migration status.
 
 ---
 
 ## Scorecard Summary
 
-| Category | Total Items | Migrated | Pending | Blocked |
-|----------|------------|----------|---------|---------|
+| Category | Total Items | Migrated/Resolved | Pending | Blocked |
+|----------|------------|-------------------|---------|---------|
 | Legacy broad buckets | 3 | 3 | 0 | 0 |
-| Compatibility shims | 2 | 0 | 2 | 0 |
-| Mesh-first cutover holdouts | 8 | 5 | 3 | 0 |
-| Forbidden overlap debt | 7 | 4 | 3 | 0 |
-| Type MOVE candidates | 9 | 6 | 3 | 0 |
+| Compatibility shims | 2 | 1 | 1 | 0 |
+| Mesh-first cutover holdouts | 8 | 8 | 0 | 0 |
+| Forbidden overlap debt | 7 | 7 | 0 | 0 |
+| Type MOVE candidates | 9 | 9 | 0 | 0 |
 
-**Overall Progress**: 18 / 29 items migrated (62%)
+**Overall Progress**: 28 / 29 items migrated or resolved (97%)
 
 ---
 
@@ -34,7 +34,7 @@ as a pass.
 |---------|-----------|---------------------|--------|--------------|
 | `mesh-inventory-placement` | At least N connectors have `placement.has_mesh_replica = true` and `placement.replica_count >= 2`. | SKIP: current `fwc mesh explain-availability` exposes host artifact provenance and optional placement policy, but not live `has_mesh_replica` or `replica_count` attainment. | Default N = 3 connectors; default replica count = 2. | `fwc mesh cutover-gates --json`; `fwc mesh explain-availability <connector> --host <endpoint> --json`; `bv --robot-triage` for candidate connector prioritization. |
 | `mesh-lifecycle-state-replication` | `ConnectorStateRoot` for at least N connectors is mesh-replicated with `replica_count >= 2` and `last_replicated_seq` advancing within bounded staleness. | SKIP: no stable `ConnectorStateRoot` replication telemetry route is exposed to `fwc` yet. | Default N = 3 connectors; default replica count = 2; default staleness <= 60s. | `fwc mesh cutover-gates --json`; future `fwc mesh state status --json`. |
-| `mesh-audit-chain-quorum` | Audit chain status reports `quorum_signed_checkpoints >= 1` and `quorum_signers >= 2` for the active zone within bounded staleness. | SKIP: no stable `fwc audit chain status --json` quorum summary is wired into the cutover gate evaluator yet. | At least one quorum-signed checkpoint; at least two signers; default checkpoint age <= 60s. | `fwc mesh cutover-gates --json`; future/expanded `fwc audit chain status --json`. |
+| `mesh-audit-chain-quorum` | Audit chain status reports `quorum_signed_checkpoints >= 1` and `quorum_signers >= 2` for the active zone within bounded staleness. | SKIP: `fwc audit chain status --json` has a fail-closed artifact/status route, but live quorum checkpoint telemetry is not wired into the cutover evaluator yet. | At least one quorum-signed checkpoint; at least two signers; default checkpoint age <= 60s. | `fwc mesh cutover-gates --json`; `fwc audit chain status --json`. |
 | `mesh-policy-object-distribution` | Policy bundles for the active zone are present on `peer_count >= 2` mesh peers with verified owner signatures. | SKIP: policy bundle peer distribution and owner-signature telemetry are not exposed through `fwc policy distribution --json` yet. | At least two peers; owner signatures verified. | `fwc mesh cutover-gates --json`; future/expanded `fwc policy distribution --json`. |
 
 Gate status contract:
@@ -51,6 +51,8 @@ connector status, or sync/transfer logs without the required predicate fields.
 
 Configuration details: [Mesh Cutover Gates Configuration](configuration/cutover_gates.md).
 Operator recovery steps: [Mesh Cutover Gates Runbook](runbooks/mesh_cutover_gates.md).
+Three-node live proof harness:
+`bash scripts/e2e/mesh_cutover_gates_3node.sh --hosts <a>,<b>,<c>`.
 
 ---
 
@@ -66,10 +68,17 @@ Operator recovery steps: [Mesh Cutover Gates Runbook](runbooks/mesh_cutover_gate
 
 ## 2. Compatibility Shims
 
+Phase I.1 reconciliation: the bridge-plan guess that these were
+`fcp_core::compat::policy` and `fcp_core::compat::evidence` modules was false
+for the current checkout. No such `fcp-core` modules or callers exist. The
+remaining SDK shims are listed below; see
+[`docs/cleanup/shim_inventory.md`](cleanup/shim_inventory.md) for the
+machine-readable inventory.
+
 | Shim | Location | Purpose | Delete After | Status |
 |------|----------|---------|-------------|--------|
-| ConnectorErrorMapping | fcp-sdk/src/migration.rs | V2->V3 error mapping bridge | P4 convergence | ACTIVE (all 150 connectors use it) |
-| ConnectorRuntime | fcp-sdk/src/migration.rs | V2->V3 runtime bridge | P4 convergence | ACTIVE (all 150 connectors use it) |
+| ConnectorErrorMapping | fcp-sdk/src/error_mapping.rs | First-class SDK error mapping contract | legacy `fcp_sdk::migration` trait re-export removed | MIGRATED (`flywheel_connectors-angoc.3.7`) |
+| ConnectorRuntime | fcp-sdk/src/runtime.rs | First-class SDK lifecycle helper | migrated out of migration namespace | MIGRATED (`flywheel_connectors-angoc.3.6`) |
 
 ---
 
@@ -83,13 +92,13 @@ block the final mesh-first cutover.
 | Holdout | Current Owner | Target Owner | Impact | Status |
 |---------|--------------|-------------|--------|--------|
 | Enforcement pipeline ordering | fcp-host (enforcement.rs) | fcp-core (canonical order) | SDKs can't replicate enforcement | RESOLVED (01eebe074: EnforcementCheckOrder) |
-| Health aggregation model | fcp-host (health.rs) | fcp-core (HealthAggregation) | SDKs can't aggregate health | PENDING |
+| Health aggregation model | fcp-host (health.rs) | fcp-core (`AggregateHealthState`, `CompositeHealthSnapshot`) | SDKs can't aggregate health | RESOLVED (`fa2c573f`: fcp-core health aggregation model + tests) |
 | Rollout decision logic | fcp-host (rollout.rs) | fcp-kernel (RolloutDecision) | Non-host platforms can't evaluate rollouts | MIGRATED (fcp-kernel/src/execution_control.rs) |
 | Progress emission | fcp-host (progress.rs) | fcp-kernel (ProgressUpdate) | Agents can't consume progress generically | MIGRATED (fcp-kernel/src/execution_control.rs) |
 | Cancellation semantics | fcp-host (cancellation.rs) | fcp-kernel (CancelReason) | SDKs can't implement cancel | MIGRATED (fcp-kernel/src/execution_control.rs) |
 | Readiness model | fwc (readiness.rs) | fcp-core (ReadinessContract) | Multiple CLIs can't share readiness | MIGRATED (fwc/src/truth.rs KnowledgeState) |
 | Policy manipulation | fwc (policy_cmd.rs) | fcp-host RPC | CLI bypasses host for policy | MIGRATED (fwc routes through --host) |
-| Credential storage | fwc (credential_store.rs) | fcp-core (CredentialStore trait) | No standard credential interface | PENDING |
+| Credential storage | fwc (credential_store.rs) | fcp-core (`CredentialBackend` trait) | No standard credential interface | RESOLVED (`fa2c573f`: mesh-native credential backend contract + tests; fwc local store remains an implementation) |
 
 ---
 
@@ -97,13 +106,13 @@ block the final mesh-first cutover.
 
 | ID | Overlap | Owner Map Resolution | Status |
 |----|---------|---------------------|--------|
-| F1 | Health aggregation (fcp-core vs fcp-host) | fcp-core owns aggregation model | PENDING |
+| F1 | Health aggregation (fcp-core vs fcp-host) | fcp-core owns aggregation model | RESOLVED (`fa2c573f`: `AggregateHealthState` + `CompositeHealthSnapshot`) |
 | F2 | Rollout decisions (fcp-core vs fcp-host) | Move to fcp-kernel | RESOLVED (RolloutDecision in fcp-kernel) |
 | F3 | Enforcement ordering (fcp-host only) | Declare in fcp-core | RESOLVED (01eebe074: EnforcementCheckOrder) |
 | F4 | Progress/cancellation (fcp-host only) | Move to fcp-kernel | RESOLVED (CancelReason, ProgressUpdate in fcp-kernel) |
 | F5 | Readiness duplication (fcp-core vs fwc) | fwc truth.rs owns contract | RESOLVED (KnowledgeState taxonomy) |
 | F6 | CLI policy manipulation (fwc direct crypto) | Route through fcp-host RPC | RESOLVED (fwc uses --host for policy) |
-| F7 | Credential store (fwc only) | Define trait in fcp-core | PENDING |
+| F7 | Credential store (fwc only) | Define trait in fcp-core | RESOLVED (`fa2c573f`: `CredentialBackend`) |
 
 ---
 
@@ -118,8 +127,8 @@ block the final mesh-first cutover.
 | RolloutEvidence | fcp-host::rollout | fcp-kernel | P2.1 | MIGRATED |
 | RolloutObservation | fcp-host::rollout | fcp-kernel | P2.1 | MIGRATED |
 | EnforcementCheckOrder | (new) | fcp-core | P2.1 | RESOLVED (01eebe074) |
-| ReadinessContract | (new) | fcp-core | P2.2 | PENDING (fwc truth.rs has KnowledgeState taxonomy) |
-| CredentialStore trait | (new) | fcp-core | P2.3 | PENDING |
+| ReadinessContract | (new) | fwc truth model | P2.2 | RESCOPED (`fwc/src/truth.rs` `KnowledgeState` owns the operator truth/readiness taxonomy; F5 resolved) |
+| CredentialStore trait | (new) | fcp-core | P2.3 | RESOLVED (`fa2c573f`: `CredentialBackend` trait in fcp-core) |
 
 ---
 
@@ -142,6 +151,8 @@ artifacts and which wave still depends on open cutover work.
 Key evidence backing this scorecard:
 - **Crate carving**: fcp-kernel (38KB), fcp-policy (6.1KB), fcp-evidence (4.4KB) all exist with tests
 - **Type MOVEs**: `CancelReason`, `CleanupBehavior`, `ProgressUpdate`, `RolloutDecision`, `RolloutEvidence`, `RolloutObservation` all in `fcp-kernel/src/execution_control.rs`
+- **Core ownership repairs**: `EnforcementCheckOrder`, `AggregateHealthState`/`CompositeHealthSnapshot`, and `CredentialBackend` live in `fcp-core` (`fa2c573f`); the readiness truth taxonomy is intentionally owned by `fwc/src/truth.rs`
+- **Phase I.2 overlap ledger**: `docs/cleanup/forbidden_overlap_status.md` has `pending=0 resolved=3`, with detail beads `angoc.3.3`, `angoc.3.4`, and `angoc.3.5` closed
 - **E2E proof**: 423bu.3 epic (10 children CLOSED) - full invoke flow proven
 - **Live verification**: kzabz epic (5 children CLOSED) - 7 connectors verified
 - **Performance**: tr2xx epic (6 children CLOSED) - benchmarks + CI gate

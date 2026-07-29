@@ -148,3 +148,84 @@ fn message_has_name(message: &ChatMessage) -> bool {
         | ChatMessage::Tool { name, .. } => name.is_some(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn groq_chat_request_uses_default_model_and_preserves_user() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "user": "operator-1",
+                "n": 1
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect("request should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+        assert_eq!(request.user.as_deref(), Some("operator-1"));
+        assert_eq!(request.n, Some(1));
+    }
+
+    #[test]
+    fn logprobs_are_rejected_for_groq_chat() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "logprobs": true
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("logprobs should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn multiple_candidates_are_rejected_for_groq_chat() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "n": 2
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("n greater than one should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn message_names_are_rejected_for_groq_chat() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello", "name": "operator"}]
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("named messages should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn legacy_completion_request_uses_supplied_default_model() {
+        let request = legacy_request_from_value(
+            json!({
+                "prompt": "Summarize the build status",
+                "max_tokens": 24,
+                "temperature": 0.2
+            }),
+            "llama-3.1-8b-instant",
+        )
+        .expect("legacy request should decode");
+
+        assert_eq!(request.model, "llama-3.1-8b-instant");
+        assert_eq!(request.max_tokens, Some(24));
+        assert_eq!(request.temperature, Some(0.2));
+    }
+}

@@ -254,7 +254,7 @@ impl FcpConnector for SpotifyConnectorAdapter {
                 message: "invalid capability id".into(),
             })?;
         if let Some(verifier) = &self.verifier {
-            verifier.verify(req.capability_token.clone(), &cap_id, &req.operation, &[])?;
+            verifier.verify_bound(req.capability_token.clone(), &cap_id, &req.operation, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -325,6 +325,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -333,6 +334,8 @@ fn build_token(
     };
     let mut constraints_cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
+    // dja9u typestate ratchet: the verifier binds to the handshake's
+    // requested_instance_id, so tokens MUST carry the matching target_instance.
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -340,7 +343,9 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -433,7 +438,16 @@ async fn default_deny_compliance_suite_passes() {
         &["spotify.playback"],
     );
     // Token grants "spotify.playback" but invoke targets "spotify.search" -> denial
-    let token = build_token(&signing_key, "spotify.playback", &["spotify.playback"]);
+    let token = build_token(
+        &signing_key,
+        "spotify.playback",
+        &["spotify.playback"],
+        handshake
+            .requested_instance_id
+            .as_ref()
+            .expect("handshake instance id")
+            .as_str(),
+    );
     let invoke = invoke_request("spotify.search", json!({ "query": "kind of blue" }), token);
 
     let dynamic = DynamicSuite {
@@ -484,7 +498,16 @@ async fn allow_valid_token_connector_suite_passes() {
     let mut connector = SpotifyConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["spotify.read"]);
-    let token = build_token(&signing_key, "spotify.read", &["spotify.search"]);
+    let token = build_token(
+        &signing_key,
+        "spotify.read",
+        &["spotify.search"],
+        handshake
+            .requested_instance_id
+            .as_ref()
+            .expect("handshake instance id")
+            .as_str(),
+    );
     let invoke = invoke_request("spotify.search", json!({ "query": "kind of blue" }), token);
     let suite = ConnectorSuite {
         test_name: "spotify_allow_valid_token".to_string(),

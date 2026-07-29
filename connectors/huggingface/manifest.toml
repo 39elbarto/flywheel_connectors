@@ -5,15 +5,16 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:c3184ae5afdd2b1686edcc9d4a61083fde2797b5c152bf1d197e768704e3e6cc"
+interface_hash = "blake3-256:fcp.interface.v2:dcaf5b5b4b7afdeca97f2639553dbde137d5163a9fafd60d9b7d1093009b2430"
 
 [connector]
 id = "fcp.huggingface"
 name = "Hugging Face"
 version = "0.2.0"
-description = "Incubating Hugging Face Inference API and Hub catalog connector with bounded model discovery"
+description = "Proven Hugging Face Inference API and Hub catalog connector with bounded model discovery"
 archetypes = ["operational"]
 format = "native"
+status = "proven"
 
 [connector.state]
 model = "stateless"
@@ -27,7 +28,7 @@ allowed_targets = ["z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["huggingface.inference", "huggingface.models"]
 forbidden = ["network.listen", "system.exec"]
 
 [provides.operations."huggingface.inference.text_generation"]

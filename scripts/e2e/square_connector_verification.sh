@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/square_connector/${RUN_ID}}"
+TARGET_DIR="${FCP_SQUARE_TARGET_DIR:-/tmp/fcp-square-e2e}"
+RCH_BIN="${RCH_BIN:-rch}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -36,16 +41,35 @@ require_cmd() {
   fi
 }
 
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+
+  if grep -Fq "[RCH] remote" "${log_path}"; then
+    return 0
+  fi
+
+  echo "[square-verification] ${name}: rch command did not produce remote proof" >&2
+  echo "rch command did not produce remote proof" >>"${log_path}"
+  return 1
+}
+
 run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[square-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 run_capture_stdout() {
@@ -53,12 +77,18 @@ run_capture_stdout() {
   local stdout_path="$2"
   shift 2
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[square-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${stdout_path}" 2>"${log_path}"
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 promote_overall_status() {
@@ -77,53 +107,47 @@ promote_overall_status() {
   esac
 }
 
-classify_manifest_failure() {
+classify_failure() {
   local log_path="$1"
-  if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
+  if grep -Eq 'timeout: failed to execute process|RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|missing worker|No space left on device|dbus-1\.pc|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|The system library .*dbus-1.* required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
   fi
 }
 
-require_cmd rch
+classify_manifest_failure() {
+  local log_path="$1"
+  if grep -Eq 'missing worker system package dbus-1\.pc|The system library .*dbus-1.* required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
+    echo "infra_blocked"
+  else
+    classify_failure "${log_path}"
+  fi
+}
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-manifest_check_cmd=()
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
-  manifest_check_cmd=(
-    "${FWC_MANIFEST_BIN}"
-    manifest
-    fix
-    connectors/square/manifest.toml
-    --check
-    --json
-  )
-else
-  manifest_check_runner="rch:cargo-run"
-  manifest_check_cmd=(
-    rch
-    exec
-    --
-    cargo
-    run
-    -q
-    -p
-    fwc
-    --
-    manifest
-    fix
-    connectors/square/manifest.toml
-    --check
-    --json
-  )
-fi
+run_status_step() {
+  local status_var="$1"
+  local name="$2"
+  shift 2
+
+  if run_logged "${name}" "$@"; then
+    printf -v "${status_var}" '%s' "passed"
+  else
+    local status
+    status="$(classify_failure "${OUT_ROOT}/logs/${name}.log")"
+    printf -v "${status_var}" '%s' "${status}"
+    promote_overall_status "${status}"
+  fi
+}
+
+require_cmd "${RCH_BIN}"
+
+manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
 
 if run_capture_stdout \
   manifest_check \
   "${manifest_stdout_path}" \
-  "${manifest_check_cmd[@]}"
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/square/manifest.toml --check --json
 then
   manifest_status="passed"
   cp "${manifest_stdout_path}" "${OUT_ROOT}/evidence/manifest_check.json"
@@ -145,135 +169,19 @@ EOF
   promote_overall_status "${manifest_status}"
 fi
 
-if run_logged \
-  format_check \
-  rch exec -- cargo fmt --manifest-path connectors/square/Cargo.toml --check
-then
-  fmt_check_status="passed"
-else
-  fmt_check_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  cargo_check \
-  rch exec -- cargo check -p fcp-square --all-targets
-then
-  cargo_check_status="passed"
-else
-  cargo_check_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  health_guidance_evidence \
-  rch exec -- cargo test -p fcp-square --test integration health_unconfigured_includes_guidance -- --nocapture
-then
-  health_guidance_status="passed"
-else
-  health_guidance_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  doctor_guidance_evidence \
-  rch exec -- cargo test -p fcp-square --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-then
-  doctor_guidance_status="passed"
-else
-  doctor_guidance_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  self_check_evidence \
-  rch exec -- cargo test -p fcp-square --test integration self_check_ready_with_mock_square_api_and_evidence -- --nocapture
-then
-  self_check_status="passed"
-else
-  self_check_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  retryable_self_check_evidence \
-  rch exec -- cargo test -p fcp-square --test integration self_check_retryable_square_failure_reports_degraded -- --nocapture
-then
-  retryable_self_check_status="passed"
-else
-  retryable_self_check_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  payments_pagination_evidence \
-  rch exec -- cargo test -p fcp-square --test integration invoke_payments_list_preserves_pagination_evidence -- --nocapture
-then
-  payments_pagination_status="passed"
-else
-  payments_pagination_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  catalog_filter_evidence \
-  rch exec -- cargo test -p fcp-square --test integration invoke_catalog_list_preserves_filter_evidence -- --nocapture
-then
-  catalog_filter_status="passed"
-else
-  catalog_filter_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  payment_create_evidence \
-  rch exec -- cargo test -p fcp-square --test integration invoke_payment_create_preserves_mutation_evidence -- --nocapture
-then
-  payment_create_status="passed"
-else
-  payment_create_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  compliance_evidence \
-  rch exec -- cargo test -p fcp-square --test integration introspection_emits_v3_compliance_evidence -- --nocapture
-then
-  compliance_status="passed"
-else
-  compliance_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  integration_suite \
-  rch exec -- cargo test -p fcp-square --test integration -- --nocapture
-then
-  integration_suite_status="passed"
-else
-  integration_suite_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  crate_suite \
-  rch exec -- cargo test -p fcp-square -- --nocapture
-then
-  crate_suite_status="passed"
-else
-  crate_suite_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  clippy \
-  rch exec -- cargo clippy -p fcp-square --all-targets -- -D warnings
-then
-  clippy_status="passed"
-else
-  clippy_status="failed"
-  promote_overall_status failed
-fi
+run_status_step fmt_check_status format_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --manifest-path connectors/square/Cargo.toml --check
+run_status_step cargo_check_status cargo_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-square --all-targets
+run_status_step health_guidance_status health_guidance_evidence env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration health_unconfigured_includes_guidance -- --nocapture
+run_status_step doctor_guidance_status doctor_guidance_evidence env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+run_status_step self_check_status self_check_evidence env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration self_check_ready_with_mock_square_api_and_evidence -- --nocapture
+run_status_step retryable_self_check_status retryable_self_check_evidence env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration self_check_retryable_square_failure_reports_degraded -- --nocapture
+run_status_step payments_pagination_status payments_pagination_evidence env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration invoke_payments_list_preserves_pagination_evidence -- --nocapture
+run_status_step catalog_filter_status catalog_filter_evidence env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration invoke_catalog_list_preserves_filter_evidence -- --nocapture
+run_status_step payment_create_status payment_create_evidence env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration invoke_payment_create_preserves_mutation_evidence -- --nocapture
+run_status_step compliance_status compliance_evidence env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+run_status_step integration_suite_status integration_suite env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square --test integration -- --nocapture
+run_status_step crate_suite_status crate_suite env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-square -- --nocapture
+run_status_step clippy_status clippy env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-square --all-targets -- -D warnings
 
 cat > "${OUT_ROOT}/environment.json" <<EOF
 {
@@ -282,34 +190,38 @@ cat > "${OUT_ROOT}/environment.json" <<EOF
   "repo_root": "${REPO_ROOT}",
   "verification_script": "scripts/e2e/square_connector_verification.sh",
   "artifact_root": "${OUT_ROOT}",
+  "target_dir": "${TARGET_DIR}",
   "manifest_check_runner": "${manifest_check_runner}",
+  "rch_bin": "${RCH_BIN}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "scope_note": "first slice covers merchant-scoped payments, refunds, orders, catalog reads, customer reads, locations, and readiness evidence"
 }
 EOF
 
-cat > "${OUT_ROOT}/replay.sh" <<'EOF'
+cat > "${OUT_ROOT}/replay.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  "${FWC_MANIFEST_BIN}" manifest fix connectors/square/manifest.toml --check --json
-else
-  rch exec -- cargo run -q -p fwc -- manifest fix connectors/square/manifest.toml --check --json
-fi
-rch exec -- cargo fmt --manifest-path connectors/square/Cargo.toml --check
-rch exec -- cargo check -p fcp-square --all-targets
-rch exec -- cargo test -p fcp-square --test integration health_unconfigured_includes_guidance -- --nocapture
-rch exec -- cargo test -p fcp-square --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-rch exec -- cargo test -p fcp-square --test integration self_check_ready_with_mock_square_api_and_evidence -- --nocapture
-rch exec -- cargo test -p fcp-square --test integration self_check_retryable_square_failure_reports_degraded -- --nocapture
-rch exec -- cargo test -p fcp-square --test integration invoke_payments_list_preserves_pagination_evidence -- --nocapture
-rch exec -- cargo test -p fcp-square --test integration invoke_catalog_list_preserves_filter_evidence -- --nocapture
-rch exec -- cargo test -p fcp-square --test integration invoke_payment_create_preserves_mutation_evidence -- --nocapture
-rch exec -- cargo test -p fcp-square --test integration introspection_emits_v3_compliance_evidence -- --nocapture
-rch exec -- cargo test -p fcp-square --test integration -- --nocapture
-rch exec -- cargo test -p fcp-square -- --nocapture
-rch exec -- cargo clippy -p fcp-square --all-targets -- -D warnings
+TARGET_DIR="\${FCP_SQUARE_TARGET_DIR:-${TARGET_DIR}}"
+RCH_BIN="\${RCH_BIN:-${RCH_BIN}}"
+REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
+export RCH_FORCE_REMOTE=1
+
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/square/manifest.toml --check --json
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --manifest-path connectors/square/Cargo.toml --check
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-square --all-targets
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration health_unconfigured_includes_guidance -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration self_check_ready_with_mock_square_api_and_evidence -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration self_check_retryable_square_failure_reports_degraded -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration invoke_payments_list_preserves_pagination_evidence -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration invoke_catalog_list_preserves_filter_evidence -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration invoke_payment_create_preserves_mutation_evidence -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square --test integration -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-square -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-square --all-targets -- -D warnings
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 
@@ -319,6 +231,8 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
   "connector": "fcp-square",
   "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "steps": {
     "manifest_check": {
       "status": "${manifest_status}",

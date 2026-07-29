@@ -56,7 +56,7 @@ impl AppleRemindersError {
     }
 }
 
-impl fcp_sdk::migration::ConnectorErrorMapping for AppleRemindersError {
+impl fcp_sdk::ConnectorErrorMapping for AppleRemindersError {
     fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
         match error {
             fcp_async_core::AsyncError::Timeout { timeout_ms } => {
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_from_timeout() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = AppleRemindersError::from_async_error(fcp_async_core::AsyncError::Timeout {
             timeout_ms: 5000,
         });
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_from_cancelled() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = AppleRemindersError::from_async_error(fcp_async_core::AsyncError::Cancelled);
         assert!(err.to_string().contains("cancelled"));
     }

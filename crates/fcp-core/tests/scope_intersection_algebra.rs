@@ -1,7 +1,7 @@
 //! Pin set-intersection algebraic laws on the fcp-core scope-bearing
 //! intersection primitive (flywheel_connectors-epqsi).
 //!
-//! Bead asks for "CapabilityScope intersection semantics". No such
+//! Bead asks for "`CapabilityScope` intersection semantics". No such
 //! `CapabilityScope` type exists in fcp-core, and `CapabilityConstraints`
 //! has no `intersect` method either. The only scope-bearing
 //! intersection primitive in fcp-core is `ForkEvidence::double_signers`
@@ -222,17 +222,11 @@ fn double_signers_empty_when_signers_disjoint() {
 
 #[test]
 fn double_signers_empty_when_one_side_empty() {
-    let evidence_a_empty = fork_with(&[], &["alice", "bob"]);
-    assert!(
-        evidence_a_empty.double_signers().is_empty(),
-        "∅ ∩ S MUST be ∅"
-    );
+    let evidence = fork_with(&[], &["alice", "bob"]);
+    assert!(evidence.double_signers().is_empty(), "∅ ∩ S MUST be ∅");
 
-    let evidence_b_empty = fork_with(&["alice", "bob"], &[]);
-    assert!(
-        evidence_b_empty.double_signers().is_empty(),
-        "S ∩ ∅ MUST be ∅"
-    );
+    let evidence = fork_with(&["alice", "bob"], &[]);
+    assert!(evidence.double_signers().is_empty(), "S ∩ ∅ MUST be ∅");
 }
 
 #[test]

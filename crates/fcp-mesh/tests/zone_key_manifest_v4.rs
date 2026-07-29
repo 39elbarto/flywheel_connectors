@@ -1,4 +1,4 @@
-//! ZoneKeyManifest V4 schema migration tests (br-kyopb.1.2.3).
+//! `ZoneKeyManifest` V4 schema migration tests (br-kyopb.1.2.3).
 //!
 //! Lives in `fcp-mesh/tests/` because the user-facing acceptance command
 //! is `cargo test -p fcp-mesh zone_key_manifest_v4`. The actual schema
@@ -22,12 +22,14 @@
 //!    `XWing` wraps for V4 recipients alongside the inherited
 //!    `HpkeX25519` wraps for V3 recipients. `resolved_wrapped_key_for`
 //!    returns the V4 form when present and falls back to V3 when not.
-//! 4. **WrappedKey enum tag = "kem" discrimination** round-trips
+//! 4. **`WrappedKey` enum tag = "kem" discrimination** round-trips
 //!    through serde JSON (the canonical FCP wire form is CBOR but JSON
 //!    exercises the same serde Serialize/Deserialize path).
 //! 5. **V4 X-Wing wrap end-to-end:** generate an X-Wing keypair, seal a
-//!    real ZoneKey to it via the V4 path, embed in a V4 manifest, and
+//!    real `ZoneKey` to it via the V4 path, embed in a V4 manifest, and
 //!    confirm the receiver opens it cleanly with the V4 secret.
+
+#![allow(clippy::similar_names, clippy::default_trait_access)]
 
 use fcp_core::{
     NodeId, NodeSignature, ObjectHeader, ObjectIdKeyId, Provenance, TailscaleNodeId, WrappedKey,
@@ -46,7 +48,7 @@ fn test_node(label: &str) -> TailscaleNodeId {
     TailscaleNodeId::new(format!("100.64.0.{}", label.len()))
 }
 
-fn test_zone_key() -> ZoneKey {
+const fn test_zone_key() -> ZoneKey {
     ZoneKey::from_bytes([0x42u8; 32])
 }
 
@@ -173,8 +175,7 @@ fn zone_key_manifest_v4_migrated_to_v4_promotes_v3_wraps() {
     )
     .expect("HPKE wrap must succeed");
 
-    let v3_manifest =
-        make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3.clone(), bob_v3.clone()]);
+    let v3_manifest = make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3, bob_v3]);
 
     // br-z8bsg: migrated_to_v4 returns UnsignedV4Manifest (typestate
     // enforcement). Inspection is via .as_payload(); a real publisher
@@ -282,7 +283,7 @@ fn zone_key_manifest_v4_supports_mixed_v3_and_v4_wraps() {
         .unwrap();
 
     // Build the mixed manifest.
-    let mut manifest = make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3.clone()]);
+    let mut manifest = make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3]);
     manifest.kem = ZoneKemAlgorithm::XWing;
     manifest.add_xwing_wrap(bob.clone(), 1_700_000_001, bob_xwing_sealed);
 
@@ -330,7 +331,7 @@ fn zone_key_manifest_v4_wrapped_key_kem_tag_round_trips_through_serde() {
         &zone_key,
     )
     .unwrap();
-    let alice_wk = WrappedKey::from_hpke(alice_v3.sealed.clone());
+    let alice_wk = WrappedKey::from_hpke(alice_v3.sealed);
     let alice_json = serde_json::to_value(&alice_wk).unwrap();
     assert_eq!(
         alice_json.get("kem").and_then(|v| v.as_str()),
@@ -421,7 +422,7 @@ fn zone_key_manifest_v4_add_xwing_wrap_replaces_existing_entry() {
 
     let mut manifest = make_v3_manifest(&zone, 1_700_000_000, vec![]);
     manifest.add_xwing_wrap(recipient.clone(), 100, sealed_a);
-    manifest.add_xwing_wrap(recipient.clone(), 200, sealed_b.clone());
+    manifest.add_xwing_wrap(recipient, 200, sealed_b.clone());
     assert_eq!(manifest.wrapped_keys_v4.len(), 1, "must replace not append");
     assert_eq!(manifest.wrapped_keys_v4[0].issued_at, 200);
     let final_box = manifest.wrapped_keys_v4[0]

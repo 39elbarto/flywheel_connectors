@@ -158,8 +158,10 @@ async fn handle_message(connector: &mut SynologyChatConnector, message: &str) ->
                 "jsonrpc": "2.0",
                 "result": value
             });
-            if let Some(id) = id {
-                response["id"] = id;
+            if let Some(id) = id
+                && let Some(object) = response.as_object_mut()
+            {
+                object.insert("id".to_string(), id);
             }
             response
         }
@@ -168,8 +170,10 @@ async fn handle_message(connector: &mut SynologyChatConnector, message: &str) ->
                 "jsonrpc": "2.0",
                 "error": error.to_response()
             });
-            if let Some(id) = id {
-                response["id"] = id;
+            if let Some(id) = id
+                && let Some(object) = response.as_object_mut()
+            {
+                object.insert("id".to_string(), id);
             }
             response
         }

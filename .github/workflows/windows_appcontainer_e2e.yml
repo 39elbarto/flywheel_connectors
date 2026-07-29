@@ -7,6 +7,7 @@ on:
       - "docs/architecture/windows_appcontainer_capability_map.md"
       - "docs/development/windows_cross_compile.md"
       - "docs/runbooks/windows_appcontainer.md"
+      - "scripts/e2e/windows_appcontainer_process_launch_verification.sh"
       - ".github/workflows/windows_appcontainer_e2e.yml"
   workflow_dispatch:
     inputs:
@@ -40,6 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout toon_rust path dependency
+        shell: bash
+        run: git clone --depth 1 --filter=blob:none https://github.com/Dicklesworthstone/toon_rust.git ../toon_rust
+
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt, clippy
@@ -57,7 +62,7 @@ jobs:
           @{
             schema_version = "1.0.0"
             event_type = "fcp.host.windows.appcontainer.workflow_started"
-            bead_id = "flywheel_connectors-r4qcg.1.2"
+            bead_id = "flywheel_connectors-r4qcg.2"
             actor = "github-actions"
             redaction_scope = "public"
             correlation_id = "windows-appcontainer-${{ github.run_id }}"
@@ -81,42 +86,18 @@ jobs:
       - name: No-mock artifact tests
         run: cargo test -p fcp-sandbox --target x86_64-pc-windows-msvc --features windows-appcontainer --test no_mock_integration windows_appcontainer -- --nocapture
 
-      - name: Live AppContainer launch test
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_e2e == 'true' }}
-        shell: pwsh
+      - name: Process-launch evidence script
+        shell: bash
         env:
-          FCP_SANDBOX_WINDOWS_APPCONTAINER: "1"
-          FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E: "1"
-        run: |
-          cargo test -p fcp-sandbox --target x86_64-pc-windows-msvc --features windows-appcontainer windows_appcontainer_real_process_launch_e2e --lib -- --nocapture
-          @{
-            schema_version = "1.0.0"
-            event_type = "fcp.host.windows.appcontainer.live_e2e_requested"
-            bead_id = "flywheel_connectors-r4qcg.1.2"
-            actor = "github-actions"
-            redaction_scope = "public"
-            correlation_id = "windows-appcontainer-${{ github.run_id }}"
-            timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-            result = "cargo_test_completed"
-            artifact_path = "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
-          } | ConvertTo-Json -Compress | Add-Content "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
-
-      - name: Record live E2E skip
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.live_e2e != 'true' }}
-        shell: pwsh
-        run: |
-          @{
-            schema_version = "1.0.0"
-            event_type = "fcp.host.windows.appcontainer.skip"
-            bead_id = "flywheel_connectors-r4qcg.1.2"
-            actor = "github-actions"
-            redaction_scope = "public"
-            correlation_id = "windows-appcontainer-${{ github.run_id }}"
-            timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-            skip_reason = "live_e2e_not_requested"
-            final_filter_strength = "process_limit"
-            artifact_path = "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
-          } | ConvertTo-Json -Compress | Add-Content "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
+          RCH_BIN: direct
+          RUN_ID: ${{ github.run_id }}
+          OUT_ROOT: ${{ env.WINDOWS_APPCONTAINER_ARTIFACT_DIR }}/process-launch
+          WINDOWS_APPCONTAINER_BEAD_ID: flywheel_connectors-r4qcg.2
+          WINDOWS_APPCONTAINER_CARGO_TARGET: x86_64-pc-windows-msvc
+          WINDOWS_APPCONTAINER_CARGO_FEATURES: windows-appcontainer
+          FCP_SANDBOX_WINDOWS_APPCONTAINER: ${{ (github.event_name == 'workflow_dispatch' && inputs.live_e2e == 'true') && '1' || '' }}
+          FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E: ${{ (github.event_name == 'workflow_dispatch' && inputs.live_e2e == 'true') && '1' || '' }}
+        run: bash scripts/e2e/windows_appcontainer_process_launch_verification.sh
 
       - name: Upload Windows AppContainer artifacts
         uses: actions/upload-artifact@v4

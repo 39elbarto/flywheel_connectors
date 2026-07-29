@@ -299,3 +299,117 @@ fn invalid<T>(message: &str) -> FcpResult<T> {
         message: message.into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn submit_workflow_uses_prompt_alias_and_default_client_id() {
+        let input = SubmitWorkflowInput::parse(
+            json!({
+                "prompt": {"1": {"class_type": "CheckpointLoaderSimple"}}
+            }),
+            " agent-client ",
+        )
+        .expect("valid workflow should parse");
+
+        assert_eq!(input.client_id.as_deref(), Some("agent-client"));
+        assert_eq!(
+            input.request_body(),
+            json!({
+                "prompt": {"1": {"class_type": "CheckpointLoaderSimple"}},
+                "client_id": "agent-client"
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_must_be_json_object() {
+        let error = SubmitWorkflowInput::parse(json!({"workflow": ["not", "an", "object"]}), "c")
+            .expect_err("array workflow should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn prompt_ids_reject_path_like_values() {
+        let error = PromptIdInput::parse(json!({"prompt_id": "node/../other"}))
+            .expect_err("path-like prompt id should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn wait_rejects_zero_timeout_and_large_poll_interval() {
+        let timeout_error = WaitInput::parse(json!({"prompt_id": "abc", "timeout_ms": 0}))
+            .expect_err("zero timeout should fail");
+        let interval_error =
+            WaitInput::parse(json!({"prompt_id": "abc", "poll_interval_ms": 60_001}))
+                .expect_err("oversized poll interval should fail");
+
+        assert!(matches!(timeout_error, FcpError::InvalidRequest { .. }));
+        assert!(matches!(interval_error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn artifacts_from_history_flattens_images_and_gifs() {
+        let mut outputs = BTreeMap::new();
+        outputs.insert(
+            "node-7".to_string(),
+            OutputNode {
+                images: vec![ComfyImage {
+                    filename: "image.png".into(),
+                    subfolder: "renders".into(),
+                    kind: "output".into(),
+                }],
+                gifs: vec![ComfyImage {
+                    filename: "clip.gif".into(),
+                    subfolder: String::new(),
+                    kind: "temp".into(),
+                }],
+            },
+        );
+        let mut history = BTreeMap::new();
+        history.insert(
+            "prompt-1".to_string(),
+            HistoryEntry {
+                outputs,
+                status: json!({"completed": true}),
+            },
+        );
+
+        let status = status_from_history("prompt-1", &history);
+        let artifacts = artifacts_from_history(
+            "https://worker.tail.ts.net/base?ignored=true",
+            "prompt-1",
+            &history,
+        )
+        .expect("artifact URLs should build");
+
+        assert!(status.complete);
+        assert_eq!(status.output_count, 2);
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].url_host_class, "tailnet_dns");
+        assert!(artifacts[0].url.contains("/view?"));
+        assert!(artifacts[0].url.contains("filename=image.png"));
+    }
+
+    #[test]
+    fn view_url_rejects_control_characters_in_artifact_fields() {
+        let error = view_url(
+            "http://127.0.0.1:8188",
+            &ComfyImage {
+                filename: "bad\nname.png".into(),
+                subfolder: String::new(),
+                kind: "output".into(),
+            },
+        )
+        .expect_err("newline in filename should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+}

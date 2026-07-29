@@ -1,18 +1,18 @@
 //! Tencent `QQ` bot connector.
 
 use std::{
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest, ZoneId,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    ConnectorMetrics, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, HealthState, Introspection, InvokeRequest, InvokeResponse,
+    OperationId, OperationInfo, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
@@ -21,16 +21,27 @@ use tracing::warn;
 
 use crate::client::{
     QqClient, channel_message_body, direct_message_body, normalize_message_event,
-    sanitize_path_segment,
+    sanitize_path_segment, validate_gateway_event_envelope,
 };
 use crate::error::QqError;
 use crate::types::{
     CAP_EVENTS_READ, CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE, EVENT_QQ_EVENT_DROPPED,
-    EVENT_QQ_MESSAGE_AUTHORIZED, OP_EVENTS_NORMALIZE, OP_GATEWAY_PROJECT_EVENT, OP_GET_GATEWAY,
-    OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL, OP_SEND_GROUP, QqConfig, QqGatewayEvent,
+    EVENT_QQ_MESSAGE_AUTHORIZED, OP_EVENTS_NORMALIZE, OP_GATEWAY_DRAIN_EVENTS,
+    OP_GATEWAY_PROJECT_EVENT, OP_GET_GATEWAY, OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL,
+    OP_SEND_GROUP, QqConfig, QqGatewayEvent,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 8] = [
+    OP_SEND_CHANNEL,
+    OP_SEND_GROUP,
+    OP_SEND_C2C,
+    OP_GET_GATEWAY,
+    OP_EVENTS_NORMALIZE,
+    OP_GATEWAY_PROJECT_EVENT,
+    OP_GATEWAY_DRAIN_EVENTS,
+    OP_HEALTH,
+];
 
 #[derive(Clone, Copy)]
 struct QqSendOperationSpec {
@@ -38,14 +49,28 @@ struct QqSendOperationSpec {
     path_prefix: &'static str,
     target_kind: &'static str,
     log_operation: &'static str,
+    allowed_fields: &'static [&'static str],
     body: fn(&str, Option<&str>) -> Value,
 }
+
+#[derive(Debug)]
+struct ParsedQqSendInput<'a> {
+    target_id: &'a str,
+    path: String,
+    content: &'a str,
+    msg_id: Option<&'a str>,
+}
+
+const CHANNEL_SEND_FIELDS: &[&str] = &["channel_id", "content", "msg_id"];
+const GROUP_SEND_FIELDS: &[&str] = &["group_openid", "content", "msg_id"];
+const C2C_SEND_FIELDS: &[&str] = &["openid", "content", "msg_id"];
 
 const QQ_SEND_CHANNEL_SPEC: QqSendOperationSpec = QqSendOperationSpec {
     target_field: "channel_id",
     path_prefix: "/channels/",
     target_kind: "channel",
     log_operation: "send_channel",
+    allowed_fields: CHANNEL_SEND_FIELDS,
     body: channel_message_body,
 };
 
@@ -54,6 +79,7 @@ const QQ_SEND_GROUP_SPEC: QqSendOperationSpec = QqSendOperationSpec {
     path_prefix: "/v2/groups/",
     target_kind: "group",
     log_operation: "send_group",
+    allowed_fields: GROUP_SEND_FIELDS,
     body: direct_message_body,
 };
 
@@ -62,6 +88,7 @@ const QQ_SEND_C2C_SPEC: QqSendOperationSpec = QqSendOperationSpec {
     path_prefix: "/v2/users/",
     target_kind: "c2c",
     log_operation: "send_c2c",
+    allowed_fields: C2C_SEND_FIELDS,
     body: direct_message_body,
 };
 
@@ -185,329 +212,6 @@ fn qq_coordination_audit_records(
         records.push(record);
     }
     records
-}
-
-fn empty_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false
-    })
-}
-
-fn nonblank_string_schema() -> Value {
-    json!({
-        "type": "string",
-        "minLength": 1,
-        "pattern": "\\S"
-    })
-}
-
-fn target_id_schema() -> Value {
-    json!({
-        "type": "string",
-        "minLength": 1,
-        "pattern": "^[^/\\\\]+$",
-        "not": {
-            "pattern": "\\.\\.|%2[fFeE]|%5[cC]"
-        }
-    })
-}
-
-fn send_message_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": true,
-        "properties": {
-            "id": { "type": "string" },
-            "timestamp": { "type": "string" },
-            "coordination": {
-                "type": "array",
-                "description": "Redacted chat coordination audit records"
-            }
-        }
-    })
-}
-
-fn channel_send_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["channel_id", "content"],
-        "additionalProperties": false,
-        "properties": {
-            "channel_id": target_id_schema(),
-            "content": nonblank_string_schema(),
-            "msg_id": { "type": "string" }
-        }
-    })
-}
-
-fn group_send_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["group_openid", "content"],
-        "additionalProperties": false,
-        "properties": {
-            "group_openid": target_id_schema(),
-            "content": nonblank_string_schema(),
-            "msg_id": { "type": "string" }
-        }
-    })
-}
-
-fn c2c_send_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["openid", "content"],
-        "additionalProperties": false,
-        "properties": {
-            "openid": target_id_schema(),
-            "content": nonblank_string_schema(),
-            "msg_id": { "type": "string" }
-        }
-    })
-}
-
-fn gateway_event_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["op"],
-        "additionalProperties": false,
-        "properties": {
-            "op": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 255
-            },
-            "s": {
-                "type": ["integer", "null"],
-                "minimum": 0
-            },
-            "t": {
-                "type": ["string", "null"],
-                "maxLength": 64,
-                "pattern": "^[A-Z0-9_]+$"
-            },
-            "d": {
-                "type": ["object", "null"],
-                "additionalProperties": true
-            },
-            "id": {
-                "type": ["string", "null"],
-                "maxLength": 256
-            }
-        }
-    })
-}
-
-fn gateway_event_input_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["event"],
-        "additionalProperties": false,
-        "properties": {
-            "event": gateway_event_schema()
-        }
-    })
-}
-
-fn normalized_event_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": [
-            "event_type",
-            "message_id",
-            "channel_id",
-            "guild_id",
-            "group_id",
-            "sender_id",
-            "sender_name",
-            "text",
-            "timestamp",
-            "is_reply",
-            "reply_to",
-            "has_attachments",
-            "routing",
-            "raw"
-        ],
-        "additionalProperties": false,
-        "properties": {
-            "event_type": { "type": "string" },
-            "message_id": { "type": ["string", "null"] },
-            "channel_id": { "type": ["string", "null"] },
-            "guild_id": { "type": ["string", "null"] },
-            "group_id": { "type": ["string", "null"] },
-            "sender_id": { "type": ["string", "null"] },
-            "sender_name": { "type": ["string", "null"] },
-            "text": { "type": ["string", "null"] },
-            "timestamp": { "type": ["string", "null"] },
-            "is_reply": { "type": "boolean" },
-            "reply_to": { "type": ["string", "null"] },
-            "has_attachments": { "type": "boolean" },
-            "routing": {
-                "type": "string",
-                "enum": ["channel", "group", "c2c"]
-            },
-            "raw": {
-                "type": ["object", "null"],
-                "additionalProperties": true
-            }
-        }
-    })
-}
-
-fn inbound_policy_decision_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": [
-            "allowed",
-            "reason_code",
-            "routing",
-            "sender_id",
-            "target_id",
-            "mentioned_bot"
-        ],
-        "additionalProperties": false,
-        "properties": {
-            "allowed": { "type": "boolean" },
-            "reason_code": { "type": "string" },
-            "routing": {
-                "type": "string",
-                "enum": ["channel", "group", "c2c"]
-            },
-            "sender_id": { "type": ["string", "null"] },
-            "target_id": { "type": ["string", "null"] },
-            "mentioned_bot": { "type": "boolean" }
-        }
-    })
-}
-
-fn gateway_runtime_snapshot_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": [
-            "enabled",
-            "session_id",
-            "last_sequence",
-            "heartbeat_interval_ms",
-            "heartbeat_sent_count",
-            "heartbeat_ack_count",
-            "reconnect_attempts",
-            "max_reconnect_attempts",
-            "reconnect_backoff_ms",
-            "queue_depth",
-            "max_queue_depth",
-            "dedupe_size",
-            "dedupe_window_size",
-            "accepted_events",
-            "dropped_events",
-            "duplicate_events",
-            "stale_sequence_events"
-        ],
-        "additionalProperties": false,
-        "properties": {
-            "enabled": { "type": "boolean" },
-            "session_id": { "type": ["string", "null"] },
-            "last_sequence": { "type": "integer", "minimum": 0 },
-            "heartbeat_interval_ms": { "type": "integer", "minimum": 0 },
-            "heartbeat_sent_count": { "type": "integer", "minimum": 0 },
-            "heartbeat_ack_count": { "type": "integer", "minimum": 0 },
-            "reconnect_attempts": { "type": "integer", "minimum": 0 },
-            "max_reconnect_attempts": { "type": "integer", "minimum": 0 },
-            "reconnect_backoff_ms": { "type": "integer", "minimum": 0 },
-            "queue_depth": { "type": "integer", "minimum": 0 },
-            "max_queue_depth": { "type": "integer", "minimum": 0 },
-            "dedupe_size": { "type": "integer", "minimum": 0 },
-            "dedupe_window_size": { "type": "integer", "minimum": 0 },
-            "accepted_events": { "type": "integer", "minimum": 0 },
-            "dropped_events": { "type": "integer", "minimum": 0 },
-            "duplicate_events": { "type": "integer", "minimum": 0 },
-            "stale_sequence_events": { "type": "integer", "minimum": 0 }
-        }
-    })
-}
-
-fn gateway_projection_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": [
-            "accepted",
-            "topic",
-            "reason_code",
-            "sequence",
-            "event_id",
-            "normalized",
-            "policy",
-            "runtime"
-        ],
-        "additionalProperties": false,
-        "properties": {
-            "accepted": { "type": "boolean" },
-            "topic": {
-                "type": "string",
-                "enum": [EVENT_QQ_MESSAGE_AUTHORIZED, EVENT_QQ_EVENT_DROPPED]
-            },
-            "reason_code": { "type": "string" },
-            "sequence": { "type": ["integer", "null"], "minimum": 0 },
-            "event_id": { "type": ["string", "null"] },
-            "normalized": {
-                "anyOf": [
-                    normalized_event_schema(),
-                    { "type": "null" }
-                ]
-            },
-            "policy": {
-                "anyOf": [
-                    inbound_policy_decision_schema(),
-                    { "type": "null" }
-                ]
-            },
-            "runtime": gateway_runtime_snapshot_schema()
-        }
-    })
-}
-
-#[allow(clippy::too_many_lines)]
-fn output_schema_for(operation_id: &str) -> Value {
-    match operation_id {
-        OP_SEND_CHANNEL | OP_SEND_GROUP | OP_SEND_C2C => send_message_output_schema(),
-        OP_GET_GATEWAY => json!({
-            "type": "object",
-            "required": ["url"],
-            "additionalProperties": true,
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "format": "uri"
-                }
-            }
-        }),
-        OP_HEALTH => json!({
-            "type": "object",
-            "required": ["status", "base_url", "gateway", "manifest_hash"],
-            "additionalProperties": false,
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "enum": ["ok"]
-                },
-                "base_url": {
-                    "type": "string",
-                    "format": "uri"
-                },
-                "gateway": {
-                    "type": ["string", "null"],
-                    "format": "uri"
-                },
-                "manifest_hash": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$"
-                }
-            }
-        }),
-        OP_EVENTS_NORMALIZE => normalized_event_schema(),
-        OP_GATEWAY_PROJECT_EVENT => gateway_projection_schema(),
-        _ => json!({ "type": "object" }),
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -647,81 +351,18 @@ impl QqConnector {
         DoctorResult::from_checks(checks)
     }
 
-    // Keep the QQ operation catalog contiguous so introspection metadata stays auditable.
-    #[allow(clippy::too_many_lines)]
-    fn operations() -> Vec<OperationInfo> {
-        vec![
-            operation(
-                OP_SEND_CHANNEL,
-                "Send a QQ channel message",
-                CAP_MESSAGES_WRITE,
-                RiskLevel::Medium,
-                SafetyTier::Risky,
-                IdempotencyClass::None,
-                channel_send_input_schema(),
-                "Use for QQ channel deliveries when you already know the target channel_id.",
-            ),
-            operation(
-                OP_SEND_GROUP,
-                "Send a QQ group message",
-                CAP_MESSAGES_WRITE,
-                RiskLevel::Medium,
-                SafetyTier::Risky,
-                IdempotencyClass::None,
-                group_send_input_schema(),
-                "Use for QQ group deliveries to a known group_openid target.",
-            ),
-            operation(
-                OP_SEND_C2C,
-                "Send a QQ C2C message",
-                CAP_MESSAGES_WRITE,
-                RiskLevel::Medium,
-                SafetyTier::Risky,
-                IdempotencyClass::None,
-                c2c_send_input_schema(),
-                "Use for one-to-one QQ bot messages directed at a specific openid.",
-            ),
-            operation(
-                OP_GET_GATEWAY,
-                "Get the QQ gateway websocket URL",
-                CAP_GATEWAY_READ,
-                RiskLevel::Low,
-                SafetyTier::Safe,
-                IdempotencyClass::Strict,
-                empty_input_schema(),
-                "Use when a higher-level runtime needs the official QQ gateway URL for event intake.",
-            ),
-            operation(
-                OP_HEALTH,
-                "Verify QQ credentials and gateway discovery",
-                CAP_HEALTH_READ,
-                RiskLevel::Low,
-                SafetyTier::Safe,
-                IdempotencyClass::Strict,
-                empty_input_schema(),
-                "Use before higher-risk send operations when you need a bounded auth and connectivity check.",
-            ),
-            operation(
-                OP_EVENTS_NORMALIZE,
-                "Normalize a raw QQ gateway event into a structured event with routing",
-                CAP_EVENTS_READ,
-                RiskLevel::Low,
-                SafetyTier::Safe,
-                IdempotencyClass::Strict,
-                gateway_event_input_schema(),
-                "Use to normalize raw QQ Bot WebSocket gateway events into structured events with routing classification (channel/group/c2c), quote context, and attachment detection.",
-            ),
-            operation(
-                OP_GATEWAY_PROJECT_EVENT,
-                "Project a raw QQ gateway event through runtime state and inbound policy",
-                CAP_EVENTS_READ,
-                RiskLevel::Low,
-                SafetyTier::Safe,
-                IdempotencyClass::Strict,
-                gateway_event_input_schema(),
-                "Use when a host-owned QQ WebSocket loop needs connector-side sequence, duplicate, and inbound-policy projection before agent-visible event fanout.",
-            ),
-        ]
+    /// Return the manifest-backed QQ operation catalog.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embedded QQ manifest is invalid. The connector test suite
+    /// parses the same manifest strictly and checks every catalog entry against it.
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
+        static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+        OPERATIONS
+            .get_or_init(|| qq_operations_info().expect("embedded QQ manifest should validate"))
+            .clone()
     }
 
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
@@ -775,6 +416,14 @@ impl QqConnector {
                     .map_err(|e| e.to_fcp_error())?;
                 serialize_output(&projection, "projected gateway event")?
             }
+            OP_GATEWAY_DRAIN_EVENTS => {
+                let limit = parse_gateway_drain_limit(&req.input)?;
+                let drained = client
+                    .drain_gateway_events(limit)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serialize_output(&drained, "drained gateway events")?
+            }
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -792,11 +441,9 @@ impl QqConnector {
         input: &Value,
         spec: QqSendOperationSpec,
     ) -> FcpResult<Value> {
-        let target_id = required_string(input, spec.target_field)?;
-        let path = message_path(spec.path_prefix, target_id, spec.target_field)?;
-        let content = required_string(input, "content")?;
-        let msg_id = optional_string(input, "msg_id")?;
-        let (claim_channel_id, thread_id) = qq_claim_target(spec.target_kind, target_id, msg_id);
+        let parsed = parse_send_message_input(input, &spec)?;
+        let (claim_channel_id, thread_id) =
+            qq_claim_target(spec.target_kind, parsed.target_id, parsed.msg_id);
         let (zone_id, claimant_agent_id) = self.chat_coordination_context();
         let coordination = self
             .claim_before_qq_send(
@@ -818,8 +465,8 @@ impl QqConnector {
         let mut output = client
             .api_request(
                 reqwest::Method::POST,
-                &path,
-                Some((spec.body)(content, msg_id)),
+                &parsed.path,
+                Some((spec.body)(parsed.content, parsed.msg_id)),
             )
             .await
             .map_err(|e| e.to_fcp_error())?;
@@ -982,7 +629,7 @@ impl FcpConnector for QqConnector {
 
     fn introspect(&self) -> Introspection {
         Introspection {
-            operations: Self::operations(),
+            operations: Self::operations_info(),
             events: qq_events_info(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -1061,7 +708,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         OP_SEND_CHANNEL | OP_SEND_GROUP | OP_SEND_C2C => CAP_MESSAGES_WRITE,
         OP_GET_GATEWAY => CAP_GATEWAY_READ,
         OP_HEALTH => CAP_HEALTH_READ,
-        OP_EVENTS_NORMALIZE | OP_GATEWAY_PROJECT_EVENT => CAP_EVENTS_READ,
+        OP_EVENTS_NORMALIZE | OP_GATEWAY_PROJECT_EVENT | OP_GATEWAY_DRAIN_EVENTS => CAP_EVENTS_READ,
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -1075,22 +722,13 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
 fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
     match operation {
         OP_SEND_CHANNEL => {
-            let channel_id = required_string(input, "channel_id")?;
-            let _path = message_path("/channels/", channel_id, "channel_id")?;
-            required_string(input, "content")?;
-            optional_string(input, "msg_id")?;
+            parse_send_message_input(input, &QQ_SEND_CHANNEL_SPEC)?;
         }
         OP_SEND_GROUP => {
-            let group_openid = required_string(input, "group_openid")?;
-            let _path = message_path("/v2/groups/", group_openid, "group_openid")?;
-            required_string(input, "content")?;
-            optional_string(input, "msg_id")?;
+            parse_send_message_input(input, &QQ_SEND_GROUP_SPEC)?;
         }
         OP_SEND_C2C => {
-            let openid = required_string(input, "openid")?;
-            let _path = message_path("/v2/users/", openid, "openid")?;
-            required_string(input, "content")?;
-            optional_string(input, "msg_id")?;
+            parse_send_message_input(input, &QQ_SEND_C2C_SPEC)?;
         }
         OP_GET_GATEWAY | OP_HEALTH => {}
         OP_EVENTS_NORMALIZE => {
@@ -1103,9 +741,13 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
                     code: 1005,
                     message: format!("invalid gateway event: {e}"),
                 })?;
+            validate_gateway_event_envelope(&gateway_event).map_err(|e| e.to_fcp_error())?;
             normalize_message_event(&gateway_event).map_err(|e| e.to_fcp_error())?;
         }
         OP_GATEWAY_PROJECT_EVENT => validate_gateway_project_input(input)?,
+        OP_GATEWAY_DRAIN_EVENTS => {
+            let _limit = parse_gateway_drain_limit(input)?;
+        }
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -1118,6 +760,7 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
 
 fn validate_gateway_project_input(input: &Value) -> FcpResult<()> {
     let gateway_event = parse_gateway_event(input)?;
+    validate_gateway_event_envelope(&gateway_event).map_err(|e| e.to_fcp_error())?;
     if gateway_event.op != 0 {
         return Ok(());
     }
@@ -1126,6 +769,26 @@ fn validate_gateway_project_input(input: &Value) -> FcpResult<()> {
         Err(QqError::InvalidInput(message)) if message.contains("not a normalizable") => Ok(()),
         Err(error) => Err(error.to_fcp_error()),
     }
+}
+
+fn parse_gateway_drain_limit(input: &Value) -> FcpResult<usize> {
+    let Some(limit) = input.get("limit") else {
+        return Ok(usize::MAX);
+    };
+    let limit = limit.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "gateway drain limit must be an integer".into(),
+    })?;
+    if limit == 0 || limit > 10_000 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "gateway drain limit must be between 1 and 10000".into(),
+        });
+    }
+    usize::try_from(limit).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "gateway drain limit is too large for this platform".into(),
+    })
 }
 
 fn parse_gateway_event(input: &Value) -> FcpResult<QqGatewayEvent> {
@@ -1260,40 +923,100 @@ fn qq_events_info() -> Vec<EventInfo> {
     ]
 }
 
-// This factory mirrors the OperationInfo fields to keep each catalog entry explicit.
-#[allow(clippy::too_many_arguments)]
-fn operation(
-    id: &'static str,
-    summary: &str,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    input_schema: Value,
-    when_to_use: &str,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        description: Some(summary.into()),
-        input_schema,
-        output_schema: output_schema_for(id),
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        safety_tier,
-        idempotency,
-        ai_hints: AgentHint {
-            when_to_use: when_to_use.into(),
-            common_mistakes: vec![
-                "QQ channel sends use channel_id, while group and C2C sends require group_openid or openid."
-                    .into(),
-            ],
-            examples: Vec::new(),
-            related: vec![CapabilityId::from_static(CAP_HEALTH_READ)],
-        },
-        rate_limit: None,
-        requires_approval: Some(ApprovalMode::None),
+fn qq_operations_info() -> FcpResult<Vec<OperationInfo>> {
+    Ok(ordered_manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect())
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest =
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded QQ manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
+}
+
+fn parse_send_message_input<'a>(
+    input: &'a Value,
+    spec: &QqSendOperationSpec,
+) -> FcpResult<ParsedQqSendInput<'a>> {
+    reject_unexpected_fields(input, spec.allowed_fields)?;
+    let target_id = required_string(input, spec.target_field)?;
+    let path = message_path(spec.path_prefix, target_id, spec.target_field)?;
+    let content = required_string(input, "content")?;
+    let msg_id = optional_string(input, "msg_id")?;
+    Ok(ParsedQqSendInput {
+        target_id,
+        path,
+        content,
+        msg_id,
+    })
+}
+
+fn reject_unexpected_fields(value: &Value, allowed_fields: &[&str]) -> FcpResult<()> {
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1005,
+        message: "QQ send input must be an object".into(),
+    })?;
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed_fields.contains(&field.as_str()))
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!(
+                "unsupported QQ send field `{field}`; supported fields are {}",
+                allowed_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1301,7 +1024,10 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, InstanceId, ZoneId};
+    use fcp_prelude::{
+        CapabilityConstraints, CapabilityToken, IdempotencyClass, InstanceId, RiskLevel,
+        SafetyTier, ZoneId,
+    };
 
     fn build_token(
         signing_key: &Ed25519SigningKey,
@@ -1349,17 +1075,23 @@ mod tests {
     }
 
     const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
-        (OP_SEND_CHANNEL, "messages_send_channel"),
-        (OP_SEND_GROUP, "messages_send_group"),
-        (OP_SEND_C2C, "messages_send_c2c"),
-        (OP_GET_GATEWAY, "gateway_get"),
-        (OP_EVENTS_NORMALIZE, "events_normalize"),
-        (OP_GATEWAY_PROJECT_EVENT, "gateway_project_event"),
-        (OP_HEALTH, "health"),
+        (OP_SEND_CHANNEL, OP_SEND_CHANNEL),
+        (OP_SEND_GROUP, OP_SEND_GROUP),
+        (OP_SEND_C2C, OP_SEND_C2C),
+        (OP_GET_GATEWAY, OP_GET_GATEWAY),
+        (OP_EVENTS_NORMALIZE, OP_EVENTS_NORMALIZE),
+        (OP_GATEWAY_PROJECT_EVENT, OP_GATEWAY_PROJECT_EVENT),
+        (OP_GATEWAY_DRAIN_EVENTS, OP_GATEWAY_DRAIN_EVENTS),
+        (OP_HEALTH, OP_HEALTH),
     ];
 
     fn qq_manifest() -> Result<toml::Value, String> {
         toml::from_str(MANIFEST_TOML).map_err(|err| format!("QQ manifest TOML should parse: {err}"))
+    }
+
+    fn strict_qq_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML)
+            .map_err(|err| format!("QQ manifest should parse with strict schema: {err}"))
     }
 
     fn manifest_operations(
@@ -1505,6 +1237,9 @@ mod tests {
             "reply_to": null,
             "has_attachments": false,
             "routing": "group",
+            "interaction_kind": "plain",
+            "command_name": null,
+            "approval_action": null,
             "raw": {
                 "id": "msg-1",
                 "content": "bot-openid deploy status?"
@@ -1522,15 +1257,35 @@ mod tests {
             "heartbeat_ack_count": 0,
             "reconnect_attempts": 0,
             "max_reconnect_attempts": 5,
+            "terminal_reconnect_failures": 0,
             "reconnect_backoff_ms": 1_000,
+            "max_reconnect_backoff_ms": 30_000,
             "queue_depth": 1,
             "max_queue_depth": 128,
+            "peer_queue_count": 1,
+            "largest_peer_queue_depth": 1,
+            "max_peer_queue_depth": 32,
             "dedupe_size": 1,
             "dedupe_window_size": 1_024,
+            "reply_reference_count": 1,
+            "max_reply_references": 128,
+            "known_reply_references": 0,
+            "unknown_reply_references": 0,
             "accepted_events": 1,
             "dropped_events": 0,
             "duplicate_events": 0,
             "stale_sequence_events": 0
+        })
+    }
+
+    fn sample_lifecycle_directive(action: &str, reason_code: &str) -> Value {
+        json!({
+            "action": action,
+            "reason_code": reason_code,
+            "resume_session_id": null,
+            "resume_sequence": 1,
+            "heartbeat_interval_ms": 45_000,
+            "reconnect_after_ms": null
         })
     }
 
@@ -1542,6 +1297,16 @@ mod tests {
             "sender_id": "member-1",
             "target_id": "group-1",
             "mentioned_bot": true
+        })
+    }
+
+    fn sample_queued_gateway_event() -> Value {
+        json!({
+            "topic": EVENT_QQ_MESSAGE_AUTHORIZED,
+            "sequence": 1,
+            "event_id": "evt-1",
+            "normalized": sample_normalized_event(),
+            "policy": sample_policy_decision()
         })
     }
 
@@ -1581,10 +1346,10 @@ mod tests {
     }
 
     #[test]
-    fn introspect_returns_seven_operations() {
+    fn introspect_returns_eight_operations() {
         let connector = QqConnector::new();
         let introspection = connector.introspect();
-        assert_eq!(introspection.operations.len(), 7);
+        assert_eq!(introspection.operations.len(), 8);
         assert_eq!(introspection.events.len(), 2);
     }
 
@@ -1597,21 +1362,76 @@ mod tests {
             .iter()
             .map(|op| op.id.as_str())
             .collect();
-        assert!(ids.contains(&"qq.messages.send_channel"));
-        assert!(ids.contains(&"qq.messages.send_group"));
-        assert!(ids.contains(&"qq.messages.send_c2c"));
-        assert!(ids.contains(&"qq.gateway.get"));
-        assert!(ids.contains(&"qq.health"));
-        assert!(ids.contains(&"qq.events.normalize"));
-        assert!(ids.contains(&"qq.gateway.project_event"));
+        assert_eq!(ids, OPERATION_ORDER.to_vec());
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_qq_manifest()?;
+        let operation_catalog = QqConnector::operations_info();
+        let catalog_ids: Vec<&str> = operation_catalog
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect();
+
+        assert_eq!(catalog_ids, OPERATION_ORDER.to_vec());
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+
+        for operation in operation_catalog {
+            let operation_id = operation.id.as_str();
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest should declare {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_ref(),
+                Some(&manifest_operation.description)
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                operation.ai_hints.when_to_use,
+                manifest_operation.ai_hints.when_to_use
+            );
+            assert_eq!(
+                operation.ai_hints.common_mistakes,
+                manifest_operation.ai_hints.common_mistakes
+            );
+            assert_eq!(
+                operation.ai_hints.examples,
+                manifest_operation.ai_hints.examples
+            );
+            assert_eq!(
+                operation.ai_hints.related,
+                manifest_operation.ai_hints.related
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should declare manifest network constraints"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]
     #[allow(clippy::too_many_lines)]
     fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let _strict_manifest = strict_qq_manifest()?;
         let manifest = qq_manifest()?;
         let operations = manifest_operations(&manifest)?;
-        let operation_catalog = QqConnector::operations();
+        let operation_catalog = QqConnector::operations_info();
 
         for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
             assert!(
@@ -1643,7 +1463,7 @@ mod tests {
             let _output_validator = validator_for(&operation.output_schema)?;
         }
 
-        let channel_input = operation_schema(&manifest, "messages_send_channel", "input_schema")?;
+        let channel_input = operation_schema(&manifest, OP_SEND_CHANNEL, "input_schema")?;
         assert_schema_accepts(
             &channel_input,
             &json!({"channel_id": "channel-1", "content": "hello", "msg_id": ""}),
@@ -1658,7 +1478,7 @@ mod tests {
             &json!({"channel_id": "channel-1", "content": "hello", "extra": true}),
         )?;
 
-        let group_input = operation_schema(&manifest, "messages_send_group", "input_schema")?;
+        let group_input = operation_schema(&manifest, OP_SEND_GROUP, "input_schema")?;
         assert_schema_accepts(
             &group_input,
             &json!({"group_openid": "group-1", "content": "hello"}),
@@ -1668,17 +1488,17 @@ mod tests {
             &json!({"group_openid": "group/1", "content": "hello"}),
         )?;
 
-        let c2c_input = operation_schema(&manifest, "messages_send_c2c", "input_schema")?;
+        let c2c_input = operation_schema(&manifest, OP_SEND_C2C, "input_schema")?;
         assert_schema_accepts(&c2c_input, &json!({"openid": "user-1", "content": "hello"}))?;
         assert_schema_rejects(&c2c_input, &json!({"openid": "user-1", "content": "   "}))?;
 
-        for operation_key in ["gateway_get", "health"] {
+        for operation_key in [OP_GET_GATEWAY, OP_HEALTH] {
             let input = operation_schema(&manifest, operation_key, "input_schema")?;
             assert_schema_accepts(&input, &json!({}))?;
             assert_schema_rejects(&input, &json!({"unexpected": true}))?;
         }
 
-        for operation_key in ["events_normalize", "gateway_project_event"] {
+        for operation_key in [OP_EVENTS_NORMALIZE, OP_GATEWAY_PROJECT_EVENT] {
             let input = operation_schema(&manifest, operation_key, "input_schema")?;
             assert_schema_accepts(&input, &json!({"event": sample_gateway_event()}))?;
             assert_schema_rejects(&input, &json!({}))?;
@@ -1687,11 +1507,14 @@ mod tests {
             assert_schema_rejects(&input, &json!({"event": {"op": 0}, "unexpected": true}))?;
         }
 
-        for operation_key in [
-            "messages_send_channel",
-            "messages_send_group",
-            "messages_send_c2c",
-        ] {
+        let drain_input = operation_schema(&manifest, OP_GATEWAY_DRAIN_EVENTS, "input_schema")?;
+        assert_schema_accepts(&drain_input, &json!({}))?;
+        assert_schema_accepts(&drain_input, &json!({"limit": 1}))?;
+        assert_schema_rejects(&drain_input, &json!({"limit": 0}))?;
+        assert_schema_rejects(&drain_input, &json!({"limit": 10001}))?;
+        assert_schema_rejects(&drain_input, &json!({"unexpected": true}))?;
+
+        for operation_key in [OP_SEND_CHANNEL, OP_SEND_GROUP, OP_SEND_C2C] {
             let output = operation_schema(&manifest, operation_key, "output_schema")?;
             assert_schema_accepts(
                 &output,
@@ -1700,11 +1523,11 @@ mod tests {
             assert_schema_rejects(&output, &json!([{"id": "msg-1"}]))?;
         }
 
-        let gateway_output = operation_schema(&manifest, "gateway_get", "output_schema")?;
+        let gateway_output = operation_schema(&manifest, OP_GET_GATEWAY, "output_schema")?;
         assert_schema_accepts(&gateway_output, &json!({"url": "wss://gateway.qq.com"}))?;
         assert_schema_rejects(&gateway_output, &json!({}))?;
 
-        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        let health_output = operation_schema(&manifest, OP_HEALTH, "output_schema")?;
         assert_schema_accepts(
             &health_output,
             &json!({
@@ -1724,12 +1547,12 @@ mod tests {
             }),
         )?;
 
-        let normalize_output = operation_schema(&manifest, "events_normalize", "output_schema")?;
+        let normalize_output = operation_schema(&manifest, OP_EVENTS_NORMALIZE, "output_schema")?;
         assert_schema_accepts(&normalize_output, &sample_normalized_event())?;
         assert_schema_rejects(&normalize_output, &json!({"routing": "group"}))?;
 
         let projection_output =
-            operation_schema(&manifest, "gateway_project_event", "output_schema")?;
+            operation_schema(&manifest, OP_GATEWAY_PROJECT_EVENT, "output_schema")?;
         assert_schema_accepts(
             &projection_output,
             &json!({
@@ -1740,7 +1563,8 @@ mod tests {
                 "event_id": "evt-1",
                 "normalized": sample_normalized_event(),
                 "policy": sample_policy_decision(),
-                "runtime": sample_runtime_snapshot()
+                "runtime": sample_runtime_snapshot(),
+                "lifecycle": sample_lifecycle_directive("drain_events", "accepted")
             }),
         )?;
         assert_schema_accepts(
@@ -1753,7 +1577,8 @@ mod tests {
                 "event_id": null,
                 "normalized": null,
                 "policy": null,
-                "runtime": sample_runtime_snapshot()
+                "runtime": sample_runtime_snapshot(),
+                "lifecycle": sample_lifecycle_directive("none", "heartbeat_ack")
             }),
         )?;
         assert_schema_rejects(
@@ -1766,6 +1591,27 @@ mod tests {
                 "event_id": null,
                 "normalized": null,
                 "policy": null,
+                "runtime": sample_runtime_snapshot(),
+                "lifecycle": sample_lifecycle_directive("none", "heartbeat_ack")
+            }),
+        )?;
+
+        let drain_output = operation_schema(&manifest, OP_GATEWAY_DRAIN_EVENTS, "output_schema")?;
+        assert_schema_accepts(
+            &drain_output,
+            &json!({
+                "drained_count": 1,
+                "remaining_count": 0,
+                "events": [sample_queued_gateway_event()],
+                "runtime": sample_runtime_snapshot()
+            }),
+        )?;
+        assert_schema_rejects(
+            &drain_output,
+            &json!({
+                "drained_count": 1,
+                "remaining_count": 0,
+                "events": [{"topic": EVENT_QQ_EVENT_DROPPED}],
                 "runtime": sample_runtime_snapshot()
             }),
         )?;
@@ -1778,13 +1624,17 @@ mod tests {
         let manifest = qq_manifest()?;
         let operations = manifest_operations(&manifest)?;
         let api_operations = [
-            "messages_send_channel",
-            "messages_send_group",
-            "messages_send_c2c",
-            "gateway_get",
-            "health",
+            OP_SEND_CHANNEL,
+            OP_SEND_GROUP,
+            OP_SEND_C2C,
+            OP_GET_GATEWAY,
+            OP_HEALTH,
         ];
-        let local_only_operations = ["events_normalize", "gateway_project_event"];
+        let local_only_operations = [
+            OP_EVENTS_NORMALIZE,
+            OP_GATEWAY_PROJECT_EVENT,
+            OP_GATEWAY_DRAIN_EVENTS,
+        ];
 
         for operation_key in api_operations {
             let constraints = operation_network_constraints(&manifest, operation_key)?;
@@ -2019,6 +1869,7 @@ mod tests {
         assert!(required_capability(OP_HEALTH).is_ok());
         assert!(required_capability(OP_EVENTS_NORMALIZE).is_ok());
         assert!(required_capability(OP_GATEWAY_PROJECT_EVENT).is_ok());
+        assert!(required_capability(OP_GATEWAY_DRAIN_EVENTS).is_ok());
     }
 
     #[test]
@@ -2091,6 +1942,36 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn simulate_send_channel_rejects_unsupported_passive_reply_field() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_MESSAGES_WRITE,
+                OP_SEND_CHANNEL,
+                json!({
+                    "channel_id": "channel-1",
+                    "content": "hello",
+                    "event_id": "evt-passive-reply"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("event_id")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn simulate_events_normalize_missing_event_denied() {
         let signing_key = Ed25519SigningKey::generate();
         let connector = ready_connector(&signing_key).await;
@@ -2146,6 +2027,36 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn simulate_gateway_drain_events_validates_limit() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let allowed = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_DRAIN_EVENTS,
+                json!({"limit": 10}),
+            ))
+            .await
+            .unwrap();
+        assert!(allowed.would_succeed);
+
+        let denied = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_DRAIN_EVENTS,
+                json!({"limit": 0}),
+            ))
+            .await
+            .unwrap();
+        assert!(!denied.would_succeed);
+        assert_eq!(denied.denial_code.as_deref(), Some("FCP-1003"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn simulate_gateway_project_event_rejects_malformed_dispatch() {
         let signing_key = Ed25519SigningKey::generate();
         let connector = ready_connector(&signing_key).await;
@@ -2162,6 +2073,33 @@ mod tests {
 
         assert!(!response.would_succeed);
         assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_gateway_project_event_rejects_malformed_control_envelope() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let oversized_event_id = "x".repeat(257);
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_PROJECT_EVENT,
+                json!({"event": {"op": 10, "id": oversized_event_id}}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+        assert!(
+            response.failure_reason.as_deref().is_some_and(|reason| {
+                reason.contains("gateway event id exceeds parser bounds")
+            }),
+            "unexpected simulate denial reason: {:?}",
+            response.failure_reason
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -2243,6 +2181,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_send_message_input_rejects_rich_payload_fields() {
+        let err = parse_send_message_input(
+            &serde_json::json!({
+                "openid": "user-42",
+                "content": "hello",
+                "media": {"file_id": "media-1"}
+            }),
+            &QQ_SEND_C2C_SPEC,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("media"));
+    }
+
+    #[test]
+    fn reject_unexpected_fields_requires_object() {
+        assert!(reject_unexpected_fields(&serde_json::json!([]), CHANNEL_SEND_FIELDS).is_err());
+    }
+
+    #[test]
     fn optional_string_rejects_non_string_values() {
         let err = optional_string(&serde_json::json!({"msg_id": 7}), "msg_id").unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
@@ -2285,7 +2244,7 @@ mod tests {
 
     #[test]
     fn operations_have_correct_capabilities() {
-        let ops = QqConnector::operations();
+        let ops = QqConnector::operations_info();
         let send_ops: Vec<_> = ops
             .iter()
             .filter(|op| op.id.as_str().starts_with("qq.messages."))
@@ -2309,7 +2268,7 @@ mod tests {
 
     #[test]
     fn operations_have_agent_hints() {
-        let ops = QqConnector::operations();
+        let ops = QqConnector::operations_info();
         for op in &ops {
             assert!(!op.ai_hints.when_to_use.is_empty());
             assert!(!op.ai_hints.common_mistakes.is_empty());
@@ -2326,7 +2285,7 @@ mod tests {
 
     #[test]
     fn events_normalize_operation_has_correct_properties() {
-        let ops = QqConnector::operations();
+        let ops = QqConnector::operations_info();
         let normalize_op = ops
             .iter()
             .find(|op| op.id.as_str() == OP_EVENTS_NORMALIZE)

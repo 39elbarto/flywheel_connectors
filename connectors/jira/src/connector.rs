@@ -14,7 +14,7 @@ use chrono::{DateTime, FixedOffset};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use reqwest::Url;
@@ -267,6 +267,12 @@ impl JiraConnector {
             session_id: None,
             zone_dir: None,
         }
+    }
+
+    /// Return the connector instance ID used for capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {
@@ -3798,7 +3804,11 @@ mod tests {
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+        instance_id: &InstanceId,
+    ) -> CapabilityToken {
         let cap = match op {
             "jira.delete_issue" | "jira.worklog.delete" | "jira.automation.rule.delete" => {
                 "jira.delete"
@@ -3833,6 +3843,7 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .target_instance(instance_id.as_str())
             .try_constraints_cbor(&constraints_cbor)
             .unwrap()
             .sign(signing_key)
@@ -3892,7 +3903,7 @@ mod tests {
     async fn test_invoke_without_config() {
         let mut connector = JiraConnector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "jira.get_issue");
+        let token = generate_valid_token(&signing_key, "jira.get_issue", connector.instance_id());
         let result = connector
             .handle_invoke(json!({
                 "operation": "jira.get_issue",
@@ -3918,7 +3929,7 @@ mod tests {
             .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "jira.get_issue");
+        let token = generate_valid_token(&signing_key, "jira.get_issue", connector.instance_id());
         let result = connector
             .handle_invoke(json!({
                 "operation": "jira.get_issue",
@@ -3958,7 +3969,8 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "jira.create_issue");
+        let token =
+            generate_valid_token(&signing_key, "jira.create_issue", connector.instance_id());
         let result = connector
             .handle_invoke(json!({
                 "operation": "jira.create_issue",

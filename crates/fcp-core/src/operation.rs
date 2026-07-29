@@ -26,6 +26,10 @@
 //! execution lease fencing token. This prevents zombie lease holders from executing
 //! operations after losing the lease.
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope,
+    signing_bytes_for_canonical_payload,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -324,6 +328,20 @@ impl OperationReceipt {
         bytes.extend_from_slice(&self.executed_at.to_le_bytes());
         append_len_prefixed_bytes(&mut bytes, self.executed_by.as_str().as_bytes());
         bytes
+    }
+}
+
+/// Hybrid signed operation-receipt envelope.
+pub type HybridSignedOperationReceipt = SignedEnvelope<OperationReceipt>;
+
+impl HybridSignable for OperationReceipt {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::OperationReceipt;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        Ok(signing_bytes_for_canonical_payload(
+            Self::OBJECT_KIND,
+            &self.signable_bytes(),
+        ))
     }
 }
 

@@ -143,7 +143,7 @@ impl TwitterError {
     }
 }
 
-impl fcp_sdk::migration::ConnectorErrorMapping for TwitterError {
+impl fcp_sdk::ConnectorErrorMapping for TwitterError {
     fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
         use fcp_async_core::AsyncError;
         match error {
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_timeout() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TwitterError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
         assert!(matches!(err, TwitterError::Api { status: 408, .. }));
         assert!(err.to_string().contains("5000"));
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_cancelled() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TwitterError::from_async_error(AsyncError::Cancelled);
         assert!(matches!(err, TwitterError::Stream(_)));
     }
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_channel_closed() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TwitterError::from_async_error(AsyncError::ChannelClosed);
         assert!(matches!(err, TwitterError::Stream(_)));
         assert!(err.is_retryable());
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_to_fcp_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TwitterError::NotConfigured;
         let fcp = ConnectorErrorMapping::to_fcp_error(&err);
         assert!(matches!(fcp, FcpError::NotConfigured));
@@ -659,14 +659,14 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_is_retryable_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TwitterError::RateLimited { retry_after: 10 };
         assert!(ConnectorErrorMapping::is_retryable(&err));
     }
 
     #[test]
     fn connector_error_mapping_retry_after_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TwitterError::RateLimited { retry_after: 30 };
         assert_eq!(
             ConnectorErrorMapping::retry_after(&err),

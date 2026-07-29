@@ -48,7 +48,7 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google-admin-reports`, while runtime `BaseConnector` and requests use `google-admin-reports`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-admin-reports-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest `interface_hash` is still `pending`.
 - Manifest optional capabilities are empty even though operation entries and runtime introspection use `admin.reports.audit.read` and `admin.reports.usage.read`.
 - Manifest input schema for `admin.list_activities` requires only `application_name`, while runtime requires both `user_key` and `application_name`.
@@ -56,7 +56,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Runtime `handle_shutdown` shuts down the client runtime but does not clear config, client, verifier, session, or configured/handshaken flags.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align connector IDs, manifest hash/interface hash, optional capabilities, required input schemas, and shutdown state semantics.
+A follow-up parity bead should align connector IDs, interface hash, optional capabilities, required input schemas, and shutdown state semantics.
 
 ## First-Slice Scope
 

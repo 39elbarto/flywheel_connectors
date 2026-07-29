@@ -1685,6 +1685,7 @@ fn twilio_full_manifest_parses_with_all_operations() {
         "twilio.hangup_call",
         "twilio.list_calls",
         "twilio.generate_twiml",
+        "twilio.media_stream.process_events",
         "twilio.list_recordings",
         "twilio.download_recording",
         "twilio.download_media",
@@ -2006,10 +2007,12 @@ fn slack_full_manifest_parses_with_all_operations() {
     let expected_ops = [
         "slack.post_message",
         "slack.reply_thread",
+        "slack.update_progress_draft",
         "slack.get_channel_history",
         "slack.search_messages",
         "slack.list_channels",
         "slack.get_user_info",
+        "slack.handle_events_api",
         "slack.upload_file",
         "slack.add_reaction",
         "slack.set_channel_topic",
@@ -2686,6 +2689,7 @@ fn youtube_full_manifest_parses_with_all_operations() {
         "youtube.post_comment",
         "youtube.get_captions",
         "youtube.get_caption_transcript",
+        "youtube.get_transcript",
         "youtube.upload_caption",
         "youtube.get_analytics",
         "youtube.upload_video",
@@ -3691,6 +3695,9 @@ fn anthropic_full_manifest_parses_with_all_operations() {
     let expected_ops = [
         "anthropic.chat",
         "anthropic.get_usage",
+        "anthropic.auth.list_methods",
+        "anthropic.auth.refresh_oauth",
+        "anthropic.models.normalize",
         "anthropic.message",
         "anthropic.message.stream",
     ];
@@ -3822,6 +3829,7 @@ fn microsoft365_full_manifest_parses_with_all_operations() {
         "m365.subscriptions.create",
         "m365.subscriptions.delete",
         "m365.subscriptions.renew",
+        "m365.notifications.ingest",
         "m365.tasks.create_task",
         "m365.tasks.list_task_lists",
         "m365.tasks.list_tasks",
@@ -3842,7 +3850,7 @@ fn microsoft365_full_manifest_parses_with_all_operations() {
     println!("MICROSOFT365_INTERFACE_HASH={hash}");
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 15);
+    assert_eq!(pools.pools.len(), 16);
 
     let op_pools = &pools.operation_pools;
     assert!(op_pools.contains_key("m365.mail.search_messages"));
@@ -4061,7 +4069,7 @@ fn telegram_manifest_parses_as_valid_toml_with_expected_structure() {
         Some("fcp.telegram")
     );
 
-    // Verify 4 operations
+    // Verify all operations
     let provides = parsed.get("provides").expect("provides section");
     let operations = provides
         .get("operations")
@@ -4073,6 +4081,11 @@ fn telegram_manifest_parses_as_valid_toml_with_expected_structure() {
         "telegram.send_media",
         "telegram.get_file",
         "telegram.answer_callback_query",
+        "telegram.send_chat_action",
+        "telegram.set_message_reaction",
+        "telegram.set_webhook",
+        "telegram.delete_webhook",
+        "telegram.get_webhook_info",
         "telegram.ingest_webhook_update",
     ];
     for op_name in &expected_ops {
@@ -5467,6 +5480,7 @@ fn asana_full_manifest_parses_with_all_operations() {
     let expected_ops = [
         "asana.projects.list",
         "asana.tasks.create",
+        "asana.tasks.update",
         "asana.tasks.delete",
         "asana.tasks.list",
         "asana.workspaces.list",
@@ -5661,6 +5675,7 @@ fn amplitude_full_manifest_parses_with_all_operations() {
     let expected_ops = [
         "amplitude.charts.query",
         "amplitude.cohorts.list",
+        "amplitude.health",
         "amplitude.events.export",
     ];
     for op_name in &expected_ops {
@@ -6039,6 +6054,8 @@ fn mcp_bridge_full_manifest_parses_with_all_operations() {
         "mcp.prompts.list",
         "mcp.resources.list",
         "mcp.resources.read",
+        "mcp.sampling.handle",
+        "mcp.server.metrics",
         "mcp.tools.call",
         "mcp.tools.list",
     ];
@@ -6048,7 +6065,7 @@ fn mcp_bridge_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 4);
+    assert_eq!(pools.pools.len(), 6);
 }
 
 // =============================================================================
@@ -6227,6 +6244,7 @@ fn posthog_full_manifest_parses_with_all_operations() {
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "posthog.events.query",
+        "posthog.events.capture",
         "posthog.feature_flags.list",
         "posthog.insights.list",
     ];
@@ -6236,7 +6254,7 @@ fn posthog_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 // =============================================================================
@@ -6419,6 +6437,7 @@ fn webhook_receiver_full_manifest_parses_with_all_operations() {
         "webhook.endpoints.delete",
         "webhook.endpoints.list",
         "webhook.endpoints.rotate_secret",
+        "webhook.events.ingest",
         "webhook.events.recent",
     ];
     for op_name in &expected_ops {
@@ -6427,7 +6446,7 @@ fn webhook_receiver_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 // =============================================================================

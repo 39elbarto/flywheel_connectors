@@ -11,8 +11,8 @@
 //!    `text` and `error` constructors are how connectors typically
 //!    emit responses.
 //! 3. **`McpToolAnnotations`** — optional metadata block attached
-//!    to tool listings (risk_level, safety_tier, idempotency,
-//!    capability, read_only, destructive). Skip-serializing-if-None
+//!    to tool listings (`risk_level`, `safety_tier`, idempotency,
+//!    capability, `read_only`, destructive). Skip-serializing-if-None
 //!    on every field for forward compat.
 //!
 //! Properties pinned (NORMATIVE):
@@ -210,7 +210,7 @@ fn tool_call_response_with_content_const_fn_preserves_inputs() {
         McpContentBlock::text("b"),
         McpContentBlock::resource("file:///c"),
     ];
-    let r = McpToolCallResponse::with_content(blocks.clone(), false);
+    let r = McpToolCallResponse::with_content(blocks, false);
     assert_eq!(r.content.len(), 3);
     assert!(!r.is_error);
 }

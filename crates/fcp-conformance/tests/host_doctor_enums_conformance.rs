@@ -2,12 +2,12 @@
 //!
 //! `fcp doctor` is the operator self-check primitive. Four enums
 //! govern its output JSON, with HETEROGENEOUS rename rules across
-//! the same module — drift in any one (e.g., flipping OverallStatus
+//! the same module — drift in any one (e.g., flipping `OverallStatus`
 //! from UPPERCASE to lowercase) silently breaks every dashboard
 //! filter and alert rule:
 //!
 //! - `OverallStatus` — UPPERCASE (`OK` / `WARN` / `FAIL`)
-//! - `FreshnessLevel` — snake_case (`fresh` / `stale` / `too_stale`
+//! - `FreshnessLevel` — `snake_case` (`fresh` / `stale` / `too_stale`
 //!   / `missing`) with `Default::default() == Fresh`
 //! - `CheckStatus` — UPPERCASE (`OK` / `WARN` / `FAIL`)
 //! - `CheckSeverity` — lowercase (`info` / `warning` / `critical`)
@@ -17,10 +17,10 @@
 //! 1. Each enum's variant set with the exact wire string for serde.
 //! 2. Mixed-case / unknown / empty rejection for each.
 //! 3. `FreshnessLevel::default == Fresh`.
-//! 4. Copy + PartialEq + variant distinctness.
-//! 5. **Cross-enum hetero-rename invariant**: OverallStatus and
-//!    CheckStatus use UPPERCASE while CheckSeverity uses lowercase
-//!    and FreshnessLevel uses snake_case — pin so a "tidy-up" PR
+//! 4. Copy + `PartialEq` + variant distinctness.
+//! 5. **Cross-enum hetero-rename invariant**: `OverallStatus` and
+//!    `CheckStatus` use UPPERCASE while `CheckSeverity` uses lowercase
+//!    and `FreshnessLevel` uses `snake_case` — pin so a "tidy-up" PR
 //!    doesn't homogenise them and break every consumer.
 
 use fcp_host::{CheckSeverity, CheckStatus, FreshnessLevel, OverallStatus};

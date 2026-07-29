@@ -91,7 +91,7 @@ Important runtime truths the contract preserves:
 - Runtime `simulate` uses the FCP `SimulateRequest` shape and reads operation input from `input`.
 - Runtime `invoke` and `simulate` require a bound capability token for the operation capability.
 - Runtime capability verification currently passes an empty resource URI list for Twilio operations.
-- Runtime `handshake()` installs a `CapabilityVerifier`, grants every requested capability unfiltered, and returns hard-coded `manifest_hash = "sha256:twilio-connector-v1"`.
+- Runtime `handshake()` installs a `CapabilityVerifier`, grants every requested capability unfiltered, and returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime event caps report streaming support, no replay, no ack requirement, and a minimum buffer of 50 events.
 - Runtime `shutdown()` clears config, client, verifier, session, and base configured/handshaken flags.
 
@@ -161,7 +161,7 @@ This README documents runtime truth and keeps current drift visible:
 - Twilio documents Basic authentication and recommends API keys for production. Runtime direct mode uses Account SID plus auth token; there is no API-key-specific configuration surface.
 - The manifest and runtime both expose a broad operation catalog, but runtime introspection does not include provider approval metadata even for message sends, calls, DM-like WhatsApp sends, Verify sends, and destructive room/call actions.
 - Handshake grants every requested capability unfiltered. It does not intersect requested capabilities with the actual Twilio catalog.
-- Handshake returns a hard-coded manifest hash instead of hashing the checked-in manifest.
+- Handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime `invoke` verifies capability tokens but does not bind resource URIs such as phone numbers, message SIDs, call SIDs, Conversation SIDs, or room SIDs.
 - Runtime `simulate` validates required inputs and capability token binding, but it does not model provider rate limits, carrier acceptance, account balance, trial-account recipient restrictions, WhatsApp template approval, Verify service state, Video room existence, or webhook source IP policy.
 - The configured `base_url` does not retarget the Conversations, Verify, or Video service bases in normal configure flow.
@@ -183,7 +183,7 @@ The current Twilio README slice documents the existing runtime surface:
 - Local health, doctor, self-check, introspection, simulate, invoke, and shutdown behavior
 - Capability-token verification and its current empty resource-URI binding
 - Webhook signature, replay, inbound policy, body-size, timeout, and parsing behavior
-- Runtime/manifest/provider-doc drift around auth modes, manifest hash, approval metadata, provider constraints, base URLs, and live checks
+- Runtime/manifest/provider-doc drift around auth modes, approval metadata, provider constraints, base URLs, and live checks
 - Existing integration-test orientation through WireMock and local webhook parsing paths
 
 ## Auth And Zone Boundary

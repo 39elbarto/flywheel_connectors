@@ -10,7 +10,7 @@
 //!
 //! NORMATIVE properties pinned:
 //!
-//! 1. **`HealthState::as_str` snake_case mapping** for all 5 variants.
+//! 1. **`HealthState::as_str` `snake_case` mapping** for all 5 variants.
 //! 2. **`ConnectorHealth` constructors** produce the right variant.
 //! 3. **`is_healthy` only on `Healthy`**; `is_available` covers
 //!    `Healthy + Degraded` (the documented "operational" set) but

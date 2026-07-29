@@ -14,16 +14,16 @@
 //!
 //!   1. **Display format** — UUID lowercase-hyphenated 8-4-4-4-12.
 //!   2. **Display → parse round-trip** preserves Eq + Hash.
-//!   3. **from_uuid → as_uuid** identity.
+//!   3. **`from_uuid` → `as_uuid`** identity.
 //!   4. **Case-insensitive parse** — uppercase, lowercase, and
 //!      mixed-case UUID strings all parse to the same value.
 //!   5. **Malformed input rejected** — non-UUID strings, wrong
 //!      length, non-hex characters.
-//!   6. **Equality across construction paths**: new / from_uuid /
+//!   6. **Equality across construction paths**: new / `from_uuid` /
 //!      parse / clone / Display→parse.
 //!   7. **Debug != Display**: Debug wraps the value as
 //!      `CredentialId("<uuid>")`.
-//!   8. **HashMap key correctness** across re-parsed values.
+//!   8. **`HashMap` key correctness** across re-parsed values.
 //!   9. **Serde JSON round-trip** via `#[serde(transparent)]` —
 //!      JSON form is the quoted UUID string.
 

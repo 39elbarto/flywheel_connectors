@@ -1,13 +1,14 @@
 //! FCP `Snowflake` Connector implementation.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
-    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
-    StepId,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, Introspection,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, SelfCheckReport, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,20 @@ use crate::{
     client::{SnowflakeAuth, SnowflakeClient},
     error::SnowflakeError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OP_DATABASES_LIST: &str = "snowflake.databases.list";
+const OP_WAREHOUSES_LIST: &str = "snowflake.warehouses.list";
+const OP_SQL_QUERY: &str = "snowflake.sql.query";
+const OP_SQL_EXECUTE: &str = "snowflake.sql.execute";
+const OP_TABLES_LIST: &str = "snowflake.tables.list";
+const OPERATION_ORDER: &[&str] = &[
+    OP_DATABASES_LIST,
+    OP_WAREHOUSES_LIST,
+    OP_SQL_QUERY,
+    OP_SQL_EXECUTE,
+    OP_TABLES_LIST,
+];
 
 /// Authentication mode for the `Snowflake` connector.
 #[derive(Debug, Clone)]
@@ -258,124 +273,7 @@ impl SnowflakeConnector {
     #[must_use]
     pub fn introspection() -> Introspection {
         Introspection {
-            operations: vec![
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.databases.list"),
-                    summary: "List databases".into(),
-                    input_schema: json!({"type": "object", "required": []}),
-                    output_schema: json!({"type": "object", "required": ["databases"], "properties": {"databases": {"type": "array"}}}),
-                    capability: CapabilityId::from_static("snowflake.databases.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List available Snowflake databases.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r"{}".into()],
-                        related: vec![
-                            CapabilityId::from_static("snowflake.sql.query"),
-                            CapabilityId::from_static("snowflake.warehouses.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.warehouses.list"),
-                    summary: "List available warehouses".into(),
-                    input_schema: json!({"type": "object", "required": []}),
-                    output_schema: json!({"type": "object", "required": ["warehouses"], "properties": {"warehouses": {"type": "array"}}}),
-                    capability: CapabilityId::from_static("snowflake.warehouses.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List available Snowflake warehouses.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r"{}".into()],
-                        related: vec![CapabilityId::from_static("snowflake.sql.query")],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.sql.query"),
-                    summary: "Execute a SQL query".into(),
-                    input_schema: json!({"type": "object", "required": ["statement"], "properties": {"statement": {"type": "string", "description": "SQL statement to execute"}, "warehouse": {"type": "string"}, "database": {"type": "string"}, "schema": {"type": "string"}}}),
-                    output_schema: json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
-                    capability: CapabilityId::from_static("snowflake.sql.read"),
-                    risk_level: RiskLevel::Medium,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Risky,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "Execute a SQL query against Snowflake.".into(),
-                        common_mistakes: vec![
-                            "Running unbounded queries without LIMIT.".into(),
-                            "Forgetting to specify warehouse.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"statement": "SELECT * FROM orders LIMIT 100", "warehouse": "COMPUTE_WH", "database": "ANALYTICS"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("snowflake.databases.list"),
-                            CapabilityId::from_static("snowflake.warehouses.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.sql.execute"),
-                    summary: "Execute a SQL statement (DDL/DML)".into(),
-                    input_schema: json!({"type": "object", "required": ["statement"], "properties": {"statement": {"type": "string", "description": "SQL DDL/DML statement"}, "warehouse": {"type": "string"}, "database": {"type": "string"}}}),
-                    output_schema: json!({"type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}),
-                    capability: CapabilityId::from_static("snowflake.sql.write"),
-                    risk_level: RiskLevel::High,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Dangerous,
-                    idempotency: IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "Execute DDL/DML statements (CREATE, INSERT, UPDATE, DELETE, DROP).".into(),
-                        common_mistakes: vec![
-                            "Running DROP without confirmation.".into(),
-                            "Forgetting to specify the correct database context.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"statement": "CREATE TABLE test (id INT, name VARCHAR)", "warehouse": "COMPUTE_WH", "database": "DEV"}"#.into(),
-                        ],
-                        related: vec![CapabilityId::from_static("snowflake.sql.query")],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("snowflake.tables.list"),
-                    summary: "List tables in a database/schema".into(),
-                    input_schema: json!({"type": "object", "required": ["database"], "properties": {"database": {"type": "string"}, "schema": {"type": "string"}}}),
-                    output_schema: json!({"type": "object", "required": ["tables"], "properties": {"tables": {"type": "array"}}}),
-                    capability: CapabilityId::from_static("snowflake.databases.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List tables in a database, optionally filtered by schema.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"database": "ANALYTICS", "schema": "PUBLIC"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("snowflake.databases.list"),
-                            CapabilityId::from_static("snowflake.sql.query"),
-                        ],
-                    },
-                },
-            ],
+            operations: typed_operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -867,48 +765,57 @@ fn is_local_test_host(host: &str) -> bool {
 
 /// Build the operations info for introspection.
 fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "snowflake.databases.list",
-            "summary": "List databases",
-            "capability": "snowflake.databases.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "snowflake.warehouses.list",
-            "summary": "List available warehouses",
-            "capability": "snowflake.warehouses.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "snowflake.sql.query",
-            "summary": "Execute a SQL query",
-            "capability": "snowflake.sql.read",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "strict",
-        },
-        {
-            "id": "snowflake.sql.execute",
-            "summary": "Execute a SQL statement (DDL/DML)",
-            "capability": "snowflake.sql.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "none",
-        },
-        {
-            "id": "snowflake.tables.list",
-            "summary": "List tables in a database/schema",
-            "capability": "snowflake.databases.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-    ])
+    static OPERATIONS: OnceLock<serde_json::Value> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| serde_json::to_value(typed_operations_info()).unwrap_or_else(|_| json!([])))
+        .clone()
+}
+
+fn typed_operations_info() -> Vec<OperationInfo> {
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Snowflake manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: Some(ApprovalMode::from(operation.requires_approval)),
+    }
 }
 
 #[cfg(test)]
@@ -1135,6 +1042,110 @@ mod tests {
     }
 
     #[test]
+    fn strict_snowflake_manifest() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        assert_eq!(manifest.connector.id.as_ref(), "fcp.snowflake");
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+        assert_eq!(
+            manifest.manifest.interface_hash,
+            manifest.compute_interface_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        for (index, operation) in operations.into_iter().enumerate() {
+            assert_eq!(operation.id.as_ref(), OPERATION_ORDER[index]);
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should exist in manifest");
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.ai_hints.when_to_use.as_str(),
+                manifest_operation.ai_hints.when_to_use.as_str()
+            );
+            assert_eq!(
+                &operation.ai_hints.common_mistakes,
+                &manifest_operation.ai_hints.common_mistakes
+            );
+            assert_eq!(
+                &operation.ai_hints.examples,
+                &manifest_operation.ai_hints.examples
+            );
+            let actual_related: Vec<&str> = operation
+                .ai_hints
+                .related
+                .iter()
+                .map(|capability| capability.as_ref())
+                .collect();
+            let expected_related: Vec<&str> = manifest_operation
+                .ai_hints
+                .related
+                .iter()
+                .map(|capability| capability.as_ref())
+                .collect();
+            assert_eq!(actual_related, expected_related);
+
+            let actual_rate_limit = operation.rate_limit.as_ref().map(|rate_limit| {
+                (
+                    rate_limit.max,
+                    rate_limit.per_ms,
+                    rate_limit.burst,
+                    rate_limit.scope.as_deref(),
+                    rate_limit.pool_name.as_deref(),
+                )
+            });
+            let expected_rate_limit = manifest_operation.rate_limit.as_ref().map(|rate_limit| {
+                let rate_limit = &rate_limit.0;
+                (
+                    rate_limit.max,
+                    rate_limit.per_ms,
+                    rate_limit.burst,
+                    rate_limit.scope.as_deref(),
+                    rate_limit.pool_name.as_deref(),
+                )
+            });
+            assert_eq!(actual_rate_limit, expected_rate_limit);
+            assert_eq!(
+                operation.requires_approval,
+                Some(ApprovalMode::from(manifest_operation.requires_approval))
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_schema_is_the_runtime_introspection_schema() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should exist in manifest");
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+        }
+    }
+
+    #[test]
     fn operations_all_have_required_fields() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
@@ -1237,6 +1248,7 @@ mod tests {
             .unwrap();
         assert_eq!(exec_op["safety_tier"], "dangerous");
         assert_eq!(exec_op["risk_level"], "high");
+        assert_eq!(exec_op["requires_approval"], "interactive");
     }
 
     #[test]

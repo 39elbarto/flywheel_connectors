@@ -41,7 +41,7 @@ fn signal_schema_operation_event_and_error_contracts_are_advertised() {
                 id: OP_SEND_MESSAGE,
                 capability: CAP_SEND,
                 required_input_fields: &["recipients", "message"],
-                output_fields: &["timestamp"],
+                output_fields: &["timestamp", "coordination"],
             },
             OperationContract {
                 id: OP_RECEIVE_MESSAGES,
@@ -146,48 +146,54 @@ fn signal_schema_operation_event_and_error_contracts_are_advertised() {
 fn signal_advertises_full_operation_matrix_with_user_facing_metadata() {
     let connector = SignalConnector::new();
     let introspection = connector.introspect();
-    let expected = [
+    let expected: [(
+        &str,
+        &str,
+        SafetyTier,
+        IdempotencyClass,
+        Option<ApprovalMode>,
+    ); 6] = [
         (
             OP_SEND_MESSAGE,
             CAP_SEND,
             SafetyTier::Risky,
             IdempotencyClass::None,
-            ApprovalMode::None,
+            None,
         ),
         (
             OP_RECEIVE_MESSAGES,
             CAP_READ,
             SafetyTier::Safe,
             IdempotencyClass::None,
-            ApprovalMode::None,
+            None,
         ),
         (
             OP_LIST_GROUPS,
             CAP_READ,
             SafetyTier::Safe,
             IdempotencyClass::Strict,
-            ApprovalMode::None,
+            None,
         ),
         (
             OP_GET_GROUP,
             CAP_READ,
             SafetyTier::Safe,
             IdempotencyClass::Strict,
-            ApprovalMode::None,
+            None,
         ),
         (
             OP_GET_IDENTITY,
             CAP_READ,
             SafetyTier::Safe,
             IdempotencyClass::Strict,
-            ApprovalMode::None,
+            None,
         ),
         (
             OP_TRUST_IDENTITY,
             CAP_ADMIN,
             SafetyTier::Dangerous,
             IdempotencyClass::BestEffort,
-            ApprovalMode::Interactive,
+            Some(ApprovalMode::Interactive),
         ),
     ];
 
@@ -212,8 +218,7 @@ fn signal_advertises_full_operation_matrix_with_user_facing_metadata() {
             "{operation_id} idempotency drifted"
         );
         assert_eq!(
-            operation.requires_approval,
-            Some(approval),
+            operation.requires_approval, approval,
             "{operation_id} approval policy drifted"
         );
         assert!(

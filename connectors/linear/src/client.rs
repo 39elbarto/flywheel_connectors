@@ -4,9 +4,11 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, header};
 use tracing::debug;
 
@@ -130,7 +132,7 @@ impl LinearClient {
     /// without any side effects.
     pub async fn health_check(&self) -> LinearResult<()> {
         let query = r"query { viewer { id } }";
-        let _data = self.execute_graphql(query, None).await?;
+        let _data = self.execute_graphql(query, None, true).await?;
         Ok(())
     }
 
@@ -169,7 +171,10 @@ impl LinearClient {
             "teamId": team_id,
         });
         if let Some(desc) = description {
-            variables["description"] = serde_json::Value::String(desc.into());
+            variables.as_object_mut().unwrap().insert(
+                "description".to_string(),
+                serde_json::Value::String(desc.into()),
+            );
         }
 
         let query = r"
@@ -188,7 +193,9 @@ impl LinearClient {
             }
         ";
 
-        let data = self.execute_graphql(query, Some(variables)).await?;
+        // NOT replay-safe: `issueCreate` mutation — a replay files a
+        // second issue. Linear has no idempotency-key header.
+        let data = self.execute_graphql(query, Some(variables), false).await?;
         let payload: IssueCreatePayload = serde_json::from_value(data["issueCreate"].clone())?;
 
         payload.issue.ok_or(LinearError::Api {
@@ -213,7 +220,7 @@ impl LinearClient {
         ";
 
         let variables = serde_json::json!({ "id": issue_id });
-        let data = self.execute_graphql(query, Some(variables)).await?;
+        let data = self.execute_graphql(query, Some(variables), true).await?;
 
         if data["issue"].is_null() {
             return Err(LinearError::NotFound {
@@ -264,7 +271,9 @@ impl LinearClient {
             "input": serde_json::Value::Object(input),
         });
 
-        let data = self.execute_graphql(query, Some(variables)).await?;
+        // Replay-safe: `issueUpdate` sets named fields to named values, so
+        // applying it twice converges on the same issue.
+        let data = self.execute_graphql(query, Some(variables), true).await?;
         let payload: IssueUpdatePayload = serde_json::from_value(data["issueUpdate"].clone())?;
 
         payload.issue.ok_or(LinearError::Api {
@@ -291,7 +300,7 @@ impl LinearClient {
         ";
 
         let variables = serde_json::json!({ "query": query_text });
-        let data = self.execute_graphql(query, Some(variables)).await?;
+        let data = self.execute_graphql(query, Some(variables), true).await?;
 
         let nodes = data["searchIssues"]["nodes"]
             .as_array()
@@ -318,7 +327,7 @@ impl LinearClient {
             }
         ";
 
-        let data = self.execute_graphql(query, None).await?;
+        let data = self.execute_graphql(query, None, true).await?;
 
         let nodes = data["teams"]["nodes"]
             .as_array()
@@ -348,7 +357,7 @@ impl LinearClient {
         ";
 
         let variables = serde_json::json!({ "teamId": team_id });
-        let data = self.execute_graphql(query, Some(variables)).await?;
+        let data = self.execute_graphql(query, Some(variables), true).await?;
 
         if data["team"].is_null() {
             return Err(LinearError::NotFound {
@@ -393,7 +402,9 @@ impl LinearClient {
             "body": body,
         });
 
-        let data = self.execute_graphql(query, Some(variables)).await?;
+        // NOT replay-safe: `commentCreate` mutation — a replay posts a
+        // second comment on the issue.
+        let data = self.execute_graphql(query, Some(variables), false).await?;
         let payload: CommentCreatePayload = serde_json::from_value(data["commentCreate"].clone())?;
 
         payload.comment.ok_or(LinearError::Api {
@@ -414,7 +425,7 @@ impl LinearClient {
             }
         ";
 
-        let data = self.execute_graphql(query, None).await?;
+        let data = self.execute_graphql(query, None, true).await?;
 
         let nodes = data["projects"]["nodes"]
             .as_array()
@@ -431,10 +442,26 @@ impl LinearClient {
 
     // ── Internal GraphQL helpers ─────────────────────────────────
 
+    /// Execute a GraphQL document against Linear's single endpoint.
+    ///
+    /// `replay_safe` states whether repeating this document can duplicate a
+    /// side effect (br-kxd3e). It has to be supplied per call because Linear
+    /// speaks GraphQL: queries and mutations travel over the SAME `POST
+    /// /graphql` request, so the HTTP verb carries no information about
+    /// whether a replay is safe. Deciding it here rather than in the helper is
+    /// the whole point — a mutation added later cannot inherit a query's
+    /// retry behaviour by accident.
+    ///
+    /// Linear has no idempotency-key header. `issueCreate` and `commentCreate`
+    /// do accept a client-supplied UUID `id`, which would make those retries
+    /// genuinely safe rather than merely refused — recorded as a follow-up on
+    /// the bead rather than done blind, because it needs Linear's real
+    /// duplicate-id error shape to handle correctly.
     async fn execute_graphql(
         &self,
         query: &str,
         variables: Option<serde_json::Value>,
+        replay_safe: bool,
     ) -> LinearResult<serde_json::Value> {
         let request = GraphQLRequest {
             query: query.to_string(),
@@ -448,7 +475,7 @@ impl LinearClient {
             let request = &request;
             let retry_ctx = retry_ctx.clone();
             async move {
-                debug!(attempt, api_url = %self.api_url, "GraphQL request");
+                debug!(attempt, api_url = %redact_url(&self.api_url), "GraphQL request");
 
                 let builder = self
                     .http
@@ -490,13 +517,20 @@ impl LinearClient {
                         }
 
                         if status.is_server_error() {
-                            return AttemptOutcome::Retryable {
-                                error: LinearError::Api {
+                            // br-kxd3e: a 5xx means Linear RECEIVED the
+                            // document. For a mutation that means the issue or
+                            // comment may already exist. The 429 arm above is
+                            // deliberately ahead of this one: a rate limit was
+                            // refused WITHOUT executing, so it stays retryable
+                            // for mutations too.
+                            return AttemptOutcome::retryable_if_replayable(
+                                LinearError::Api {
                                     message: format!("Server error: {status}"),
                                     status_code: Some(status.as_u16()),
                                 },
-                                retry_after: None,
-                            };
+                                None,
+                                replay_safe,
+                            );
                         }
 
                         match response.text().await {
@@ -529,22 +563,27 @@ impl LinearClient {
                                 }
                                 Err(error) => AttemptOutcome::Terminal(LinearError::Json(error)),
                             },
-                            Err(error) if error.is_timeout() || error.is_connect() => {
-                                AttemptOutcome::Retryable {
-                                    error: LinearError::Http(error),
-                                    retry_after: None,
-                                }
-                            }
-                            Err(error) => AttemptOutcome::Terminal(LinearError::Http(error)),
+                            // A body-read failure happens AFTER the request was
+                            // fully sent, so it can never be proof of
+                            // non-delivery.
+                            Err(error) => AttemptOutcome::retryable_if_replayable(
+                                LinearError::Http(error),
+                                None,
+                                replay_safe,
+                            ),
                         }
                     }
-                    Err(error) if error.is_timeout() || error.is_connect() => {
-                        AttemptOutcome::Retryable {
-                            error: LinearError::Http(error),
-                            retry_after: None,
-                        }
+                    // br-kxd3e: `is_timeout()` is the TOTAL request timeout and
+                    // fires after the body was written; only a connect-phase
+                    // failure proves Linear never saw the document.
+                    Err(error) => {
+                        let replayable = replay_safe || !transport_error_reached_service(&error);
+                        AttemptOutcome::retryable_if_replayable(
+                            LinearError::Http(error),
+                            None,
+                            replayable,
+                        )
                     }
-                    Err(error) => AttemptOutcome::Terminal(LinearError::Http(error)),
                 }
             }
         })
@@ -555,267 +594,6 @@ impl LinearClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
-
-    fn graphql_success(data: &serde_json::Value) -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": data }))
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_issue() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(graphql_success(&serde_json::json!({
-                "issue": {
-                    "id": "issue-1",
-                    "identifier": "LIN-1",
-                    "title": "Test issue",
-                    "state": { "id": "s1", "name": "In Progress" },
-                    "team": { "id": "t1", "name": "Engineering", "key": "ENG" }
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()));
-
-        let issue = client.get_issue("issue-1").await.unwrap();
-        assert_eq!(issue.identifier, "LIN-1");
-        assert_eq!(issue.title, "Test issue");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_issue() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(graphql_success(&serde_json::json!({
-                "issueCreate": {
-                    "success": true,
-                    "issue": {
-                        "id": "issue-2",
-                        "identifier": "LIN-2",
-                        "title": "New bug",
-                        "team": { "id": "t1" }
-                    }
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()));
-
-        let issue = client.create_issue("New bug", "t1", None).await.unwrap();
-        assert_eq!(issue.identifier, "LIN-2");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_search_issues() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(graphql_success(&serde_json::json!({
-                "searchIssues": {
-                    "nodes": [
-                        { "id": "i1", "identifier": "LIN-1", "title": "Login bug" },
-                        { "id": "i2", "identifier": "LIN-2", "title": "Logout bug" }
-                    ]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()));
-
-        let issues = client.search_issues("bug").await.unwrap();
-        assert_eq!(issues.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_teams() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(graphql_success(&serde_json::json!({
-                "teams": {
-                    "nodes": [
-                        { "id": "t1", "name": "Engineering", "key": "ENG" },
-                        { "id": "t2", "name": "Design", "key": "DES" }
-                    ]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()));
-
-        let teams = client.list_teams().await.unwrap();
-        assert_eq!(teams.len(), 2);
-        assert_eq!(teams[0].key, "ENG");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_cycles() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(graphql_success(&serde_json::json!({
-                "team": {
-                    "cycles": {
-                        "nodes": [
-                            { "id": "c1", "number": 1, "name": "Sprint 1" },
-                            { "id": "c2", "number": 2, "name": "Sprint 2" }
-                        ]
-                    }
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()));
-
-        let cycles = client.list_cycles("t1").await.unwrap();
-        assert_eq!(cycles.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_projects() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(graphql_success(&serde_json::json!({
-                "projects": {
-                    "nodes": [
-                        { "id": "p1", "name": "Q1 Goals" }
-                    ]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()));
-
-        let projects = client.list_projects().await.unwrap();
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].name, "Q1 Goals");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("bad-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.list_teams().await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), LinearError::Unauthorized));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_graphql_error() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "errors": [{ "message": "Variable '$id' is not defined" }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.get_issue("bad-id").await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            LinearError::Api { message, .. } => {
-                assert!(message.contains("not defined"));
-            }
-            e => panic!("Expected Api error, got: {e:?}"),
-        }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.list_teams().await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            LinearError::RateLimited { .. }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limited_retry_after_beyond_request_budget_is_terminal() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
-            .mount(&mock_server)
-            .await;
-
-        let client = LinearClient::new("test-key")
-            .unwrap()
-            .with_api_url(&format!("{}/graphql", mock_server.uri()))
-            .with_retry_config(1);
-
-        let result = client.list_teams().await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            LinearError::RateLimited {
-                retry_after_ms: 60_000
-            }
-        ));
-    }
 
     #[test]
     fn test_error_is_retryable() {

@@ -317,13 +317,14 @@ fcp-line = { path = "../../connectors/line", optional = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-asupersync = { version = "0.3.1", default-features = false, features = ["tls", "tls-native-roots"] }
+asupersync = { version = "=0.3.4", default-features = false, features = ["tls", "tls-native-roots"] }
 fcp-kernel = { workspace = true }
 fcp-policy = { workspace = true }
 fcp-evidence = { workspace = true }
 fcp-crypto = { workspace = true, features = ["test-utils"] }
 fcp-telemetry = { workspace = true }
 pretty_assertions = { workspace = true }
+proptest = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }
 futures-util = { workspace = true }
@@ -337,6 +338,7 @@ fcp-store = { workspace = true }
 fcp-raptorq = { workspace = true }
 fcp-audit = { workspace = true }
 fcp-mesh = { workspace = true }
+fcp-migrate = { workspace = true }
 fcp-tailscale = { workspace = true }
 fwc = { workspace = true }
 blake3 = { workspace = true }
@@ -363,3 +365,4 @@ fcp-oauth = { workspace = true }
 # both referenced by `tests/capability_enforcement_concurrent_e2e.rs`.
 fcp-cbor = { workspace = true }
 semver = { workspace = true }
+br-tools = { path = "../br-tools" }

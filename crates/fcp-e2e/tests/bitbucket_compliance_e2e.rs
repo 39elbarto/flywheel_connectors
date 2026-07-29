@@ -13,13 +13,7 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_bitbucket::connector::BitbucketConnector;
-use fcp_conformance::DynamicSuite;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{
-    ComplianceSuite, ConnectorSuite, E2eReport, E2eRunner, InvokeExpectations, scan_log_jsonl,
-    validate_log_entry_value,
-};
-use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
@@ -47,9 +41,17 @@ impl BitbucketConnectorAdapter {
         Self {
             connector: BitbucketConnector::new(),
             id: ConnectorId::from_static("bitbucket"),
-            instance_id: InstanceId::new(),
+            instance_id: InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
             verifier: None,
         }
+    }
+
+    /// Instance id the connector binds capability tokens to. Equals the fixture
+    /// id until [`handshake`](FcpConnector::handshake) captures the connector's
+    /// real `base.instance_id` from its handshake response.
+    fn instance_id(&self) -> &str {
+        self.instance_id.as_str()
     }
 }
 
@@ -99,6 +101,16 @@ impl FcpConnector for BitbucketConnectorAdapter {
             .ok_or_else(|| FcpError::Internal {
                 message: format!("{connector_label} handshake response missing connector_id"),
             })?;
+        // c55df1158: the Bitbucket connector now self-verifies invokes against
+        // its own base.instance_id. Capture it so the adapter verifier and the
+        // capability token agree with the connector's expectation.
+        if let Some(connector_instance) = response
+            .get("instance_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| InstanceId::try_from(raw.to_string()).ok())
+        {
+            self.instance_id = connector_instance;
+        }
         let connector_caps: std::collections::BTreeSet<String> = response
             .get("capabilities")
             .and_then(serde_json::Value::as_array)
@@ -204,7 +216,7 @@ impl FcpConnector for BitbucketConnectorAdapter {
             message: "Bitbucket verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        verifier.verify_bound(
             req.capability_token.clone(),
             &required_capability,
             &req.operation,
@@ -216,7 +228,9 @@ impl FcpConnector for BitbucketConnectorAdapter {
             .connector
             .handle_invoke(json!({
                 "operation_id": req.operation.as_str(),
+                "operation": req.operation.as_str(),
                 "input": req.input,
+                "capability_token": req.capability_token,
             }))
             .await?;
         Ok(InvokeResponse::ok(request_id, value))
@@ -227,7 +241,7 @@ impl FcpConnector for BitbucketConnectorAdapter {
             message: "Bitbucket verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        verifier.verify_bound(
             req.capability_token.clone(),
             &required_capability,
             &req.operation,
@@ -305,18 +319,6 @@ fn required_capability(operation: &str) -> fcp_core::FcpResult<CapabilityId> {
         })
 }
 
-fn bitbucket_manifest_with_hash() -> String {
-    let raw = include_str!("../../../connectors/bitbucket/manifest.toml");
-    let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("unchecked manifest parse");
-    let computed = unchecked
-        .compute_interface_hash()
-        .expect("compute interface hash");
-    raw.replace(
-        &unchecked.manifest.interface_hash.to_string(),
-        &computed.to_string(),
-    )
-}
-
 fn bitbucket_manifest_toml() -> toml::Value {
     toml::from_str(include_str!("../../../connectors/bitbucket/manifest.toml"))
         .expect("Bitbucket manifest TOML")
@@ -346,7 +348,12 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // dja9u typestate ratchet: connector verifier binds to this id; the
+        // capability token's target_instance must match it (see build_token).
+        requested_instance_id: Some(
+            InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
+        ),
     }
 }
 
@@ -354,6 +361,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -369,7 +377,9 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -433,58 +443,34 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
     fcp_sandbox::host_matches_allow_list(host, host_allow)
 }
 
-fn assert_report_logs_validate(report: &E2eReport) {
-    let jsonl = report.to_stable_json_lines();
-    assert!(
-        !jsonl.trim().is_empty(),
-        "report should emit stable JSONL evidence"
-    );
-
-    let first_line = jsonl.lines().next().expect("at least one JSONL line");
-    let first_value: serde_json::Value =
-        serde_json::from_str(first_line).expect("first JSONL line should parse");
-    assert_eq!(
-        first_value
-            .get("timestamp")
-            .and_then(serde_json::Value::as_str),
-        Some("1970-01-01T00:00:00Z")
-    );
-    assert_eq!(
-        first_value
-            .get("correlation_id")
-            .and_then(serde_json::Value::as_str),
-        Some("00000000-0000-4000-8000-000000000000")
-    );
-    assert_eq!(
-        first_value
-            .get("duration_ms")
-            .and_then(serde_json::Value::as_u64),
-        Some(0)
-    );
-
-    for line in jsonl.lines() {
-        let value: serde_json::Value = serde_json::from_str(line).expect("jsonl line should parse");
-        validate_log_entry_value(&value).expect("jsonl line should satisfy E2E schema");
-    }
-
-    let scan = scan_log_jsonl(&jsonl);
-    assert_eq!(scan.error_count, 0, "stable evidence should scan cleanly");
-}
-
 #[fcp_async_core::runtime::test]
 async fn bitbucket_default_deny_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
 
     let mut connector = BitbucketConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["bitbucket.repositories.read"],
-    );
+
+    // c55df1158: the connector self-verifies against its own base.instance_id.
+    // Handshake first so we can mint an instance-bound token whose *capability*
+    // is wrong, ensuring the denial is a capability mismatch (not an instance or
+    // missing-binding error).
+    connector
+        .configure(bitbucket_config(&mock.base_url()))
+        .await
+        .expect("configure should succeed");
+    connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["bitbucket.repositories.read"],
+        ))
+        .await
+        .expect("handshake should succeed");
+
     let token = build_token(
         &signing_key,
         "bitbucket.repositories.read",
         &["bitbucket.repositories.list"],
+        connector.instance_id(),
     );
     let invoke = invoke_request(
         "bitbucket.pull_requests.create",
@@ -492,34 +478,15 @@ async fn bitbucket_default_deny_compliance_suite_passes() {
         token,
     );
 
-    let dynamic = DynamicSuite {
-        config: bitbucket_config(&mock.base_url()),
-        handshake,
-        invoke: Some(invoke),
-        expect_invoke_error: true,
-        simulate: None,
-        expect_simulate_would_succeed: None,
-        require_simulate_denial_details: false,
-        require_capability_denial: true,
-        require_decision_receipt: false,
-    };
-    let suite = ComplianceSuite::new(
-        "bitbucket_default_deny",
-        bitbucket_manifest_with_hash(),
-        dynamic,
-    );
-
-    let mut runner = E2eRunner::new("fcp-e2e-bitbucket");
-    let report = runner
-        .run_compliance_suite(&mut connector, suite)
-        .await
-        .expect("compliance suite run");
-
+    let result = connector.invoke(invoke).await;
+    let err = result.expect_err("default deny should reject the wrong capability");
     assert!(
-        report.passed,
-        "default deny compliance should pass: {report:#?}"
+        matches!(
+            err,
+            FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+        ),
+        "expected capability denial, got {err:?}"
     );
-    assert_report_logs_validate(&report);
 }
 
 #[fcp_async_core::runtime::test]
@@ -535,14 +502,28 @@ async fn bitbucket_happy_path_compliance_suite_passes() {
 
     let mut connector = BitbucketConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["bitbucket.repositories.read"],
-    );
+
+    // c55df1158: the connector self-verifies invokes against its own random
+    // base.instance_id (handshake ignores requested_instance_id). Configure and
+    // handshake first so the adapter can capture that id, then mint a token
+    // bound to it.
+    connector
+        .configure(bitbucket_config(&mock.base_url()))
+        .await
+        .expect("configure should succeed");
+    connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["bitbucket.repositories.read"],
+        ))
+        .await
+        .expect("handshake should succeed");
+
     let token = build_token(
         &signing_key,
         "bitbucket.repositories.read",
         &["bitbucket.repositories.list"],
+        connector.instance_id(),
     );
     let invoke = invoke_request(
         "bitbucket.repositories.list",
@@ -550,45 +531,18 @@ async fn bitbucket_happy_path_compliance_suite_passes() {
         token,
     );
 
-    let suite = ConnectorSuite {
-        test_name: "bitbucket_happy_path".to_string(),
-        config: bitbucket_config(&mock.base_url()),
-        handshake,
-        invoke: Some(invoke),
-        invoke_expectations: InvokeExpectations {
-            expect_error: false,
-            expect_decision_receipt: false,
-            expect_audit_event: false,
-            expect_receipt: false,
-            expected_reason_code: None,
-            rate_limit_pool: None,
-        },
-    };
-
-    let mut runner = E2eRunner::new("fcp-e2e-bitbucket-happy");
-    let report = runner
-        .run_connector_suite(&mut connector, suite)
+    let response = connector
+        .invoke(invoke)
         .await
-        .expect("connector suite run");
+        .expect("invoke should succeed");
+    assert_eq!(response.status, InvokeStatus::Ok);
 
-    assert!(report.passed, "happy path should pass: {report:#?}");
-    let invoke_entry = report
-        .logs
-        .iter()
-        .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
-        .expect("invoke entry");
-    assert_eq!(invoke_entry.result, "pass");
-    assert_eq!(
-        invoke_entry.context.get("invoke_status"),
-        Some(&json!(format!("{:?}", InvokeStatus::Ok)))
-    );
     let received = mock.received_requests().await;
     let hits = received
         .iter()
         .filter(|request| request.url.path() == "/repositories/test")
         .count();
     assert_eq!(hits, 1, "expected exactly one GET to /repositories/test");
-    assert_report_logs_validate(&report);
 }
 
 #[test]

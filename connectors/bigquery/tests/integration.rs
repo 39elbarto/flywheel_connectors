@@ -676,6 +676,27 @@ async fn error_500() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn error_200_empty_body_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/projects/test-project/datasets"))
+        .and(bearer_token("test-access-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "bigquery.datasets.list",
+            "input": {"project_id": "test-project"}
+        }))
+        .await
+        .is_ok()
+    );
+}
+
 // -- Unknown op / Simulate ---------------------------------------------------
 
 #[fcp_async_core::runtime::test]

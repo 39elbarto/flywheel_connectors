@@ -55,7 +55,7 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google_chat`, runtime `BaseConnector` ID is `google-chat`, and package/binary names use `fcp-google-chat`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-chat-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest `interface_hash` is all zeroes.
 - Manifest optional capabilities are empty even though operations and runtime introspection use `chat.read`, `chat.write`, and `chat.webhook`.
 - Runtime `handle_invoke_internal` does not parse or verify `capability_token` for any operation. Capability-token verification currently exists in `simulate`, not `invoke`.

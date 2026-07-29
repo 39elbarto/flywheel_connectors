@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::header::{HeaderValue, RETRY_AFTER};
 use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
@@ -20,6 +21,33 @@ use crate::types::{
 pub const DEFAULT_EVENTS_BASE_URL: &str = "https://workspaceevents.googleapis.com/v1";
 /// Default Google Cloud Pub/Sub API base URL.
 pub const DEFAULT_PUBSUB_BASE_URL: &str = "https://pubsub.googleapis.com/v1";
+
+/// Validate a subscription resource name before interpolating it into a request
+/// path or method selector (`{base}/{name}`, `{base}/{name}:reactivate`, …).
+///
+/// Valid names are multi-segment resources (`subscriptions/{id}`,
+/// `projects/{p}/subscriptions/{s}`), so structural `/` is allowed, but a
+/// literal `?` or `#` would inject a query string / fragment against the
+/// allowlisted Google host (and collide with the `?validateOnly=true` the
+/// delete path appends), while `..` / encoded slashes would traverse to a
+/// sibling endpoint. Mirrors the resource-name guard used by google-chat.
+fn validate_resource_name<'a>(name: &'a str, field: &str) -> WorkspaceEventsResult<&'a str> {
+    let lower = name.to_ascii_lowercase();
+    if name.is_empty()
+        || name.starts_with('/')
+        || name.contains("..")
+        || name.contains('?')
+        || name.contains('#')
+        || name.contains('\\')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(WorkspaceEventsError::InvalidInput {
+            message: format!("{field} contains invalid characters: {name:?}"),
+        });
+    }
+    Ok(name)
+}
 
 #[derive(Debug, Clone, Copy)]
 enum MissingResourceKind {
@@ -148,6 +176,7 @@ impl WorkspaceEventsClient {
         &self,
         subscription_name: &str,
     ) -> WorkspaceEventsResult<WorkspaceSubscription> {
+        let subscription_name = validate_resource_name(subscription_name, "subscription_name")?;
         let url = format!("{}/{}", self.events_base_url, subscription_name);
         self.get_json(&url, MissingResourceKind::WorkspaceSubscription)
             .await
@@ -206,6 +235,7 @@ impl WorkspaceEventsClient {
         subscription_name: &str,
         ttl: Option<&str>,
     ) -> WorkspaceEventsResult<LongRunningOperation> {
+        let subscription_name = validate_resource_name(subscription_name, "subscription_name")?;
         let url = format!("{}/{subscription_name}:reactivate", self.events_base_url);
         let body = if let Some(ttl) = ttl {
             serde_json::json!({ "ttl": ttl })
@@ -223,6 +253,7 @@ impl WorkspaceEventsClient {
         subscription_name: &str,
         validate_only: bool,
     ) -> WorkspaceEventsResult<LongRunningOperation> {
+        let subscription_name = validate_resource_name(subscription_name, "subscription_name")?;
         let url = if validate_only {
             format!(
                 "{}/{subscription_name}?validateOnly=true",
@@ -242,6 +273,8 @@ impl WorkspaceEventsClient {
         pubsub_subscription: &str,
         max_messages: u32,
     ) -> WorkspaceEventsResult<PullResponse> {
+        let pubsub_subscription =
+            validate_resource_name(pubsub_subscription, "pubsub_subscription")?;
         let url = format!("{}/{pubsub_subscription}:pull", self.pubsub_base_url);
         let body = serde_json::json!({
             "maxMessages": max_messages
@@ -257,6 +290,8 @@ impl WorkspaceEventsClient {
         pubsub_subscription: &str,
         ack_ids: &[String],
     ) -> WorkspaceEventsResult<serde_json::Value> {
+        let pubsub_subscription =
+            validate_resource_name(pubsub_subscription, "pubsub_subscription")?;
         let url = format!("{}/{pubsub_subscription}:acknowledge", self.pubsub_base_url);
         let body = serde_json::json!({
             "ackIds": ack_ids
@@ -406,18 +441,24 @@ fn map_api_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_google_discovery::auth::{
-        FCP_CREDENTIAL_ID_HEADER, GOOGLE_AUTHORIZATION_HEADER, GoogleAuthSourceKind,
-    };
-    use std::future::Future;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn run_async_test<F>(future: F) -> F::Output
-    where
-        F: Future,
-    {
-        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    #[test]
+    fn validate_resource_name_accepts_multi_segment_names() {
+        assert!(validate_resource_name("subscriptions/sub-1", "subscription_name").is_ok());
+        assert!(
+            validate_resource_name("projects/demo/subscriptions/x", "pubsub_subscription").is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_resource_name_rejects_injection() {
+        assert!(validate_resource_name("", "subscription_name").is_err());
+        assert!(validate_resource_name("/subscriptions/x", "subscription_name").is_err());
+        assert!(validate_resource_name("subscriptions/x?validateOnly=false", "n").is_err());
+        assert!(validate_resource_name("subscriptions/x#frag", "n").is_err());
+        assert!(validate_resource_name("subscriptions/../v1/other", "n").is_err());
+        assert!(validate_resource_name("subscriptions\\x", "n").is_err());
+        assert!(validate_resource_name("subscriptions/x%2f..", "n").is_err());
     }
 
     #[test]
@@ -456,76 +497,5 @@ mod tests {
 
         assert_eq!(client.events_base_url, "http://localhost:9999/v1");
         assert_eq!(client.pubsub_base_url, "http://localhost:9998/v1");
-    }
-
-    #[test]
-    fn bearer_token_requests_use_authorization_header() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/v1/subscriptions"))
-                .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "subscriptions": [
-                        { "name": "subscriptions/auth-header", "state": "ACTIVE" }
-                    ]
-                })))
-                .mount(&server)
-                .await;
-
-            let client =
-                WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
-                    access_token: "test-token".into(),
-                    source: GoogleAuthSourceKind::AccessToken,
-                    granted_scopes: Vec::new(),
-                    quota_project_id: None,
-                })
-                .unwrap()
-                .with_base_urls(
-                    format!("{}/v1", server.uri()),
-                    format!("{}/v1", server.uri()),
-                );
-
-            let subscriptions = client.list_subscriptions(None, None).await.unwrap();
-            assert_eq!(
-                subscriptions.subscriptions[0].name,
-                "subscriptions/auth-header"
-            );
-        });
-    }
-
-    #[test]
-    fn credential_reference_requests_use_fcp_credential_header() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            let credential_id = fcp_core::CredentialId::new();
-            Mock::given(method("GET"))
-                .and(path("/v1/subscriptions"))
-                .and(header(FCP_CREDENTIAL_ID_HEADER, credential_id.to_string()))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "subscriptions": [
-                        { "name": "subscriptions/credential-header", "state": "ACTIVE" }
-                    ]
-                })))
-                .mount(&server)
-                .await;
-
-            let client =
-                WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::CredentialReference {
-                    credential_id,
-                    quota_project_id: None,
-                })
-                .unwrap()
-                .with_base_urls(
-                    format!("{}/v1", server.uri()),
-                    format!("{}/v1", server.uri()),
-                );
-
-            let subscriptions = client.list_subscriptions(None, None).await.unwrap();
-            assert_eq!(
-                subscriptions.subscriptions[0].name,
-                "subscriptions/credential-header"
-            );
-        });
     }
 }

@@ -4,13 +4,13 @@
 //! `host_enforcement_config_contract_conformance.rs` already pins
 //! `EnforcementConfig`. This file pins:
 //!
-//! - `PipelineOutcome` Allow/Deny variants and predicates
-//! - `EnforcementDecision` derived counters (allow_count, skip_count,
-//!   is_allowed, checks_executed)
+//! - `PipelineOutcome` `Allow`/`Deny` variants and predicates
+//! - `EnforcementDecision` derived counters (`allow_count`, `skip_count`,
+//!   `is_allowed`, `checks_executed`)
 //! - `CheckRecord` field preservation
-//! - `EnforcementCheck::name()` for the 11 documented check structs
-//!   (the snake_case identifiers that flow into audit records and
-//!   PipelineOutcome::Deny.check_name)
+//! - `EnforcementCheck::name()` for the 14 documented check structs
+//!   (the `snake_case` identifiers that flow into audit records and
+//!   `PipelineOutcome::Deny.check_name`)
 //!
 //! Properties pinned (NORMATIVE):
 //!
@@ -25,24 +25,26 @@
 //! 5. **`allow_count`** counts only `CheckOutcome::Allow` records.
 //! 6. **`skip_count`** counts only `CheckOutcome::Skip` records.
 //! 7. **Check name registry**: every documented struct returns the
-//!    expected snake_case identifier:
-//!    - CanonicalDecodeCheck → "canonical_decode"
-//!    - ZoneMembershipCheck → "zone_membership"
-//!    - CapabilityVerifyCheck → "capability_verify"
-//!    - HolderProofCheck → "holder_proof"
-//!    - CheckpointFreshnessCheck → "checkpoint_freshness"
-//!    - TaintApprovalCheck → "taint_approval"
-//!    - PolicyCeilingCheck → "policy_ceiling"
-//!    - ConnectorManifestCheck → "connector_manifest"
-//!    - RateLimitCheck → "rate_limit"
-//!    - BudgetCheck → "budget"
-//!    - RevocationCheck → "revocation" (NOT "revocation_freshness"
-//!      — the host's RevocationCheck does both freshness AND
-//!      membership; the name reflects the combined check)
+//!    expected `snake_case` identifier:
+//!    - `CanonicalDecodeCheck` → "`canonical_decode`"
+//!    - `ZoneMembershipCheck` → "`zone_membership`"
+//!    - `CapabilityVerifyCheck` → "`capability_verify`"
+//!    - `CascadeRevocationCheck` → "`revocation_cascade`"
+//!    - `DeploymentTierCheck` → "`deployment_tier`"
+//!    - `HolderProofCheck` → "`holder_proof`"
+//!    - `CheckpointFreshnessCheck` → "`checkpoint_freshness`"
+//!    - `TaintApprovalCheck` → "`taint_approval`"
+//!    - `PolicyCeilingCheck` → "`policy_ceiling`"
+//!    - `CapabilityConstraintsCheck` → "`capability_constraints`"
+//!    - `ConnectorManifestCheck` → "`connector_manifest`"
+//!    - `RateLimitCheck` → "`rate_limit`"
+//!    - `BudgetCheck` → "`budget`"
+//!    - `RevocationCheck` → "`revocation_freshness`"
 
 use fcp_host::{
-    BudgetCheck, CanonicalDecodeCheck, CapabilityVerifyCheck, CheckOutcome, CheckRecord,
-    CheckpointFreshnessCheck, ConnectorManifestCheck, EnforcementCheck, EnforcementDecision,
+    BudgetCheck, CanonicalDecodeCheck, CapabilityConstraintsCheck, CapabilityVerifyCheck,
+    CascadeRevocationCheck, CheckOutcome, CheckRecord, CheckpointFreshnessCheck,
+    ConnectorManifestCheck, DeploymentTierCheck, EnforcementCheck, EnforcementDecision,
     HolderProofCheck, PipelineOutcome, PolicyCeilingCheck, RateLimitCheck, RevocationCheck,
     TaintApprovalCheck, ZoneMembershipCheck,
 };
@@ -196,7 +198,7 @@ fn check_record_preserves_name_outcome_and_elapsed_ms() {
     assert!((rec.elapsed_ms - 1.234).abs() < f64::EPSILON);
 }
 
-// ─── Check-name registry: 11 documented checks ────────────────────
+// ─── Check-name registry: 14 documented checks ────────────────────
 
 #[test]
 fn canonical_decode_check_name_is_canonical_decode() {
@@ -211,6 +213,16 @@ fn zone_membership_check_name_is_zone_membership() {
 #[test]
 fn capability_verify_check_name_is_capability_verify() {
     assert_eq!(CapabilityVerifyCheck.name(), "capability_verify");
+}
+
+#[test]
+fn revocation_cascade_check_name_is_revocation_cascade() {
+    assert_eq!(CascadeRevocationCheck.name(), "revocation_cascade");
+}
+
+#[test]
+fn deployment_tier_check_name_is_deployment_tier() {
+    assert_eq!(DeploymentTierCheck::new().name(), "deployment_tier");
 }
 
 #[test]
@@ -234,6 +246,11 @@ fn policy_ceiling_check_name_is_policy_ceiling() {
 }
 
 #[test]
+fn capability_constraints_check_name_is_capability_constraints() {
+    assert_eq!(CapabilityConstraintsCheck.name(), "capability_constraints");
+}
+
+#[test]
 fn connector_manifest_check_name_is_connector_manifest() {
     assert_eq!(ConnectorManifestCheck.name(), "connector_manifest");
 }
@@ -249,15 +266,13 @@ fn budget_check_name_is_budget() {
 }
 
 #[test]
-fn revocation_check_name_is_revocation_not_revocation_freshness() {
-    // NORMATIVE: the host's combined revocation check uses the
-    // shorter name "revocation" (NOT "revocation_freshness") because
-    // it covers both membership AND freshness in one struct. Drift
-    // here would split the audit-trail name from the executing check.
+fn revocation_check_name_is_revocation_freshness() {
+    // NORMATIVE: this check pins the legacy freshness audit name used
+    // by the host pipeline and enforcement order conformance tests.
     assert_eq!(
         RevocationCheck.name(),
-        "revocation",
-        "host RevocationCheck name MUST be 'revocation' (combined membership+freshness)"
+        "revocation_freshness",
+        "host RevocationCheck name MUST remain 'revocation_freshness'"
     );
 }
 
@@ -268,10 +283,13 @@ fn check_name_registry_has_no_duplicates() {
         CanonicalDecodeCheck.name(),
         ZoneMembershipCheck.name(),
         CapabilityVerifyCheck.name(),
+        CascadeRevocationCheck.name(),
+        DeploymentTierCheck::new().name(),
         HolderProofCheck.name(),
         CheckpointFreshnessCheck.name(),
         TaintApprovalCheck.name(),
         PolicyCeilingCheck.name(),
+        CapabilityConstraintsCheck.name(),
         ConnectorManifestCheck.name(),
         RateLimitCheck.name(),
         BudgetCheck.name(),
@@ -281,9 +299,9 @@ fn check_name_registry_has_no_duplicates() {
     assert_eq!(
         unique.len(),
         names.len(),
-        "all 11 check names MUST be distinct (no duplicates)"
+        "all 14 check names MUST be distinct (no duplicates)"
     );
-    assert_eq!(unique.len(), 11);
+    assert_eq!(unique.len(), 14);
 }
 
 #[test]
@@ -292,10 +310,13 @@ fn check_names_use_snake_case_only() {
         CanonicalDecodeCheck.name(),
         ZoneMembershipCheck.name(),
         CapabilityVerifyCheck.name(),
+        CascadeRevocationCheck.name(),
+        DeploymentTierCheck::new().name(),
         HolderProofCheck.name(),
         CheckpointFreshnessCheck.name(),
         TaintApprovalCheck.name(),
         PolicyCeilingCheck.name(),
+        CapabilityConstraintsCheck.name(),
         ConnectorManifestCheck.name(),
         RateLimitCheck.name(),
         BudgetCheck.name(),

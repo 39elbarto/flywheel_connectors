@@ -1,7 +1,6 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_async_core::Cx;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_openai_compat::{
     ChatCompletionsRequest, ChatMessage, EmbeddingInput, HttpRequest, OpenAiCompatProvider,
@@ -388,7 +387,7 @@ async fn rate_limit_retries_provider_errors_map_cancellation_and_shutdown_are_sa
     assert!(!error.to_string().contains("should-not-leak"));
     assert!(!error.to_string().contains("private prompt"));
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let client = TogetherClient::new(
         TogetherProvider::new(
@@ -407,6 +406,10 @@ async fn rate_limit_retries_provider_errors_map_cancellation_and_shutdown_are_sa
         .await
         .expect_err("cancelled context should fail before dispatch");
     assert!(cancelled.to_string().contains("cancelled"));
+    // compatibility_cx() returns the shared ambient runtime context, so clear
+    // the cancel flag before the rest of the test drives the runtime again
+    // (otherwise async Mutex locks observe the cancellation and panic).
+    cx.set_cancel_requested(false);
 
     connector
         .handle_shutdown(json!({}))
@@ -579,7 +582,7 @@ async fn together_loopback_e2e_jsonl_matrix() {
         }),
     );
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let cancelled = TogetherClient::new(
         TogetherProvider::new(
@@ -596,6 +599,8 @@ async fn together_loopback_e2e_jsonl_matrix() {
     )
     .await
     .expect_err("cancelled context should fail");
+    // Restore the shared ambient runtime context before further runtime use.
+    cx.set_cancel_requested(false);
     emit_jsonl(
         &git_revision,
         "cancellation",

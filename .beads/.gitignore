@@ -15,6 +15,10 @@ last-touched
 .sync.lock
 sync_base.jsonl
 
+# `br` write lock + stale-rotation variants (e.g. `.write.lock.stale-<timestamp>`)
+.write.lock
+.write.lock.stale-*
+
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
 

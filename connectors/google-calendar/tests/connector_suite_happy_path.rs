@@ -148,7 +148,7 @@ impl FcpConnector for GoogleCalendarAdapter {
     }
 }
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -158,11 +158,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &str) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".to_string()],
@@ -177,6 +177,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .principal("user:test")
         .operations(&[OP_LIST_EVENTS])
         .issuer("node:test")
+        .target_instance(instance_id)
         .token_id(b"google-calendar-connector-suite")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -217,6 +218,7 @@ async fn connector_suite_happy_path_lists_events() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     let invoke = InvokeRequest {
         r#type: "invoke".to_string(),
         id: RequestId::new("google-calendar-connector-suite"),
@@ -227,7 +229,7 @@ async fn connector_suite_happy_path_lists_events() {
             "calendar_id": CALENDAR_ID,
             "max_results": 2
         }),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, instance_id.as_str()),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -244,7 +246,7 @@ async fn connector_suite_happy_path_lists_events() {
             "token": "ya29_test_calendar",
             "base_url": format!("{}/calendar/v3", server.uri()),
         }),
-        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes(), instance_id.clone()),
         invoke: Some(invoke),
         invoke_expectations: InvokeExpectations::default(),
     };

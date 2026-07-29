@@ -2,7 +2,7 @@
 //!
 //! `fcp_mesh::admission::AdmissionController` is the per-peer
 //! back-pressure gate every connector sits behind. It enforces
-//! NORMATIVE PeerBudget caps on bytes/min, symbols/min, decode
+//! NORMATIVE `PeerBudget` caps on bytes/min, symbols/min, decode
 //! capacity, and authentication state. Zero conformance coverage
 //! today (123 inline tests cover internals; the cross-crate
 //! contract has been unpinned).
@@ -16,7 +16,7 @@
 //!    documented back-pressure signal: callers must honour the
 //!    suggested retry delay rather than spinning.
 //! 3. **Symbol-budget exceeded surfaces `retry_after`.**
-//! 4. **AuthenticationRequired fires when the policy demands it
+//! 4. **`AuthenticationRequired` fires when the policy demands it
 //!    and the peer is unauthenticated.** This is the cheap
 //!    short-circuit reject path — admission never spends budget
 //!    cycles on unauthenticated peers when authentication is
@@ -24,10 +24,10 @@
 //! 5. **Per-peer isolation.** One peer exhausting their budget
 //!    MUST NOT affect another peer's admission status.
 //! 6. **Restrictive vs permissive presets give contrasting
-//!    limits.** PeerBudget::restrictive() must reject what
-//!    PeerBudget::permissive() admits.
+//!    limits.** `PeerBudget::restrictive()` must reject what
+//!    `PeerBudget::permissive()` admits.
 //!
-//! These tests use freshly-constructed AdmissionControllers so
+//! These tests use freshly-constructed `AdmissionControllers` so
 //! state from prior tests cannot leak.
 
 use std::time::Duration;
@@ -47,6 +47,14 @@ fn restrictive_policy() -> AdmissionPolicy {
     AdmissionPolicy {
         per_peer: PeerBudget::restrictive(),
         require_authenticated_requests: false,
+        ..AdmissionPolicy::default()
+    }
+}
+
+fn authenticated_permissive_policy() -> AdmissionPolicy {
+    AdmissionPolicy {
+        per_peer: PeerBudget::permissive(),
+        require_authenticated_requests: true,
         ..AdmissionPolicy::default()
     }
 }
@@ -136,10 +144,7 @@ fn authentication_required_short_circuits_before_budget_checks() {
     // is_authenticated=false, the admission MUST short-circuit with
     // AuthenticationRequired regardless of how small or oversized
     // the resource request is. This pins the cheap-reject ordering.
-    let mut policy = AdmissionPolicy::default();
-    policy.require_authenticated_requests = true;
-    policy.per_peer = PeerBudget::permissive();
-    let mut controller = AdmissionController::new(policy);
+    let mut controller = AdmissionController::new(authenticated_permissive_policy());
     let peer = NodeId::new("node-unauth");
 
     // Even a tiny request must be rejected.
@@ -165,10 +170,7 @@ fn authentication_required_short_circuits_before_budget_checks() {
 
 #[test]
 fn authentication_required_passes_through_when_peer_is_authenticated() {
-    let mut policy = AdmissionPolicy::default();
-    policy.require_authenticated_requests = true;
-    policy.per_peer = PeerBudget::permissive();
-    let mut controller = AdmissionController::new(policy);
+    let mut controller = AdmissionController::new(authenticated_permissive_policy());
     let peer = NodeId::new("node-authed");
 
     controller

@@ -1,13 +1,14 @@
 //! FCP Monday.com Connector implementation.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RequestId, RiskLevel, SafetyTier, SelfCheckReport,
-    SimulateRequest, SimulateResponse, StepId,
+    ApprovalMode, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, RequestId, SelfCheckReport, SimulateRequest, SimulateResponse, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,25 @@ use crate::{
     client::{DEFAULT_BASE_URL, MondayAuth, MondayClient},
     error::MondayError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+const OP_BOARDS_LIST: &str = "monday.boards.list";
+const OP_BOARDS_GET: &str = "monday.boards.get";
+const OP_ITEMS_LIST: &str = "monday.items.list";
+const OP_ITEMS_CREATE: &str = "monday.items.create";
+const OP_ITEMS_DELETE: &str = "monday.items.delete";
+const OP_UPDATES_LIST: &str = "monday.updates.list";
+const OP_UPDATES_CREATE: &str = "monday.updates.create";
+const OPERATION_ORDER: [&str; 7] = [
+    OP_BOARDS_LIST,
+    OP_BOARDS_GET,
+    OP_ITEMS_LIST,
+    OP_ITEMS_CREATE,
+    OP_ITEMS_DELETE,
+    OP_UPDATES_LIST,
+    OP_UPDATES_CREATE,
+];
 
 /// Parsed and validated Monday.com connector configuration.
 #[derive(Debug, Clone)]
@@ -426,13 +446,13 @@ impl MondayConnector {
         })?;
 
         let result = match operation {
-            "monday.boards.list" => self.invoke_boards_list(client, &input).await,
-            "monday.boards.get" => self.invoke_boards_get(client, &input).await,
-            "monday.items.list" => self.invoke_items_list(client, &input).await,
-            "monday.items.create" => self.invoke_items_create(client, &input).await,
-            "monday.items.delete" => self.invoke_items_delete(client, &input).await,
-            "monday.updates.list" => self.invoke_updates_list(client, &input).await,
-            "monday.updates.create" => self.invoke_updates_create(client, &input).await,
+            OP_BOARDS_LIST => self.invoke_boards_list(client, &input).await,
+            OP_BOARDS_GET => self.invoke_boards_get(client, &input).await,
+            OP_ITEMS_LIST => self.invoke_items_list(client, &input).await,
+            OP_ITEMS_CREATE => self.invoke_items_create(client, &input).await,
+            OP_ITEMS_DELETE => self.invoke_items_delete(client, &input).await,
+            OP_UPDATES_LIST => self.invoke_updates_list(client, &input).await,
+            OP_UPDATES_CREATE => self.invoke_updates_create(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -449,7 +469,7 @@ impl MondayConnector {
 
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let request = parse_simulate_params(params)?;
+        let request = parse_simulate_params(&params);
         let Some(capability) = monday_capability_for_operation(&request.operation) else {
             let response =
                 SimulateResponse::denied(request.id, "Unknown operation", "unknown_operation");
@@ -640,20 +660,19 @@ struct ParsedSimulateRequest {
     input: Value,
 }
 
-fn parse_simulate_params(params: Value) -> FcpResult<ParsedSimulateRequest> {
+fn parse_simulate_params(params: &Value) -> ParsedSimulateRequest {
     if let Ok(req) = serde_json::from_value::<SimulateRequest>(params.clone()) {
-        return Ok(ParsedSimulateRequest {
+        return ParsedSimulateRequest {
             id: req.id,
             operation: req.operation.as_str().to_string(),
             input: req.input,
-        });
+        };
     }
 
     let id = params
         .get("id")
         .and_then(Value::as_str)
-        .map(RequestId::new)
-        .unwrap_or_else(|| RequestId::new("monday-simulate"));
+        .map_or_else(|| RequestId::new("monday-simulate"), RequestId::new);
     let operation = params
         .get("operation_id")
         .or_else(|| params.get("operation"))
@@ -662,11 +681,11 @@ fn parse_simulate_params(params: Value) -> FcpResult<ParsedSimulateRequest> {
         .to_string();
     let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
-    Ok(ParsedSimulateRequest {
+    ParsedSimulateRequest {
         id,
         operation,
         input,
-    })
+    }
 }
 
 fn monday_capability_for_operation(operation: &str) -> Option<CapabilityId> {
@@ -678,20 +697,20 @@ fn monday_capability_for_operation(operation: &str) -> Option<CapabilityId> {
 
 fn validate_monday_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
     match operation {
-        "monday.boards.list" => Ok(()),
-        "monday.boards.get" | "monday.items.list" => require_str(input, "board_id")
+        OP_BOARDS_LIST => Ok(()),
+        OP_BOARDS_GET | OP_ITEMS_LIST => require_str(input, "board_id")
             .map(|_| ())
             .map_err(|error| error.to_fcp_error()),
-        "monday.items.create" => {
+        OP_ITEMS_CREATE => {
             require_str(input, "board_id").map_err(|error| error.to_fcp_error())?;
             require_str(input, "item_name")
                 .map(|_| ())
                 .map_err(|error| error.to_fcp_error())
         }
-        "monday.items.delete" | "monday.updates.list" => require_str(input, "item_id")
+        OP_ITEMS_DELETE | OP_UPDATES_LIST => require_str(input, "item_id")
             .map(|_| ())
             .map_err(|error| error.to_fcp_error()),
-        "monday.updates.create" => {
+        OP_UPDATES_CREATE => {
             require_str(input, "item_id").map_err(|error| error.to_fcp_error())?;
             require_str(input, "body")
                 .map(|_| ())
@@ -768,237 +787,76 @@ fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
-/// Build a single typed `OperationInfo`.
-// Explicit metadata parameters keep each operation declaration complete at its call site.
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
+/// Build typed operations info for introspection from the embedded manifest.
+fn typed_operations_info() -> Vec<OperationInfo> {
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Monday.com manifest should parse");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
 }
 
-/// Build typed operations info for introspection.
-fn typed_operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "monday.boards.list",
-            "List boards",
-            json!({"type": "object", "required": [], "properties": {"limit": {"type": "integer", "maximum": 100}}}),
-            json!({"type": "object", "required": ["boards"], "properties": {"boards": {"type": "array"}}}),
-            "monday.boards.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List Monday.com boards.".into(),
-                common_mistakes: vec!["Not specifying a limit parameter, which defaults to 25 boards; set limit explicitly when you need to retrieve more boards.".into()],
-                examples: vec!["{}".into()],
-                related: vec![
-                    CapabilityId::from_static("monday.items.list"),
-                    CapabilityId::from_static("monday.items.create"),
-                ],
-            },
-        ),
-        op_info(
-            "monday.boards.get",
-            "Get a board by ID",
-            json!({"type": "object", "required": ["board_id"], "properties": {"board_id": {"type": "string"}}}),
-            json!({"type": "object", "required": ["board"], "properties": {"board": {"type": "object"}}}),
-            "monday.boards.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Retrieve a single Monday.com board by its ID.".into(),
-                common_mistakes: vec!["Using the board name instead of its numeric ID.".into()],
-                examples: vec!["{\"board_id\": \"123456789\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("monday.boards.list"),
-                    CapabilityId::from_static("monday.items.list"),
-                ],
-            },
-        ),
-        op_info(
-            "monday.items.list",
-            "List items on a board",
-            json!({"type": "object", "required": ["board_id"], "properties": {"board_id": {"type": "string"}}}),
-            json!({"type": "object", "required": ["items"], "properties": {"items": {"type": "array"}}}),
-            "monday.items.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List items on a Monday.com board.".into(),
-                common_mistakes: vec!["Expecting column values to be included by default; the GraphQL API requires explicitly requesting column_values in the query fields to return them.".into()],
-                examples: vec!["{\"board_id\": \"123456789\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("monday.boards.list"),
-                    CapabilityId::from_static("monday.items.create"),
-                ],
-            },
-        ),
-        op_info(
-            "monday.items.create",
-            "Create a new item on a board",
-            json!({"type": "object", "required": ["board_id", "item_name"], "properties": {"board_id": {"type": "string"}, "item_name": {"type": "string"}, "column_values": {"type": "object", "description": "Column values as JSON"}}}),
-            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}),
-            "monday.items.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Create a new item on a board.".into(),
-                common_mistakes: vec!["Passing column_values as plain key-value pairs instead of the Monday.com JSON-stringified column format; each column type has its own expected JSON structure.".into()],
-                examples: vec!["{\"board_id\": \"123456789\", \"item_name\": \"Fix login bug\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("monday.items.list"),
-                    CapabilityId::from_static("monday.items.delete"),
-                ],
-            },
-        ),
-        op_info(
-            "monday.items.delete",
-            "Delete an item",
-            json!({"type": "object", "required": ["item_id"], "properties": {"item_id": {"type": "string"}}}),
-            json!({"type": "object"}),
-            "monday.items.write",
-            RiskLevel::High,
-            SafetyTier::Dangerous,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Delete an item. Cannot be undone.".into(),
-                common_mistakes: vec!["Deleting a parent item also deletes all its subitems; verify the item has no subitems before deleting if you only intend to remove the parent.".into()],
-                examples: vec!["{\"item_id\": \"987654321\"}".into()],
-                related: vec![CapabilityId::from_static("monday.items.list")],
-            },
-        ),
-        op_info(
-            "monday.updates.list",
-            "List updates on an item",
-            json!({"type": "object", "required": ["item_id"], "properties": {"item_id": {"type": "string"}}}),
-            json!({"type": "object", "required": ["updates"], "properties": {"updates": {"type": "array"}}}),
-            "monday.updates.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Retrieve the update/comment thread on a Monday.com item.".into(),
-                common_mistakes: vec!["Expecting updates to be ordered newest-first by default; verify the sort order matches your use case.".into()],
-                examples: vec!["{\"item_id\": \"987654321\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("monday.items.list"),
-                    CapabilityId::from_static("monday.updates.create"),
-                ],
-            },
-        ),
-        op_info(
-            "monday.updates.create",
-            "Create an update on an item",
-            json!({"type": "object", "required": ["item_id", "body"], "properties": {"item_id": {"type": "string"}, "body": {"type": "string"}}}),
-            json!({"type": "object"}),
-            "monday.updates.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Post a new update/comment on a Monday.com item.".into(),
-                common_mistakes: vec!["Using HTML markup in the body without checking Monday.com's supported formatting; use plain text or Monday.com's supported HTML subset.".into()],
-                examples: vec!["{\"item_id\": \"987654321\", \"body\": \"Fixed the login issue.\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("monday.updates.list"),
-                    CapabilityId::from_static("monday.items.list"),
-                ],
-            },
-        ),
-    ]
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 /// Build the operations info for introspection (JSON format, used by simulate).
 fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "monday.boards.list",
-            "summary": "List boards",
-            "capability": "monday.boards.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "monday.boards.get",
-            "summary": "Get a board by ID",
-            "capability": "monday.boards.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "monday.items.list",
-            "summary": "List items on a board",
-            "capability": "monday.items.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "monday.items.create",
-            "summary": "Create a new item on a board",
-            "capability": "monday.items.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "monday.items.delete",
-            "summary": "Delete an item",
-            "capability": "monday.items.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-        {
-            "id": "monday.updates.list",
-            "summary": "List updates on an item",
-            "capability": "monday.updates.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "monday.updates.create",
-            "summary": "Create an update on an item",
-            "capability": "monday.updates.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-    ])
+    static OPERATIONS: OnceLock<serde_json::Value> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| serde_json::to_value(typed_operations_info()).unwrap_or_default())
+        .clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strict_monday_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
 
     #[test]
     fn config_from_api_token() {
@@ -1121,6 +979,93 @@ mod tests {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 7);
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_monday_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).expect("serialize runtime hints"),
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .expect("serialize manifest hints")
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn operations_info_json_exposes_manifest_approval_modes() {
+        let ops = operations_info();
+        let item_create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_ITEMS_CREATE))
+            .unwrap();
+        let item_delete_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_ITEMS_DELETE))
+            .unwrap();
+        let update_create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_UPDATES_CREATE))
+            .unwrap();
+
+        assert_eq!(item_create_op["requires_approval"], "policy");
+        assert_eq!(item_delete_op["requires_approval"], "interactive");
+        assert_eq!(update_create_op["requires_approval"], "policy");
     }
 
     #[test]
@@ -1715,7 +1660,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "monday.api_token");
-        assert!(v["steps"].as_array().unwrap().len() == 2);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
     }
 
     #[test]

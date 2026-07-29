@@ -1,5 +1,5 @@
 //! Conformance harness for the resource-pool placement planner
-//! (TealOtter's evxvv.3 work landed in 64b0e9510 + 93e899e8c).
+//! (`TealOtter`'s evxvv.3 work landed in 64b0e9510 + 93e899e8c).
 //!
 //! The planner produces three streams that downstream operator tooling
 //! consumes:
@@ -48,6 +48,7 @@ use fcp_mesh::{
     AvailabilityProfile, DecisionReason, DeviceProfile, ExecutionPlanner, InstalledConnector,
     LatencyClass, NodeInfo, PlannerContext, PlannerInput, PowerSource, ResourcePoolClass,
     ResourcePoolDecisionSummary, ResourcePoolRefusalReason, ResourcePoolStatus,
+    SimulateResourceAvailability,
 };
 use fcp_tailscale::NodeId;
 
@@ -266,6 +267,31 @@ fn placement_conformance_refusal_taxonomy_is_exhaustive_and_summarized() {
     );
 }
 
+#[test]
+fn placement_conformance_simulate_resource_availability_serde_shape_is_stable() {
+    let availability = SimulateResourceAvailability {
+        available: true,
+        rate_limit_remaining: Some(100),
+        rate_limit_reset_at: None,
+        details: Some("API healthy".to_string()),
+    };
+
+    let value = serde_json::to_value(&availability).expect("availability serializes");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "available": true,
+            "rate_limit_remaining": 100,
+            "details": "API healthy",
+        }),
+        "admin simulation availability JSON shape drifted",
+    );
+
+    let parsed: SimulateResourceAvailability =
+        serde_json::from_value(value).expect("availability deserializes");
+    assert_eq!(parsed, availability);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Property 3: cross-zone independence under partial topology
 // ─────────────────────────────────────────────────────────────────────
@@ -308,20 +334,12 @@ fn placement_conformance_cross_zone_pools_do_not_leak_capacity_into_target_zone(
             1024,
         ),
         // Wide-open private-zone pool — must NOT influence the decision.
-        pool_for(
-            "rr-private-open",
-            "dual",
-            Some(private.clone()),
-            64,
-            65_536,
-            0,
-            0,
-        ),
+        pool_for("rr-private-open", "dual", Some(private), 64, 65_536, 0, 0),
     ];
 
     let input = PlannerInput::new(vec![dual], 1_700_000_000).with_resource_pools(pools);
     let context = PlannerContext::new(test_connector_id())
-        .with_target_zone(work.clone())
+        .with_target_zone(work)
         .with_resource_pool_class(ResourcePoolClass::RequestResponse)
         .with_requested_cpu_cores(2)
         .with_min_memory_mb(1024);
@@ -403,7 +421,7 @@ fn placement_conformance_node_in_wrong_zone_is_never_admitted() {
     );
 }
 
-/// br-conformance: zone-unbounded pools (zone_id = None) admit nodes
+/// br-conformance: zone-unbounded pools (`zone_id` = None) admit nodes
 /// regardless of their zone membership. Pin this contract — it's the
 /// "shared infrastructure" placement model and operators rely on it
 /// for centralised pools that span zones.
@@ -438,7 +456,7 @@ fn placement_conformance_zone_unbounded_pool_admits_any_zone_member() {
     );
 }
 
-/// br-conformance: when a node is plan-eligible, its CandidateNode
+/// br-conformance: when a node is plan-eligible, its `CandidateNode`
 /// MUST carry a `SelectedAsBest` or `EligibleNotSelected`
 /// `DecisionReason` so operator audit trails can explain WHY each
 /// candidate ranked where it did. Pre-fix: a refactor that returned

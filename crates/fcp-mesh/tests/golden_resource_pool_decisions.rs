@@ -2,23 +2,30 @@
 //! (br-evxvv.3, commits 9ba0c5a40 + 64b0e9510).
 //!
 //! Freezes the per-node admission decision (admitted vs rejected with
-//! refusal-reason taxonomy) AND the aggregated ResourcePoolDecisionSummary
+//! refusal-reason taxonomy) AND the aggregated `ResourcePoolDecisionSummary`
 //! for a fixed matrix of canonical topologies. This pins the operator-
 //! readable summary that downstream tooling (admission-rejection
 //! dashboards, evidence bundles attached to placement decisions) reads
 //! off the planner.
 //!
 //! Matrix:
-//!   - single_node_admitted             — pool has headroom on both axes
-//!   - single_node_no_matching_pool     — pool absent for node+class+zone
-//!   - single_node_cpu_exhausted        — pool CPU usage exceeds capacity
+//!   - `single_node_admitted`             — pool has headroom on both axes
+//!   - `single_node_no_matching_pool`     — pool absent for node+class+zone
+//!   - `single_node_cpu_exhausted`        — pool CPU usage exceeds capacity
 //!     after admission
-//!   - single_node_memory_exhausted     — pool memory usage exceeds floor
-//!   - mixed_4_nodes_one_per_outcome    — 4 nodes, one admitted + one of
+//!   - `single_node_memory_exhausted`     — pool memory usage exceeds floor
+//!   - `mixed_4_nodes_one_per_outcome`    — 4 nodes, one admitted + one of
 //!     each refusal type (verifies summary aggregation arithmetic)
 //!
 //! Each row pins:
-//!   - per-node decision (admitted/rejected + refusal_reason class)
+
+#![allow(
+    clippy::default_trait_access,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines
+)]
+
+//!   - per-node decision (admitted/rejected + `refusal_reason` class)
 //!   - aggregated summary (evaluated, admitted, rejected, plus refusal
 //!     buckets)
 //!
@@ -30,7 +37,7 @@
 //! and the cross-product 4-node case.
 //!
 //! Update flow:
-//!   UPDATE_GOLDENS=1 cargo test -p fcp-mesh --test golden_resource_pool_decisions
+//!   `UPDATE_GOLDENS=1` cargo test -p fcp-mesh --test `golden_resource_pool_decisions`
 //!   cargo insta review
 //!   git diff crates/fcp-mesh/tests/snapshots/
 

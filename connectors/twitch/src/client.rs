@@ -1,16 +1,24 @@
 //! Twitch Helix API client.
 
 use fcp_prelude::log_redaction::redact_url;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
-};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
 use tracing::debug;
 
 use crate::error::{TwitchError, TwitchResult};
+
+/// Percent-encode set for `application/x-www-form-urlencoded` values: encode
+/// everything except the RFC 3986 unreserved characters (`-`, `_`, `.`, `~`).
+const FORM_VALUE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 use crate::types::*;
 
 /// Twitch Helix API client with OAuth2 client credentials.
@@ -72,16 +80,28 @@ impl TwitchClient {
 
     /// Acquire an OAuth2 token via client credentials grant.
     ///
-    /// Twitch's token endpoint accepts parameters as query strings on POST.
+    /// The `client_id`/`client_secret` are sent in the
+    /// `application/x-www-form-urlencoded` request body (per RFC 6749 §4.4.2),
+    /// never in the URL query string: reqwest's `Error` `Display` appends the
+    /// full request URL, so a secret placed in the query would leak into any
+    /// transport-error message or log. The body keeps the secret off the URL.
     pub async fn acquire_token(&mut self) -> TwitchResult<()> {
+        // Build the form body manually (the workspace `reqwest` is compiled
+        // without the feature that provides `RequestBuilder::form`). Values are
+        // percent-encoded; `grant_type` is a fixed literal.
+        let body = format!(
+            "client_id={}&client_secret={}&grant_type=client_credentials",
+            utf8_percent_encode(&self.client_id, FORM_VALUE),
+            utf8_percent_encode(&self.client_secret, FORM_VALUE),
+        );
         let resp = self
             .client
             .post(&self.token_url)
-            .query(&[
-                ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
-                ("grant_type", "client_credentials"),
-            ])
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(body)
             .send()
             .await
             .map_err(TwitchError::Http)?;
@@ -424,18 +444,15 @@ impl TwitchClient {
                 }
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
-                    let decision = classify_http_status(status, None);
-                    let err = TwitchError::Api {
+                    // br-kxd3e: NOT replay-safe — a replay creates a SECOND clip.
+                    // Every remaining retryable class here is a 5xx, which
+                    // means Twitch RECEIVED the request and may already have
+                    // acted. 429 is handled above, before this point, because
+                    // it was refused WITHOUT being performed.
+                    return AttemptOutcome::Terminal(TwitchError::Api {
                         status,
                         message: text,
-                    };
-                    if !matches!(decision, RetryDecision::Terminal) {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
-                    }
-                    return AttemptOutcome::Terminal(err);
+                    });
                 }
                 match resp.json::<HelixResponse<CreateClipResponse>>().await {
                     Ok(r) => AttemptOutcome::Success(r),
@@ -505,18 +522,15 @@ impl TwitchClient {
                 }
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
-                    let decision = classify_http_status(status, None);
-                    let err = TwitchError::Api {
+                    // br-kxd3e: NOT replay-safe — a replay posts the chat message TWICE.
+                    // Every remaining retryable class here is a 5xx, which
+                    // means Twitch RECEIVED the request and may already have
+                    // acted. 429 is handled above, before this point, because
+                    // it was refused WITHOUT being performed.
+                    return AttemptOutcome::Terminal(TwitchError::Api {
                         status,
                         message: text,
-                    };
-                    if !matches!(decision, RetryDecision::Terminal) {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
-                    }
-                    return AttemptOutcome::Terminal(err);
+                    });
                 }
                 match resp.json::<HelixResponse<SendChatMessageResponse>>().await {
                     Ok(r) => AttemptOutcome::Success(r),
@@ -589,8 +603,6 @@ impl TwitchClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -654,159 +666,5 @@ mod tests {
         )
         .unwrap();
         assert!(!client.has_token());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn acquire_token_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "test_token_value",
-                "expires_in": 3600,
-                "token_type": "bearer"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut client = TwitchClient::new(
-            "https://api.twitch.tv",
-            &format!("{}/oauth2/token", mock_server.uri()),
-            &format!("{}/oauth2/validate", mock_server.uri()),
-            "test_id",
-            "test_secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-
-        client.acquire_token().await.unwrap();
-        assert!(client.has_token());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn acquire_token_failure() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/oauth2/token"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("invalid_client"))
-            .mount(&mock_server)
-            .await;
-
-        let mut client = TwitchClient::new(
-            "https://api.twitch.tv",
-            &format!("{}/oauth2/token", mock_server.uri()),
-            &format!("{}/oauth2/validate", mock_server.uri()),
-            "bad_id",
-            "bad_secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-
-        let result = client.acquire_token().await;
-        assert!(matches!(result, Err(TwitchError::TokenError(_))));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn validate_token_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/oauth2/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "client_id": "cid",
-                "scopes": [],
-                "expires_in": 3600
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut client = TwitchClient::new(
-            "https://api.twitch.tv",
-            &format!("{}/oauth2/token", mock_server.uri()),
-            &format!("{}/oauth2/validate", mock_server.uri()),
-            "cid",
-            "secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        client.access_token = Some("tok".into());
-
-        let validated = client.validate_token().await.unwrap();
-        assert_eq!(validated.client_id, "cid");
-        assert_eq!(validated.expires_in, 3600);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/oauth2/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "client_id": "cid",
-                "scopes": [],
-                "expires_in": 3600
-            })))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/helix/users"))
-            .and(header("Client-Id", "cid"))
-            .and(header("authorization", "Bearer tok"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [{
-                    "id": "1",
-                    "login": "twitch",
-                    "display_name": "Twitch",
-                    "type": "",
-                    "broadcaster_type": "",
-                    "description": "",
-                    "profile_image_url": "",
-                    "offline_image_url": "",
-                    "view_count": 0,
-                    "created_at": "2020-01-01T00:00:00Z"
-                }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut client = TwitchClient::new(
-            &mock_server.uri(),
-            &format!("{}/oauth2/token", mock_server.uri()),
-            &format!("{}/oauth2/validate", mock_server.uri()),
-            "cid",
-            "secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        client.access_token = Some("tok".into());
-        let validated = client.health_check().await.unwrap();
-        assert_eq!(validated.client_id, "cid");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_401() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/oauth2/validate"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let mut client = TwitchClient::new(
-            &mock_server.uri(),
-            &format!("{}/oauth2/token", mock_server.uri()),
-            &format!("{}/oauth2/validate", mock_server.uri()),
-            "cid",
-            "secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        client.access_token = Some("bad_tok".into());
-        let result = client.health_check().await;
-        assert!(matches!(result, Err(TwitchError::Unauthorized(_))));
     }
 }

@@ -61,7 +61,14 @@ fn spawn_split_sse_server(steps: TraceSteps) -> (String, thread::JoinHandle<()>)
         let request = read_http_headers(&mut stream);
         let request_text = String::from_utf8_lossy(&request);
         assert!(request_text.starts_with("GET /events "));
-        assert!(request_text.contains("Accept: text/event-stream"));
+        // Header names are case-insensitive (RFC 7230) and the HTTP client
+        // emits them lowercased on the wire (e.g. `accept: ...`), so normalize
+        // before matching rather than pinning the historical title-case form.
+        assert!(
+            request_text
+                .to_ascii_lowercase()
+                .contains("accept: text/event-stream")
+        );
 
         stream
             .write_all(

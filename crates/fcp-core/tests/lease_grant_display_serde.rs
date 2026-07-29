@@ -1,4 +1,4 @@
-//! Pin `LeaseResponse` (the closest analogue to "LeaseGrant") +
+//! Pin `LeaseResponse` (the closest analogue to "`LeaseGrant`") +
 //! `LeaseRequest` serde shape (flywheel_connectors-trwwc).
 //!
 //! Bead asks for `LeaseGrant Display formatting + serde`. No type
@@ -6,9 +6,9 @@
 //! lease-grant-shaped surface lives in two paired types in
 //! `lease.rs`:
 //!
-//!  - `LeaseRequest` (lease.rs:472) — request to acquire or renew
+//!  - `LeaseRequest` (`lease.rs:472`) — request to acquire or renew
 //!    a lease.
-//!  - `LeaseResponse` (lease.rs:491) — 3-variant externally-tagged
+//!  - `LeaseResponse` (`lease.rs:491`) — 3-variant externally-tagged
 //!    enum carrying the response: `Granted(Box<Lease>)` (the actual
 //!    lease grant), `Denied { ... }` (with current holder/expiry),
 //!    `Invalid { reason }` (malformed request).
@@ -23,22 +23,22 @@
 //!   1. **`LeaseResponse::Granted` JSON shape** — externally-tagged
 //!      single-key form `{"Granted": {<lease fields>}}`.
 //!   2. **`LeaseResponse::Denied` JSON shape** — single-key form
-//!      with named struct fields (current_holder, expires_at,
-//!      current_seq).
+//!      with named struct fields (`current_holder`, `expires_at`,
+//!      `current_seq`).
 //!   3. **`LeaseResponse::Invalid` JSON shape** — single-key form
 //!      with `reason` field.
 //!   4. **JSON round-trip** preserves variant + payload for each.
-//!   5. **CBOR round-trip preserves Denied + Invalid** (the
-//!      payload-light variants). Granted holds a Box<Lease> with
-//!      ObjectId via hex_or_bytes which intersects the known
+//!   5. **CBOR round-trip preserves `Denied` + `Invalid`** (the
+//!      payload-light variants). `Granted` holds a `Box<Lease>` with
+//!      `ObjectId` via `hex_or_bytes` which intersects the known
 //!      Content-shim quirk on internally-tagged enums but
-//!      LeaseResponse is externally-tagged so this should round-trip
+//!      `LeaseResponse` is externally-tagged so this should round-trip
 //!      cleanly — pinned explicitly.
 //!   6. **`LeaseRequest` JSON shape pinned** — 5 fields including
-//!      Option<u64> for renew_seq.
+//!      `Option<u64>` for `renew_seq`.
 //!   7. **`LeaseRequest` JSON + CBOR round-trip**.
-//!   8. **PascalCase tag canonical, snake_case rejected** — drift
-//!      sentinel for any future rename_all swap on LeaseResponse.
+//!   8. **`PascalCase` tag canonical, `snake_case` rejected** — drift
+//!      sentinel for any future `rename_all` swap on `LeaseResponse`.
 
 use ciborium::value::Value as CborValue;
 use fcp_cbor::SchemaId;
@@ -131,10 +131,13 @@ fn lease_response_denied_serializes_as_externally_tagged_single_key_object() {
         Some("holder-other")
     );
     assert_eq!(
-        inner.get("expires_at").and_then(|v| v.as_u64()),
+        inner.get("expires_at").and_then(serde_json::Value::as_u64),
         Some(1_700_000_000)
     );
-    assert_eq!(inner.get("current_seq").and_then(|v| v.as_u64()), Some(42));
+    assert_eq!(
+        inner.get("current_seq").and_then(serde_json::Value::as_u64),
+        Some(42)
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -292,10 +295,13 @@ fn lease_request_json_shape_preserves_all_5_fields() {
         Some("requester-node")
     );
     assert_eq!(
-        obj.get("requested_ttl").and_then(|v| v.as_u64()),
+        obj.get("requested_ttl").and_then(serde_json::Value::as_u64),
         Some(3_600)
     );
-    assert_eq!(obj.get("renew_seq").and_then(|v| v.as_u64()), Some(15));
+    assert_eq!(
+        obj.get("renew_seq").and_then(serde_json::Value::as_u64),
+        Some(15)
+    );
 }
 
 #[test]
@@ -318,7 +324,7 @@ fn lease_request_renew_seq_present_as_null_when_none() {
         "renew_seq has no skip_serializing_if so MUST be present (as null) when None"
     );
     assert!(
-        obj.get("renew_seq").map(|v| v.is_null()).unwrap_or(false),
+        obj.get("renew_seq").is_some_and(serde_json::Value::is_null),
         "renew_seq MUST be JSON null when None"
     );
 }

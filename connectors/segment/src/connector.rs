@@ -1,12 +1,14 @@
 //! FCP Segment CDP Connector implementation.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, OperationId,
+    OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId,
+    SelfCheckReport, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,13 @@ use crate::{
     client::{DEFAULT_BASE_URL, SegmentAuth, SegmentClient},
     error::SegmentError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+const OP_SOURCES_LIST: &str = "segment.sources.list";
+const OP_DESTINATIONS_LIST: &str = "segment.destinations.list";
+const OP_TRACK: &str = "segment.track";
+const OPERATION_ORDER: [&str; 3] = [OP_SOURCES_LIST, OP_DESTINATIONS_LIST, OP_TRACK];
 
 /// Parsed and validated Segment connector configuration.
 #[derive(Debug, Clone)]
@@ -598,124 +607,61 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| SegmentError::InvalidInput(format!("Missing required field: {field}")))
 }
 
-/// Construct a single [`OperationInfo`].
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
-    }
-}
-
 /// Build the operations info for introspection.
 fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "segment.sources.list",
-            "List sources in a workspace",
-            json!({"type": "object", "required": []}),
-            json!({
-                "type": "object",
-                "required": ["sources"],
-                "properties": {"sources": {"type": "array"}}
-            }),
-            "segment.sources.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List all sources in a Segment workspace.".into(),
-                common_mistakes: vec![],
-                examples: vec!["{}".into()],
-                related: vec![
-                    CapabilityId::from_static("segment.destinations.list"),
-                    CapabilityId::from_static("segment.track"),
-                ],
-            },
-        ),
-        op_info(
-            "segment.destinations.list",
-            "List destinations for a source",
-            json!({
-                "type": "object",
-                "required": ["source_id"],
-                "properties": {
-                    "source_id": {"type": "string", "description": "Source ID"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["destinations"],
-                "properties": {"destinations": {"type": "array"}}
-            }),
-            "segment.destinations.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List destinations connected to a Segment source.".into(),
-                common_mistakes: vec![],
-                examples: vec![r#"{"source_id": "src_abc123"}"#.into()],
-                related: vec![
-                    CapabilityId::from_static("segment.sources.list"),
-                ],
-            },
-        ),
-        op_info(
-            "segment.track",
-            "Send a track event",
-            json!({
-                "type": "object",
-                "required": ["event", "user_id"],
-                "properties": {
-                    "event": {"type": "string", "description": "Event name"},
-                    "user_id": {"type": "string", "description": "User ID"},
-                    "properties": {"type": "object", "description": "Event properties"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["success"],
-                "properties": {"success": {"type": "boolean"}}
-            }),
-            "segment.track.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Send a tracking event to Segment.".into(),
-                common_mistakes: vec![
-                    "Forgetting to include user_id".into(),
-                ],
-                examples: vec![
-                    r#"{"event": "Item Purchased", "user_id": "user_123", "properties": {"price": 9.99}}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("segment.sources.list"),
-                ],
-            },
-        ),
-    ]
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Segment manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> ApprovalMode {
+    ApprovalMode::from(mode)
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: Some(approval_mode_from_manifest(operation.requires_approval)),
+    }
 }
 
 #[cfg(test)]
@@ -861,6 +807,103 @@ mod tests {
         let ops = ops_json();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn introspection_operations_preserve_runtime_order() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.iter().map(|operation| operation.id.as_str()).collect();
+        assert_eq!(ids, OPERATION_ORDER);
+    }
+
+    fn strict_segment_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_segment_manifest()?;
+        let operations = operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                Some(approval_mode_from_manifest(
+                    manifest_operation.requires_approval
+                ))
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn operations_info_json_exposes_manifest_approval_modes_and_rate_limits() {
+        let ops = ops_json();
+        let track = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["id"] == OP_TRACK)
+            .unwrap();
+        let sources = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|operation| operation["id"] == OP_SOURCES_LIST)
+            .unwrap();
+
+        assert_eq!(track["requires_approval"], "policy");
+        assert_eq!(sources["requires_approval"], "none");
+        assert_eq!(track["rate_limit"]["max"], 500);
+        assert_eq!(sources["rate_limit"]["max"], 200);
+        assert_eq!(track["rate_limit"]["pool_name"], "segment.track.write");
+        assert_eq!(sources["rate_limit"]["pool_name"], "segment.sources.read");
     }
 
     #[test]
@@ -1564,7 +1607,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "segment.write_key");
-        assert!(v["steps"].as_array().unwrap().len() == 2);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
     }
 
     #[test]

@@ -11,8 +11,9 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_sdk::prelude::*;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -413,6 +414,9 @@ impl FcpConnector for HueConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -599,7 +603,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, InstanceId, RequestId, ZoneId};
 
     use super::*;
 
@@ -611,7 +615,7 @@ mod tests {
         (OP_RECALL_SCENE, "recall_scene"),
     ];
 
-    fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+    fn handshake_request(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
             zone: ZoneId::work(),
@@ -624,7 +628,7 @@ mod tests {
             ],
             host: None,
             transport_caps: None,
-            requested_instance_id: None,
+            requested_instance_id: Some(instance_id.clone()),
         }
     }
 
@@ -632,6 +636,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -645,6 +650,7 @@ mod tests {
             .zone_id("z:work")
             .principal("user:test")
             .operations(&[operation])
+            .target_instance(instance_id.as_str())
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
@@ -884,8 +890,12 @@ mod tests {
             .await
             .expect("configure should succeed");
         let signing_key = Ed25519SigningKey::generate();
+        let instance_id = InstanceId::new();
         connector
-            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .handshake(handshake_request(
+                signing_key.verifying_key().to_bytes(),
+                &instance_id,
+            ))
             .await
             .expect("handshake should succeed");
         let response = connector
@@ -896,7 +906,7 @@ mod tests {
                 operation: OperationId::from_static(OP_HEALTH),
                 zone_id: ZoneId::work(),
                 input: json!({}),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_HEALTH),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_HEALTH, &instance_id),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,

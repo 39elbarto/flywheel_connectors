@@ -131,7 +131,7 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_delete_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn generate_delete_token(signing_key: &Ed25519SigningKey, instance_id: &str) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -146,6 +146,7 @@ fn generate_delete_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .principal("user:test")
         .operations(&[OP_NOTES_DELETE])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should be accepted")
@@ -321,7 +322,7 @@ async fn invoke_delete_note_removes_target_file() {
         .invoke(invoke_req(
             OP_NOTES_DELETE,
             json!({ "path": note_path }),
-            generate_delete_token(&signing_key),
+            generate_delete_token(&signing_key, connector.instance_id()),
         ))
         .await
         .unwrap();

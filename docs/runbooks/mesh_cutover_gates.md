@@ -43,6 +43,50 @@ default until every gate is green from live telemetry.
    `fwc policy distribution --json` and confirm peer distribution plus owner
    signature verification.
 
+## Three-Node Proof Harness
+
+Two harnesses are available; both verify the four stable gates against
+three live host endpoints, but emit different artifact layouts.
+
+### `scripts/e2e/mesh_cutover_gates_3node.sh` (legacy port 8787)
+
+Use the live harness when the mesh has three host endpoints that are expected to
+report green cutover telemetry:
+
+```bash
+FCP_CUTOVER_GATE_HOSTS="http://node-a:8787,http://node-b:8787,http://node-c:8787" \
+  bash scripts/e2e/mesh_cutover_gates_3node.sh
+```
+
+The harness calls `fwc --host <endpoint> mesh cutover-gates --json` for each
+host, stores one redaction-safe JSON payload per host, and fails unless every
+host reports the four stable gates as `green` with direct live telemetry and the
+same `data_hash`. Host endpoints are recorded only as SHA-256 hashes in the
+summary artifacts.
+
+### `scripts/e2e/cutover_gates_3node.sh` (bead-level proof, port 8790)
+
+Use `scripts/e2e/cutover_gates_3node.sh` for the bead-level 3-node cutover
+gate proof. The harness is intentionally strict: it only passes when exactly
+three configured host-admin endpoints each return `overall_status = "green"`
+from `fwc --host <endpoint> mesh cutover-gates --json`, and each payload
+contains the four stable gate records with `status = "green"`.
+
+```bash
+FCP_CUTOVER_GATE_HOSTS="http://node-a:8790,http://node-b:8790,http://node-c:8790" \
+  scripts/e2e/cutover_gates_3node.sh
+```
+
+The harness writes `summary.json`, `steps.jsonl`, per-host payloads, stderr
+logs, and `replay.sh` under
+`artifacts/e2e/mesh_cutover_gates_3node/<run-id>/`. Host endpoints are hashed
+in the structured logs. The pass condition is stricter than three independent
+green responses: all three host payloads must also report the same `data_hash`,
+proving they agree on one cutover-gate snapshot contract. If no endpoints are
+configured, the harness exits successfully with a `skipped` summary; that skip
+artifact is evidence that no live 3-node proof was attempted, not evidence that
+the cutover gates are green.
+
 ## Common Failures
 
 | Symptom | Likely cause | Fix |
@@ -50,6 +94,7 @@ default until every gate is green from live telemetry.
 | All gates report `skip`. | Live mesh/audit/policy telemetry routes are unavailable to `fwc`. | Wire the missing host routes before using cutover status as a graduation signal. |
 | `live_telemetry.state = "unavailable"`. | The host-admin probe failed during evaluation, commonly because the host was down, restarting, or unreachable. | Re-run after host recovery and compare `data_hash`; the same snapshot after restart must keep the same digest. |
 | `live_telemetry.reason_code = "direct-cutover-telemetry-invalid"`. | The host returned a direct cutover-gates snapshot that did not contain exactly the four stable gate records. | Fix the `GET /rpc/mesh/cutover-gates` response before treating any gate as green. |
+| Harness fails with `green host payloads reported divergent data_hash values`. | Every host reported green gates, but the three hosts did not agree on the same snapshot digest. | Compare the per-host payloads under the artifact root and fix the stale or divergent host telemetry route before treating the run as cutover proof. |
 | One gate reports `red`. | The route exists, but the measured value misses its target. | Fix the underlying replication, quorum, or distribution issue; do not lower the target unless the zone SLO explicitly allows it. |
 | JSON schema validation fails. | The CLI output changed without a matching schema bump. | Update `crates/fwc/schemas/mesh_cutover_gates.schema.json` and the conformance test in the same change. |
 

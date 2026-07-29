@@ -260,6 +260,7 @@ impl GitLabConnector {
             "protocol_version": "2.0",
             "connector_id": "fcp.gitlab",
             "connector_version": "0.1.0",
+            "instance_id": self.base.instance_id.as_str(),
             "session_id": session_id,
             "capabilities": ["gitlab.projects.read", "gitlab.issues.read", "gitlab.issues.write", "gitlab.merge_requests.read", "gitlab.pipelines.read"]
         }))
@@ -1645,7 +1646,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "gitlab.personal_access_token");
-        assert!(v["steps"].as_array().unwrap().len() == 3);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     }
 
     #[test]

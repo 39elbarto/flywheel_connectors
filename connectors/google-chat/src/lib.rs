@@ -35,4 +35,6 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+#[cfg(test)]
+mod test_http_fixture;
 pub mod types;

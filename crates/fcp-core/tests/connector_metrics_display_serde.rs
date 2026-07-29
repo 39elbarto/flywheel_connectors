@@ -10,7 +10,7 @@ use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-fn sample_metrics() -> ConnectorMetrics {
+const fn sample_metrics() -> ConnectorMetrics {
     ConnectorMetrics {
         requests_total: 17,
         requests_success: 15,

@@ -169,17 +169,52 @@ fn log_event(path: &Path, event: &Value) {
     writeln!(file, "{event}").expect("e2e log line should be writable");
 }
 
-#[test]
-fn wecom_manifest_ai_hints_cover_all_operations() {
-    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
-    let manifest_text = fs::read_to_string(&manifest_path).expect("manifest should be readable");
-    let manifest: toml::Value = toml::from_str(&manifest_text).expect("manifest should parse");
-    let operations = manifest
-        .get("provides")
-        .and_then(|provides| provides.get("operations"))
-        .and_then(toml::Value::as_table)
-        .expect("manifest should declare operations");
+#[derive(Default)]
+struct AiHintCoverageFailures {
+    missing_when_to_use: Vec<String>,
+    missing_common_mistakes: Vec<String>,
+    missing_examples: Vec<String>,
+    invalid_examples: Vec<String>,
+    secret_shaped_examples: Vec<String>,
+}
 
+impl AiHintCoverageFailures {
+    fn record_missing_hint_section(&mut self, operation_id: &str) {
+        self.missing_when_to_use.push(operation_id.to_owned());
+        self.missing_common_mistakes.push(operation_id.to_owned());
+        self.missing_examples.push(operation_id.to_owned());
+    }
+
+    fn assert_empty(&self) {
+        assert!(
+            self.missing_when_to_use.is_empty(),
+            "operations missing ai_hints.when_to_use: {:?}",
+            self.missing_when_to_use
+        );
+        assert!(
+            self.missing_common_mistakes.is_empty(),
+            "operations missing concrete common_mistakes: {:?}",
+            self.missing_common_mistakes
+        );
+        assert!(
+            self.missing_examples.is_empty(),
+            "operations missing realistic examples: {:?}",
+            self.missing_examples
+        );
+        assert!(
+            self.invalid_examples.is_empty(),
+            "operations have invalid JSON examples: {:?}",
+            self.invalid_examples
+        );
+        assert!(
+            self.secret_shaped_examples.is_empty(),
+            "examples contain secret-shaped values or labels: {:?}",
+            self.secret_shaped_examples
+        );
+    }
+}
+
+fn assert_expected_operation_inventory(operations: &toml::Table) {
     let expected_operations = [
         "messages_send_text",
         "messages_send_markdown",
@@ -201,96 +236,108 @@ fn wecom_manifest_ai_hints_cover_all_operations() {
         actual_operations, expected_operations,
         "manifest operation inventory changed; update ai_hints coverage expectations"
     );
+}
 
-    let mut missing_when_to_use = Vec::new();
-    let mut missing_common_mistakes = Vec::new();
-    let mut missing_examples = Vec::new();
-    let mut invalid_examples = Vec::new();
-    let mut secret_shaped_examples = Vec::new();
+fn validate_ai_hints(
+    operation_id: &str,
+    operation: &toml::Value,
+    failures: &mut AiHintCoverageFailures,
+) {
+    let Some(ai_hints) = operation.get("ai_hints").and_then(toml::Value::as_table) else {
+        failures.record_missing_hint_section(operation_id);
+        return;
+    };
 
-    for (operation_id, operation) in operations {
-        let Some(ai_hints) = operation.get("ai_hints").and_then(toml::Value::as_table) else {
-            missing_when_to_use.push(operation_id.clone());
-            missing_common_mistakes.push(operation_id.clone());
-            missing_examples.push(operation_id.clone());
-            continue;
-        };
-
-        let when_to_use = ai_hints
-            .get("when_to_use")
-            .and_then(toml::Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        if when_to_use.is_empty() {
-            missing_when_to_use.push(operation_id.clone());
-        }
-
-        let common_mistakes = ai_hints
-            .get("common_mistakes")
-            .and_then(toml::Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        if common_mistakes.is_empty()
-            || common_mistakes
-                .iter()
-                .any(|mistake| mistake.as_str().unwrap_or_default().trim().is_empty())
-        {
-            missing_common_mistakes.push(operation_id.clone());
-        }
-
-        let examples = ai_hints
-            .get("examples")
-            .and_then(toml::Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        if examples.is_empty() {
-            missing_examples.push(operation_id.clone());
-            continue;
-        }
-
-        for example in examples {
-            let Some(example_text) = example.as_str().map(str::trim) else {
-                invalid_examples.push(format!("{operation_id}: example is not a string"));
-                continue;
-            };
-            if example_text.is_empty() {
-                invalid_examples.push(format!("{operation_id}: example is empty"));
-                continue;
-            }
-            if let Err(error) = serde_json::from_str::<Value>(example_text) {
-                invalid_examples.push(format!("{operation_id}: {error}"));
-            }
-
-            let lower = example_text.to_ascii_lowercase();
-            if ["api_key", "bearer", "password", "secret", "token"]
-                .iter()
-                .any(|needle| lower.contains(needle))
-            {
-                secret_shaped_examples.push(operation_id.clone());
-            }
-        }
+    let when_to_use = ai_hints
+        .get("when_to_use")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if when_to_use.is_empty() {
+        failures.missing_when_to_use.push(operation_id.to_owned());
     }
 
-    assert!(
-        missing_when_to_use.is_empty(),
-        "operations missing ai_hints.when_to_use: {missing_when_to_use:?}"
-    );
-    assert!(
-        missing_common_mistakes.is_empty(),
-        "operations missing concrete common_mistakes: {missing_common_mistakes:?}"
-    );
-    assert!(
-        missing_examples.is_empty(),
-        "operations missing realistic examples: {missing_examples:?}"
-    );
-    assert!(
-        invalid_examples.is_empty(),
-        "operations have invalid JSON examples: {invalid_examples:?}"
-    );
-    assert!(
-        secret_shaped_examples.is_empty(),
-        "examples contain secret-shaped values or labels: {secret_shaped_examples:?}"
-    );
+    let common_mistakes: &[toml::Value] = ai_hints
+        .get("common_mistakes")
+        .and_then(toml::Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    if common_mistakes.is_empty()
+        || common_mistakes
+            .iter()
+            .any(|mistake| mistake.as_str().unwrap_or_default().trim().is_empty())
+    {
+        failures
+            .missing_common_mistakes
+            .push(operation_id.to_owned());
+    }
+
+    let examples: &[toml::Value] = ai_hints
+        .get("examples")
+        .and_then(toml::Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    validate_ai_hint_examples(operation_id, examples, failures);
+}
+
+fn validate_ai_hint_examples(
+    operation_id: &str,
+    examples: &[toml::Value],
+    failures: &mut AiHintCoverageFailures,
+) {
+    if examples.is_empty() {
+        failures.missing_examples.push(operation_id.to_owned());
+        return;
+    }
+
+    for example in examples {
+        let Some(example_text) = example.as_str().map(str::trim) else {
+            failures
+                .invalid_examples
+                .push(format!("{operation_id}: example is not a string"));
+            continue;
+        };
+        if example_text.is_empty() {
+            failures
+                .invalid_examples
+                .push(format!("{operation_id}: example is empty"));
+            continue;
+        }
+        if let Err(error) = serde_json::from_str::<Value>(example_text) {
+            failures
+                .invalid_examples
+                .push(format!("{operation_id}: {error}"));
+        }
+
+        let lower = example_text.to_ascii_lowercase();
+        if ["api_key", "bearer", "password", "secret", "token"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+        {
+            failures
+                .secret_shaped_examples
+                .push(operation_id.to_owned());
+        }
+    }
+}
+
+#[test]
+fn wecom_manifest_ai_hints_cover_all_operations() {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+    let manifest_text = fs::read_to_string(&manifest_path).expect("manifest should be readable");
+    let manifest: toml::Value = toml::from_str(&manifest_text).expect("manifest should parse");
+    let operations = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should declare operations");
+
+    assert_expected_operation_inventory(operations);
+
+    let mut failures = AiHintCoverageFailures::default();
+    for (operation_id, operation) in operations {
+        validate_ai_hints(operation_id, operation, &mut failures);
+    }
+
+    failures.assert_empty();
 }
 
 #[fcp_async_core::runtime::test]

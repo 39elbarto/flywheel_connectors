@@ -17,6 +17,8 @@ use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use chrono::{Duration, Utc};
 use serde_json::json;
 
+const LIVE_GATE_ENV: &str = "FCP_LIVE_READ";
+
 // ============================================================================
 // Skip guard
 // ============================================================================
@@ -25,8 +27,27 @@ fn github_token() -> Option<String> {
     std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty())
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn skip_without_live_gate() -> bool {
+    if live_gate_enabled() {
+        return false;
+    }
+
+    eprintln!(
+        "SKIP: {LIVE_GATE_ENV} is not enabled; set {LIVE_GATE_ENV}=1 before running live GitHub connector verification."
+    );
+    true
+}
+
 macro_rules! skip_without_token {
     ($var:ident) => {
+        if skip_without_live_gate() {
+            return;
+        }
         let Some($var) = github_token() else {
             eprintln!(
                 "SKIP: GITHUB_TOKEN not set — skipping live GitHub connector verification. \
@@ -41,7 +62,11 @@ macro_rules! skip_without_token {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -56,6 +81,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .principal("user:live-test")
         .operations(&[op])
         .issuer("node:live-test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("test constraints CBOR should be valid")
@@ -102,7 +128,11 @@ async fn live_get_repo_public_repo() {
 
     let mut connector = GitHubConnector::new();
     let signing_key = setup_live_connector(&mut connector, &token).await;
-    let cap_token = generate_read_token(&signing_key, "github.get_repo");
+    let cap_token = generate_read_token(
+        &signing_key,
+        connector.instance_id().as_str(),
+        "github.get_repo",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -147,7 +177,11 @@ async fn live_search_repos() {
 
     let mut connector = GitHubConnector::new();
     let signing_key = setup_live_connector(&mut connector, &token).await;
-    let cap_token = generate_read_token(&signing_key, "github.search_repos");
+    let cap_token = generate_read_token(
+        &signing_key,
+        connector.instance_id().as_str(),
+        "github.search_repos",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -182,6 +216,10 @@ async fn live_search_repos() {
 
 #[fcp_async_core::test]
 async fn live_error_mapping_invalid_token() {
+    if skip_without_live_gate() {
+        return;
+    }
+
     // Test with a deliberately invalid token to verify ConnectorErrorMapping
     // works correctly: should get a structured FCP auth error, not a raw HTTP 401.
     let mut connector = GitHubConnector::new();
@@ -209,7 +247,11 @@ async fn live_error_mapping_invalid_token() {
         .await
         .expect("handshake should succeed");
 
-    let cap_token = generate_read_token(&signing_key, "github.get_repo");
+    let cap_token = generate_read_token(
+        &signing_key,
+        connector.instance_id().as_str(),
+        "github.get_repo",
+    );
 
     let err = connector
         .handle_invoke(json!({

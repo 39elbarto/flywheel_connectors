@@ -11,9 +11,8 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, Url, header};
 use tracing::debug;
 
@@ -524,7 +523,7 @@ impl YouTubeClient {
         });
 
         let response = self
-            .execute_with_retry("POST", &url, Some(&body), GoogleResponseMode::Json)
+            .execute_with_retry("POST", &url, Some(&body), GoogleResponseMode::Json, false)
             .await?;
 
         // Parse the video resource from the response.
@@ -593,14 +592,14 @@ impl YouTubeClient {
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> YouTubeResult<T> {
         let response = self
-            .execute_with_retry("GET", url, None, GoogleResponseMode::Json)
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Json, true)
             .await?;
         decode_json_response(response)
     }
 
     async fn get_text(&self, url: &str) -> YouTubeResult<String> {
         let response = self
-            .execute_with_retry("GET", url, None, GoogleResponseMode::Binary)
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Binary, true)
             .await?;
         match response.body {
             GoogleResponseBody::Binary(bytes) => {
@@ -620,17 +619,24 @@ impl YouTubeClient {
         body: &serde_json::Value,
     ) -> YouTubeResult<T> {
         let response = self
-            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json)
+            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json, false)
             .await?;
         decode_json_response(response)
     }
 
+    /// Execute with retry.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a
+    /// side effect (br-kxd3e). It is a parameter rather than a function of
+    /// `http_method` because Google models several state changes — and some
+    /// pure reads — as POSTs, so the verb alone decides nothing.
     async fn execute_with_retry(
         &self,
         http_method: &'static str,
         url: &str,
         body: Option<&serde_json::Value>,
         response_mode: GoogleResponseMode,
+        replay_safe: bool,
     ) -> YouTubeResult<GoogleExecuteResponse> {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -644,10 +650,14 @@ impl YouTubeClient {
                 .await
             {
                 Ok(response) => AttemptOutcome::Success(response),
-                Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
-                    retry_after: e.retry_after(),
-                    error: e,
-                },
+                Err(e) if e.is_retryable() => {
+                    // A rate limit was refused WITHOUT performing the work, so
+                    // it stays retryable; a 5xx means Google received the
+                    // request and may already have done it.
+                    let replayable = replay_safe || e.replay_is_safe();
+                    let retry_after = e.retry_after();
+                    AttemptOutcome::retryable_if_replayable(e, retry_after, replayable)
+                }
                 Err(e) => AttemptOutcome::Terminal(e),
             }
         })
@@ -662,7 +672,9 @@ impl YouTubeClient {
         response_mode: GoogleResponseMode,
     ) -> YouTubeResult<GoogleExecuteResponse> {
         let parsed_url = Url::parse(raw_url).map_err(|error| YouTubeError::Api {
-            message: format!("invalid request url `{raw_url}`: {error}"),
+            // `raw_url` carries `&key=<API_KEY>`; every other diagnostic path
+            // redacts it, so this parse-failure branch must too.
+            message: format!("invalid request url `{}`: {error}", redact_key(raw_url)),
             status_code: None,
         })?;
 
@@ -826,504 +838,9 @@ mod urlencoding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path_regex},
-    };
-
-    #[fcp_async_core::runtime::test]
-    async fn test_search() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/search.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#searchListResponse",
-                "etag": "abc123",
-                "pageInfo": { "totalResults": 1, "resultsPerPage": 5 },
-                "items": [{
-                    "kind": "youtube#searchResult",
-                    "etag": "def456",
-                    "id": { "kind": "youtube#video", "videoId": "dQw4w9WgXcQ" },
-                    "snippet": {
-                        "title": "Test Video",
-                        "description": "A test video",
-                        "thumbnails": {}
-                    }
-                }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let results = client.search("test", Some(5), Some("video")).await.unwrap();
-        assert_eq!(results.items.len(), 1);
-        assert_eq!(results.items[0].id.video_id.as_deref(), Some("dQw4w9WgXcQ"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_video() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/videos.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#videoListResponse",
-                "etag": "abc",
-                "pageInfo": { "totalResults": 1, "resultsPerPage": 1 },
-                "items": [{
-                    "kind": "youtube#video",
-                    "etag": "def",
-                    "id": "dQw4w9WgXcQ",
-                    "snippet": {
-                        "title": "Rick Astley - Never Gonna Give You Up",
-                        "description": "Official music video",
-                        "thumbnails": {}
-                    },
-                    "contentDetails": {
-                        "duration": "PT3M33S",
-                        "definition": "hd"
-                    },
-                    "statistics": {
-                        "viewCount": "1500000000",
-                        "likeCount": "15000000"
-                    }
-                }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let result = client.get_video("dQw4w9WgXcQ").await.unwrap();
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].id, "dQw4w9WgXcQ");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_videos() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/videos.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#videoListResponse",
-                "etag": "abc",
-                "pageInfo": { "totalResults": 2, "resultsPerPage": 2 },
-                "items": [
-                    {
-                        "kind": "youtube#video",
-                        "etag": "def1",
-                        "id": "vid1",
-                        "snippet": { "title": "Video 1", "description": "First", "thumbnails": {} }
-                    },
-                    {
-                        "kind": "youtube#video",
-                        "etag": "def2",
-                        "id": "vid2",
-                        "snippet": { "title": "Video 2", "description": "Second", "thumbnails": {} }
-                    }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let result = client
-            .list_videos(&["vid1".to_string(), "vid2".to_string()])
-            .await
-            .unwrap();
-        assert_eq!(result.items.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_channel() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/channels.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#channelListResponse",
-                "etag": "abc",
-                "pageInfo": { "totalResults": 1, "resultsPerPage": 1 },
-                "items": [{
-                    "kind": "youtube#channel",
-                    "etag": "def",
-                    "id": "UCuAXFkgsw1L7xaCfnd5JJOw",
-                    "snippet": {
-                        "title": "Rick Astley",
-                        "description": "Official channel"
-                    },
-                    "statistics": {
-                        "subscriberCount": "5000000",
-                        "videoCount": "100"
-                    }
-                }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let result = client
-            .get_channel("UCuAXFkgsw1L7xaCfnd5JJOw")
-            .await
-            .unwrap();
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(
-            result.items[0].snippet.as_ref().unwrap().title,
-            "Rick Astley"
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_playlists() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/playlists.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#playlistListResponse",
-                "etag": "abc",
-                "pageInfo": { "totalResults": 2, "resultsPerPage": 2 },
-                "items": [
-                    {
-                        "kind": "youtube#playlist",
-                        "etag": "def1",
-                        "id": "pl1",
-                        "snippet": { "title": "Playlist 1", "description": "First", "thumbnails": {} },
-                        "contentDetails": { "itemCount": 10 }
-                    },
-                    {
-                        "kind": "youtube#playlist",
-                        "etag": "def2",
-                        "id": "pl2",
-                        "snippet": { "title": "Playlist 2", "description": "Second", "thumbnails": {} },
-                        "contentDetails": { "itemCount": 20 }
-                    }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let result = client
-            .list_playlists("UCtest", Some(10), None)
-            .await
-            .unwrap();
-        assert_eq!(result.items.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_playlist_items() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/playlistItems.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#playlistItemListResponse",
-                "etag": "abc",
-                "pageInfo": { "totalResults": 2, "resultsPerPage": 5 },
-                "items": [
-                    {
-                        "kind": "youtube#playlistItem",
-                        "etag": "d1",
-                        "id": "item1",
-                        "snippet": {
-                            "title": "Video 1",
-                            "description": "First video",
-                            "position": 0
-                        },
-                        "contentDetails": { "videoId": "vid1" }
-                    },
-                    {
-                        "kind": "youtube#playlistItem",
-                        "etag": "d2",
-                        "id": "item2",
-                        "snippet": {
-                            "title": "Video 2",
-                            "description": "Second video",
-                            "position": 1
-                        },
-                        "contentDetails": { "videoId": "vid2" }
-                    }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let result = client
-            .list_playlist_items("PLtest", Some(5), None)
-            .await
-            .unwrap();
-        assert_eq!(result.items.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_comments() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/commentThreads.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#commentThreadListResponse",
-                "etag": "abc",
-                "pageInfo": { "totalResults": 1, "resultsPerPage": 20 },
-                "items": [{
-                    "kind": "youtube#commentThread",
-                    "etag": "def",
-                    "id": "ct1",
-                    "snippet": {
-                        "videoId": "dQw4w9WgXcQ",
-                        "topLevelComment": {
-                            "id": "c1",
-                            "snippet": {
-                                "textDisplay": "Great video!",
-                                "authorDisplayName": "TestUser",
-                                "likeCount": 5
-                            }
-                        },
-                        "totalReplyCount": 0
-                    }
-                }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let result = client.list_comments("dQw4w9WgXcQ", Some(20)).await.unwrap();
-        assert_eq!(result.items.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_captions() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/captions.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#captionListResponse",
-                "etag": "abc",
-                "items": [{
-                    "kind": "youtube#caption",
-                    "etag": "def",
-                    "id": "cap1",
-                    "snippet": {
-                        "videoId": "dQw4w9WgXcQ",
-                        "language": "en",
-                        "trackKind": "asr",
-                        "name": "English (auto-generated)"
-                    }
-                }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let result = client.get_captions("dQw4w9WgXcQ").await.unwrap();
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(
-            result.items[0]
-                .snippet
-                .as_ref()
-                .unwrap()
-                .language
-                .as_deref(),
-            Some("en")
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_caption_transcript() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/captions/cap1.*"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("1\n00:00:00,000 --> 00:00:01,000\nHello world\n".to_string()),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let transcript = client
-            .get_caption_transcript("cap1", Some("srt"))
-            .await
-            .unwrap();
-        assert!(transcript.contains("Hello world"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_upload_caption() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path_regex("/captions.*"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "kind": "youtube#caption",
-                "etag": "etag-1",
-                "id": "cap-new-1",
-                "snippet": {
-                    "videoId": "dQw4w9WgXcQ",
-                    "language": "en",
-                    "trackKind": "standard",
-                    "name": "English"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri());
-
-        let caption = client
-            .upload_caption("dQw4w9WgXcQ", "en", "hello", Some("English"))
-            .await
-            .unwrap();
-
-        assert_eq!(caption.id, "cap-new-1");
-        assert_eq!(
-            caption.snippet.as_ref().unwrap().language.as_deref(),
-            Some("en")
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/videos.*"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "error": {
-                    "code": 401,
-                    "message": "Invalid API key",
-                    "errors": [{ "reason": "authError", "domain": "global" }]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("bad-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(0);
-
-        let result = client.get_video("dQw4w9WgXcQ").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), YouTubeError::Unauthorized));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/channels.*"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "error": {
-                    "code": 404,
-                    "message": "Channel not found",
-                    "errors": [{ "reason": "notFound", "domain": "youtube.channel" }]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(0);
-
-        let result = client.get_channel("UCnonexistent").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), YouTubeError::NotFound { .. }));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_quota_exceeded() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/search.*"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
-                "error": {
-                    "code": 403,
-                    "message": "The request cannot be completed because you have exceeded your quota.",
-                    "errors": [{ "reason": "quotaExceeded", "domain": "youtube.quota" }]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(0);
-
-        let result = client.search("test", None, None).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), YouTubeError::QuotaExceeded));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path_regex("/videos.*"))
-            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
-                "error": {
-                    "code": 429,
-                    "message": "Rate limit exceeded"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = YouTubeClient::new("test-key")
-            .unwrap()
-            .with_base_url(&mock_server.uri())
-            .with_retry_config(0);
-
-        let result = client.get_video("dQw4w9WgXcQ").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            YouTubeError::RateLimited { .. }
-        ));
-    }
 
     #[test]
-    fn test_redact_key() {
+    fn redact_key_hides_secret_and_preserves_other_parameters() {
         let url = "https://example.com/search?part=snippet&key=SECRET123&q=test";
         let redacted = redact_key(url);
         assert!(!redacted.contains("SECRET123"));
@@ -1332,14 +849,40 @@ mod tests {
     }
 
     #[test]
-    fn test_urlencoding() {
+    fn redact_key_leaves_urls_without_key_unchanged() {
+        let url = "https://example.com/search?part=snippet&q=test";
+        assert_eq!(redact_key(url), url);
+    }
+
+    #[test]
+    fn urlencoding_percent_encodes_reserved_bytes() {
         assert_eq!(urlencoding::encode("hello world"), "hello%20world");
         assert_eq!(urlencoding::encode("a+b"), "a%2Bb");
+        assert_eq!(urlencoding::encode("x/y?z"), "x%2Fy%3Fz");
         assert_eq!(urlencoding::encode("simple"), "simple");
     }
 
     #[test]
-    fn test_error_is_retryable() {
+    fn api_key_auth_diagnostics_are_redacted() {
+        let auth = YouTubeAuth::ApiKey("SECRET123".to_string());
+        assert_eq!(auth.redacted_label(), "api_key:redacted");
+        assert!(!format!("{auth:?}").contains("SECRET123"));
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn client_builder_applies_base_url_and_retry_config() {
+        let client = YouTubeClient::new("test-key")
+            .expect("client")
+            .with_base_url("https://youtube.test/v3")
+            .with_retry_config(0);
+
+        assert_eq!(client.base_url(), "https://youtube.test/v3");
+        assert_eq!(client.retry_config.max_retries, 0);
+    }
+
+    #[test]
+    fn error_retryability_classification_matches_transport_policy() {
         let err = YouTubeError::RateLimited {
             retry_after_ms: 1000,
         };

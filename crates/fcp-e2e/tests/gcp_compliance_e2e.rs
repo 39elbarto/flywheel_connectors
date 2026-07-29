@@ -61,7 +61,11 @@ fn gcp_config(base_url: &str) -> serde_json::Value {
     })
 }
 
-fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    capabilities: &[&str],
+    instance_id: InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -74,12 +78,16 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // GCP honors requested_instance_id and verifies with verify_bound; pin
+        // it to the test instance so the token's INSTANCE_ID claim matches
+        // (instance-binding pattern, commit 16171621d).
+        requested_instance_id: Some(instance_id),
     }
 }
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -95,9 +103,14 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: GCP verifies with verify_bound, which
+        // requires an INSTANCE_ID claim; bind to the test instance
+        // (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -194,12 +207,15 @@ async fn gcp_default_deny_compliance_suite_passes() {
 
     let mut connector = GcpConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
         &["gcp.compute.read"],
+        instance_id.clone(),
     );
     let token = build_token(
         &signing_key,
+        instance_id.as_str(),
         "gcp.compute.read",
         &["gcp.compute.list_instances"],
     );
@@ -249,12 +265,15 @@ async fn gcp_happy_path_compute_list_suite_passes() {
 
     let mut connector = GcpConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
         &["gcp.compute.read"],
+        instance_id.clone(),
     );
     let token = build_token(
         &signing_key,
+        instance_id.as_str(),
         "gcp.compute.read",
         &["gcp.compute.list_instances"],
     );
@@ -325,12 +344,15 @@ async fn gcp_dangerous_storage_delete_emits_stable_evidence() {
 
     let mut connector = GcpConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
         &["gcp.storage.write"],
+        instance_id.clone(),
     );
     let token = build_token(
         &signing_key,
+        instance_id.as_str(),
         "gcp.storage.write",
         &["gcp.storage.delete_object"],
     );

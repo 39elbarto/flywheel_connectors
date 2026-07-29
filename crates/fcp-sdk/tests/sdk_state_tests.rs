@@ -8,11 +8,20 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "cursor-store-object-store")]
+use chrono::{Duration, Utc};
 use fcp_cbor::SchemaId;
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_crypto::{CapabilityTokenBuilder, Ed25519SigningKey};
 use fcp_prelude::{ObjectHeader, Signature};
 
 #[cfg(feature = "cursor-store-object-store")]
-use fcp_prelude::{ConnectorStateObject, ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
+use fcp_prelude::{
+    CONNECTOR_STATE_APPEND_OPERATION_ID, CONNECTOR_STATE_WRITE_CAPABILITY_ID,
+    CapabilityConstraints, CapabilityToken, CapabilityVerifier, ConnectorStateObject,
+    ConnectorStateWriteAuthorization, ObjectIdKey, RetentionClass, StorageMeta, StoredObject,
+    connector_state_resource_uri,
+};
 use fcp_sdk::prelude::*;
 use semver::Version;
 
@@ -174,6 +183,89 @@ fn object_store_header(created_at: u64, zone_id: ZoneId) -> ObjectHeader {
     }
 }
 
+#[cfg(feature = "cursor-store-object-store")]
+fn capability_constraints_cbor(resource_allow: Vec<String>) -> Vec<u8> {
+    let constraints = CapabilityConstraints {
+        resource_allow,
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("constraints should encode");
+    cbor
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+fn connector_state_write_authorization_with_key(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> (ConnectorStateWriteAuthorization, Ed25519SigningKey) {
+    let instance_id = InstanceId::new();
+    let signing_key = Ed25519SigningKey::generate();
+    let now = Utc::now();
+    let token = CapabilityToken::from_raw(
+        CapabilityTokenBuilder::new()
+            .capability_id(CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+            .zone_id(zone_id.as_str())
+            .target_instance(instance_id.as_str())
+            .principal("principal:test")
+            .operations(&[CONNECTOR_STATE_APPEND_OPERATION_ID])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&capability_constraints_cbor(vec![
+                connector_state_resource_uri(connector_id),
+            ]))
+            .expect("constraints should be accepted")
+            .sign(&signing_key)
+            .expect("token should sign"),
+    );
+    let verifier = CapabilityVerifier::new(
+        signing_key.verifying_key().to_bytes(),
+        zone_id.clone(),
+        instance_id,
+    );
+    let authorization = ConnectorStateWriteAuthorization::verify_append_token(
+        &verifier,
+        token,
+        connector_id,
+        zone_id,
+    )
+    .expect("connector-state append token should authorize");
+    (authorization, signing_key)
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+fn signature_for_object_store_cursor_commit(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    mut header: ObjectHeader,
+    lease: CursorLease,
+    cursor: &CursorState,
+    signing_key: &Ed25519SigningKey,
+) -> Signature {
+    if !header.refs.contains(&lease.lease_object_id) {
+        header.refs.push(lease.lease_object_id);
+    }
+    let state_cbor = cursor.to_cbor().expect("cursor state should encode");
+    let mut state = ConnectorStateObject {
+        updated_at: header.created_at,
+        header,
+        connector_id: connector_id.clone(),
+        instance_id: None,
+        zone_id: zone_id.clone(),
+        prev: None,
+        seq: 0,
+        state_cbor,
+        lease_seq: lease.lease_seq,
+        lease_object_id: lease.lease_object_id,
+        writer_public_key: [0u8; 32],
+        signature: Signature::zero(),
+    };
+    state
+        .sign_with(signing_key)
+        .expect("connector state should sign");
+    state.signature
+}
+
 #[test]
 fn cursor_store_commit_and_load() {
     let backend = InMemoryCursorStoreBackend::new();
@@ -258,6 +350,71 @@ fn cursor_store_object_store_roundtrip() {
 
 #[cfg(feature = "cursor-store-object-store")]
 #[test]
+fn cursor_store_object_store_authorized_commit_advances_canonical_root() {
+    let object_store: Arc<dyn ObjectStore> =
+        Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+    let object_id_key = ObjectIdKey::from_bytes([0xA7; 32]);
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let (authorization, signing_key) =
+        connector_state_write_authorization_with_key(&connector_id, &zone_id);
+
+    let backend = ObjectStoreCursorBackend::new(
+        Arc::clone(&object_store),
+        object_id_key,
+        connector_id.clone(),
+        zone_id.clone(),
+    )
+    .with_write_authorization(authorization);
+    let mut store = CursorStore::new(backend, connector_id.clone(), zone_id.clone())
+        .with_writer_public_key(signing_key.verifying_key().to_bytes());
+
+    let cursor = CursorState {
+        offset: Some(64),
+        last_seen_id: Some("id-64".to_string()),
+        watermark: Some(640),
+    };
+    let lease = CursorLease {
+        lease_seq: 1,
+        lease_object_id: ObjectId::from_bytes([0x12; 32]),
+    };
+    let header = object_store_header(1_700_150_000, zone_id.clone());
+    let signature = signature_for_object_store_cursor_commit(
+        &connector_id,
+        &zone_id,
+        header.clone(),
+        lease,
+        &cursor,
+        &signing_key,
+    );
+
+    let object_id = store
+        .commit_cursor(cursor.clone(), header, lease, signature)
+        .expect("authorized commit should succeed");
+
+    let canonical_store = fcp_store::FcpStoreConnectorStateStore::new(
+        object_store,
+        object_id_key,
+        connector_id,
+        zone_id,
+    );
+    let root = fcp_async_core::runtime::block_on_sync(canonical_store.read_root());
+    let (_root_id, root) = root
+        .expect("runtime should be available")
+        .expect("canonical read should succeed")
+        .expect("canonical root should exist");
+    assert_eq!(root.head, Some(object_id));
+    assert_eq!(root.state_schema_version, 1);
+
+    let loaded = store
+        .load_cursor()
+        .expect("load should succeed")
+        .expect("cursor should exist");
+    assert_eq!(loaded, cursor);
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+#[test]
 fn cursor_store_object_store_rejects_tampered_recovery_state() {
     let object_store: Arc<dyn ObjectStore> =
         Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
@@ -279,9 +436,9 @@ fn cursor_store_object_store_rejects_tampered_recovery_state() {
 
     let clean_state = ConnectorStateObject {
         header: header.clone(),
-        connector_id: connector_id.clone(),
+        connector_id,
         instance_id: None,
-        zone_id: zone_id.clone(),
+        zone_id,
         prev: None,
         seq: 1,
         state_cbor: CursorState {
@@ -294,6 +451,7 @@ fn cursor_store_object_store_rejects_tampered_recovery_state() {
         updated_at: header.created_at,
         lease_seq: 1,
         lease_object_id,
+        writer_public_key: [0u8; 32],
         signature: Signature::zero(),
     };
     let clean_body =

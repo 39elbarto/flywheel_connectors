@@ -115,7 +115,7 @@ This README documents runtime truth and keeps current drift visible:
 - Manifest rate-limit pools exist for read, write, delete, and search at 3 requests per 1000 ms with burst 3. Runtime introspection reports no rate-limit metadata.
 - Manifest event capabilities advertise streaming support with no replay and a 50-event minimum buffer. Runtime does not expose subscribe or unsubscribe handlers in the stdio entrypoint.
 - Handshake grants every requested capability without filtering against the manifest optional capability list.
-- Handshake returns the hardcoded manifest hash `sha256:notion-connector-v1`, not the manifest interface hash.
+- Handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Configure does not reset an existing handshake, verifier, or session.
 - Health does not require a completed handshake.
 - `simulate` is not an authorization preview. It is a permissive deserialization check.

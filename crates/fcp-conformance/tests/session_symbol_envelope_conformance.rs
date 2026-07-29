@@ -5,10 +5,10 @@
 //! Each FCPS frame carries one or more symbols individually encrypted
 //! under a per-sender HKDF-derived subkey, with:
 //!
-//! - the AAD binding ciphertext to (object_id, k, zone_id_hash,
-//!   zone_key_id, epoch_id, sender_node_id, sender_instance_id),
-//! - the nonce derived from (frame_seq, esi) for ChaCha20-Poly1305 or
-//!   (sender_instance_id, frame_seq, esi) for XChaCha20-Poly1305.
+//! - the AAD binding ciphertext to (`object_id`, k, `zone_id_hash`,
+//!   `zone_key_id`, `epoch_id`, `sender_node_id`, `sender_instance_id`),
+//! - the nonce derived from (`frame_seq`, esi) for ChaCha20-Poly1305 or
+//!   (`sender_instance_id`, `frame_seq`, esi) for XChaCha20-Poly1305.
 //!
 //! These tests pin the public `fcp_protocol::symbol_envelope` API so a
 //! regression that drops a `SymbolContext` field from the AAD or from
@@ -40,11 +40,11 @@ fn baseline_ctx() -> SymbolContext {
     }
 }
 
-fn zone_key() -> AeadKey {
+const fn zone_key() -> AeadKey {
     AeadKey::from_bytes(ZONE_KEY_BYTES)
 }
 
-fn alt_zone_key() -> AeadKey {
+const fn alt_zone_key() -> AeadKey {
     AeadKey::from_bytes(ALT_ZONE_KEY_BYTES)
 }
 
@@ -129,7 +129,7 @@ fn tampered_object_id_in_aad_decrypt_fails() {
     )
     .expect("encrypt");
 
-    let mut tampered = ctx.clone();
+    let mut tampered = ctx;
     tampered.object_id = ObjectId::from_unscoped_bytes(b"different-object");
 
     let err = decrypt_symbol(
@@ -158,7 +158,7 @@ fn tampered_zone_key_id_in_aad_decrypt_fails() {
     )
     .expect("encrypt");
 
-    let mut tampered = ctx.clone();
+    let mut tampered = ctx;
     tampered.zone_key_id = ZoneKeyId::from_bytes([0xFF; 8]);
 
     let err = decrypt_symbol(

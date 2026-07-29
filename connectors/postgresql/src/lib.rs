@@ -30,12 +30,20 @@ pub mod types;
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        collections::{HashMap, VecDeque},
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
 
     use fcp_prelude::{CredentialId, FcpError};
-    use serde_json::json;
-    use wiremock::matchers::{body_json, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use serde_json::{Value, json};
 
     use crate::client::{DEFAULT_BASE_URL, PostgresAuth, PostgresClient};
     use crate::connector::PostgreSqlConnector;
@@ -45,6 +53,250 @@ mod tests {
         PostgresApiResponse, PreparedRequest, QueryParams, QueryResult, TableInfo,
         TransactionRequest,
     };
+
+    #[derive(Clone)]
+    enum LoopbackMatcher {
+        Method(&'static str),
+        Path(&'static str),
+        Body(Value),
+    }
+
+    fn method(expected: &'static str) -> LoopbackMatcher {
+        LoopbackMatcher::Method(expected)
+    }
+
+    fn path(expected: &'static str) -> LoopbackMatcher {
+        LoopbackMatcher::Path(expected)
+    }
+
+    fn body_json(expected: Value) -> LoopbackMatcher {
+        LoopbackMatcher::Body(expected)
+    }
+
+    #[derive(Clone)]
+    struct LoopbackResponse {
+        status: u16,
+        body: Vec<u8>,
+    }
+
+    impl LoopbackResponse {
+        fn new(status: u16) -> Self {
+            Self {
+                status,
+                body: Vec::new(),
+            }
+        }
+
+        fn set_body_json(mut self, body: impl serde::Serialize) -> Self {
+            self.body = serde_json::to_vec(&body).expect("serialize loopback response");
+            self
+        }
+    }
+
+    struct Route {
+        matchers: Vec<LoopbackMatcher>,
+        response: LoopbackResponse,
+    }
+
+    struct RouteBuilder {
+        matchers: Vec<LoopbackMatcher>,
+        response: LoopbackResponse,
+        expected_calls: usize,
+    }
+
+    impl RouteBuilder {
+        fn and(mut self, matcher: LoopbackMatcher) -> Self {
+            self.matchers.push(matcher);
+            self
+        }
+
+        fn respond_with(mut self, response: LoopbackResponse) -> Self {
+            self.response = response;
+            self
+        }
+
+        fn expect(mut self, expected_calls: usize) -> Self {
+            self.expected_calls = expected_calls;
+            self
+        }
+
+        async fn mount(self, server: &LoopbackServer) {
+            let mut routes = server.routes.lock().expect("lock loopback routes");
+            for _ in 0..self.expected_calls {
+                routes.push_back(Route {
+                    matchers: self.matchers.clone(),
+                    response: self.response.clone(),
+                });
+            }
+        }
+    }
+
+    struct Stub;
+
+    impl Stub {
+        fn given(matcher: LoopbackMatcher) -> RouteBuilder {
+            RouteBuilder {
+                matchers: vec![matcher],
+                response: LoopbackResponse::new(200),
+                expected_calls: 1,
+            }
+        }
+    }
+
+    struct LoopbackServer {
+        base_url: String,
+        routes: Arc<Mutex<VecDeque<Route>>>,
+        stop: Arc<AtomicBool>,
+        join: Option<thread::JoinHandle<()>>,
+    }
+
+    impl LoopbackServer {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback server");
+            listener
+                .set_nonblocking(true)
+                .expect("set loopback nonblocking");
+            let addr = listener.local_addr().expect("loopback address");
+            let routes = Arc::new(Mutex::new(VecDeque::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_routes = Arc::clone(&routes);
+            let thread_stop = Arc::clone(&stop);
+            let join = thread::spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let route = thread_routes
+                                .lock()
+                                .expect("lock loopback routes")
+                                .pop_front()
+                                .expect("loopback route registered");
+                            handle_loopback_request(&mut stream, route);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept loopback request: {error}"),
+                    }
+                }
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                routes,
+                stop,
+                join: Some(join),
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+    }
+
+    impl Drop for LoopbackServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(self.base_url.trim_start_matches("http://"));
+            if let Some(join) = self.join.take() {
+                join.join().expect("loopback thread should exit");
+            }
+        }
+    }
+
+    struct LoopbackRequest {
+        method: String,
+        target: String,
+        body: Vec<u8>,
+    }
+
+    fn handle_loopback_request(stream: &mut TcpStream, route: Route) {
+        let request = read_loopback_request(stream);
+        for matcher in route.matchers {
+            match matcher {
+                LoopbackMatcher::Method(expected) => assert_eq!(request.method, expected),
+                LoopbackMatcher::Path(expected) => assert_eq!(
+                    request
+                        .target
+                        .split_once('?')
+                        .map_or(request.target.as_str(), |(path, _)| path),
+                    expected
+                ),
+                LoopbackMatcher::Body(expected) => {
+                    let actual: Value =
+                        serde_json::from_slice(&request.body).expect("request body JSON");
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        let head = format!(
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            route.response.status,
+            status_reason(route.response.status),
+            route.response.body.len()
+        );
+        stream
+            .write_all(head.as_bytes())
+            .expect("write response header");
+        stream
+            .write_all(&route.response.body)
+            .expect("write response body");
+        stream.flush().expect("flush response");
+    }
+
+    fn read_loopback_request(stream: &mut TcpStream) -> LoopbackRequest {
+        let mut buffer = Vec::new();
+        let mut scratch = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut scratch).expect("read loopback request");
+            assert!(read > 0, "unexpected EOF before headers");
+            buffer.extend_from_slice(&scratch[..read]);
+            if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+
+        let header_text =
+            std::str::from_utf8(&buffer[..header_end]).expect("HTTP headers are UTF-8");
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().expect("request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("method").to_string();
+        let target = parts.next().expect("target").to_string();
+        let mut headers = HashMap::new();
+        for line in lines.filter(|line| !line.is_empty()) {
+            let (name, value) = line.split_once(':').expect("header separator");
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = buffer[header_end..].to_vec();
+        while body.len() < content_length {
+            let read = stream.read(&mut scratch).expect("read loopback body");
+            assert!(read > 0, "unexpected EOF before body");
+            body.extend_from_slice(&scratch[..read]);
+        }
+        body.truncate(content_length);
+        LoopbackRequest {
+            method,
+            target,
+            body,
+        }
+    }
+
+    const fn status_reason(status: u16) -> &'static str {
+        match status {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            408 => "Request Timeout",
+            409 => "Conflict",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            _ => "OK",
+        }
+    }
 
     // ===== Config parsing tests =====
 
@@ -1041,7 +1293,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ===== Invoke tests — unknown operation =====
+    // ===== Invoke tests: invalid operation routing =====
 
     #[test]
     fn invoke_unknown_operation() {
@@ -1073,16 +1325,16 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ===== Wiremock tests: pg.query =====
+    // ===== Loopback tests: pg.query =====
 
     #[test]
     fn invoke_query_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [{"id": 1, "name": "Alice"}],
                     "columns": [
                         {"name": "id", "data_type": "integer", "nullable": false},
@@ -1090,10 +1342,10 @@ mod tests {
                     ],
                     "row_count": 1
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1109,18 +1361,18 @@ mod tests {
     fn invoke_query_empty_result() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [],
                     "columns": [],
                     "row_count": 0
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1137,17 +1389,17 @@ mod tests {
     fn invoke_query_with_timeout() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [{"count": 42}],
                     "row_count": 1
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1163,8 +1415,8 @@ mod tests {
     fn invoke_query_missing_sql() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1179,17 +1431,17 @@ mod tests {
     fn invoke_query_null_values_in_rows() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [{"id": 1, "email": null}],
                     "row_count": 1
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1206,17 +1458,17 @@ mod tests {
     fn invoke_query_error_response() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(400).set_body_json(json!({
                     "message": "syntax error at position 10",
                     "code": "42601"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1231,16 +1483,16 @@ mod tests {
     fn invoke_query_auth_error() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(401).set_body_json(json!({
                     "message": "Invalid API key"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1255,14 +1507,14 @@ mod tests {
     fn invoke_query_rate_limited() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(429))
-                .mount(&mock)
+                .respond_with(LoopbackResponse::new(429))
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1273,22 +1525,22 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.execute =====
+    // ===== Loopback tests: pg.execute =====
 
     #[test]
     fn invoke_execute_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "affected_rows": 3
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.execute",
@@ -1304,8 +1556,8 @@ mod tests {
     fn invoke_execute_missing_sql() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.execute",
@@ -1320,16 +1572,16 @@ mod tests {
     fn invoke_execute_no_params() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "affected_rows": 0
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.execute",
@@ -1345,17 +1597,17 @@ mod tests {
     fn invoke_execute_constraint_violation() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(409).set_body_json(json!({
                     "message": "duplicate key value violates unique constraint",
                     "code": "23505"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.execute",
@@ -1366,26 +1618,26 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.explain =====
+    // ===== Loopback tests: pg.explain =====
 
     #[test]
     fn invoke_explain_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/explain"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "plan": {
                         "Node Type": "Seq Scan",
                         "Relation Name": "users",
                         "Total Cost": 1.23
                     }
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.explain",
@@ -1401,8 +1653,8 @@ mod tests {
     fn invoke_explain_missing_sql() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.explain",
@@ -1413,23 +1665,23 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.schema.tables =====
+    // ===== Loopback tests: pg.schema.tables =====
 
     #[test]
     fn invoke_schema_tables_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/schema/tables"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!([
                     {"name": "users", "schema": "public", "row_count_estimate": 1000},
                     {"name": "orders", "schema": "public", "row_count_estimate": 5000}
                 ])))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.schema.tables",
@@ -1445,14 +1697,14 @@ mod tests {
     fn invoke_schema_tables_with_schema_filter() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/schema/tables"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-                .mount(&mock)
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!([])))
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.schema.tables",
@@ -1468,14 +1720,14 @@ mod tests {
     fn invoke_schema_tables_empty() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/schema/tables"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-                .mount(&mock)
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!([])))
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.schema.tables",
@@ -1488,23 +1740,23 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.schema.columns =====
+    // ===== Loopback tests: pg.schema.columns =====
 
     #[test]
     fn invoke_schema_columns_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/schema/columns"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!([
                     {"name": "id", "data_type": "integer", "nullable": false, "is_primary_key": true},
                     {"name": "email", "data_type": "text", "nullable": true, "is_primary_key": false}
                 ])))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.schema.columns",
@@ -1520,8 +1772,8 @@ mod tests {
     fn invoke_schema_columns_missing_table() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.schema.columns",
@@ -1532,23 +1784,23 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.schema.indexes =====
+    // ===== Loopback tests: pg.schema.indexes =====
 
     #[test]
     fn invoke_schema_indexes_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/schema/indexes"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!([
                     {"name": "users_pkey", "table": "users", "columns": ["id"], "unique": true, "type": "btree"},
                     {"name": "users_email_idx", "table": "users", "columns": ["email"], "unique": true, "type": "btree"}
                 ])))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.schema.indexes",
@@ -1564,8 +1816,8 @@ mod tests {
     fn invoke_schema_indexes_missing_table() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.schema.indexes",
@@ -1576,22 +1828,22 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.transaction.begin =====
+    // ===== Loopback tests: pg.transaction.begin =====
 
     #[test]
     fn invoke_transaction_begin_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/transaction"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "txn_id": "txn-abc-123"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.transaction.begin",
@@ -1607,17 +1859,17 @@ mod tests {
     fn invoke_transaction_begin_with_isolation() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/transaction"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "txn_id": "txn-456",
                     "isolation_level": "serializable"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.transaction.begin",
@@ -1629,22 +1881,22 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.transaction.commit =====
+    // ===== Loopback tests: pg.transaction.commit =====
 
     #[test]
     fn invoke_transaction_commit_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/transaction"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "status": "committed"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.transaction.commit",
@@ -1660,8 +1912,8 @@ mod tests {
     fn invoke_transaction_commit_missing_txn_id() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.transaction.commit",
@@ -1672,22 +1924,22 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.transaction.rollback =====
+    // ===== Loopback tests: pg.transaction.rollback =====
 
     #[test]
     fn invoke_transaction_rollback_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/transaction"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "status": "rolled_back"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.transaction.rollback",
@@ -1703,8 +1955,8 @@ mod tests {
     fn invoke_transaction_rollback_missing_txn_id() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.transaction.rollback",
@@ -1715,25 +1967,25 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.batch =====
+    // ===== Loopback tests: pg.batch =====
 
     #[test]
     fn invoke_batch_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/batch"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "results": [
                         {"affected_rows": 1},
                         {"affected_rows": 1}
                     ]
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.batch",
@@ -1755,8 +2007,8 @@ mod tests {
     fn invoke_batch_missing_statements() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.batch",
@@ -1771,16 +2023,16 @@ mod tests {
     fn invoke_batch_empty_statements() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/batch"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "results": []
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.batch",
@@ -1796,8 +2048,8 @@ mod tests {
     fn invoke_batch_non_string_statement() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.batch",
@@ -1808,23 +2060,23 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.prepared =====
+    // ===== Loopback tests: pg.prepared =====
 
     #[test]
     fn invoke_prepared_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/prepared"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [{"id": 1}],
                     "row_count": 1
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.prepared",
@@ -1840,8 +2092,8 @@ mod tests {
     fn invoke_prepared_missing_name() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            let c = connector_with_mock(&mock);
+            let server = LoopbackServer::start().await;
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.prepared",
@@ -1856,17 +2108,17 @@ mod tests {
     fn invoke_prepared_no_params() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/prepared"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [],
                     "row_count": 0
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.prepared",
@@ -1878,24 +2130,24 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: pg.health =====
+    // ===== Loopback tests: pg.health =====
 
     #[test]
     fn invoke_pg_health_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/health"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "status": "ok",
                     "version": "15.2",
                     "uptime_seconds": 86400
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.health",
@@ -1911,16 +2163,16 @@ mod tests {
     fn invoke_pg_health_server_down() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/health"))
-                .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(503).set_body_json(json!({
                     "message": "database unavailable"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.health",
@@ -1931,22 +2183,22 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: error status codes =====
+    // ===== Loopback tests: error status codes =====
 
     #[test]
     fn invoke_403_permission_denied() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(403).set_body_json(json!({
                     "message": "insufficient privileges"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1961,16 +2213,16 @@ mod tests {
     fn invoke_408_timeout() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(408).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(408).set_body_json(json!({
                     "message": "query timed out"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -1985,16 +2237,16 @@ mod tests {
     fn invoke_500_internal_error() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(500).set_body_json(json!({
                     "message": "internal server error"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -2009,14 +2261,14 @@ mod tests {
     fn invoke_empty_error_body() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(500))
-                .mount(&mock)
+                .respond_with(LoopbackResponse::new(500))
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -2027,22 +2279,22 @@ mod tests {
         });
     }
 
-    // ===== Wiremock tests: response with error field =====
+    // ===== Loopback tests: response with error field =====
 
     #[test]
     fn invoke_query_response_with_error_field() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "error": "relation \"nonexistent\" does not exist"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -2329,21 +2581,21 @@ mod tests {
     fn parameterized_query_uses_params_array() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
                 .and(body_json(json!({
                     "sql": "SELECT * FROM users WHERE name = $1 AND age > $2",
                     "params": ["Robert'; DROP TABLE users;--", 25]
                 })))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [],
                     "row_count": 0
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -2364,18 +2616,18 @@ mod tests {
     fn multiple_queries_in_sequence() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [{"count": 5}],
                     "row_count": 1
                 })))
                 .expect(2)
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let r1 = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -2400,10 +2652,10 @@ mod tests {
     fn query_with_various_data_types() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [{
                         "id": 1,
                         "name": "Alice",
@@ -2415,10 +2667,10 @@ mod tests {
                     }],
                     "row_count": 1
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -2442,20 +2694,20 @@ mod tests {
     fn query_large_result_set() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
+            let server = LoopbackServer::start().await;
             let rows: Vec<serde_json::Value> = (0..100)
                 .map(|i| json!({"id": i, "name": format!("user_{i}")}))
                 .collect();
-            Mock::given(method("POST"))
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": rows,
                     "row_count": 100
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -2473,16 +2725,16 @@ mod tests {
     fn transaction_error_from_server() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/transaction"))
-                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(400).set_body_json(json!({
                     "message": "transaction already committed"
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.transaction.commit",
@@ -2510,25 +2762,25 @@ mod tests {
     // ===== Empty response body handling =====
 
     #[test]
-    fn handle_empty_success_body() {
+    fn handle_empty_json_success_body_fails_closed() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/health"))
-                .respond_with(ResponseTemplate::new(200))
-                .mount(&mock)
+                .respond_with(LoopbackResponse::new(200))
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.health",
                     "input": {}
                 }))
-                .await
-                .unwrap();
-            assert!(result.get("health").is_some());
+                .await;
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("empty response body"), "{err}");
         });
     }
 
@@ -2538,14 +2790,14 @@ mod tests {
     fn invoke_with_no_input_field() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("GET"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("GET"))
                 .and(path("/rest/v1/schema/tables"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-                .mount(&mock)
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!([])))
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let result = c
                 .handle_invoke(json!({
                     "operation_id": "pg.schema.tables"
@@ -2670,17 +2922,17 @@ mod tests {
     fn request_count_increments() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                .respond_with(LoopbackResponse::new(200).set_body_json(json!({
                     "rows": [],
                     "row_count": 0
                 })))
-                .mount(&mock)
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             c.handle_invoke(json!({
                 "operation_id": "pg.query",
                 "input": {"sql": "SELECT 1"}
@@ -2697,14 +2949,14 @@ mod tests {
     fn error_count_increments_on_failure() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock = MockServer::start().await;
-            Mock::given(method("POST"))
+            let server = LoopbackServer::start().await;
+            Stub::given(method("POST"))
                 .and(path("/rest/v1/rpc/query"))
-                .respond_with(ResponseTemplate::new(500))
-                .mount(&mock)
+                .respond_with(LoopbackResponse::new(500))
+                .mount(&server)
                 .await;
 
-            let c = connector_with_mock(&mock);
+            let c = connector_with_loopback(&server);
             let _ = c
                 .handle_invoke(json!({
                     "operation_id": "pg.query",
@@ -2743,15 +2995,15 @@ mod tests {
         c
     }
 
-    fn connector_with_mock(mock: &MockServer) -> PostgreSqlConnector {
+    fn connector_with_loopback(server: &LoopbackServer) -> PostgreSqlConnector {
         let mut c = PostgreSqlConnector::new();
         let rt = tokio_runtime();
         rt.block_on(c.handle_configure(json!({
             "api_key": "test-key",
-            "base_url": mock.uri()
+            "base_url": server.uri()
         })))
         .unwrap();
-        rt.block_on(c.handle_handshake(json!({"session_id": "mock-session"})))
+        rt.block_on(c.handle_handshake(json!({"session_id": "loopback-session"})))
             .unwrap();
         c
     }

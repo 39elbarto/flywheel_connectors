@@ -16,8 +16,8 @@ use fcp_prelude::{
     InvokeResponse, OperationId, OperationInfo, OrderingPolicy, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, ZoneId,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -4737,8 +4737,6 @@ mod tests {
     use std::net::{Shutdown, SocketAddr, TcpListener as StdTcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use wiremock::matchers::{method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const MANIFEST_SCHEMA_OPERATIONS: [(&str, &str); 21] = [
         ("send_message", OP_SEND_MESSAGE),
@@ -6016,7 +6014,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn send_media_loopback_uploads_sanitized_multipart_with_private_api_reply() {
         let root = unique_media_root();
-        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fake-png-media");
+        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fixture-png-media");
         let server = BlueBubblesLoopback::spawn(
             "media-private-api",
             vec![
@@ -6060,7 +6058,7 @@ mod tests {
         assert_eq!(result["message_id"], "media-msg-1");
         assert_eq!(result["filename"], "bad__name.png");
         assert_eq!(result["content_type"], "image/png");
-        assert_eq!(result["byte_len"], 14);
+        assert_eq!(result["byte_len"], 17);
         assert_eq!(
             result["media_send_decision"]["request_method"],
             "private-api"
@@ -6108,7 +6106,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn send_media_loopback_denies_reply_when_private_api_disabled() {
         let root = unique_media_root();
-        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fake-png-media");
+        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fixture-png-media");
         let server = BlueBubblesLoopback::spawn(
             "media-private-api-disabled",
             vec![LoopbackResponse::json(
@@ -6143,7 +6141,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn send_media_rejects_unconfigured_outside_and_oversized_before_network() {
         let root = unique_media_root();
-        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fake-png-media");
+        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fixture-png-media");
         let no_roots = BlueBubblesLoopback::spawn("media-no-roots", Vec::new());
         let no_roots_error = invoke_against_loopback_with_config(
             loopback_config(no_roots.uri()),
@@ -6162,7 +6160,7 @@ mod tests {
         let allowed_root = unique_media_root();
         let outside_root = unique_media_root();
         let outside_path =
-            write_media_fixture(&outside_root, MediaFixtureName::Photo, b"fake-png-media");
+            write_media_fixture(&outside_root, MediaFixtureName::Photo, b"fixture-png-media");
         let outside = BlueBubblesLoopback::spawn("media-outside-root", Vec::new());
         let outside_error = invoke_against_loopback_with_config(
             loopback_media_config(outside.uri(), &allowed_root, 1024),
@@ -6184,7 +6182,7 @@ mod tests {
             OP_SEND_MEDIA,
             json!({
                 "chat_guid": "iMessage;-;+15551234567",
-                "local_path": write_media_fixture(&root, MediaFixtureName::Large, b"fake-png-media").to_string_lossy().to_string()
+                "local_path": write_media_fixture(&root, MediaFixtureName::Large, b"fixture-png-media").to_string_lossy().to_string()
             }),
         )
         .await
@@ -7319,15 +7317,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_sync_events_single_chat() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v1/chat/chat-guid-1/message"))
-            .and(query_param("password", "test-password-123"))
-            .and(query_param("after", "1700000000000"))
-            .and(query_param("limit", "10"))
-            .and(query_param("sort", "ASC"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let server = BlueBubblesLoopback::spawn(
+            "sync-events-single-chat",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
                 "offset": 0,
                 "limit": 10,
                 "data": [
@@ -7344,13 +7338,13 @@ mod tests {
                         "attachments": []
                     }
                 ]
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )],
+        );
 
         let mut connector = BlueBubblesConnector::new();
         connector
-            .configure(test_config_with_url(&mock_server.uri()))
+            .configure(test_config_with_url(server.uri()))
             .await
             .unwrap();
         let signing_key = Ed25519SigningKey::generate();
@@ -7378,6 +7372,18 @@ mod tests {
         assert_eq!(events[0]["thread"]["thread_originator_guid"], "root-1");
         assert_eq!(result["next_after"], 1_700_000_000_101_i64);
         assert_eq!(result["synced_chats"], 1);
+
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/chat/chat-guid-1/message")
+        );
+        assert!(target_has_query_key(&requests[0].target, "password"));
+        assert!(requests[0].target.contains("after=1700000000000"));
+        assert!(requests[0].target.contains("limit=10"));
+        assert!(requests[0].target.contains("sort=ASC"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -7757,7 +7763,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn no_mock_bluebubbles_ingress_loopback_registers_callback_and_exercises_actions() {
+    async fn loopback_bluebubbles_ingress_registers_callback_and_exercises_actions() {
         let ingress_listener =
             StdTcpListener::bind("127.0.0.1:0").expect("bind FCP ingress loopback");
         let ingress_base = format!(
@@ -8453,11 +8459,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_ingest_webhook_event_fetches_and_caches_reply_context() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/message/root-1"))
-            .and(query_param("password", "test-password-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let server = BlueBubblesLoopback::spawn(
+            "reply-context-fetch",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
                 "data": {
                     "guid": "root-1",
                     "text": "secret reply body",
@@ -8467,14 +8473,13 @@ mod tests {
                     "handle": { "address": "+15551234567", "display_name": "Alice" },
                     "attachments": [{ "guid": "reply-att-1" }]
                 }
-            })))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
+                }),
+            )],
+        );
 
         let mut connector = BlueBubblesConnector::new();
         connector
-            .configure(test_config_with_reply_context(&mock_server.uri()))
+            .configure(test_config_with_reply_context(server.uri()))
             .await
             .unwrap();
         let signing_key = Ed25519SigningKey::generate();
@@ -8535,35 +8540,36 @@ mod tests {
         .await;
         assert_eq!(second["reply_context_lookup"]["status"], "cache_hit");
         assert_eq!(second["event"]["reply_context"]["message_guid"], "root-1");
-        mock_server.verify().await;
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/message/root-1")
+        );
+        assert!(target_has_query_key(&requests[0].target, "password"));
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_ingest_webhook_event_coalesces_concurrent_reply_context_fetches() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/message/root-1"))
-            .and(query_param("password", "test-password-123"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(Duration::from_millis(100))
-                    .set_body_json(json!({
-                        "data": {
-                            "guid": "root-1",
-                            "text": "secret reply body",
-                            "is_from_me": true,
-                            "chatGuid": "iMessage;-;+15551234567",
-                            "attachments": []
-                        }
-                    })),
-            )
-            .expect(1)
-            .mount(&mock_server)
-            .await;
+        let mut response = LoopbackResponse::json(
+            200,
+            &json!({
+                "data": {
+                    "guid": "root-1",
+                    "text": "secret reply body",
+                    "is_from_me": true,
+                    "chatGuid": "iMessage;-;+15551234567",
+                    "attachments": []
+                }
+            }),
+        );
+        response.delay = Duration::from_millis(100);
+        let server = BlueBubblesLoopback::spawn("reply-context-concurrent", vec![response]);
 
         let mut connector = BlueBubblesConnector::new();
         connector
-            .configure(test_config_with_reply_context(&mock_server.uri()))
+            .configure(test_config_with_reply_context(server.uri()))
             .await
             .unwrap();
         let signing_key = Ed25519SigningKey::generate();
@@ -8645,16 +8651,23 @@ mod tests {
                     .contains("secret reply body")
             );
         }
-        mock_server.verify().await;
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/message/root-1")
+        );
+        assert!(target_has_query_key(&requests[0].target, "password"));
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_ingest_webhook_event_rejects_cross_chat_reply_context() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/message/root-1"))
-            .and(query_param("password", "test-password-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let server = BlueBubblesLoopback::spawn(
+            "reply-context-cross-chat",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
                 "data": {
                     "guid": "root-1",
                     "text": "secret reply body",
@@ -8662,14 +8675,13 @@ mod tests {
                     "chatGuid": "iMessage;-;+15551234567",
                     "attachments": []
                 }
-            })))
-            .expect(1)
-            .mount(&mock_server)
-            .await;
+                }),
+            )],
+        );
 
         let mut connector = BlueBubblesConnector::new();
         connector
-            .configure(test_config_with_reply_context(&mock_server.uri()))
+            .configure(test_config_with_reply_context(server.uri()))
             .await
             .unwrap();
         let signing_key = Ed25519SigningKey::generate();
@@ -8709,7 +8721,14 @@ mod tests {
                 .unwrap()
                 .contains("secret reply body")
         );
-        mock_server.verify().await;
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/message/root-1")
+        );
+        assert!(target_has_query_key(&requests[0].target, "password"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -9261,34 +9280,43 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_list_and_unregister_webhooks_by_url() {
-        let mock_server = MockServer::start().await;
         let callback_url = "http://localhost:8645/bluebubbles-webhook";
-
-        Mock::given(method("GET"))
-            .and(path("/api/v1/webhook"))
-            .and(query_param("password", "test-password-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{
-                    "id": "wh-1",
-                    "url": callback_url,
-                    "events": ["new-message", "updated-message"]
-                }]
-            })))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("DELETE"))
-            .and(path("/api/v1/webhook/wh-1"))
-            .and(query_param("password", "test-password-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "status": 200,
-                "message": "deleted"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = BlueBubblesLoopback::spawn(
+            "webhook-list-unregister",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": [{
+                            "id": "wh-1",
+                            "url": callback_url,
+                            "events": ["new-message", "updated-message"]
+                        }]
+                    }),
+                ),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": [{
+                            "id": "wh-1",
+                            "url": callback_url,
+                            "events": ["new-message", "updated-message"]
+                        }]
+                    }),
+                ),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "status": 200,
+                        "message": "deleted"
+                    }),
+                ),
+            ],
+        );
 
         let mut connector = BlueBubblesConnector::new();
         connector
-            .configure(test_config_with_url(&mock_server.uri()))
+            .configure(test_config_with_url(server.uri()))
             .await
             .unwrap();
         let signing_key = Ed25519SigningKey::generate();
@@ -9320,43 +9348,57 @@ mod tests {
         assert_eq!(result["deleted_count"], 1);
         assert_eq!(result["deleted"][0]["webhook_id"], "wh-1");
         assert_eq!(result["deleted"][0]["response"]["message"], "deleted");
+
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/webhook")
+        );
+        assert!(target_has_query_key(&requests[0].target, "password"));
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(
+            requests[1].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/webhook")
+        );
+        assert!(target_has_query_key(&requests[1].target, "password"));
+        assert_eq!(requests[2].method, "DELETE");
+        assert_eq!(
+            requests[2].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/webhook/wh-1")
+        );
+        assert!(target_has_query_key(&requests[2].target, "password"));
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_register_webhook_posts_when_no_existing_match() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v1/webhook"))
-            .and(query_param("password", "test-password-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": []
-            })))
-            .mount(&mock_server)
-            .await;
         let callback_url = format!(
             "{}?{}={}",
             "http://localhost:8645/bluebubbles-webhook", "password", "test-password-123"
         );
-
-        Mock::given(method("POST"))
-            .and(path("/api/v1/webhook"))
-            .and(query_param("password", "test-password-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "status": 200,
-                "message": "registered",
-                "data": {
-                    "id": "wh-1",
-                    "url": callback_url.clone(),
-                    "events": ["new-message", "updated-message"]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = BlueBubblesLoopback::spawn(
+            "webhook-register",
+            vec![
+                LoopbackResponse::json(200, &json!({ "data": [] })),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                    "status": 200,
+                    "message": "registered",
+                    "data": {
+                        "id": "wh-1",
+                        "url": callback_url.clone(),
+                        "events": ["new-message", "updated-message"]
+                    }
+                        }),
+                ),
+            ],
+        );
 
         let mut connector = BlueBubblesConnector::new();
         connector
-            .configure(test_config_with_url(&mock_server.uri()))
+            .configure(test_config_with_url(server.uri()))
             .await
             .unwrap();
         let signing_key = Ed25519SigningKey::generate();
@@ -9376,5 +9418,20 @@ mod tests {
         let result = response.result.as_ref().unwrap();
         assert_eq!(result["registration_status"], "registered");
         assert_eq!(result["response"]["data"]["id"], "wh-1");
+
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/webhook")
+        );
+        assert!(target_has_query_key(&requests[0].target, "password"));
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(
+            requests[1].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/webhook")
+        );
+        assert!(target_has_query_key(&requests[1].target, "password"));
     }
 }

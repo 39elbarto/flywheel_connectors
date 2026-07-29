@@ -232,6 +232,11 @@ async fn s3_fifo_cache_real_concurrent_load_holds_invariants() {
         final_len <= CACHE_CAPACITY,
         "br-fuzz: final_len={final_len} exceeds capacity={CACHE_CAPACITY}"
     );
+    let hit_rate_per_mille = hits
+        .checked_mul(1000)
+        .zip(hits.checked_add(misses))
+        .and_then(|(scaled_hits, total)| scaled_hits.checked_div(total))
+        .unwrap_or(0);
 
     log(
         "s3_fifo_cache_real_concurrent_load",
@@ -245,7 +250,7 @@ async fn s3_fifo_cache_real_concurrent_load_holds_invariants() {
             "capacity_violations": capacity_violations,
             "hits": hits,
             "misses": misses,
-            "hit_rate_per_mille": if hits + misses > 0 { hits * 1000 / (hits + misses) } else { 0 },
+            "hit_rate_per_mille": hit_rate_per_mille,
             "final_len": final_len,
         }),
     );

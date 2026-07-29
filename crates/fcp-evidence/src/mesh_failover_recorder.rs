@@ -43,12 +43,12 @@ pub struct MeshFailoverFlightRecord {
     pub valid_for_ms: u64,
     /// Minimum distinct nodes required before the evidence can be mesh-backed.
     pub required_node_count: usize,
-    /// Nodes that participated in the timeline.
+    /// Redacted node hashes that participated in the timeline.
     #[serde(default)]
     pub participating_nodes: BTreeSet<String>,
-    /// Primary node before failover.
+    /// Redacted primary node hash before failover.
     pub primary_before: String,
-    /// Primary node after failover, if failover reached a new owner.
+    /// Redacted primary node hash after failover, if failover reached a new owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_after: Option<String>,
     /// State root before failover, if known.
@@ -98,15 +98,19 @@ impl MeshFailoverFlightRecord {
             return Err(MeshFailoverRecordError::MissingParticipants);
         }
         for node_id in &self.participating_nodes {
-            validate_key_fragment("participating_node", node_id)?;
+            validate_node_hash("participating_node_hash", node_id)?;
         }
         validate_known_node(
-            "primary_before",
+            "primary_before_hash",
             &self.primary_before,
             &self.participating_nodes,
         )?;
         if let Some(primary_after) = &self.primary_after {
-            validate_known_node("primary_after", primary_after, &self.participating_nodes)?;
+            validate_known_node(
+                "primary_after_hash",
+                primary_after,
+                &self.participating_nodes,
+            )?;
         }
         if let Some(state_root_before) = &self.state_root_before {
             state_root_before.validate()?;
@@ -483,8 +487,12 @@ pub struct MeshFailoverEvent {
     pub observed_at_unix_ms: u64,
     /// Event kind.
     pub kind: MeshFailoverEventKind,
-    /// Optional participating node id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional participating node id hash.
+    #[serde(
+        default,
+        rename = "node_id_hash",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub node_id: Option<String>,
     /// Optional lease id involved in the event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,7 +513,7 @@ impl MeshFailoverEvent {
         participating_nodes: &BTreeSet<String>,
     ) -> Result<(), MeshFailoverRecordError> {
         if let Some(node_id) = &self.node_id {
-            validate_known_node("event.node_id", node_id, participating_nodes)?;
+            validate_known_node("event.node_id_hash", node_id, participating_nodes)?;
         }
         if let Some(lease_id) = &self.lease_id {
             validate_key_fragment("event.lease_id", lease_id)?;
@@ -732,8 +740,8 @@ pub struct MeshFailoverJsonlEvent {
     pub observed_at_unix_ms: u64,
     /// Event kind.
     pub kind: MeshFailoverEventKind,
-    /// Optional node id.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Optional node id hash.
+    #[serde(rename = "node_id_hash", skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     /// Optional lease id.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -782,6 +790,20 @@ pub enum MeshFailoverRecordError {
         field: &'static str,
         /// Unknown node id.
         node_id: String,
+    },
+    /// Node hash field was not the expected digest length.
+    #[error("{field} had length {actual}; expected 64 lowercase hex characters")]
+    NodeHashLengthMismatch {
+        /// Field name.
+        field: &'static str,
+        /// Actual character length.
+        actual: usize,
+    },
+    /// Node hash field was not lowercase hex.
+    #[error("{field} must be lowercase hex")]
+    NodeHashNotLowerHex {
+        /// Field name.
+        field: &'static str,
     },
     /// Duplicate event sequence found.
     #[error("duplicate mesh failover event sequence {sequence}")]
@@ -832,7 +854,7 @@ fn validate_known_node(
     node_id: &str,
     participating_nodes: &BTreeSet<String>,
 ) -> Result<(), MeshFailoverRecordError> {
-    validate_key_fragment(field, node_id)?;
+    validate_node_hash(field, node_id)?;
     if participating_nodes.contains(node_id) {
         Ok(())
     } else {
@@ -841,6 +863,23 @@ fn validate_known_node(
             node_id: node_id.to_owned(),
         })
     }
+}
+
+fn validate_node_hash(field: &'static str, value: &str) -> Result<(), MeshFailoverRecordError> {
+    validate_safe_text(field, value)?;
+    if value.len() != 64 {
+        return Err(MeshFailoverRecordError::NodeHashLengthMismatch {
+            field,
+            actual: value.len(),
+        });
+    }
+    if !value
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(MeshFailoverRecordError::NodeHashNotLowerHex { field });
+    }
+    Ok(())
 }
 
 fn validate_key_fragment(field: &'static str, value: &str) -> Result<(), MeshFailoverRecordError> {
@@ -926,6 +965,9 @@ mod tests {
 
     const NOW: u64 = 1_770_000_000_000;
     const DAY_MS: u64 = 86_400_000;
+    const NODE_A_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NODE_B_HASH: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const NODE_C_HASH: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     fn event(
         sequence: u32,
@@ -970,9 +1012,9 @@ mod tests {
             observed_at_unix_ms: NOW,
             valid_for_ms: DAY_MS,
             required_node_count: 2,
-            participating_nodes: BTreeSet::from(["node-a".to_owned(), "node-b".to_owned()]),
-            primary_before: "node-a".to_owned(),
-            primary_after: Some("node-b".to_owned()),
+            participating_nodes: BTreeSet::from([NODE_A_HASH.to_owned(), NODE_B_HASH.to_owned()]),
+            primary_before: NODE_A_HASH.to_owned(),
+            primary_after: Some(NODE_B_HASH.to_owned()),
             state_root_before: Some(MeshStateRootRef {
                 root_id: "state-root-before".to_owned(),
                 seq: 41,
@@ -990,55 +1032,55 @@ mod tests {
                 event(
                     1,
                     MeshFailoverEventKind::PlacementDecided,
-                    Some("node-a"),
-                    "placement selected node-a and node-b",
+                    Some(NODE_A_HASH),
+                    "placement selected redacted primary and replacement",
                 ),
                 event(
                     2,
                     MeshFailoverEventKind::LeaseAcquired,
-                    Some("node-a"),
-                    "node-a acquired initial lease",
+                    Some(NODE_A_HASH),
+                    "redacted primary acquired initial lease",
                 ),
                 event(
                     3,
                     MeshFailoverEventKind::StateRootCommitted,
-                    Some("node-a"),
-                    "node-a committed state root before failover",
+                    Some(NODE_A_HASH),
+                    "redacted primary committed state root before failover",
                 ),
                 event(
                     4,
                     MeshFailoverEventKind::FailoverTriggered,
-                    Some("node-b"),
-                    "node-b observed owner loss",
+                    Some(NODE_B_HASH),
+                    "redacted replacement observed owner loss",
                 ),
                 event(
                     5,
                     MeshFailoverEventKind::LeaseAcquired,
-                    Some("node-b"),
-                    "node-b acquired failover lease",
+                    Some(NODE_B_HASH),
+                    "redacted replacement acquired failover lease",
                 ),
                 event(
                     6,
                     MeshFailoverEventKind::ReplayStarted,
-                    Some("node-b"),
-                    "node-b started bounded replay",
+                    Some(NODE_B_HASH),
+                    "redacted replacement started bounded replay",
                 ),
                 event(
                     7,
                     MeshFailoverEventKind::ReplayCompleted,
-                    Some("node-b"),
-                    "node-b completed bounded replay",
+                    Some(NODE_B_HASH),
+                    "redacted replacement completed bounded replay",
                 ),
                 event(
                     8,
                     MeshFailoverEventKind::AuditReceiptRecorded,
-                    Some("node-b"),
+                    Some(NODE_B_HASH),
                     "audit receipt recorded lease replay and cleanup",
                 ),
                 event(
                     9,
                     MeshFailoverEventKind::CleanupCompleted,
-                    Some("node-b"),
+                    Some(NODE_B_HASH),
                     "old lease cleanup completed",
                 ),
             ],
@@ -1076,7 +1118,7 @@ mod tests {
             event(
                 7,
                 MeshFailoverEventKind::PartitionObserved,
-                Some("node-b"),
+                Some(NODE_B_HASH),
                 "partition isolated the old owner",
             ),
         );
@@ -1085,7 +1127,7 @@ mod tests {
             event(
                 8,
                 MeshFailoverEventKind::PartitionHealed,
-                Some("node-b"),
+                Some(NODE_B_HASH),
                 "partition healed before cleanup",
             ),
         );
@@ -1109,20 +1151,20 @@ mod tests {
         let mut record = clean_record();
         record.scenario_id = "single-host".to_owned();
         record.required_node_count = 3;
-        record.participating_nodes = BTreeSet::from(["node-a".to_owned()]);
-        record.primary_before = "node-a".to_owned();
-        record.primary_after = Some("node-a".to_owned());
+        record.participating_nodes = BTreeSet::from([NODE_A_HASH.to_owned()]);
+        record.primary_before = NODE_A_HASH.to_owned();
+        record.primary_after = Some(NODE_A_HASH.to_owned());
         record.events = vec![
             event(
                 1,
                 MeshFailoverEventKind::DowngradeWarning,
-                Some("node-a"),
+                Some(NODE_A_HASH),
                 "single-host fallback warning emitted",
             ),
             event(
                 2,
                 MeshFailoverEventKind::AuditReceiptRecorded,
-                Some("node-a"),
+                Some(NODE_A_HASH),
                 "host-backed audit receipt recorded",
             ),
         ];
@@ -1148,7 +1190,7 @@ mod tests {
         record.events.push(event(
             10,
             MeshFailoverEventKind::StaleStateRootRejected,
-            Some("node-b"),
+            Some(NODE_B_HASH),
             "stale state root rejected during restore",
         ));
 
@@ -1171,7 +1213,7 @@ mod tests {
         record.events.push(event(
             10,
             MeshFailoverEventKind::ReplayConflict,
-            Some("node-b"),
+            Some(NODE_B_HASH),
             "bounded replay detected conflicting append",
         ));
 
@@ -1222,10 +1264,10 @@ mod tests {
         let first = serde_json::to_string(&events[0]).expect("serialize event");
 
         assert_eq!(events.len(), 9);
-        assert_eq!(
-            first,
-            r#"{"schema":"fcp.mesh-failover-flight-recorder.v1","scenario_id":"clean-2node","connector_id":"connector.github","event_sequence":1,"observed_at_unix_ms":1770000000001,"kind":"placement_decided","node_id":"node-a","truth_source":"mesh_backed","classification":"clean_failover","summary":"placement selected node-a and node-b"}"#
+        let expected_first = format!(
+            r#"{{"schema":"fcp.mesh-failover-flight-recorder.v1","scenario_id":"clean-2node","connector_id":"connector.github","event_sequence":1,"observed_at_unix_ms":1770000000001,"kind":"placement_decided","node_id_hash":"{NODE_A_HASH}","truth_source":"mesh_backed","classification":"clean_failover","summary":"placement selected redacted primary and replacement"}}"#
         );
+        assert_eq!(first, expected_first);
         let joined = events
             .iter()
             .map(|event| serde_json::to_string(event).expect("serialize event"))
@@ -1233,6 +1275,8 @@ mod tests {
             .join("\n");
         assert!(!joined.contains("://"));
         assert!(!looks_like_secret(&joined));
+        assert!(!joined.contains("node-a"));
+        assert!(!joined.contains("node-b"));
     }
 
     #[test]
@@ -1253,6 +1297,35 @@ mod tests {
     }
 
     #[test]
+    fn raw_or_malformed_node_labels_are_rejected() {
+        let mut record = clean_record();
+        record.participating_nodes = BTreeSet::from(["node-a".to_owned(), NODE_B_HASH.to_owned()]);
+        record.primary_before = "node-a".to_owned();
+        let err = record
+            .validate()
+            .expect_err("raw node labels must be hashed before recorder ingestion");
+        assert!(matches!(
+            err,
+            MeshFailoverRecordError::NodeHashLengthMismatch {
+                field: "participating_node_hash",
+                ..
+            }
+        ));
+
+        let mut record = clean_record();
+        record.events[0].node_id = Some("A".repeat(64));
+        let err = record
+            .validate()
+            .expect_err("uppercase node hashes should be rejected");
+        assert!(matches!(
+            err,
+            MeshFailoverRecordError::NodeHashNotLowerHex {
+                field: "event.node_id_hash"
+            }
+        ));
+    }
+
+    #[test]
     fn duplicate_or_unknown_event_references_are_rejected() {
         let mut record = clean_record();
         record.events[1].sequence = record.events[0].sequence;
@@ -1266,7 +1339,7 @@ mod tests {
         ));
 
         let mut record = clean_record();
-        record.events[0].node_id = Some("node-c".to_owned());
+        record.events[0].node_id = Some(NODE_C_HASH.to_owned());
         let err = record
             .validate()
             .expect_err("unknown node reference rejected");

@@ -1,5 +1,5 @@
 //! Pin `CostEstimateConfidence` documented ordering + `CostEstimate` shape
-//! — the closest analogue to "ConnectorChargingMode ordering"
+//! — the closest analogue to "`ConnectorChargingMode` ordering"
 //! (flywheel_connectors-xjuwz).
 //!
 //! Bead asks for `ConnectorChargingMode` Display + ordering pinning. No type
@@ -11,7 +11,7 @@
 //! "charging mode" ordering signal.
 //!
 //! Coverage:
-//!   * 3-variant CostEstimateConfidence snake_case serde matrix (Low /
+//!   * 3-variant `CostEstimateConfidence` `snake_case` serde matrix (Low /
 //!     Medium / High),
 //!   * **Documented ordering**: even though the type does NOT derive
 //!     Ord/PartialOrd, the variant declaration order Low → Medium → High
@@ -21,14 +21,15 @@
 //!   * Loud sentinel: confirm Ord is NOT silently added (would let
 //!     #[derive(Ord)] order be wrong if someone ever shuffled variants —
 //!     pin the explicit-ordinal contract via direct comparison),
-//!   * CostEstimate full 5-field JSON shape with skip-when-None for every
+//!   * `CostEstimate` full 5-field JSON shape with skip-when-None for every
 //!     optional field,
-//!   * CostEstimate empty-state shape (Default::default() omits all 5 fields),
-//!   * 6 builder helpers (with_credits / with_duration_ms / with_bytes /
-//!     and_credits / and_duration_ms / and_bytes / and_currency / and_confidence),
-//!   * CurrencyCost shape pinning + USD helper,
+//!   * `CostEstimate` empty-state shape (`Default::default()` omits all 5 fields),
+//!   * builder helpers (`with_credits`, `with_duration_ms`, `with_bytes`,
+//!     `and_credits`, `and_duration_ms`, `and_bytes`, `and_currency`,
+//!     `and_confidence`),
+//!   * `CurrencyCost` shape pinning + USD helper,
 //!   * JSON + CBOR round-trip preserves all populated fields,
-//!   * PascalCase rejection sentinel for confidence.
+//!   * `PascalCase` rejection sentinel for confidence.
 
 use ciborium::Value as CborValue;
 use fcp_core::{CostEstimate, CostEstimateConfidence, CurrencyCost};
@@ -41,9 +42,9 @@ const ALL_CONFIDENCES: &[(CostEstimateConfidence, &str)] = &[
 ];
 
 /// Documented ordering: Low (loosest) → Medium → High (tightest).
-/// CostEstimateConfidence does NOT derive Ord; this helper IS the
+/// `CostEstimateConfidence` does NOT derive Ord; this helper IS the
 /// canonical mapping callers must use.
-fn confidence_ordinal(c: CostEstimateConfidence) -> u8 {
+const fn confidence_ordinal(c: CostEstimateConfidence) -> u8 {
     match c {
         CostEstimateConfidence::Low => 0,
         CostEstimateConfidence::Medium => 1,

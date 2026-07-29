@@ -26,10 +26,28 @@ use fcp_crypto::{
     ed25519::SIGNATURE_SIZE as ED25519_SIGNATURE_SIZE,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use thiserror::Error;
 
+pub mod cep;
+pub mod compaction;
+pub mod conformal;
 pub mod explain;
+pub mod hlc;
+pub mod otlp_export;
+pub mod replay;
+
+pub use cep::{
+    AnomalyAlertError, CEP_ANOMALY_ALERT_SCHEMA_VERSION, EventPattern, EventPatternError,
+    EventPredicate, PatternMatch,
+};
+pub use compaction::{
+    ReservoirCompaction, ReservoirCompactionError, ReservoirCompactionReport, ReservoirCompactor,
+    compact_entries,
+};
+pub use conformal::{ConformalScore, ConformalScoreEstimator};
+pub use hlc::{HybridLogicalClock, HybridLogicalTimestamp};
 
 const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
 const CAPABILITY_CONSTRAINT_DESCRIPTOR_HASH_DOMAIN: &[u8] =
@@ -47,6 +65,23 @@ const DECISION_RECEIPT_SIG_DOMAIN: &[u8] = b"FCP2-DECISION-RECEIPT-SIG-V1";
 pub const MAX_FUTURE_TIMESTAMP_SKEW_SECS: u64 = 300;
 const AUDIT_ENTRY_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-SIG-V1";
 const CHAIN_HEAD_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-CHAIN-HEAD-SIG-V1";
+
+/// Convert an audit entry's wall-clock timestamp into the default HLC stamp.
+///
+/// Callers that already maintain a causal HLC should set the explicit `hlc`
+/// field instead. This helper exists for builder paths and fixtures that only
+/// have the legacy Unix-seconds timestamp available.
+#[must_use]
+pub fn audit_entry_hlc_from_occurred_at(
+    occurred_at: u64,
+    node_id: impl Into<String>,
+) -> HybridLogicalTimestamp {
+    HybridLogicalTimestamp::from_physical(occurred_at.saturating_mul(1_000), node_id)
+}
+
+fn default_audit_entry_hlc() -> HybridLogicalTimestamp {
+    audit_entry_hlc_from_occurred_at(0, "legacy-audit-entry")
+}
 
 // ============================================================================
 // Event type constants
@@ -72,6 +107,8 @@ pub mod event_types {
     pub const SECURITY_VIOLATION: &str = "security.violation";
     /// Audit chain fork detected (critical).
     pub const AUDIT_FORK_DETECTED: &str = "audit.fork_detected";
+    /// CEP pattern matched an anomaly over audit-chain entries.
+    pub const CEP_ANOMALY_ALERT: &str = "audit.cep_anomaly_alert";
 }
 
 // ============================================================================
@@ -104,7 +141,9 @@ impl Severity {
             | event_types::CAPABILITY_CONSTRAINT_DENIED
             | event_types::ELEVATION_GRANTED
             | event_types::DECLASSIFICATION_GRANTED => Self::Warning,
-            event_types::REVOCATION_ISSUED | event_types::SECURITY_VIOLATION => Self::Error,
+            event_types::REVOCATION_ISSUED
+            | event_types::SECURITY_VIOLATION
+            | event_types::CEP_ANOMALY_ALERT => Self::Error,
             event_types::AUDIT_FORK_DETECTED => Self::Critical,
             _ => Self::Info,
         }
@@ -284,6 +323,9 @@ pub struct AuditEntry {
     pub seq: u64,
     /// When event occurred (Unix timestamp seconds).
     pub occurred_at: u64,
+    /// Hybrid logical timestamp for cross-zone causal ordering.
+    #[serde(default = "default_audit_entry_hlc")]
+    pub hlc: HybridLogicalTimestamp,
     /// Previous entry ID in chain (hash link).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev: Option<String>,
@@ -328,12 +370,82 @@ struct AuditEntryIdMaterial<'a> {
     zone_id: &'a str,
     seq: u64,
     occurred_at: u64,
+    hlc: &'a HybridLogicalTimestamp,
     prev: Option<&'a str>,
     correlation_id: &'a str,
     trace_context: Option<&'a TraceContext>,
     connector_id: Option<&'a str>,
     operation_id: Option<&'a str>,
     metadata: &'a std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Borrowed field set used to compute an [`AuditEntry`] canonical id without
+/// first materializing an owned entry.
+///
+/// This is useful on hot append paths that may need to speculatively compute
+/// an id and then discard it if an optimistic chain-head compare fails. The
+/// canonical payload is byte-identical to [`AuditEntry::computed_id`].
+#[derive(Debug, Clone, Copy)]
+pub struct AuditEntryIdFields<'a> {
+    /// Audit event type.
+    pub event_type: &'a str,
+    /// Event severity.
+    pub severity: Severity,
+    /// Actor who triggered the event.
+    pub actor: &'a str,
+    /// Zone where the event occurred.
+    pub zone_id: &'a str,
+    /// Monotonic chain sequence number.
+    pub seq: u64,
+    /// Event timestamp in Unix seconds.
+    pub occurred_at: u64,
+    /// Hybrid logical timestamp bound into the canonical entry id.
+    pub hlc: &'a HybridLogicalTimestamp,
+    /// Previous entry ID in the chain, if any.
+    pub prev: Option<&'a str>,
+    /// Correlation ID for request tracing.
+    pub correlation_id: &'a str,
+    /// Optional distributed trace context.
+    pub trace_context: Option<&'a TraceContext>,
+    /// Connector ID, if applicable.
+    pub connector_id: Option<&'a str>,
+    /// Operation ID, if applicable.
+    pub operation_id: Option<&'a str>,
+    /// Additional metadata as key-value pairs.
+    pub metadata: &'a std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Compute the canonical id for an audit-entry payload from borrowed fields.
+///
+/// # Errors
+///
+/// Returns [`AuditError::SerializationError`] when canonical CBOR encoding of
+/// the entry payload fails.
+pub fn compute_audit_entry_id(fields: AuditEntryIdFields<'_>) -> Result<String, AuditError> {
+    let material = AuditEntryIdMaterial {
+        event_type: fields.event_type,
+        severity: fields.severity,
+        actor: fields.actor,
+        zone_id: fields.zone_id,
+        seq: fields.seq,
+        occurred_at: fields.occurred_at,
+        hlc: fields.hlc,
+        prev: fields.prev,
+        correlation_id: fields.correlation_id,
+        trace_context: fields.trace_context,
+        connector_id: fields.connector_id,
+        operation_id: fields.operation_id,
+        metadata: fields.metadata,
+    };
+
+    let canonical = fcp_cbor::to_canonical_cbor(&material).map_err(|err| {
+        AuditError::SerializationError(format!("failed to canonicalize audit entry: {err}"))
+    })?;
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(AUDIT_ENTRY_ID_DOMAIN);
+    hasher.update(&canonical);
+    Ok(hex::encode(hasher.finalize().as_bytes()))
 }
 
 impl AuditEntry {
@@ -368,32 +480,21 @@ impl AuditEntry {
     /// Returns [`AuditError::SerializationError`] when canonical CBOR encoding
     /// of the entry payload fails.
     pub fn computed_id(&self) -> Result<String, AuditError> {
-        let material = AuditEntryIdMaterial {
+        compute_audit_entry_id(AuditEntryIdFields {
             event_type: &self.event_type,
             severity: self.severity,
             actor: &self.actor,
             zone_id: &self.zone_id,
             seq: self.seq,
             occurred_at: self.occurred_at,
+            hlc: &self.hlc,
             prev: self.prev.as_deref(),
             correlation_id: &self.correlation_id,
             trace_context: self.trace_context.as_ref(),
             connector_id: self.connector_id.as_deref(),
             operation_id: self.operation_id.as_deref(),
             metadata: &self.metadata,
-        };
-
-        let canonical = fcp_cbor::to_canonical_cbor(&material).map_err(|err| {
-            AuditError::SerializationError(format!(
-                "failed to canonicalize audit entry {}: {err}",
-                self.id
-            ))
-        })?;
-
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(AUDIT_ENTRY_ID_DOMAIN);
-        hasher.update(&canonical);
-        Ok(hex::encode(hasher.finalize().as_bytes()))
+        })
     }
 
     /// Canonical bytes that an issuer signs to bind their identity to
@@ -552,6 +653,7 @@ pub struct AuditEntryBuilder {
     zone_id: Option<String>,
     seq: Option<u64>,
     occurred_at: Option<u64>,
+    hlc: Option<HybridLogicalTimestamp>,
     prev: Option<String>,
     correlation_id: Option<String>,
     trace_context: Option<TraceContext>,
@@ -613,6 +715,13 @@ impl AuditEntryBuilder {
     #[must_use]
     pub const fn occurred_at(mut self, ts: u64) -> Self {
         self.occurred_at = Some(ts);
+        self
+    }
+
+    /// Set the hybrid logical timestamp.
+    #[must_use]
+    pub fn hlc(mut self, hlc: HybridLogicalTimestamp) -> Self {
+        self.hlc = Some(hlc);
         self
     }
 
@@ -699,6 +808,9 @@ impl AuditEntryBuilder {
         let severity = self
             .severity
             .unwrap_or_else(|| Severity::for_event_type(&event_type));
+        let hlc = self
+            .hlc
+            .unwrap_or_else(|| audit_entry_hlc_from_occurred_at(occurred_at, actor.clone()));
 
         Ok(AuditEntry {
             id,
@@ -708,6 +820,7 @@ impl AuditEntryBuilder {
             zone_id,
             seq,
             occurred_at,
+            hlc,
             prev: self.prev,
             correlation_id: self.correlation_id.unwrap_or_default(),
             trace_context: self.trace_context,
@@ -828,18 +941,29 @@ impl ChainHead {
         self.coverage >= threshold
     }
 
-    /// Returns true iff this head carries at least one signature AND the
-    /// declared [`signature_count`](Self::signature_count) matches the actual
-    /// number of signatures present.
+    /// Returns true iff this head carries at least one signature, the declared
+    /// [`signature_count`](Self::signature_count) matches the actual number of
+    /// signatures present, AND every signature carries a distinct
+    /// `issuer_kid`.
     ///
     /// This method intentionally does NOT verify signatures cryptographically
     /// (that requires an issuer-key registry outside this crate's scope), but
-    /// it refuses to treat a producer-asserted numeric count as quorum when
-    /// no signatures are attached or when the count disagrees with the list.
+    /// it refuses to treat a producer-asserted numeric count as quorum when no
+    /// signatures are attached, when the count disagrees with the list, or when
+    /// the same signer appears more than once (which would let one key inflate
+    /// its way to any threshold). Cryptographic distinctness is enforced by
+    /// [`Self::verify_signatures`].
     #[must_use]
     pub fn has_quorum(&self) -> bool {
-        !self.signatures.is_empty()
-            && usize::try_from(self.signature_count).is_ok_and(|n| n == self.signatures.len())
+        if self.signatures.is_empty()
+            || !usize::try_from(self.signature_count).is_ok_and(|n| n == self.signatures.len())
+        {
+            return false;
+        }
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.signatures.len());
+        self.signatures
+            .iter()
+            .all(|sig| seen.insert(sig.issuer_kid.as_str()))
     }
 
     /// Returns true iff the declared [`signature_count`](Self::signature_count)
@@ -858,7 +982,7 @@ impl ChainHead {
     ///    || u32(zone_id_len, LE)   || zone_id
     ///    || u32(head_entry_len, LE) || head_entry
     ///    || u64(head_seq, LE)
-    ///    || u64(coverage_bits, LE)  // exact `f64::to_bits()` representation
+    ///    || u64(coverage_bits, LE)  // exact f64 to_bits representation
     ///    || u32(epoch_id_len, LE)   || epoch_id
     ///    || u32(signature_count, LE)`
     ///
@@ -939,6 +1063,10 @@ impl ChainHead {
             return Err(AuditError::EmptySignedHead { seq: self.head_seq });
         }
         let transcript = self.signing_bytes();
+        // Track resolved signer keys so a single key cannot satisfy an
+        // N-signer quorum by attaching the same signature N times — quorum is
+        // N *distinct* signers, not N signatures.
+        let mut seen_signers: HashSet<Vec<u8>> = HashSet::with_capacity(self.signatures.len());
         for sig in &self.signatures {
             let kid = KeyId::from_hex(&sig.issuer_kid)
                 .map_err(|_| AuditError::UnknownIssuer { seq: self.head_seq })?;
@@ -946,6 +1074,9 @@ impl ChainHead {
                 key_lookup(&kid).ok_or(AuditError::UnknownIssuer { seq: self.head_seq })?;
             if verifying_key.key_id().as_slice() != kid.as_slice() {
                 return Err(AuditError::SignatureInvalid { seq: self.head_seq });
+            }
+            if !seen_signers.insert(kid.as_slice().to_vec()) {
+                return Err(AuditError::DuplicateSigner { seq: self.head_seq });
             }
             if sig.signature.is_empty() {
                 return Err(AuditError::EmptySignedHead { seq: self.head_seq });
@@ -1051,6 +1182,10 @@ pub struct DecisionReceipt {
     /// Connector operation associated with the decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    /// Calibrated confidence derived from recent receipt history for this
+    /// connector operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<ConformalScore>,
     /// Ed25519 key ID of the receipt's signer, when the emitting host
     /// has a configured audit signing key. Present iff [`Self::signature`]
     /// is present. Bead `flywheel_connectors-17l4c`.
@@ -1084,6 +1219,7 @@ struct DecisionReceiptIdMaterial<'a> {
     trace_context: Option<&'a TraceContext>,
     connector_id: Option<&'a str>,
     operation_id: Option<&'a str>,
+    confidence: Option<&'a ConformalScore>,
 }
 
 impl DecisionReceipt {
@@ -1137,6 +1273,7 @@ impl DecisionReceipt {
             trace_context: self.trace_context.as_ref(),
             connector_id: self.connector_id.as_deref(),
             operation_id: self.operation_id.as_deref(),
+            confidence: self.confidence.as_ref(),
         };
 
         let canonical = fcp_cbor::to_canonical_cbor(&material).map_err(|err| {
@@ -2112,6 +2249,16 @@ pub enum AuditError {
         seq: u64,
     },
 
+    /// A quorum-signed head carried two or more signatures from the same
+    /// issuer key. Quorum requires N *distinct* signers; without a
+    /// distinctness check a single compromised key could inflate its
+    /// signature to satisfy any threshold.
+    #[error("duplicate quorum signer at seq {seq}")]
+    DuplicateSigner {
+        /// Sequence number of the head that carried a repeated signer.
+        seq: u64,
+    },
+
     /// Optimistic-CAS retry budget exhausted under same-zone
     /// contention (br-1a73y).
     ///
@@ -2154,6 +2301,7 @@ impl AuditError {
             Self::UnknownIssuer { .. } => "FCP-5017",
             Self::EmptySignedHead { .. } => "FCP-5018",
             Self::ContentionExhausted { .. } => "FCP-5019",
+            Self::DuplicateSigner { .. } => "FCP-5020",
         }
     }
 }
@@ -2289,6 +2437,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq: 0,
             occurred_at: 1_700_000_000,
+            hlc: audit_entry_hlc_from_occurred_at(1_700_000_000, "user:alice"),
             prev: None,
             correlation_id: "corr-0".to_string(),
             trace_context: None,
@@ -2309,6 +2458,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq,
             occurred_at: 1_700_000_000 + seq * 60,
+            hlc: audit_entry_hlc_from_occurred_at(1_700_000_000 + seq * 60, "user:bob"),
             prev: Some(prev_id.to_string()),
             correlation_id: format!("corr-{seq}"),
             trace_context: None,
@@ -2431,6 +2581,7 @@ mod tests {
             trace_context: None,
             connector_id: None,
             operation_id: None,
+            confidence: None,
             issuer_kid: None,
             signature: None,
         }
@@ -2455,6 +2606,7 @@ mod tests {
         assert_eq!(event_types::REVOCATION_ISSUED, "revocation.issued");
         assert_eq!(event_types::SECURITY_VIOLATION, "security.violation");
         assert_eq!(event_types::AUDIT_FORK_DETECTED, "audit.fork_detected");
+        assert_eq!(event_types::CEP_ANOMALY_ALERT, "audit.cep_anomaly_alert");
     }
 
     #[test]
@@ -2469,6 +2621,7 @@ mod tests {
             event_types::REVOCATION_ISSUED,
             event_types::SECURITY_VIOLATION,
             event_types::AUDIT_FORK_DETECTED,
+            event_types::CEP_ANOMALY_ALERT,
         ];
         for t in types {
             assert!(t.contains('.'), "event type {t} should contain a dot");
@@ -2533,6 +2686,10 @@ mod tests {
         assert_eq!(
             Severity::for_event_type(event_types::AUDIT_FORK_DETECTED),
             Severity::Critical
+        );
+        assert_eq!(
+            Severity::for_event_type(event_types::CEP_ANOMALY_ALERT),
+            Severity::Error
         );
     }
 
@@ -2863,6 +3020,22 @@ mod tests {
     }
 
     #[test]
+    fn audit_entry_hlc_participates_in_canonical_id() {
+        let mut entry = genesis_entry();
+        let baseline = entry.computed_id().unwrap();
+        entry.hlc = HybridLogicalTimestamp::new(
+            entry.hlc.physical_ms,
+            entry.hlc.logical.saturating_add(1),
+            entry.hlc.node_id.clone(),
+        );
+        assert_ne!(
+            baseline,
+            entry.computed_id().unwrap(),
+            "HLC must be part of the audit-entry canonical payload"
+        );
+    }
+
+    #[test]
     fn audit_entry_with_trace_context() {
         let mut entry = genesis_entry();
         entry.trace_context = Some(TraceContext::new("trace-abc", "span-def"));
@@ -2901,6 +3074,7 @@ mod tests {
             zone_id: String::new(),
             seq: 0,
             occurred_at: 0,
+            hlc: audit_entry_hlc_from_occurred_at(0, ""),
             prev: None,
             correlation_id: String::new(),
             trace_context: None,
@@ -2926,6 +3100,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq,
             occurred_at: 1_700_000_000 + seq * 60,
+            hlc: audit_entry_hlc_from_occurred_at(1_700_000_000 + seq * 60, "agent:alice"),
             prev: prev_id.map(ToString::to_string),
             correlation_id: format!("corr-{seq}"),
             trace_context: None,
@@ -3238,6 +3413,79 @@ mod tests {
     }
 
     #[test]
+    fn verify_signatures_rejects_duplicate_signer_inflating_quorum() {
+        // A single key must not satisfy an N-signer quorum by attaching the
+        // same valid signature N times: `verify_signatures` must reject the
+        // repeated signer, and `has_quorum` must not treat duplicate kids as a
+        // quorum.
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (_entries, mut head) = signed_chain_and_head(&signing_key);
+
+        // Set signature_count BEFORE computing the transcript: signing_bytes()
+        // commits to signature_count, so the signature must be over the count
+        // the verifier will recompute, otherwise SignatureInvalid fires first
+        // and masks the distinctness check under test.
+        head.signature_count = 3;
+
+        // One key signs the transcript; the same (kid, signature) is attached
+        // three times to fake a 3-signer quorum.
+        let transcript = head.signing_bytes();
+        let signature = signing_key.sign(&transcript);
+        let entry = HeadSignature {
+            issuer_kid: signing_key.key_id().to_hex(),
+            signature: signature.to_bytes().to_vec(),
+        };
+        head.signatures = vec![entry.clone(), entry.clone(), entry];
+
+        // Every individual signature is cryptographically valid, so the only
+        // thing standing between this and a forged quorum is the distinctness
+        // check.
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
+        let result = head.verify_signatures(&resolver);
+        assert!(
+            matches!(result, Err(AuditError::DuplicateSigner { .. })),
+            "duplicate signer must be rejected, got {result:?}"
+        );
+
+        // Structural check (no crypto) must also refuse duplicate issuer_kids.
+        assert!(
+            !head.has_quorum(),
+            "has_quorum must not count repeated signers as a quorum"
+        );
+
+        // A genuinely distinct set of signers still verifies and has quorum.
+        let key_b = Ed25519SigningKey::generate();
+        let key_c = Ed25519SigningKey::generate();
+        head.signatures = vec![
+            HeadSignature {
+                issuer_kid: signing_key.key_id().to_hex(),
+                signature: signing_key.sign(&transcript).to_bytes().to_vec(),
+            },
+            HeadSignature {
+                issuer_kid: key_b.key_id().to_hex(),
+                signature: key_b.sign(&transcript).to_bytes().to_vec(),
+            },
+            HeadSignature {
+                issuer_kid: key_c.key_id().to_hex(),
+                signature: key_c.sign(&transcript).to_bytes().to_vec(),
+            },
+        ];
+        head.signature_count = 3;
+        let multi = std::collections::HashMap::from([
+            (signing_key.key_id().to_hex(), verifying_key.clone()),
+            (key_b.key_id().to_hex(), key_b.verifying_key()),
+            (key_c.key_id().to_hex(), key_c.verifying_key()),
+        ]);
+        let multi_resolver =
+            |kid: &KeyId| -> Option<Ed25519VerifyingKey> { multi.get(&kid.to_hex()).cloned() };
+        head.verify_signatures(&multi_resolver)
+            .expect("three distinct signers must verify");
+        assert!(head.has_quorum(), "three distinct signers form a quorum");
+    }
+
+    #[test]
     fn verify_chain_with_signers_rejects_head_signature_below_length_floor() {
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -3408,6 +3656,10 @@ mod tests {
         assert!(entry.is_genesis());
         // Severity auto-computed
         assert_eq!(entry.severity, Severity::Info);
+        assert_eq!(
+            entry.hlc,
+            audit_entry_hlc_from_occurred_at(1_700_000_000, "user:alice")
+        );
     }
 
     #[test]
@@ -3423,6 +3675,46 @@ mod tests {
         let recomputed = entry.computed_id()?;
         assert_eq!(entry.id, recomputed);
         assert_ne!(entry.id, "__provisional__");
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_audit_entry_id_fields_match_entry_computed_id() -> Result<(), AuditError> {
+        let trace_context = TraceContext::new("trace-id", "span-id").with_flags(1);
+        let entry = AuditEntryBuilder::new()
+            .event_type(event_types::CAPABILITY_INVOKE)
+            .severity(Severity::Warning)
+            .actor("user:alice")
+            .zone_id("z:work")
+            .seq(7)
+            .occurred_at(1_700_000_007)
+            .prev("prev-entry")
+            .correlation_id("corr-7")
+            .trace_context(trace_context)
+            .connector_id("github")
+            .operation_id("list_repos")
+            .meta("operation", serde_json::json!("list_repos"))
+            .meta("success", serde_json::json!(true))
+            .build_with_computed_id()?;
+
+        let borrowed = compute_audit_entry_id(AuditEntryIdFields {
+            event_type: &entry.event_type,
+            severity: entry.severity,
+            actor: &entry.actor,
+            zone_id: &entry.zone_id,
+            seq: entry.seq,
+            occurred_at: entry.occurred_at,
+            hlc: &entry.hlc,
+            prev: entry.prev.as_deref(),
+            correlation_id: &entry.correlation_id,
+            trace_context: entry.trace_context.as_ref(),
+            connector_id: entry.connector_id.as_deref(),
+            operation_id: entry.operation_id.as_deref(),
+            metadata: &entry.metadata,
+        })?;
+
+        assert_eq!(borrowed, entry.computed_id()?);
+        assert_eq!(borrowed, entry.id);
         Ok(())
     }
 
@@ -4997,7 +5289,7 @@ mod tests {
     fn severity_partial_ord_consistent_with_eq() {
         let a = Severity::Warning;
         let b = Severity::Warning;
-        assert!(a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal));
+        assert_eq!(a.partial_cmp(&b), Some(std::cmp::Ordering::Equal));
     }
 
     // ── NEW: TraceContext edge cases ────────────────────────────────────
@@ -5057,6 +5349,7 @@ mod tests {
             (event_types::REVOCATION_ISSUED, Severity::Error),
             (event_types::SECURITY_VIOLATION, Severity::Error),
             (event_types::AUDIT_FORK_DETECTED, Severity::Critical),
+            (event_types::CEP_ANOMALY_ALERT, Severity::Error),
         ];
         for (event_type, expected) in types_and_severities {
             let mut entry = genesis_entry();
@@ -5330,6 +5623,7 @@ mod tests {
             trace_context: None,
             connector_id: None,
             operation_id: None,
+            confidence: None,
             issuer_kid: None,
             signature: None,
         };
@@ -5359,6 +5653,7 @@ mod tests {
             trace_context: Some(TraceContext::new("trace-2", "span-2").with_flags(0x01)),
             connector_id: Some("stripe".to_string()),
             operation_id: Some("charges.create".to_string()),
+            confidence: Some(ConformalScore::from_value(0.875, 32, 3, 90, None)),
             issuer_kid: None,
             signature: None,
         };
@@ -5368,8 +5663,10 @@ mod tests {
         assert!(json.contains("\"correlation_id\":\"corr-2\""));
         assert!(json.contains("\"connector_id\":\"stripe\""));
         assert!(json.contains("\"operation_id\":\"charges.create\""));
+        assert!(json.contains("\"confidence\""));
 
         let parsed: DecisionReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.confidence.as_ref().unwrap().display_value(), "0.875");
         assert_eq!(parsed, receipt);
     }
 
@@ -6852,6 +7149,7 @@ mod tests {
             trace_context: entry.trace_context.clone(),
             connector_id: entry.connector_id.clone(),
             operation_id: entry.operation_id,
+            confidence: None,
             issuer_kid: None,
             signature: None,
         };

@@ -1,3 +1,5 @@
+#![allow(clippy::needless_pass_by_value, clippy::needless_pass_by_ref_mut)]
+
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;

@@ -101,10 +101,10 @@ fn bench_revocation_lookup(c: &mut Criterion) {
         let missing = make_id_from_u32(size + 1);
 
         group.bench_with_input(BenchmarkId::new("hit", size), &size, |b, _| {
-            b.iter(|| black_box(registry.is_revoked(&existing)))
+            b.iter(|| black_box(registry.is_revoked(&existing)));
         });
         group.bench_with_input(BenchmarkId::new("miss", size), &size, |b, _| {
-            b.iter(|| black_box(registry.is_revoked(&missing)))
+            b.iter(|| black_box(registry.is_revoked(&missing)));
         });
     }
     group.finish();
@@ -285,11 +285,11 @@ fn bench_gossip_push_serde(c: &mut Criterion) {
         let json = serde_json::to_vec(&msg).expect("serialize");
 
         group.bench_with_input(BenchmarkId::new("serialize", n_ids), &n_ids, |b, _| {
-            b.iter(|| black_box(serde_json::to_vec(&msg)))
+            b.iter(|| black_box(serde_json::to_vec(&msg)));
         });
 
         group.bench_with_input(BenchmarkId::new("deserialize", n_ids), &n_ids, |b, _| {
-            b.iter(|| black_box(serde_json::from_slice::<GossipMessage>(&json)))
+            b.iter(|| black_box(serde_json::from_slice::<GossipMessage>(&json)));
         });
     }
     group.finish();

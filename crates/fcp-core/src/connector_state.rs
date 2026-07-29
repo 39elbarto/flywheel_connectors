@@ -22,6 +22,9 @@
 //! - Snapshots enable compaction of older state objects
 
 use fcp_cbor::{SerializationError, to_canonical_cbor};
+use fcp_crypto::{
+    Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, canonical_signing_bytes,
+};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::{fmt, pin::Pin};
@@ -29,10 +32,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    BoundVerified, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     CheckpointTransferEncoding, ComputationCheckpoint, ConnectorId, InstanceId, Lease,
     LeaseHandoff, LeaseId, LeasePurpose, LeaseTransferValidationError, LeaseValidationError,
-    MigrationCapabilityContext, ObjectHeader, ObjectId, TailscaleNodeId, ZoneId, validate_lease,
-    validate_lease_handoff,
+    MigrationCapabilityContext, ObjectHeader, ObjectId, OperationId, TailscaleNodeId, ZoneId,
+    validate_lease, validate_lease_handoff,
 };
 
 /// Maximum accepted size for a canonical CBOR blob decoded by
@@ -56,6 +60,202 @@ pub const MAX_CURSOR_STATE_BYTES: usize = 64 * 1024;
 /// during `ciborium::from_reader` — each merge deserializes both branches,
 /// so unbounded branches are a two-sided `DoS` surface.
 pub const MAX_CRDT_STATE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Capability required to write canonical connector state.
+pub const CONNECTOR_STATE_WRITE_CAPABILITY_ID: &str = "fcp.connector-state.write";
+
+/// Operation required to append canonical connector-state objects.
+pub const CONNECTOR_STATE_APPEND_OPERATION_ID: &str = "fcp.connector-state.append";
+
+/// Domain-separated schema identifier for `ConnectorStateObject` signatures.
+///
+/// The signed payload intentionally excludes the `signature` field so the
+/// signature is not self-referential.
+pub const CONNECTOR_STATE_OBJECT_SIGNING_SCHEMA_ID: &str =
+    "fcp.connector-state.state-object-signing.v1";
+
+/// Canonical connector-state write capability identifier.
+#[must_use]
+pub fn connector_state_write_capability_id() -> CapabilityId {
+    CapabilityId::from_static(CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+}
+
+/// Canonical connector-state append operation identifier.
+#[must_use]
+pub fn connector_state_append_operation_id() -> OperationId {
+    OperationId::from_static(CONNECTOR_STATE_APPEND_OPERATION_ID)
+}
+
+/// Resource URI used for connector-scoped state-write constraints.
+#[must_use]
+pub fn connector_state_resource_uri(connector_id: &ConnectorId) -> String {
+    format!("fcp://connector-state/{}", connector_id.as_str())
+}
+
+/// Verified authorization witness for appending canonical connector state.
+///
+/// The only public constructor verifies a bound capability token against the
+/// canonical connector-state write capability, append operation, target zone,
+/// and connector-scoped resource URI. Holding this witness means the append
+/// caller has crossed the capability boundary before reaching storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorStateWriteAuthorization {
+    connector_id: ConnectorId,
+    zone_id: ZoneId,
+    writer_public_key: [u8; 32],
+}
+
+impl ConnectorStateWriteAuthorization {
+    /// Verify a capability token and construct an append authorization witness.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError::AuthorizationDenied`] when the token does
+    /// not grant connector-state append for the supplied connector and zone.
+    pub fn verify_append_token<T>(
+        verifier: &CapabilityVerifier,
+        token: T,
+        connector_id: &ConnectorId,
+        zone_id: &ZoneId,
+    ) -> Result<Self, ConnectorStateError>
+    where
+        T: Into<CapabilityToken>,
+    {
+        let resource_uris = [connector_state_resource_uri(connector_id)];
+        let bound = verifier
+            .verify_bound(
+                token,
+                &connector_state_write_capability_id(),
+                &connector_state_append_operation_id(),
+                &resource_uris,
+            )
+            .map_err(|error| {
+                connector_state_authorization_denied(
+                    connector_id,
+                    format!("capability token rejected: {error}"),
+                )
+            })?;
+
+        Self::from_bound_append_token(&bound, connector_id, zone_id, verifier.host_public_key)
+    }
+
+    /// Connector authorized by this witness.
+    #[must_use]
+    pub const fn connector_id(&self) -> &ConnectorId {
+        &self.connector_id
+    }
+
+    /// Zone authorized by this witness.
+    #[must_use]
+    pub const fn zone_id(&self) -> &ZoneId {
+        &self.zone_id
+    }
+
+    /// Public key that verified the append capability token.
+    ///
+    /// The connector-state append boundary uses this key as the writer key for
+    /// `ConnectorStateObject` signature verification.
+    #[must_use]
+    pub const fn writer_public_key(&self) -> [u8; 32] {
+        self.writer_public_key
+    }
+
+    fn from_bound_append_token(
+        token: &CapabilityToken<BoundVerified>,
+        connector_id: &ConnectorId,
+        zone_id: &ZoneId,
+        writer_public_key: [u8; 32],
+    ) -> Result<Self, ConnectorStateError> {
+        let claims = token.claims();
+        let token_zone = claims.get_zone_id().ok_or_else(|| {
+            connector_state_authorization_denied(
+                connector_id,
+                "capability token is missing zone binding".to_string(),
+            )
+        })?;
+        if token_zone != zone_id.as_str() {
+            return Err(connector_state_authorization_denied(
+                connector_id,
+                format!(
+                    "capability token zone {token_zone} does not match connector state zone {}",
+                    zone_id.as_str()
+                ),
+            ));
+        }
+
+        if let Some(claim_capability) = claims.get_capability_id()
+            && claim_capability != CONNECTOR_STATE_WRITE_CAPABILITY_ID
+        {
+            return Err(connector_state_authorization_denied(
+                connector_id,
+                format!(
+                    "capability token claim {claim_capability} does not match required {CONNECTOR_STATE_WRITE_CAPABILITY_ID}"
+                ),
+            ));
+        }
+
+        let grants_value = claims
+            .get(fcp_crypto::cose::fcp2_claims::GRANTS)
+            .ok_or_else(|| {
+                connector_state_authorization_denied(
+                    connector_id,
+                    "capability token is missing canonical grants".to_string(),
+                )
+            })?;
+        let grants: Vec<CapabilityGrant> = decode_connector_state_grants(
+            connector_id,
+            grants_value,
+            "capability token grants are malformed",
+        )?;
+        let required_capability = connector_state_write_capability_id();
+        let required_operation = connector_state_append_operation_id();
+        let grants_append = grants.iter().any(|grant| {
+            grant.capability == required_capability
+                && grant
+                    .operation
+                    .as_ref()
+                    .is_none_or(|operation| operation == &required_operation)
+        });
+
+        if !grants_append {
+            return Err(connector_state_authorization_denied(
+                connector_id,
+                format!(
+                    "capability token does not grant {CONNECTOR_STATE_WRITE_CAPABILITY_ID}:{CONNECTOR_STATE_APPEND_OPERATION_ID}"
+                ),
+            ));
+        }
+
+        Ok(Self {
+            connector_id: connector_id.clone(),
+            zone_id: zone_id.clone(),
+            writer_public_key,
+        })
+    }
+}
+
+fn decode_connector_state_grants(
+    connector_id: &ConnectorId,
+    value: &ciborium::Value,
+    context: &'static str,
+) -> Result<Vec<CapabilityGrant>, ConnectorStateError> {
+    let mut cbor = Vec::new();
+    ciborium::into_writer(value, &mut cbor).map_err(|error| {
+        connector_state_authorization_denied(connector_id, format!("{context}: {error}"))
+    })?;
+    ciborium::from_reader(cbor.as_slice()).map_err(|error| {
+        connector_state_authorization_denied(connector_id, format!("{context}: {error}"))
+    })
+}
+
+fn connector_state_authorization_denied(
+    connector_id: &ConnectorId,
+    reason: String,
+) -> ConnectorStateError {
+    ConnectorStateError::AuthorizationDenied {
+        connector_id: connector_id.clone(),
+        reason,
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Signature Type
@@ -401,8 +601,46 @@ pub struct ConnectorStateObject {
     /// This MUST be included in `header.refs` for reference tracking.
     pub lease_object_id: ObjectId,
 
+    /// Ed25519 public key of the writer that signed this state object.
+    ///
+    /// Append authorization verifies this key against the capability-token
+    /// verifier key. Read paths use the embedded key to verify persisted state
+    /// objects without needing the original append witness in memory.
+    #[serde(with = "crate::util::hex_or_bytes")]
+    pub writer_public_key: [u8; 32],
+
     /// Ed25519 signature over the canonical state object.
     pub signature: Signature,
+}
+
+#[derive(Serialize)]
+struct ConnectorStateObjectSigningPayload<'a> {
+    header: &'a ObjectHeader,
+    connector_id: &'a ConnectorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance_id: &'a Option<InstanceId>,
+    zone_id: &'a ZoneId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prev: &'a Option<ObjectId>,
+    seq: u64,
+    state_cbor: &'a [u8],
+    updated_at: u64,
+    lease_seq: u64,
+    lease_object_id: &'a ObjectId,
+    #[serde(with = "crate::util::hex_or_bytes")]
+    writer_public_key: &'a [u8; 32],
+}
+
+/// Error returned while signing or verifying connector state objects.
+#[derive(Debug, Error)]
+pub enum ConnectorStateSignatureError {
+    /// Canonical signing transcript construction failed.
+    #[error("connector state signing transcript error: {0}")]
+    Serialization(#[from] SerializationError),
+
+    /// Ed25519 signature verification failed.
+    #[error("connector state signature verification failed: {0}")]
+    Crypto(#[from] fcp_crypto::CryptoError),
 }
 
 impl ConnectorStateObject {
@@ -410,6 +648,71 @@ impl ConnectorStateObject {
     #[must_use]
     pub const fn is_genesis(&self) -> bool {
         self.prev.is_none()
+    }
+
+    /// Build the domain-separated signing bytes for this state object.
+    ///
+    /// The signed payload includes every state-object field except
+    /// [`Self::signature`], which avoids a self-referential signature.
+    ///
+    /// # Errors
+    /// Returns a [`SerializationError`] if canonical CBOR encoding fails.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, SerializationError> {
+        let payload = ConnectorStateObjectSigningPayload {
+            header: &self.header,
+            connector_id: &self.connector_id,
+            instance_id: &self.instance_id,
+            zone_id: &self.zone_id,
+            prev: &self.prev,
+            seq: self.seq,
+            state_cbor: &self.state_cbor,
+            updated_at: self.updated_at,
+            lease_seq: self.lease_seq,
+            lease_object_id: &self.lease_object_id,
+            writer_public_key: &self.writer_public_key,
+        };
+        let cbor = to_canonical_cbor(&payload)?;
+        Ok(canonical_signing_bytes(
+            CONNECTOR_STATE_OBJECT_SIGNING_SCHEMA_ID,
+            &cbor,
+        ))
+    }
+
+    /// Sign this state object with the supplied Ed25519 key.
+    ///
+    /// # Errors
+    /// Returns a [`SerializationError`] if canonical signing bytes cannot be
+    /// constructed.
+    pub fn sign_with(&mut self, signing_key: &Ed25519SigningKey) -> Result<(), SerializationError> {
+        self.writer_public_key = signing_key.verifying_key().to_bytes();
+        let signature = signing_key.sign(&self.signing_bytes()?);
+        self.signature = Signature::from_bytes(signature.to_bytes());
+        Ok(())
+    }
+
+    /// Verify this state object's signature with its embedded writer key.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateSignatureError`] when the embedded writer key is
+    /// malformed, the signing transcript cannot be constructed, or the
+    /// signature does not verify.
+    pub fn verify_signature(&self) -> Result<(), ConnectorStateSignatureError> {
+        let verifying_key = Ed25519VerifyingKey::from_bytes(&self.writer_public_key)?;
+        self.verify_signature_with(&verifying_key)
+    }
+
+    /// Verify this state object signature with the supplied Ed25519 key.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateSignatureError`] when transcript construction
+    /// fails or the signature does not verify.
+    pub fn verify_signature_with(
+        &self,
+        verifying_key: &Ed25519VerifyingKey,
+    ) -> Result<(), ConnectorStateSignatureError> {
+        let signature = Ed25519Signature::from_bytes(self.signature.as_bytes());
+        verifying_key.verify(&self.signing_bytes()?, &signature)?;
+        Ok(())
     }
 }
 
@@ -634,6 +937,84 @@ pub enum ConnectorStateError {
     },
 }
 
+/// Storage-backed summary of the current canonical connector-state chain.
+///
+/// This is the payload shape host/operator explain routes can expose when
+/// they are wired to canonical fcp-store state instead of cache markers alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorStateCanonicalStatus {
+    /// Connector represented by this status record.
+    pub connector_id: ConnectorId,
+    /// Optional connector instance represented by the root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<InstanceId>,
+    /// Zone that owns the canonical root, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone_id: Option<ZoneId>,
+    /// State model declared by the canonical root, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ConnectorStateModel>,
+    /// Whether a canonical root currently exists.
+    pub root_present: bool,
+    /// Content-addressed root object id when the store can expose it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_object_id: Option<ObjectId>,
+    /// Current canonical state-object head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_object_id: Option<ObjectId>,
+    /// Last committed canonical sequence number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_canonical_seq: Option<u64>,
+    /// Root schema version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_schema_version: Option<u32>,
+    /// Proven count of mesh replicas for the root object, when symbol
+    /// distribution metadata was supplied by the backing store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mesh_replica_count: Option<usize>,
+}
+
+impl ConnectorStateCanonicalStatus {
+    /// Build a missing-root status for a connector.
+    #[must_use]
+    pub const fn missing(connector_id: ConnectorId) -> Self {
+        Self {
+            connector_id,
+            instance_id: None,
+            zone_id: None,
+            model: None,
+            root_present: false,
+            root_object_id: None,
+            head_object_id: None,
+            last_canonical_seq: None,
+            state_schema_version: None,
+            mesh_replica_count: None,
+        }
+    }
+
+    /// Build a status from a canonical root and optional storage evidence.
+    #[must_use]
+    pub fn from_root(
+        root_object_id: Option<ObjectId>,
+        root: &ConnectorStateRoot,
+        last_canonical_seq: Option<u64>,
+        mesh_replica_count: Option<usize>,
+    ) -> Self {
+        Self {
+            connector_id: root.connector_id.clone(),
+            instance_id: root.instance_id.clone(),
+            zone_id: Some(root.zone_id.clone()),
+            model: Some(root.model.clone()),
+            root_present: true,
+            root_object_id,
+            head_object_id: root.head,
+            last_canonical_seq,
+            state_schema_version: Some(root.state_schema_version),
+            mesh_replica_count,
+        }
+    }
+}
+
 /// Canonical connector-state storage contract.
 #[async_trait::async_trait]
 pub trait ConnectorStateStore: Send + Sync + 'static {
@@ -646,7 +1027,7 @@ pub trait ConnectorStateStore: Send + Sync + 'static {
         connector_id: &ConnectorId,
     ) -> Result<Option<ConnectorStateRoot>, ConnectorStateError>;
 
-    /// Append a state-chain object.
+    /// Append a state-chain object with a verified write authorization witness.
     ///
     /// # Errors
     /// Returns [`ConnectorStateError`] if the object is malformed, unauthorized,
@@ -654,6 +1035,7 @@ pub trait ConnectorStateStore: Send + Sync + 'static {
     async fn append_object(
         &self,
         connector_id: &ConnectorId,
+        authorization: &ConnectorStateWriteAuthorization,
         object: ConnectorStateObject,
     ) -> Result<ConnectorStateAppendOutcome, ConnectorStateError>;
 
@@ -667,6 +1049,38 @@ pub trait ConnectorStateStore: Send + Sync + 'static {
         after_seq: Option<u64>,
         limit: usize,
     ) -> Result<Vec<ConnectorStateObject>, ConnectorStateError>;
+
+    /// Return a storage-backed summary of the current canonical chain.
+    ///
+    /// Store implementations that know root object ids or mesh replica counts
+    /// should override this default. The fallback is intentionally conservative:
+    /// it reports root/head/schema/seq only from the trait read APIs and leaves
+    /// storage-specific fields unset.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError`] if canonical storage cannot be queried.
+    async fn canonical_status(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<ConnectorStateCanonicalStatus, ConnectorStateError> {
+        let Some(root) = self.read_root(connector_id).await? else {
+            return Ok(ConnectorStateCanonicalStatus::missing(connector_id.clone()));
+        };
+        let last_canonical_seq = if root.head.is_some() {
+            self.read_chain(connector_id, None, usize::MAX)
+                .await?
+                .last()
+                .map(|state| state.seq)
+        } else {
+            None
+        };
+        Ok(ConnectorStateCanonicalStatus::from_root(
+            None,
+            &root,
+            last_canonical_seq,
+            None,
+        ))
+    }
 
     /// Emit and return a snapshot for the connector's current head.
     ///
@@ -2699,10 +3113,148 @@ impl SnapshotConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Provenance, TaintLevel};
+    use crate::{CapabilityConstraints, Provenance, TaintLevel};
+    use chrono::Duration;
     use fcp_cbor::SchemaId;
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
     use semver::Version;
     use uuid::Uuid;
+
+    fn capability_constraints_cbor(resource_allow: Vec<String>) -> Vec<u8> {
+        let constraints = CapabilityConstraints {
+            resource_allow,
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).unwrap();
+        cbor
+    }
+
+    fn signed_connector_state_token(
+        signing_key: &Ed25519SigningKey,
+        zone_id: &ZoneId,
+        instance_id: &InstanceId,
+        capability_id: &str,
+        operations: &[&str],
+        resource_allow: Vec<String>,
+    ) -> CapabilityToken {
+        let now = crate::Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(capability_id)
+            .zone_id(zone_id.as_str())
+            .target_instance(instance_id.as_str())
+            .principal("principal:test")
+            .operations(operations)
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&capability_constraints_cbor(resource_allow))
+            .unwrap()
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken::from_raw(cose)
+    }
+
+    #[test]
+    fn connector_state_write_authorization_accepts_bound_append_token() {
+        let connector_id = test_connector_id();
+        let zone_id = ZoneId::work();
+        let instance_id = InstanceId::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let token = signed_connector_state_token(
+            &signing_key,
+            &zone_id,
+            &instance_id,
+            CONNECTOR_STATE_WRITE_CAPABILITY_ID,
+            &[CONNECTOR_STATE_APPEND_OPERATION_ID],
+            vec![connector_state_resource_uri(&connector_id)],
+        );
+        let verifier = CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            zone_id.clone(),
+            instance_id,
+        );
+
+        let authorization = ConnectorStateWriteAuthorization::verify_append_token(
+            &verifier,
+            token,
+            &connector_id,
+            &zone_id,
+        )
+        .expect("valid connector-state append token should authorize");
+
+        assert_eq!(authorization.connector_id(), &connector_id);
+        assert_eq!(authorization.zone_id(), &zone_id);
+    }
+
+    #[test]
+    fn connector_state_write_authorization_rejects_wrong_operation() {
+        let connector_id = test_connector_id();
+        let zone_id = ZoneId::work();
+        let instance_id = InstanceId::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let token = signed_connector_state_token(
+            &signing_key,
+            &zone_id,
+            &instance_id,
+            CONNECTOR_STATE_WRITE_CAPABILITY_ID,
+            &["fcp.connector-state.read"],
+            vec![connector_state_resource_uri(&connector_id)],
+        );
+        let verifier = CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            zone_id.clone(),
+            instance_id,
+        );
+
+        let err = ConnectorStateWriteAuthorization::verify_append_token(
+            &verifier,
+            token,
+            &connector_id,
+            &zone_id,
+        )
+        .expect_err("read-only token must not authorize append");
+
+        assert!(matches!(
+            err,
+            ConnectorStateError::AuthorizationDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn connector_state_write_authorization_rejects_wrong_resource_scope() {
+        let connector_id = test_connector_id();
+        let zone_id = ZoneId::work();
+        let instance_id = InstanceId::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let other_connector_id = ConnectorId::from_static("github:issue:v1");
+        let token = signed_connector_state_token(
+            &signing_key,
+            &zone_id,
+            &instance_id,
+            CONNECTOR_STATE_WRITE_CAPABILITY_ID,
+            &[CONNECTOR_STATE_APPEND_OPERATION_ID],
+            vec![connector_state_resource_uri(&other_connector_id)],
+        );
+        let verifier = CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            zone_id.clone(),
+            instance_id,
+        );
+
+        let err = ConnectorStateWriteAuthorization::verify_append_token(
+            &verifier,
+            token,
+            &connector_id,
+            &zone_id,
+        )
+        .expect_err("resource-scoped token for another connector must not authorize append");
+
+        assert!(matches!(
+            err,
+            ConnectorStateError::AuthorizationDenied { .. }
+        ));
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // CrdtType Tests
@@ -2900,6 +3452,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 1,
             lease_object_id: test_object_id("lease"),
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
 
@@ -2943,6 +3496,7 @@ mod tests {
         async fn append_object(
             &self,
             _connector_id: &ConnectorId,
+            _authorization: &ConnectorStateWriteAuthorization,
             object: ConnectorStateObject,
         ) -> Result<ConnectorStateAppendOutcome, ConnectorStateError> {
             Ok(ConnectorStateAppendOutcome::Committed {
@@ -3039,6 +3593,21 @@ mod tests {
         assert!(matches!(result, Ok(Ok(None))));
     }
 
+    #[test]
+    fn connector_state_store_default_canonical_status_reports_missing_root() {
+        let store: Box<dyn ConnectorStateStore> = Box::new(EmptyConnectorStateStore);
+        let result =
+            fcp_async_core::runtime::block_on_sync(store.canonical_status(&test_connector_id()));
+        let status = result.expect("runtime").expect("canonical status");
+
+        assert_eq!(status.connector_id, test_connector_id());
+        assert!(!status.root_present);
+        assert!(status.root_object_id.is_none());
+        assert!(status.head_object_id.is_none());
+        assert!(status.last_canonical_seq.is_none());
+        assert!(status.mesh_replica_count.is_none());
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // SnapshotConfig Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -3086,6 +3655,43 @@ mod tests {
         let display = sig.to_string();
         assert!(display.contains("abababab"));
         assert!(display.ends_with("..."));
+    }
+
+    #[test]
+    fn connector_state_object_signature_uses_unsigned_payload() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let wrong_key = Ed25519SigningKey::generate().verifying_key();
+        let lease_object_id = test_object_id("lease");
+        let mut header = test_header();
+        header.refs.push(lease_object_id);
+        let mut state_obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 0,
+            state_cbor: vec![0xa1, 0x61, b'n', 0x00],
+            updated_at: 1_700_000_000,
+            lease_seq: 1,
+            lease_object_id,
+            writer_public_key: verifying_key.to_bytes(),
+            signature: Signature::zero(),
+        };
+
+        let unsigned_signing_bytes = state_obj.signing_bytes().unwrap();
+        state_obj.sign_with(&signing_key).unwrap();
+
+        assert_ne!(state_obj.signature, Signature::zero());
+        assert_eq!(state_obj.signing_bytes().unwrap(), unsigned_signing_bytes);
+        state_obj.verify_signature().unwrap();
+        state_obj.verify_signature_with(&verifying_key).unwrap();
+        assert!(state_obj.verify_signature_with(&wrong_key).is_err());
+
+        let mut tampered = state_obj.clone();
+        tampered.seq += 1;
+        assert!(tampered.verify_signature_with(&verifying_key).is_err());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -3774,6 +4380,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 1,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         assert!(genesis.is_genesis());
@@ -4046,6 +4653,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 42,
             lease_object_id: test_object_id("lease-1"),
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let cloned = Clone::clone(&obj);
@@ -4066,6 +4674,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 10,
             lease_object_id: test_object_id("lease-2"),
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let json = serde_json::to_string(&obj).unwrap();
@@ -4720,6 +5329,7 @@ mod tests {
             updated_at: 1_000,
             lease_seq: 10,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         assert!(validate_singleton_writer_fencing(&obj, 10, 500, 1000).is_ok());
@@ -4741,6 +5351,7 @@ mod tests {
             updated_at: 1_000,
             lease_seq: 10,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let err = validate_singleton_writer_fencing(&obj, 10, 2000, 1000).unwrap_err();
@@ -4763,6 +5374,7 @@ mod tests {
             updated_at: 1_000,
             lease_seq: 5,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let err = validate_singleton_writer_fencing(&obj, 10, 500, 1000).unwrap_err();
@@ -4784,6 +5396,7 @@ mod tests {
             updated_at: 1_000,
             lease_seq: 10,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let err = validate_singleton_writer_fencing(&obj, 10, 500, 1000).unwrap_err();

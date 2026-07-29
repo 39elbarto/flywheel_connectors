@@ -25,6 +25,8 @@ For each section below:
 2. Follow the cited bead and test anchor to confirm the surface is backed by
    executable evidence rather than prose alone.
 3. Use the rerun commands to spot-check the contract on the current tree.
+4. For proof-bearing closure, run `fwc proof status` over registry-backed rows
+   before counting static artifact tables or replay bundles toward PASS.
 
 The goal is not to prove a fully autonomous active/active mesh today. The goal
 is to prove that the repository teaches and verifies the current operating model
@@ -82,6 +84,13 @@ If those surfaces disagree, the operational evidence is incomplete. The docs
 already teach that order explicitly, and the `fwc` observability tests provide
 the executable backstop.
 
+Replay bundles are diagnostic evidence, not automatically green proof. A replay
+bundle counts toward final operational PASS only when a proof-bundle registry
+row names its source, owner bead, rerun command, required artifacts, digests,
+freshness policy, and verifier result, and `fwc proof status` reports the row
+green. Replay-only, offline, structured-skip, and stale warn-mode rows remain
+reviewable yellow evidence.
+
 ### 4. Workflow preservation after deletion
 
 The operational story would be incomplete if phase-7 cleanup had removed the
@@ -113,6 +122,7 @@ br show flywheel_connectors-z1nkz.3
 rg -n "Production Mesh Deployment Runbook|Proof Anchors|Rollout And Rollback Loop" README.md
 rg -n "Production Deployment Runbook|Proof anchors|Bring-up verification loop|Artifact bundles and replay" docs/FWC_Host_First_Truthfulness_Playbook.md
 rg -n "Operational evidence bundle indexed|Operational/deployment/workflow-preservation section still open" docs/FCP3_Final_Closure_Checklist.md
+fwc proof status --registry <proof-registry.json> --artifacts <observed-artifacts.json> --now-unix-ms <capture-ms>
 ```
 
 For cargo-backed spot checks, keep the remote-compilation path explicit:

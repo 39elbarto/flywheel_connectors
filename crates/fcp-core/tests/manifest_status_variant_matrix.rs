@@ -1,5 +1,5 @@
 //! Pin `HealthState` + `BudgetStatus` + `SelfCheckStatus` serde tag
-//! matrix — the closest analogues to "ManifestStatus variant matrix"
+//! matrix — the closest analogues to "`ManifestStatus` variant matrix"
 //! (flywheel_connectors-ghver).
 //!
 //! Bead asks for `ManifestStatus variant Display + serde`. No type
@@ -8,18 +8,18 @@
 //! reporting splits across many enums:
 //!
 //!  - Already pinned: `IntentStatus` (epymi), `ProvisioningStatus`
-//!    (6tcjg), `DescriptorStatus` (live_status_serde_tag_matrix.rs),
+//!    (6tcjg), `DescriptorStatus` (`live_status_serde_tag_matrix.rs`),
 //!    `PrerequisiteStatus` (nhms0), `OperationStatus`
-//!    (operation_status_serde_tags.rs), `RevocationSlaStatus`
-//!    (RevocationSlaStatus is also documented but largely covered
+//!    (`operation_status_serde_tags.rs`), `RevocationSlaStatus`
+//!    (`RevocationSlaStatus` is also documented but largely covered
 //!    by revocation tests).
 //!  - Unpinned classifiers covering different status surfaces:
-//!    `HealthState` (health.rs:108), `BudgetStatus` (policy.rs:123),
-//!    `SelfCheckStatus` (health.rs:110).
+//!    `HealthState` (`health.rs:108`), `BudgetStatus` (`policy.rs:123`),
+//!    `SelfCheckStatus` (`health.rs:110`).
 //!
-//! `HealthState` is the closest "ManifestStatus" analogue — a
-//! 5-variant lifecycle status (Starting/Ready/Degraded/Error/
-//! Stopping) with internal `state` tag and lowercase rename, used
+//! `HealthState` is the closest "`ManifestStatus`" analogue — a
+//! 5-variant lifecycle status (`Starting`/`Ready`/`Degraded`/`Error`/
+//! `Stopping`) with internal `state` tag and lowercase rename, used
 //! for connector-instance status reporting. `BudgetStatus` and
 //! `SelfCheckStatus` are paired status classifiers in the same
 //! reporting surface.
@@ -28,23 +28,23 @@
 //!
 //!   1. **`HealthState` per-variant JSON tag** (`state: "starting"`
 //!      etc.) — unit variants and struct variants.
-//!   2. **JSON shape per variant** — Starting/Ready/Stopping unit
-//!      variants are `{"state": "<name>"}`; Degraded/Error carry
+//!   2. **JSON shape per variant** — `Starting`/`Ready`/`Stopping` unit
+//!      variants are `{"state": "<name>"}`; `Degraded`/`Error` carry
 //!      `reason` field via internal-tag flatten.
 //!   3. **JSON round-trip** preserves variant + nested fields.
 //!   4. **CBOR carries `state` discriminator** for every variant
 //!      (Value inspection — internal-tag + nested struct hits the
 //!      same Content-shim quirk as past beads if we tried full
 //!      round-trip on struct variants).
-//!   5. **PascalCase rejected** — drift sentinel.
+//!   5. **`PascalCase` rejected** — drift sentinel.
 //!   6. **5-variant count + pairwise distinct**.
 //!   7. **`BudgetStatus` per-variant JSON tag** (`ok` / `exceeded`).
 //!   8. **`BudgetStatus` JSON+CBOR round-trip**.
 //!   9. **`SelfCheckStatus` per-variant JSON tag** (4 variants
 //!      ok/degraded/failed/unsupported).
 //!  10. **`SelfCheckStatus` JSON+CBOR round-trip**.
-//!  11. **Cross-enum: `degraded` token shared** across HealthState +
-//!      SelfCheckStatus + (transitively) ConnectorHealth — pinned
+//!  11. **Cross-enum: `degraded` token shared** across `HealthState` +
+//!      `SelfCheckStatus` + (transitively) `ConnectorHealth` — pinned
 //!      as intentional collision since each lives in its own field.
 
 use ciborium::value::Value as CborValue;
@@ -360,7 +360,9 @@ fn degraded_token_shared_across_status_enums() {
     })
     .unwrap();
     assert_eq!(
-        health_state_json.get("state").and_then(|v| v.as_str()),
+        health_state_json
+            .get("state")
+            .and_then(serde_json::Value::as_str),
         Some("degraded")
     );
 

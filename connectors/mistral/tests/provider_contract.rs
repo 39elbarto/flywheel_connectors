@@ -232,6 +232,10 @@ async fn mistral_manifest_operations_match_runtime_introspection() {
             Some(manifest_operation.description.as_str())
         );
         assert_eq!(
+            runtime_operation.get("description").and_then(Value::as_str),
+            Some(manifest_operation.description.as_str())
+        );
+        assert_eq!(
             runtime_operation.get("capability").and_then(Value::as_str),
             Some(manifest_operation.capability.as_str())
         );
@@ -271,9 +275,24 @@ async fn mistral_manifest_operations_match_runtime_introspection() {
             runtime_operation.get("output_schema"),
             Some(&manifest_operation.output_schema)
         );
-        assert!(
-            manifest_operation.network_constraints.is_some(),
-            "{operation_id} should declare network constraints"
+        assert_eq!(
+            runtime_operation
+                .get("revocation_freshness")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.revocation_freshness))
+        );
+        assert_eq!(
+            runtime_operation.get("ai_hints"),
+            Some(&json!(manifest_operation.ai_hints))
+        );
+        let expected_network_constraints = manifest_operation
+            .network_constraints
+            .as_ref()
+            .map(|network_constraints| json!(network_constraints));
+        assert_eq!(
+            runtime_operation.get("network_constraints"),
+            expected_network_constraints.as_ref()
         );
         assert!(
             !manifest_operation.ai_hints.when_to_use.trim().is_empty(),

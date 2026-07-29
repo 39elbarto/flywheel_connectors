@@ -1,7 +1,9 @@
 //! Twilio REST API client.
 //!
-//! Twilio uses Basic auth (account_sid:auth_token) and JSON POST bodies.
-//! Base URL: `https://api.twilio.com/2010-04-01/Accounts/{account_sid}`
+//! Twilio uses Basic auth (account_sid:auth_token) and
+//! `application/x-www-form-urlencoded` POST bodies (the REST API does not
+//! parse JSON request bodies). Base URL:
+//! `https://api.twilio.com/2010-04-01/Accounts/{account_sid}`
 
 use std::fmt::Write;
 use std::time::Duration;
@@ -9,8 +11,9 @@ use std::time::Duration;
 use base64::Engine;
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode, header};
 // tracing macros handled by RetryLoop internals
 
@@ -137,8 +140,10 @@ impl TwilioClient {
 
     /// Create a new Twilio client with the specified auth mode.
     pub fn new_with_auth(auth: TwilioAuth) -> TwilioResult<Self> {
+        // No default Content-Type: GET requests carry no body, and write
+        // operations set `application/x-www-form-urlencoded` per request via
+        // `RequestBuilder::form` (Twilio's REST API does not parse JSON bodies).
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
 
         match &auth {
             TwilioAuth::Token {
@@ -257,12 +262,13 @@ impl TwilioClient {
         if let Some(cb) = status_callback {
             payload["StatusCallback"] = serde_json::Value::String(cb.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Get a message by SID.
     pub async fn get_message(&self, message_sid: &str) -> TwilioResult<TwilioMessage> {
+        let message_sid = validate_sid(message_sid, "message_sid")?;
         let url = format!("{}/Messages/{message_sid}.json", self.base_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -325,12 +331,13 @@ impl TwilioClient {
         if let Some(r) = record {
             payload["Record"] = serde_json::Value::Bool(r);
         }
-        let data = self.post_json(&api_url, &payload).await?;
+        let data = self.post_form(&api_url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Get a call by SID.
     pub async fn get_call(&self, call_sid: &str) -> TwilioResult<TwilioCall> {
+        let call_sid = validate_sid(call_sid, "call_sid")?;
         let url = format!("{}/Calls/{call_sid}.json", self.base_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -338,9 +345,10 @@ impl TwilioClient {
 
     /// Hangup (end) a call by updating its status to "completed".
     pub async fn hangup_call(&self, call_sid: &str) -> TwilioResult<TwilioCall> {
+        let call_sid = validate_sid(call_sid, "call_sid")?;
         let url = format!("{}/Calls/{call_sid}.json", self.base_url);
         let payload = serde_json::json!({ "Status": "completed" });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -480,7 +488,16 @@ impl TwilioClient {
         recording_sid: &str,
         format: Option<&str>,
     ) -> TwilioResult<(String, String)> {
+        let recording_sid = validate_sid(recording_sid, "recording_sid")?;
+        // `ext` is interpolated into the request path; Twilio only serves mp3/wav
+        // recordings, so an allowlist both matches the API and prevents an
+        // attacker-supplied `format` (e.g. `mp3/../..`) from escaping the segment.
         let ext = format.unwrap_or("mp3");
+        if !matches!(ext, "mp3" | "wav") {
+            return Err(TwilioError::InvalidInput(
+                "recording format must be `mp3` or `wav`".into(),
+            ));
+        }
         let url = format!("{}/Recordings/{recording_sid}.{ext}", self.base_url);
         let data = self.get_bytes(&url).await?;
         let content_type = if ext == "wav" {
@@ -498,6 +515,8 @@ impl TwilioClient {
         message_sid: &str,
         media_sid: &str,
     ) -> TwilioResult<(String, String)> {
+        let message_sid = validate_sid(message_sid, "message_sid")?;
+        let media_sid = validate_sid(media_sid, "media_sid")?;
         let url = format!("{}/Messages/{message_sid}/Media/{media_sid}", self.base_url);
         let data = self.get_bytes(&url).await?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -513,6 +532,7 @@ impl TwilioClient {
         page_size: Option<u32>,
         page: Option<u32>,
     ) -> TwilioResult<MediaListResponse> {
+        let message_sid = validate_sid(message_sid, "message_sid")?;
         let base_url = format!("{}/Messages/{message_sid}/Media.json", self.base_url);
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(v) = page_size {
@@ -531,6 +551,8 @@ impl TwilioClient {
         message_sid: &str,
         media_sid: &str,
     ) -> TwilioResult<TwilioMediaResource> {
+        let message_sid = validate_sid(message_sid, "message_sid")?;
+        let media_sid = validate_sid(media_sid, "media_sid")?;
         let url = format!(
             "{}/Messages/{message_sid}/Media/{media_sid}.json",
             self.base_url
@@ -566,7 +588,7 @@ impl TwilioClient {
         if let Some(cb) = status_callback {
             payload["StatusCallback"] = serde_json::Value::String(cb.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -596,12 +618,13 @@ impl TwilioClient {
         if let Some(cb) = status_callback {
             payload["StatusCallback"] = serde_json::Value::String(cb.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Get a WhatsApp message by SID.
     pub async fn whatsapp_get(&self, message_sid: &str) -> TwilioResult<WhatsAppMessage> {
+        let message_sid = validate_sid(message_sid, "message_sid")?;
         let url = format!("{}/Messages/{message_sid}.json", self.base_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -680,7 +703,7 @@ impl TwilioClient {
         if let Some(name) = unique_name {
             payload["UniqueName"] = serde_json::Value::String(name.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -733,7 +756,7 @@ impl TwilioClient {
         if let Some(proxy) = messaging_proxy_address {
             payload["MessagingBinding.ProxyAddress"] = serde_json::Value::String(proxy.to_string());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -767,7 +790,7 @@ impl TwilioClient {
         if let Some(a) = author {
             payload["Author"] = serde_json::Value::String(a.to_string());
         }
-        self.post_json(&url, &payload).await
+        self.post_form(&url, &payload).await
     }
 
     /// List messages in a conversation.
@@ -809,7 +832,7 @@ impl TwilioClient {
             "To": to,
             "Channel": channel,
         });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -828,7 +851,7 @@ impl TwilioClient {
             "To": to,
             "Code": code,
         });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -845,7 +868,7 @@ impl TwilioClient {
         let payload = serde_json::json!({
             "Status": "canceled",
         });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -869,12 +892,13 @@ impl TwilioClient {
         if let Some(mp) = max_participants {
             payload["MaxParticipants"] = serde_json::Value::Number(mp.into());
         }
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Get a video room by SID or unique name.
     pub async fn get_video_room(&self, room_sid: &str) -> TwilioResult<TwilioVideoRoom> {
+        let room_sid = sanitize_path_segment(room_sid, "room_sid")?;
         let url = format!("{}/Rooms/{room_sid}", self.video_base_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -900,11 +924,12 @@ impl TwilioClient {
 
     /// End a video room (set status to completed).
     pub async fn end_video_room(&self, room_sid: &str) -> TwilioResult<TwilioVideoRoom> {
+        let room_sid = sanitize_path_segment(room_sid, "room_sid")?;
         let url = format!("{}/Rooms/{room_sid}", self.video_base_url);
         let payload = serde_json::json!({
             "Status": "completed",
         });
-        let data = self.post_json(&url, &payload).await?;
+        let data = self.post_form(&url, &payload).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -914,6 +939,7 @@ impl TwilioClient {
         room_sid: &str,
         status: Option<&str>,
     ) -> TwilioResult<VideoParticipantListResponse> {
+        let room_sid = sanitize_path_segment(room_sid, "room_sid")?;
         let base_url = format!("{}/Rooms/{room_sid}/Participants", self.video_base_url);
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(s) = status {
@@ -928,6 +954,7 @@ impl TwilioClient {
         &self,
         room_sid: &str,
     ) -> TwilioResult<VideoRecordingListResponse> {
+        let room_sid = sanitize_path_segment(room_sid, "room_sid")?;
         let url = format!("{}/Rooms/{room_sid}/Recordings", self.video_base_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -936,7 +963,8 @@ impl TwilioClient {
     // ── HTTP helpers ─────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> TwilioResult<serde_json::Value> {
-        self.execute(|| self.http.get(url)).await
+        // GET is idempotent.
+        self.execute(true, || self.http.get(url)).await
     }
 
     async fn get_with_params(
@@ -958,7 +986,8 @@ impl TwilioClient {
                 let _ = write!(url, "{key}={encoded}");
             }
         }
-        self.execute(|| self.http.get(&url)).await
+        // GET is idempotent.
+        self.execute(true, || self.http.get(&url)).await
     }
 
     async fn get_bytes(&self, url: &str) -> TwilioResult<Vec<u8>> {
@@ -1013,24 +1042,54 @@ impl TwilioClient {
         .await
     }
 
-    async fn post_json(
+    /// POST a Twilio write operation.
+    ///
+    /// The `body` is built by callers as a `serde_json::Value` map using
+    /// Twilio's PascalCase field names, but Twilio's REST API only accepts
+    /// `application/x-www-form-urlencoded` request bodies — so the map is
+    /// flattened into form pairs here. Array-valued fields (e.g. `MediaUrl`)
+    /// are emitted as repeated keys, matching Twilio's convention.
+    async fn post_form(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> TwilioResult<serde_json::Value> {
-        self.execute(|| self.http.post(url).json(body)).await
+        let encoded = encode_form_body(&json_to_form_pairs(body));
+        // NOT replay-safe: these POSTs send messages and place calls, and
+        // Twilio offers no idempotency key for them.
+        self.execute(false, || {
+            self.http
+                .post(url)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(encoded.clone())
+        })
+        .await
     }
 
     async fn delete(&self, url: &str) -> TwilioResult<()> {
-        let resp = self.execute(|| self.http.delete(url)).await;
+        // DELETE is idempotent per HTTP semantics.
+        let resp = self.execute(true, || self.http.delete(url)).await;
         match resp {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         }
     }
 
+    /// Run a request under the retry policy.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a side
+    /// effect. It must be `false` for anything that creates a resource: Twilio
+    /// has no idempotency-key mechanism on the Messages or Calls APIs, so a
+    /// replayed `POST /Messages` sends a second SMS and bills for it. Only a
+    /// pre-transmission failure (a connect error) may be retried in that case.
+    ///
+    /// A 429 stays retryable regardless — Twilio rejects a rate-limited request
+    /// without performing it, so replaying it cannot duplicate anything.
+    ///
+    /// See br-kxd3e.
     async fn execute(
         &self,
+        replay_safe: bool,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> TwilioResult<serde_json::Value> {
         let ctx = self.runtime.request_context();
@@ -1065,14 +1124,17 @@ impl TwilioClient {
 
                     if status.is_server_error() {
                         let body = response.text().await.unwrap_or_default();
-                        return AttemptOutcome::Retryable {
-                            error: TwilioError::Api {
+                        // A 5xx means Twilio RECEIVED the request; the message
+                        // may already have been queued for delivery.
+                        return AttemptOutcome::retryable_if_replayable(
+                            TwilioError::Api {
                                 message: format!("Server error {status}: {body}"),
                                 status_code: Some(status.as_u16()),
                                 error_code: None,
                             },
-                            retry_after: None,
-                        };
+                            None,
+                            replay_safe,
+                        );
                     }
 
                     if !status.is_success() {
@@ -1102,10 +1164,13 @@ impl TwilioClient {
                         Err(e) => AttemptOutcome::Terminal(TwilioError::Http(e)),
                     }
                 }
-                Err(e) => AttemptOutcome::Retryable {
-                    retry_after: None,
-                    error: TwilioError::Http(e),
-                },
+                // Only a connect-phase failure proves the request never left
+                // the client; `is_timeout()` covers the TOTAL request timeout,
+                // which fires after the body was fully sent.
+                Err(e) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&e);
+                    AttemptOutcome::retryable_if_replayable(TwilioError::Http(e), None, replayable)
+                }
             }
         })
         .await
@@ -1136,13 +1201,339 @@ fn ensure_whatsapp_prefix(number: &str) -> String {
     }
 }
 
+/// Validate a Twilio resource SID before interpolating it into a request path.
+///
+/// Twilio SIDs are a 2-letter prefix followed by 32 hex characters — strictly
+/// `[A-Za-z0-9]`. Callers reach these values through `require_str`, which does
+/// no charset validation, so a `message_sid`/`call_sid`/`media_sid` such as
+/// `../Calls/CAxxxx` (or `REALID/actions/hangup#`) would normalize to a
+/// different resource or action than intended (e.g. a "get message" request
+/// reading a call, or an "answer" turning into a "hangup"). Rejecting any
+/// non-alphanumeric byte keeps every request pinned to the addressed resource.
+fn validate_sid<'a>(value: &'a str, field: &str) -> TwilioResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(TwilioError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if trimmed.len() > 64 || !trimmed.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(TwilioError::InvalidInput(format!(
+            "{field} must be an alphanumeric Twilio SID"
+        )));
+    }
+    Ok(trimmed)
+}
+
+/// Validate a value that may be a Twilio SID *or* a resource unique name (such
+/// as a Video Room `UniqueName`), rejecting only the characters that would let
+/// it escape its URL path segment. Unlike [`validate_sid`], this permits the
+/// `-`/`_`/`.` that unique names may contain while still blocking traversal
+/// (`/`, `\`, `..`, encoded slashes) and query/fragment injection (`?`, `#`).
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> TwilioResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(TwilioError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(TwilioError::InvalidInput(format!(
+            "{field} contains path traversal or URL control characters"
+        )));
+    }
+    Ok(trimmed)
+}
+
+/// Flatten a `serde_json::Value` map into `application/x-www-form-urlencoded`
+/// key/value pairs for a Twilio POST body.
+///
+/// Twilio request payloads are always shallow maps of PascalCase field names to
+/// scalar values (Twilio uses dotted keys such as `MessagingBinding.Address`
+/// rather than nested objects, and passes structured data like
+/// `ContentVariables` as a pre-serialized JSON string). Scalars render to their
+/// natural string form; array values (e.g. `MediaUrl`) become repeated keys.
+/// Null values are omitted.
+fn json_to_form_pairs(body: &serde_json::Value) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let Some(map) = body.as_object() else {
+        return pairs;
+    };
+    for (key, value) in map {
+        match value {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(s) => pairs.push((key.clone(), s.clone())),
+            serde_json::Value::Bool(b) => pairs.push((key.clone(), b.to_string())),
+            serde_json::Value::Number(n) => pairs.push((key.clone(), n.to_string())),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    let rendered = match item {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    pairs.push((key.clone(), rendered));
+                }
+            }
+            // Nested objects do not occur in Twilio payloads; fall back to the
+            // compact JSON encoding rather than dropping the field silently.
+            other @ serde_json::Value::Object(_) => {
+                pairs.push((key.clone(), other.to_string()));
+            }
+        }
+    }
+    pairs
+}
+
+/// Serialize form pairs into an `application/x-www-form-urlencoded` body.
+///
+/// Values are percent-encoded with the same `NON_ALPHANUMERIC` set used for
+/// query strings elsewhere in this client (spaces become `%20`, which Twilio
+/// urldecodes identically to `+`). Keys are Twilio's fixed PascalCase /
+/// dotted field names (e.g. `MessagingBinding.Address`) and are emitted
+/// verbatim so the server sees the documented parameter names.
+fn encode_form_body(pairs: &[(String, String)]) -> String {
+    let mut body = String::new();
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        if i > 0 {
+            body.push('&');
+        }
+        let encoded =
+            percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC);
+        let _ = write!(body, "{key}={encoded}");
+    }
+    body
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn validate_sid_rejects_cross_resource_traversal() {
+        for bad in [
+            "",
+            "   ",
+            "../Calls/CAxxxxxxxx",
+            "REALID/actions/hangup",
+            "SID#frag",
+            "SID?x=y",
+            "a/b",
+            "a\\b",
+            "MM..2f..2f",
+            &"M".repeat(65),
+        ] {
+            assert!(
+                validate_sid(bad, "message_sid").is_err(),
+                "expected `{bad}` to be rejected"
+            );
+        }
+        // Real 34-character Twilio SIDs pass (trimmed).
+        assert_eq!(
+            validate_sid("MM0123456789abcdef0123456789abcdef", "message_sid").unwrap(),
+            "MM0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            validate_sid(" CA0123456789abcdef0123456789abcdef ", "call_sid").unwrap(),
+            "CA0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    enum TestHttpBody {
+        Json(serde_json::Value),
+        Text(&'static str),
+        Empty,
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: TestHttpBody,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        #[must_use]
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Json(body),
+            }
+        }
+
+        #[must_use]
+        fn text(method: &'static str, path: &'static str, status: u16, body: &'static str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Text(body),
+            }
+        }
+
+        #[must_use]
+        const fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Empty,
+            }
+        }
+    }
+
+    impl TestHttpServer {
+        #[must_use]
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        #[must_use]
+        fn account_base_url(&self) -> String {
+            format!("{}/2010-04-01/Accounts/ACtest123", self.url)
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn test_server(responses: Vec<TestHttpResponse>) -> (TestHttpServer, String) {
+        let server = TestHttpServer::respond(responses);
+        let base = server.account_base_url();
+        (server, base)
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let (body, is_json_body) = match response.body {
+            TestHttpBody::Json(body) => (body.to_string(), true),
+            TestHttpBody::Text(body) => (body.to_string(), false),
+            TestHttpBody::Empty => (String::new(), false),
+        };
+        let reason = match response.status {
+            200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        if is_json_body {
+            write!(stream, "content-type: application/json\r\n").unwrap();
+        }
+        write!(stream, "\r\n{body}").unwrap();
+        stream.flush().unwrap();
+    }
 
     fn test_client(base_url: &str) -> TwilioClient {
         TwilioClient::new("ACtest123", "test_auth_token")
@@ -1153,21 +1544,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            201,
+            serde_json::json!({
                 "sid": "SMtest123",
                 "status": "queued",
                 "to": "+15551234567",
                 "from": "+15559876543",
                 "body": "Hello from FCP!",
                 "date_created": "2026-03-01T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let msg = client
@@ -1186,12 +1575,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_message() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages/SMabc.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc.json",
+            200,
+            serde_json::json!({
                 "sid": "SMabc",
                 "status": "delivered",
                 "to": "+15551234567",
@@ -1199,9 +1587,8 @@ mod tests {
                 "body": "Test message",
                 "date_created": "2026-03-01T00:00:00Z",
                 "num_media": "0"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let msg = client.get_message("SMabc").await.unwrap();
@@ -1211,20 +1598,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_messages() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            200,
+            serde_json::json!({
                 "messages": [
                     { "sid": "SM1", "status": "delivered", "to": "+1", "from": "+2" },
                     { "sid": "SM2", "status": "sent", "to": "+3", "from": "+4" }
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -1236,20 +1621,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_create_call() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Calls.json",
+            201,
+            serde_json::json!({
                 "sid": "CAtest",
                 "status": "queued",
                 "to": "+15551234567",
                 "from": "+15559876543",
                 "date_created": "2026-03-01T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let call = client
@@ -1269,12 +1652,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_call() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls/CAxyz.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Calls/CAxyz.json",
+            200,
+            serde_json::json!({
                 "sid": "CAxyz",
                 "status": "completed",
                 "to": "+15551234567",
@@ -1282,9 +1664,8 @@ mod tests {
                 "duration": "42",
                 "date_created": "2026-03-01T00:00:00Z",
                 "price": "-0.0100"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let call = client.get_call("CAxyz").await.unwrap();
@@ -1294,21 +1675,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_hangup_call() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls/CAactive.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Calls/CAactive.json",
+            200,
+            serde_json::json!({
                 "sid": "CAactive",
                 "status": "completed",
                 "to": "+15551234567",
                 "from": "+15559876543",
                 "duration": "120",
                 "date_created": "2026-03-01T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let call = client.hangup_call("CAactive").await.unwrap();
@@ -1319,20 +1698,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_calls() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Calls.json",
+            200,
+            serde_json::json!({
                 "calls": [
                     { "sid": "CA1", "status": "completed", "to": "+1", "from": "+2", "duration": "30" },
                     { "sid": "CA2", "status": "in-progress", "to": "+3", "from": "+4" }
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -1344,19 +1721,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_calls_with_filters() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Calls.json",
+            200,
+            serde_json::json!({
                 "calls": [
                     { "sid": "CA1", "status": "completed", "to": "+15551234567", "from": "+2" }
                 ],
                 "next_page_uri": "/next"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -1592,19 +1967,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_account() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            200,
+            serde_json::json!({
                 "sid": "ACtest123",
                 "friendly_name": "Test Account",
                 "status": "active",
                 "type": "Full"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let account = client.get_account().await.unwrap();
@@ -1614,21 +1987,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_phone_numbers() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
+            200,
+            serde_json::json!({
                 "incoming_phone_numbers": [
                     { "sid": "PN1", "phone_number": "+15551234567", "friendly_name": "Main" }
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_phone_numbers(None, None).await.unwrap();
@@ -1637,14 +2006,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
+        let (_server, base) = test_server(vec![TestHttpResponse::empty(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            401,
+        )]);
 
         let client = test_client(&base);
         let result = client.get_account().await;
@@ -1654,19 +2020,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMmissing.json",
-            ))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMmissing.json",
+            404,
+            serde_json::json!({
                 "code": 20404,
                 "message": "The requested resource was not found"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.get_message("SMmissing").await;
@@ -1676,14 +2038,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
+        let (_server, base) = test_server(vec![TestHttpResponse::empty(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            429,
+        )]);
 
         let client = test_client(&base);
         let result = client.get_account().await;
@@ -1901,6 +2260,57 @@ mod tests {
         assert!(debug.contains(&expected_url), "debug: {debug}");
     }
 
+    // ── Form-encoding of POST bodies ────────────────────────────────────
+
+    #[test]
+    fn json_to_form_pairs_flattens_scalars() {
+        let body = serde_json::json!({
+            "To": "+15551234567",
+            "Timeout": 30,
+            "Record": true,
+        });
+        let pairs = json_to_form_pairs(&body);
+        assert!(pairs.contains(&("To".to_string(), "+15551234567".to_string())));
+        assert!(pairs.contains(&("Timeout".to_string(), "30".to_string())));
+        assert!(pairs.contains(&("Record".to_string(), "true".to_string())));
+    }
+
+    #[test]
+    fn json_to_form_pairs_emits_repeated_keys_for_arrays() {
+        let body = serde_json::json!({
+            "Body": "hi",
+            "MediaUrl": ["https://a.example/1.png", "https://a.example/2.png"],
+        });
+        let pairs = json_to_form_pairs(&body);
+        let media: Vec<&String> = pairs
+            .iter()
+            .filter(|(k, _)| k == "MediaUrl")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(media.len(), 2, "each MediaUrl should be a separate pair");
+        assert_eq!(media[0], "https://a.example/1.png");
+        assert_eq!(media[1], "https://a.example/2.png");
+    }
+
+    #[test]
+    fn json_to_form_pairs_omits_null_and_handles_empty() {
+        let body = serde_json::json!({ "A": serde_json::Value::Null, "B": "keep" });
+        let pairs = json_to_form_pairs(&body);
+        assert_eq!(pairs, vec![("B".to_string(), "keep".to_string())]);
+        assert!(json_to_form_pairs(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn encode_form_body_percent_encodes_values() {
+        let body = encode_form_body(&[
+            ("To".to_string(), "+15551234567".to_string()),
+            ("Body".to_string(), "hi there".to_string()),
+        ]);
+        // `+` and space must be percent-encoded so they survive form decoding.
+        assert_eq!(body, "To=%2B15551234567&Body=hi%20there");
+        assert_eq!(encode_form_body(&[]), "");
+    }
+
     // ── Default API base constant ───────────────────────────────────────
 
     #[test]
@@ -1910,24 +2320,22 @@ mod tests {
         assert!(DEFAULT_API_BASE.contains("Accounts"));
     }
 
-    // ── Wiremock edge case tests ────────────────────────────────────────
+    // ── HTTP edge case tests ────────────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
     async fn test_list_recordings() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Recordings.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Recordings.json",
+            200,
+            serde_json::json!({
                 "recordings": [
                     {"sid": "RE1", "duration": "30"},
                     {"sid": "RE2", "duration": "60"}
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_recordings(None, None, None).await.unwrap();
@@ -1936,14 +2344,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_forbidden_returns_unauthorized() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(403))
-            .mount(&mock_server)
-            .await;
+        let (_server, base) = test_server(vec![TestHttpResponse::empty(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            403,
+        )]);
 
         let client = test_client(&base);
         let result = client.get_account().await;
@@ -1953,17 +2358,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_api_error_with_error_body() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            400,
+            serde_json::json!({
                 "code": 21211,
                 "message": "Invalid 'To' Phone Number"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_messages(None, None, None, None, None).await;
@@ -1981,14 +2384,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_server_error_no_retry() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
-            .mount(&mock_server)
-            .await;
+        let (_server, base) = test_server(vec![TestHttpResponse::text(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            503,
+            "Service Unavailable",
+        )]);
 
         let client = test_client(&base);
         let result = client.get_account().await;
@@ -2006,21 +2407,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_with_media_url() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            201,
+            serde_json::json!({
                 "sid": "SMmedia",
                 "status": "queued",
                 "to": "+15551111111",
                 "from": "+15552222222",
                 "body": "With media",
                 "num_media": "1"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let media = vec!["https://example.com/image.png".to_string()];
@@ -2040,20 +2439,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_with_callback() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            201,
+            serde_json::json!({
                 "sid": "SMcb",
                 "status": "queued",
                 "to": "+15551111111",
                 "from": "+15552222222",
                 "body": "With callback"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let msg = client
@@ -2071,19 +2468,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_create_call_with_all_options() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Calls.json",
+            201,
+            serde_json::json!({
                 "sid": "CAfull",
                 "status": "queued",
                 "to": "+15551111111",
                 "from": "+15552222222"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let call = client
@@ -2102,17 +2497,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_messages_with_filters() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            200,
+            serde_json::json!({
                 "messages": [{"sid": "SMfiltered"}],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -2130,21 +2523,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_phone_numbers_with_filter() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
+            200,
+            serde_json::json!({
                 "incoming_phone_numbers": [
                     {"sid": "PNfiltered", "phone_number": "+15551234567"}
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -2156,17 +2545,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_recordings_with_filters() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Recordings.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Recordings.json",
+            200,
+            serde_json::json!({
                 "recordings": [{"sid": "REfiltered"}],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -2180,14 +2567,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_media() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
+            200,
+            serde_json::json!({
                 "media_list": [
                     {
                         "sid": "ME001",
@@ -2205,9 +2589,8 @@ mod tests {
                     }
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_media("SMabc", None, None).await.unwrap();
@@ -2217,21 +2600,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_media_with_pagination() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
+            200,
+            serde_json::json!({
                 "media_list": [
                     {"sid": "ME001", "content_type": "image/jpeg"}
                 ],
                 "next_page_uri": "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json?Page=1"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_media("SMabc", Some(1), Some(0)).await.unwrap();
@@ -2241,19 +2620,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_media_empty() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMnomedia/Media.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMnomedia/Media.json",
+            200,
+            serde_json::json!({
                 "media_list": [],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_media("SMnomedia", None, None).await.unwrap();
@@ -2262,14 +2637,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_media() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/ME001.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/ME001.json",
+            200,
+            serde_json::json!({
                 "sid": "ME001",
                 "account_sid": "ACtest123",
                 "parent_sid": "SMabc",
@@ -2277,9 +2649,8 @@ mod tests {
                 "date_created": "2026-03-01T00:00:00Z",
                 "date_updated": "2026-03-01T00:00:01Z",
                 "uri": "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/ME001.json"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let media = client.get_media("SMabc", "ME001").await.unwrap();
@@ -2291,19 +2662,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_media_not_found() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/MEmissing.json",
-            ))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/MEmissing.json",
+            404,
+            serde_json::json!({
                 "code": 20404,
                 "message": "The requested resource was not found"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.get_media("SMabc", "MEmissing").await;

@@ -12,7 +12,7 @@
 //!        (non-hex char, odd length)
 //!      - `Err(WrongLength { actual })` if the decoded bytes aren't 32
 //!
-//! 2. **`util::hex_or_bytes::deserialize`** (util/hex_or_bytes.rs) —
+//! 2. **`util::hex_or_bytes::deserialize`** (`util/hex_or_bytes.rs`) —
 //!    the serde codec used by `ObjectId`, `ZoneKeyId`,
 //!    `NodeSignature.signature`, and other fixed-byte-array fields
 //!    when deserializing from a human-readable format (JSON).
@@ -25,7 +25,7 @@
 //!     decodes to 0 bytes, not 32).
 //!   - `parse_prefixed("objectid:")` → `WrongLength { actual: 0 }`.
 //! - **Odd-length input**: `parse_prefixed("abc")` → `InvalidHex`
-//!   (hex::decode rejects odd length).
+//!   (`hex::decode` rejects odd length).
 //! - **Non-hex char**: `parse_prefixed("zz...")` → `InvalidHex`.
 //! - **Mixed-case acceptance**: `0xAaBb...` (32-byte mixed-case hex)
 //!   decodes successfully via both `parse_prefixed` and the

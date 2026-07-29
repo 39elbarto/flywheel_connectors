@@ -157,6 +157,8 @@ These are excluded on purpose:
 - base URL policy failures before live requests
 - degraded readiness when credentials are omitted for host-side injection
 - live `GET /v2/user` provider validation during self-check when configured and credential material is present
+- gated live sandbox repository lifecycle proof through `dockerhub.health`, `dockerhub.repos.create`, `dockerhub.repos.list`, `dockerhub.repos.delete`, and cleanup verification
+- gated live auth-denial proof with an intentionally invalid token
 - nine operation descriptors with capability, risk, safety tier, idempotency, approval metadata, schemas, and AI hints
 - simulation denial for unsupported operation IDs or missing capability verifier state
 
@@ -189,6 +191,7 @@ The verification surface captures:
 
 - runtime operation inventory and capability metadata
 - deterministic WireMock coverage for live HTTP request shapes
+- gated Docker Hub sandbox mutation proof when `FCP_LIVE_SANDBOX=1` and sandbox credentials are configured
 - auth, base URL policy, provider error, lifecycle, simulation, and introspection tests
 - formatting, check, and clippy proof through `rch`
 - UBS on changed files before commit
@@ -201,10 +204,12 @@ The verification surface captures:
 - Prefer a Docker Hub personal access token over legacy username/password configuration.
 - Use WireMock loopback fixtures for routine proof.
 - Keep repository and tag names synthetic in live tests.
+- To run the gated live suite, set `FCP_LIVE_SANDBOX=1`, `DOCKERHUB_SANDBOX_USERNAME`, `DOCKERHUB_SANDBOX_TOKEN`, `DOCKERHUB_SANDBOX_NAMESPACE`, and `FCP_SANDBOX_RUN_NAMESPACE`. `DOCKERHUB_SANDBOX_BASE_URL` defaults to `https://hub.docker.com`.
 
 **Dedicated environment**:
 
 - Do not delete production repositories or tags through this connector.
+- The gated live suite creates one synthetic repository, verifies it appears in repository inventory, deletes it, and verifies the deleted repository is no longer fetchable. Do not point it at a namespace that contains production repositories.
 - Treat private repository names, tag digests, organization names, and user metadata as sensitive.
 - Verify whether the account can access the namespace before invoking create or delete operations.
 - Track Docker Hub API deprecation notes before relying on legacy runtime endpoints for long-lived automation.

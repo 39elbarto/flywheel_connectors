@@ -14,6 +14,9 @@ use std::path::{Component, Path};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
 use fcp_prelude::{
     ApprovalMode as CoreApprovalMode, CapabilityId, ConnectorId, IdValidationError,
     IdempotencyClass, ObjectId, RateLimitDeclarationError, RateLimitDeclarations, RateLimitPool,
@@ -107,6 +110,8 @@ pub struct ConnectorManifest {
     pub event_caps: Option<EventCapsSection>,
     #[serde(default)]
     pub timeouts: Option<ManifestTimeouts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance_budget: Option<PerformanceBudget>,
     pub sandbox: SandboxSection,
     #[serde(default)]
     pub rate_limits: Option<RateLimitsSection>,
@@ -120,6 +125,19 @@ pub struct ConnectorManifest {
     pub security: Option<ConnectorSecuritySection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling: Option<ConnectorSamplingSection>,
+}
+
+/// Hybrid-signed envelope alias for [`ConnectorManifest`].
+pub type HybridSignedConnectorManifest = SignedEnvelope<ConnectorManifest>;
+
+impl HybridSignable for ConnectorManifest {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Manifest;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signatures = None;
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
 }
 
 impl ConnectorManifest {
@@ -233,6 +251,9 @@ impl ConnectorManifest {
         }
         if let Some(ref timeouts) = self.timeouts {
             timeouts.validate()?;
+        }
+        if let Some(ref performance_budget) = self.performance_budget {
+            performance_budget.validate()?;
         }
         self.sandbox.validate()?;
         if let Some(ref rate_limits) = self.rate_limits {
@@ -421,6 +442,12 @@ pub enum ManifestError {
 
     #[error("invalid manifest field `{field}`: {message}")]
     Invalid {
+        field: &'static str,
+        message: String,
+    },
+
+    #[error("invalid performance budget field `{field}`: {message}")]
+    InvalidPerformanceBudget {
         field: &'static str,
         message: String,
     },
@@ -933,6 +960,8 @@ pub enum ConnectorStatus {
     /// Fully functional — all declared operations work.
     #[default]
     Ready,
+    /// Fully functional and backed by the connector graduation proof bundle.
+    Proven,
     /// Operations are declared but return "not implemented" errors.
     Stub,
     /// Connector is experimental/in development.
@@ -948,31 +977,38 @@ pub enum ConnectorStatus {
     /// operator approval. May not graduate without significant changes.
     /// Hidden from all default discovery surfaces.
     Quarantined,
+    /// Deliberately hostile connector used only by conformance and hardening
+    /// tests. It must never load in production deploy mode.
+    Adversarial,
 }
 
 impl ConnectorStatus {
     /// Returns `true` if this status represents a live, production-ready connector.
     #[must_use]
     pub const fn is_live(&self) -> bool {
-        matches!(self, Self::Ready | Self::Experimental)
+        matches!(self, Self::Ready | Self::Proven | Self::Experimental)
     }
 
     /// Returns `true` if this connector should be hidden from default
     /// catalog, install, and discovery surfaces.
     #[must_use]
     pub const fn is_hidden_by_default(&self) -> bool {
-        matches!(self, Self::Incubating | Self::Quarantined | Self::Stub)
+        matches!(
+            self,
+            Self::Incubating | Self::Quarantined | Self::Stub | Self::Adversarial
+        )
     }
 
     /// Returns a human-readable rationale for why the connector is non-live.
     #[must_use]
     pub const fn non_live_rationale(&self) -> Option<&'static str> {
         match self {
-            Self::Ready | Self::Experimental => None,
+            Self::Ready | Self::Proven | Self::Experimental => None,
             Self::Stub => Some("Operations are declared but return not-implemented errors"),
             Self::Deprecated => Some("Connector is deprecated; prefer the listed alternative"),
             Self::Incubating => Some("Runtime path is incomplete or lacks production evidence"),
             Self::Quarantined => Some("High-risk surface requiring explicit operator approval"),
+            Self::Adversarial => Some("Deliberately hostile test surface; production load refused"),
         }
     }
 
@@ -980,7 +1016,7 @@ impl ConnectorStatus {
     #[must_use]
     pub const fn graduation_guidance(&self) -> Option<&'static str> {
         match self {
-            Self::Ready | Self::Deprecated => None,
+            Self::Ready | Self::Proven | Self::Deprecated => None,
             Self::Experimental => Some("Stabilize API surface and complete production testing"),
             Self::Stub => Some("Implement all declared operations with real API integration"),
             Self::Incubating => Some(
@@ -989,6 +1025,7 @@ impl ConnectorStatus {
             Self::Quarantined => {
                 Some("Resolve architectural concerns, complete safety review, pass security audit")
             }
+            Self::Adversarial => Some("Never graduates; replace with a non-adversarial connector"),
         }
     }
 }
@@ -997,11 +1034,13 @@ impl std::fmt::Display for ConnectorStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready => write!(f, "ready"),
+            Self::Proven => write!(f, "proven"),
             Self::Stub => write!(f, "stub"),
             Self::Experimental => write!(f, "experimental"),
             Self::Deprecated => write!(f, "deprecated"),
             Self::Incubating => write!(f, "incubating"),
             Self::Quarantined => write!(f, "quarantined"),
+            Self::Adversarial => write!(f, "adversarial"),
         }
     }
 }
@@ -1024,30 +1063,40 @@ impl StatusConsistencyResult {
     ///
     /// The canonical mapping is:
     /// - `"ready"` / `"live"` → `ConnectorStatus::Ready`
+    /// - `"proven"` → `ConnectorStatus::Proven`
     /// - `"stub"` → `ConnectorStatus::Stub`
     /// - `"experimental"` → `ConnectorStatus::Experimental`
     /// - `"deprecated"` → `ConnectorStatus::Deprecated`
     /// - `"incubating"` → `ConnectorStatus::Incubating`
     /// - `"quarantined"` → `ConnectorStatus::Quarantined`
+    /// - `"adversarial"` → `ConnectorStatus::Adversarial`
     #[must_use]
     pub fn check(manifest_status: ConnectorStatus, runtime_status: &str) -> Self {
         let runtime_canonical = match runtime_status {
             "ready" | "live" => Some(ConnectorStatus::Ready),
+            "proven" => Some(ConnectorStatus::Proven),
             "stub" => Some(ConnectorStatus::Stub),
             "experimental" => Some(ConnectorStatus::Experimental),
             "deprecated" => Some(ConnectorStatus::Deprecated),
             "incubating" => Some(ConnectorStatus::Incubating),
             "quarantined" => Some(ConnectorStatus::Quarantined),
+            "adversarial" => Some(ConnectorStatus::Adversarial),
             _ => None,
         };
 
         match runtime_canonical {
-            Some(rt) if rt == manifest_status => Self {
-                consistent: true,
-                manifest_status,
-                runtime_status: runtime_status.to_string(),
-                mismatch_reason: None,
-            },
+            Some(rt)
+                if rt == manifest_status
+                    || (manifest_status == ConnectorStatus::Proven
+                        && rt == ConnectorStatus::Ready) =>
+            {
+                Self {
+                    consistent: true,
+                    manifest_status,
+                    runtime_status: runtime_status.to_string(),
+                    mismatch_reason: None,
+                }
+            }
             Some(rt) => Self {
                 consistent: false,
                 manifest_status,
@@ -2193,6 +2242,56 @@ const fn default_manifest_connect_timeout_ms() -> u64 {
 
 const fn default_manifest_wall_clock_timeout_ms() -> u64 {
     60_000
+}
+
+/// Optional per-connector p99 resource and latency graduation budgets.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerformanceBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold_start_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_invoke_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_uss_max_mb: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_cpu_max_pct: Option<f64>,
+}
+
+impl PerformanceBudget {
+    fn validate(&self) -> Result<(), ManifestError> {
+        validate_performance_budget_value(
+            "performance_budget.cold_start_max_ms",
+            self.cold_start_max_ms,
+        )?;
+        validate_performance_budget_value(
+            "performance_budget.local_invoke_max_ms",
+            self.local_invoke_max_ms,
+        )?;
+        validate_performance_budget_value(
+            "performance_budget.memory_uss_max_mb",
+            self.memory_uss_max_mb,
+        )?;
+        validate_performance_budget_value(
+            "performance_budget.idle_cpu_max_pct",
+            self.idle_cpu_max_pct,
+        )
+    }
+}
+
+fn validate_performance_budget_value(
+    field: &'static str,
+    value: Option<f64>,
+) -> Result<(), ManifestError> {
+    if let Some(value) = value
+        && (!value.is_finite() || value < 0.0)
+    {
+        return Err(ManifestError::InvalidPerformanceBudget {
+            field,
+            message: "must be a finite non-negative number".into(),
+        });
+    }
+    Ok(())
 }
 
 /// `[sandbox]` section (NORMATIVE).
@@ -10072,22 +10171,26 @@ schema_version = "2.1"
     #[test]
     fn connector_status_display_all_variants() {
         assert_eq!(ConnectorStatus::Ready.to_string(), "ready");
+        assert_eq!(ConnectorStatus::Proven.to_string(), "proven");
         assert_eq!(ConnectorStatus::Stub.to_string(), "stub");
         assert_eq!(ConnectorStatus::Experimental.to_string(), "experimental");
         assert_eq!(ConnectorStatus::Deprecated.to_string(), "deprecated");
         assert_eq!(ConnectorStatus::Incubating.to_string(), "incubating");
         assert_eq!(ConnectorStatus::Quarantined.to_string(), "quarantined");
+        assert_eq!(ConnectorStatus::Adversarial.to_string(), "adversarial");
     }
 
     #[test]
     fn connector_status_serde_roundtrip() {
         for status in &[
             ConnectorStatus::Ready,
+            ConnectorStatus::Proven,
             ConnectorStatus::Stub,
             ConnectorStatus::Experimental,
             ConnectorStatus::Deprecated,
             ConnectorStatus::Incubating,
             ConnectorStatus::Quarantined,
+            ConnectorStatus::Adversarial,
         ] {
             let json = serde_json::to_string(status).unwrap();
             let roundtrip: ConnectorStatus = serde_json::from_str(&json).unwrap();
@@ -10098,40 +10201,48 @@ schema_version = "2.1"
     #[test]
     fn connector_status_is_live() {
         assert!(ConnectorStatus::Ready.is_live());
+        assert!(ConnectorStatus::Proven.is_live());
         assert!(ConnectorStatus::Experimental.is_live());
         assert!(!ConnectorStatus::Stub.is_live());
         assert!(!ConnectorStatus::Deprecated.is_live());
         assert!(!ConnectorStatus::Incubating.is_live());
         assert!(!ConnectorStatus::Quarantined.is_live());
+        assert!(!ConnectorStatus::Adversarial.is_live());
     }
 
     #[test]
     fn connector_status_is_hidden_by_default() {
         assert!(!ConnectorStatus::Ready.is_hidden_by_default());
+        assert!(!ConnectorStatus::Proven.is_hidden_by_default());
         assert!(!ConnectorStatus::Experimental.is_hidden_by_default());
         assert!(!ConnectorStatus::Deprecated.is_hidden_by_default());
         assert!(ConnectorStatus::Stub.is_hidden_by_default());
         assert!(ConnectorStatus::Incubating.is_hidden_by_default());
         assert!(ConnectorStatus::Quarantined.is_hidden_by_default());
+        assert!(ConnectorStatus::Adversarial.is_hidden_by_default());
     }
 
     #[test]
     fn connector_status_non_live_rationale() {
         assert!(ConnectorStatus::Ready.non_live_rationale().is_none());
+        assert!(ConnectorStatus::Proven.non_live_rationale().is_none());
         assert!(ConnectorStatus::Experimental.non_live_rationale().is_none());
         assert!(ConnectorStatus::Stub.non_live_rationale().is_some());
         assert!(ConnectorStatus::Deprecated.non_live_rationale().is_some());
         assert!(ConnectorStatus::Incubating.non_live_rationale().is_some());
         assert!(ConnectorStatus::Quarantined.non_live_rationale().is_some());
+        assert!(ConnectorStatus::Adversarial.non_live_rationale().is_some());
     }
 
     #[test]
     fn connector_status_graduation_guidance() {
         assert!(ConnectorStatus::Ready.graduation_guidance().is_none());
+        assert!(ConnectorStatus::Proven.graduation_guidance().is_none());
         assert!(ConnectorStatus::Deprecated.graduation_guidance().is_none());
         assert!(ConnectorStatus::Incubating.graduation_guidance().is_some());
         assert!(ConnectorStatus::Quarantined.graduation_guidance().is_some());
         assert!(ConnectorStatus::Stub.graduation_guidance().is_some());
+        assert!(ConnectorStatus::Adversarial.graduation_guidance().is_some());
         assert!(
             ConnectorStatus::Experimental
                 .graduation_guidance()
@@ -10159,6 +10270,18 @@ schema_version = "2.1"
     }
 
     #[test]
+    fn status_consistency_check_proven_accepts_ready_runtime() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Proven, "ready");
+        assert!(result.consistent);
+    }
+
+    #[test]
+    fn status_consistency_check_proven_match() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Proven, "proven");
+        assert!(result.consistent);
+    }
+
+    #[test]
     fn status_consistency_check_mismatch() {
         let result = StatusConsistencyResult::check(ConnectorStatus::Stub, "live");
         assert!(!result.consistent);
@@ -10182,6 +10305,12 @@ schema_version = "2.1"
     #[test]
     fn status_consistency_check_quarantined_match() {
         let result = StatusConsistencyResult::check(ConnectorStatus::Quarantined, "quarantined");
+        assert!(result.consistent);
+    }
+
+    #[test]
+    fn status_consistency_check_adversarial_match() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Adversarial, "adversarial");
         assert!(result.consistent);
     }
 
@@ -10224,5 +10353,22 @@ status = "quarantined"
         let parsed: toml::Value = toml::from_str(toml_str).unwrap();
         let status_str = parsed["connector"]["status"].as_str().unwrap();
         assert_eq!(status_str, "quarantined");
+    }
+
+    #[test]
+    fn connector_status_toml_deserialize_adversarial() {
+        let toml_str = r#"
+[connector]
+id = "fcp.test"
+name = "Test"
+version = "0.1.0"
+description = "test connector"
+archetypes = ["request-response"]
+format = "native"
+status = "adversarial"
+"#;
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let status_str = parsed["connector"]["status"].as_str().unwrap();
+        assert_eq!(status_str, "adversarial");
     }
 }

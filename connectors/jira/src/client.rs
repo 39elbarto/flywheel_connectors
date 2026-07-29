@@ -8,8 +8,9 @@ use std::time::Duration;
 use base64::Engine;
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -363,7 +364,8 @@ impl JiraClient {
     /// Create a new issue.
     #[instrument(skip(self, input))]
     pub async fn create_issue(&self, input: &serde_json::Value) -> JiraResult<CreateIssueResponse> {
-        self.post(&format!("{}/issue", self.base_url), input).await
+        self.post(&format!("{}/issue", self.base_url), input, false)
+            .await
     }
 
     /// Get an issue by key or ID.
@@ -426,7 +428,8 @@ impl JiraClient {
     /// Search issues using JQL (POST method for complex queries).
     #[instrument(skip(self, body))]
     pub async fn search_jql(&self, body: &serde_json::Value) -> JiraResult<SearchResult> {
-        self.post(&format!("{}/search", self.base_url), body).await
+        self.post(&format!("{}/search", self.base_url), body, true)
+            .await
     }
 
     // ── Transitions ──────────────────────────────────────────────
@@ -447,9 +450,13 @@ impl JiraClient {
         body: &serde_json::Value,
     ) -> JiraResult<()> {
         let issue_key = validate_issue_key(issue_key)?;
+        // NOT replay-safe: a transition body may carry an `update.comment`,
+        // and Jira permits self-loop transitions, so a replay can post a
+        // second comment. Fail closed rather than reason about the workflow.
         self.post_no_content(
             &format!("{}/issue/{issue_key}/transitions", self.base_url),
             body,
+            false,
         )
         .await
     }
@@ -487,9 +494,12 @@ impl JiraClient {
     /// Move issues to a sprint.
     #[instrument(skip(self, body))]
     pub async fn move_to_sprint(&self, sprint_id: u64, body: &serde_json::Value) -> JiraResult<()> {
+        // Replay-safe: sprint membership is a set, so moving the same
+        // issues in twice leaves them in the sprint once.
         self.post_no_content(
             &format!("{}/sprint/{sprint_id}/issue", self.agile_url),
             body,
+            true,
         )
         .await
     }
@@ -504,9 +514,11 @@ impl JiraClient {
         body: &serde_json::Value,
     ) -> JiraResult<JiraComment> {
         let issue_key = validate_issue_key(issue_key)?;
+        // NOT replay-safe: a duplicate is a second comment on the issue.
         self.post(
             &format!("{}/issue/{issue_key}/comment", self.base_url),
             body,
+            false,
         )
         .await
     }
@@ -572,9 +584,12 @@ impl JiraClient {
         body: &serde_json::Value,
     ) -> JiraResult<JiraWorklog> {
         let issue_key = validate_issue_key(issue_key)?;
+        // NOT replay-safe: a duplicate worklog double-counts logged time,
+        // which flows into billing and capacity reports.
         self.post(
             &format!("{}/issue/{issue_key}/worklog", self.base_url),
             body,
+            false,
         )
         .await
     }
@@ -727,7 +742,7 @@ impl JiraClient {
     ) -> JiraResult<JiraAutomationRule> {
         let project_id = validate_project_key(project_id)?;
         let url = format!("{}/project/{project_id}/rule", self.automation_url);
-        self.post(&url, body).await
+        self.post(&url, body, false).await
     }
 
     /// Update an automation rule.
@@ -777,7 +792,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url = %redact_url(&url), "Jira API GET");
+            debug!(attempt, url = %redact_url(url), "Jira API GET");
 
             match self.client.get(url).send().await {
                 Ok(response) => match self.handle_response(response).await {
@@ -798,7 +813,13 @@ impl JiraClient {
         .await
     }
 
-    async fn post<R>(&self, url: &str, body: &serde_json::Value) -> JiraResult<R>
+    /// POST with retry, returning a deserialized body.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a side
+    /// effect (br-kxd3e). Jira has no idempotency key, so a POST that creates
+    /// an issue, comment, or worklog must pass `false`: a 5xx means Jira
+    /// received it and may already have done the work.
+    async fn post<R>(&self, url: &str, body: &serde_json::Value, replay_safe: bool) -> JiraResult<R>
     where
         R: serde::de::DeserializeOwned + Send,
     {
@@ -807,37 +828,53 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url = %redact_url(&url), "Jira API POST");
+            debug!(attempt, url = %redact_url(url), "Jira API POST");
 
             match self.client.post(url).json(body).send().await {
                 Ok(response) => match self.handle_response(response).await {
                     Ok(data) => AttemptOutcome::Success(data),
-                    Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
-                        retry_after: e.retry_after(),
-                        error: e,
-                    },
+                    Err(e) if e.is_retryable() => {
+                        // `replay_is_safe()` keeps 429 retryable here — it was
+                        // refused WITHOUT being performed — while a 5xx is
+                        // gated on the caller's declaration.
+                        let replayable = replay_safe || e.replay_is_safe();
+                        let retry_after = e.retry_after();
+                        AttemptOutcome::retryable_if_replayable(e, retry_after, replayable)
+                    }
                     Err(e) => AttemptOutcome::Terminal(e),
                 },
-                Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
-                    error: JiraError::Http(e),
-                    retry_after: None,
-                },
-                Err(e) => AttemptOutcome::Terminal(JiraError::Http(e)),
+                // `is_timeout()` is the total request timeout and fires after
+                // the body was fully written; only a connect-phase failure
+                // proves the request never arrived.
+                Err(e) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&e);
+                    AttemptOutcome::retryable_if_replayable(JiraError::Http(e), None, replayable)
+                }
             }
         })
         .await
     }
 
-    async fn post_no_content(&self, url: &str, body: &serde_json::Value) -> JiraResult<()> {
+    /// POST with retry for endpoints that return no body.
+    ///
+    /// `replay_safe` carries the same meaning as in [`Self::post`].
+    async fn post_no_content(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        replay_safe: bool,
+    ) -> JiraResult<()> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url = %redact_url(&url), "Jira API POST (no content)");
+            debug!(attempt, url = %redact_url(url), "Jira API POST (no content)");
 
             match self.client.post(url).json(body).send().await {
                 Ok(response) => {
+                    // 429 is checked before the replay gate: it was refused
+                    // WITHOUT being performed, so it stays retryable.
                     if let Some(retry_result) = Self::check_rate_limit(&response) {
                         return AttemptOutcome::Retryable {
                             error: JiraError::RateLimited {
@@ -858,19 +895,17 @@ impl JiraClient {
                     };
                     let err = Self::parse_error(status, &bytes, retry_after_ms);
                     if err.is_retryable() {
-                        AttemptOutcome::Retryable {
-                            retry_after: err.retry_after(),
-                            error: err,
-                        }
+                        let replayable = replay_safe || err.replay_is_safe();
+                        let retry_after = err.retry_after();
+                        AttemptOutcome::retryable_if_replayable(err, retry_after, replayable)
                     } else {
                         AttemptOutcome::Terminal(err)
                     }
                 }
-                Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
-                    error: JiraError::Http(e),
-                    retry_after: None,
-                },
-                Err(e) => AttemptOutcome::Terminal(JiraError::Http(e)),
+                Err(e) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&e);
+                    AttemptOutcome::retryable_if_replayable(JiraError::Http(e), None, replayable)
+                }
             }
         })
         .await
@@ -885,7 +920,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url = %redact_url(&url), "Jira API PUT");
+            debug!(attempt, url = %redact_url(url), "Jira API PUT");
 
             match self.client.put(url).json(body).send().await {
                 Ok(response) => match self.handle_response(response).await {
@@ -912,7 +947,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url = %redact_url(&url), "Jira API PUT (no content)");
+            debug!(attempt, url = %redact_url(url), "Jira API PUT (no content)");
 
             match self.client.put(url).json(body).send().await {
                 Ok(response) => {
@@ -960,7 +995,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url = %redact_url(&url), "Jira API DELETE");
+            debug!(attempt, url = %redact_url(url), "Jira API DELETE");
 
             match self.client.delete(url).send().await {
                 Ok(response) => {
@@ -1113,10 +1148,7 @@ impl JiraClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
+    use crate::http_contract_support::{HttpExchange, HttpResponse, HttpServer, method, path};
 
     fn test_client(base_url: &str) -> JiraClient {
         JiraClient::new("test", "user@example.com", "token")
@@ -1129,11 +1161,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_issue() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "id": "10001",
                 "key": "PROJ-123",
                 "self": "https://example.atlassian.net/rest/api/3/issue/10001",
@@ -1153,11 +1185,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_create_issue() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("POST"))
+        HttpExchange::given(method("POST"))
             .and(path("/issue"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(201).set_body_json(serde_json::json!({
                 "id": "10002",
                 "key": "PROJ-124",
                 "self": "https://example.atlassian.net/rest/api/3/issue/10002"
@@ -1181,11 +1213,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_search_jql() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("POST"))
+        HttpExchange::given(method("POST"))
             .and(path("/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "issues": [
                     { "id": "10001", "key": "PROJ-1", "fields": { "summary": "Bug" } },
                     { "id": "10002", "key": "PROJ-2", "fields": { "summary": "Feature" } }
@@ -1208,11 +1240,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_transitions() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-1/transitions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "transitions": [
                     { "id": "11", "name": "To Do", "to": { "id": "1", "name": "To Do" } },
                     { "id": "21", "name": "In Progress", "to": { "id": "2", "name": "In Progress" } }
@@ -1229,11 +1261,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_sprints() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/board/42/sprint"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "values": [
                     { "id": 1, "name": "Sprint 1", "state": "active" },
                     { "id": 2, "name": "Sprint 2", "state": "future" }
@@ -1253,11 +1285,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_comments() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-1/comment"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "comments": [
                     { "id": "100", "body": { "type": "doc", "content": [] }, "created": "2024-01-01T00:00:00.000+0000" }
                 ],
@@ -1279,11 +1311,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-1"))
-            .respond_with(ResponseTemplate::new(401))
+            .respond_with(HttpResponse::new(401))
             .mount(&mock_server)
             .await;
 
@@ -1295,11 +1327,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_not_found() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-999"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(404).set_body_json(serde_json::json!({
                 "errorMessages": ["Issue does not exist or you do not have permission to see it."],
                 "errors": {}
             })))
@@ -1314,11 +1346,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-1"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
+            .respond_with(HttpResponse::new(429).insert_header("retry-after", "1"))
             .mount(&mock_server)
             .await;
 
@@ -1453,11 +1485,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_worklogs() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-1/worklog"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "worklogs": [
                     {
                         "id": "100028",
@@ -1489,11 +1521,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_worklogs_with_pagination() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-1/worklog"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "worklogs": [{"id": "100030", "timeSpent": "2h", "timeSpentSeconds": 7200}],
                 "total": 10,
                 "startAt": 5,
@@ -1513,11 +1545,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_add_worklog() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("POST"))
+        HttpExchange::given(method("POST"))
             .and(path("/issue/PROJ-1/worklog"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(201).set_body_json(serde_json::json!({
                 "id": "100030",
                 "self": "https://example.atlassian.net/rest/api/3/issue/10001/worklog/100030",
                 "timeSpent": "2h",
@@ -1544,11 +1576,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_update_worklog() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("PUT"))
+        HttpExchange::given(method("PUT"))
             .and(path("/issue/PROJ-1/worklog/100030"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "id": "100030",
                 "timeSpent": "4h",
                 "timeSpentSeconds": 14400,
@@ -1571,11 +1603,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_delete_worklog() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("DELETE"))
+        HttpExchange::given(method("DELETE"))
             .and(path("/issue/PROJ-1/worklog/100030"))
-            .respond_with(ResponseTemplate::new(204))
+            .respond_with(HttpResponse::new(204))
             .mount(&mock_server)
             .await;
 
@@ -1585,11 +1617,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_worklogs_unauthorized() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/issue/PROJ-1/worklog"))
-            .respond_with(ResponseTemplate::new(401))
+            .respond_with(HttpResponse::new(401))
             .mount(&mock_server)
             .await;
 
@@ -1601,11 +1633,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_delete_worklog_not_found() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("DELETE"))
+        HttpExchange::given(method("DELETE"))
             .and(path("/issue/PROJ-1/worklog/999999"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(404).set_body_json(serde_json::json!({
                 "errorMessages": ["Worklog with id '999999' is not found."],
                 "errors": {}
             })))
@@ -1622,11 +1654,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_automation_rules() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/project/10001/rule"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "rules": [
                     {"id": 1, "name": "Auto-assign", "state": "ENABLED", "enabled": true},
                     {"id": 2, "name": "Close stale", "state": "DISABLED", "enabled": false}
@@ -1646,11 +1678,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_automation_rule() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rule/42"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "id": 42,
                 "name": "Auto-assign on create",
                 "state": "ENABLED",
@@ -1670,11 +1702,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_automation_rule_not_found() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rule/99999"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(404).set_body_json(serde_json::json!({
                 "errorMessages": ["Rule not found"],
                 "errors": {}
             })))
@@ -1689,11 +1721,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_create_automation_rule() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("POST"))
+        HttpExchange::given(method("POST"))
             .and(path("/project/10001/rule"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(201).set_body_json(serde_json::json!({
                 "id": 100,
                 "name": "New rule",
                 "state": "ENABLED",
@@ -1715,11 +1747,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_update_automation_rule() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("PUT"))
+        HttpExchange::given(method("PUT"))
             .and(path("/rule/42"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "id": 42,
                 "name": "Updated rule",
                 "state": "ENABLED",
@@ -1736,11 +1768,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_enable_automation_rule() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("PUT"))
+        HttpExchange::given(method("PUT"))
             .and(path("/rule/42/enable"))
-            .respond_with(ResponseTemplate::new(204))
+            .respond_with(HttpResponse::new(204))
             .mount(&mock_server)
             .await;
 
@@ -1750,11 +1782,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_disable_automation_rule() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("PUT"))
+        HttpExchange::given(method("PUT"))
             .and(path("/rule/42/disable"))
-            .respond_with(ResponseTemplate::new(204))
+            .respond_with(HttpResponse::new(204))
             .mount(&mock_server)
             .await;
 
@@ -1764,11 +1796,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_delete_automation_rule() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("DELETE"))
+        HttpExchange::given(method("DELETE"))
             .and(path("/rule/42"))
-            .respond_with(ResponseTemplate::new(204))
+            .respond_with(HttpResponse::new(204))
             .mount(&mock_server)
             .await;
 
@@ -1778,11 +1810,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_delete_automation_rule_not_found() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("DELETE"))
+        HttpExchange::given(method("DELETE"))
             .and(path("/rule/99999"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(404).set_body_json(serde_json::json!({
                 "errorMessages": ["Rule not found"],
                 "errors": {}
             })))
@@ -1797,11 +1829,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_enable_automation_rule_unauthorized() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("PUT"))
+        HttpExchange::given(method("PUT"))
             .and(path("/rule/42/enable"))
-            .respond_with(ResponseTemplate::new(401))
+            .respond_with(HttpResponse::new(401))
             .mount(&mock_server)
             .await;
 
@@ -1813,11 +1845,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_automation_rules_empty() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/project/10001/rule"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "rules": [],
                 "total": 0
             })))
@@ -1951,11 +1983,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_server_info_cloud() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rest/api/2/serverInfo"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "baseUrl": "https://myco.atlassian.net",
                 "version": "1001.0.0-SNAPSHOT",
                 "versionNumbers": [1001, 0, 0],
@@ -1975,11 +2007,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_server_info_server_dc() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rest/api/2/serverInfo"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "baseUrl": "https://jira.mycompany.com",
                 "version": "9.4.7",
                 "versionNumbers": [9, 4, 7],
@@ -1997,11 +2029,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_detect_deployment_cloud() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rest/api/2/serverInfo"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "deploymentType": "Cloud"
             })))
             .mount(&mock_server)
@@ -2014,11 +2046,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_detect_deployment_server() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rest/api/2/serverInfo"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "deploymentType": "Server"
             })))
             .mount(&mock_server)
@@ -2031,11 +2063,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_detect_deployment_missing_type_defaults_server() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rest/api/2/serverInfo"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "version": "9.0.0"
             })))
             .mount(&mock_server)
@@ -2048,11 +2080,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_cloud_client_issue_url_uses_v3() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rest/api/3/issue/PROJ-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "id": "10001",
                 "key": "PROJ-1"
             })))
@@ -2071,11 +2103,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_server_dc_client_issue_url_uses_v2() {
-        let mock_server = MockServer::start().await;
+        let mock_server = HttpServer::start().await;
 
-        Mock::given(method("GET"))
+        HttpExchange::given(method("GET"))
             .and(path("/rest/api/2/issue/PROJ-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(HttpResponse::new(200).set_body_json(serde_json::json!({
                 "id": "10001",
                 "key": "PROJ-1"
             })))

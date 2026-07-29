@@ -924,7 +924,10 @@ mod tests {
         for indices in combinations {
             let subset: Vec<_> = indices.iter().map(|&i| shares[i].clone()).collect();
             let recovered = reconstruct_secret(&subset).unwrap();
-            assert!(recovered.ct_eq_bytes(secret), "failed for indices {indices:?}");
+            assert!(
+                recovered.ct_eq_bytes(secret),
+                "failed for indices {indices:?}"
+            );
         }
     }
 

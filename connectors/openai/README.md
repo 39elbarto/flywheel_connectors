@@ -58,6 +58,7 @@ Important runtime truths the contract preserves:
 - Codex base URLs are canonicalized only to explain that connector-local Codex transport is deferred to host credential flows.
 - Default chat model is `gpt-4o`.
 - FCP subscribe is not implemented; streaming and realtime operations are bounded invoke paths.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

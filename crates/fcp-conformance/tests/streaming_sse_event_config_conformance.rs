@@ -17,7 +17,7 @@
 //!    (not substring, not case-insensitive).
 //! 4. **`is_event` is false on a default event** (event field is
 //!    None — every comparison MUST fail).
-//! 5. **`json` deserialises payload via serde_json** and propagates
+//! 5. **`json` deserialises payload via `serde_json`** and propagates
 //!    deserialization errors.
 //! 6. **`SseConfig::default` has documented values**:
 //!    - `timeout` = None

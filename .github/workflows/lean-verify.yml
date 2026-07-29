@@ -1,0 +1,54 @@
+name: Lean Verify
+
+on:
+  pull_request:
+    paths:
+      - lean-toolchain
+      - lakefile.lean
+      - lake-manifest.json
+      - lean/**
+      - docs/formal/toolchain_pin.md
+      - Makefile
+      - .github/workflows/lean-verify.yml
+      - crates/fcp-conformance/tests/readme_lean_proven_gate.rs
+      - crates/fcp-conformance/tests/lean_toolchain_pin_match.rs
+  push:
+    branches:
+      - main
+    paths:
+      - lean-toolchain
+      - lakefile.lean
+      - lake-manifest.json
+      - lean/**
+      - docs/formal/toolchain_pin.md
+      - Makefile
+      - .github/workflows/lean-verify.yml
+      - crates/fcp-conformance/tests/readme_lean_proven_gate.rs
+      - crates/fcp-conformance/tests/lean_toolchain_pin_match.rs
+  workflow_dispatch:
+
+jobs:
+  lean-verify:
+    name: Lean proof gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: true
+      - name: Run Lean proof gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/lean
+          make lean-verify | tee "artifacts/lean/${GITHUB_SHA}.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lean-verify-${{ github.sha }}
+          path: artifacts/lean/${{ github.sha }}.txt
+          retention-days: 14

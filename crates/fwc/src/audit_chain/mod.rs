@@ -24,20 +24,31 @@
 
 pub mod types;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{TimeZone, Utc};
 use clap::{ArgAction, Args, Subcommand};
+use fcp_audit::AuditEntry;
+use fcp_audit::explain::{CausalExplanation, ReplayBundle};
 use fcp_cbor::to_canonical_cbor;
 use fcp_crypto::{Ed25519VerifyingKey, KeyId, ed25519::PUBLIC_KEY_SIZE};
 use fcp_kernel::{AuditEvent, AuditHead, ObjectId, ZoneId};
 use hex::encode as hex_encode;
+use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use url::Url;
 
+use crate::capability_replay::parse_since_seconds;
+use crate::truth::{KnowledgeState, RequiredTruthSource, TRUTH_SOURCE_SCHEMA_VERSION};
 use types::{AuditEventOutput, AuditFilter, AuditTailError};
+
+pub(crate) const AUDIT_CHAIN_STATUS_SCHEMA_VERSION: &str = "fcp.fwc.audit_chain_status.v1";
+const AUDIT_VERIFY_SCHEMA_VERSION: &str = "fcp.fwc.audit_verify.v1";
 
 /// Arguments for the `fcp audit` command.
 #[derive(Args, Debug, Clone)]
@@ -49,6 +60,8 @@ pub struct AuditArgs {
 /// Audit subcommands.
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuditCommands {
+    /// Inspect audit-chain status and quorum checkpoint health.
+    Chain(ChainArgs),
     /// Tail audit events from a zone's audit chain.
     ///
     /// Streams audit events in order (by seq) with optional filtering.
@@ -70,6 +83,52 @@ pub enum AuditCommands {
     /// Lists missing capabilities, incomplete operation metadata, and
     /// other readiness gaps that should be addressed.
     Gaps(GapsArgs),
+}
+
+/// Arguments for the `fwc audit chain` command group.
+#[derive(Args, Debug, Clone)]
+pub struct ChainArgs {
+    #[command(subcommand)]
+    pub command: ChainCommands,
+}
+
+/// Audit-chain status subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ChainCommands {
+    /// Summarize audit-chain quorum status.
+    Status(ChainStatusArgs),
+}
+
+/// Arguments for `fwc audit chain status`.
+#[derive(Args, Debug, Clone)]
+pub struct ChainStatusArgs {
+    /// Signed audit chain head artifact (JSON object). Omit to report missing live telemetry.
+    #[arg(long)]
+    pub head: Option<PathBuf>,
+
+    /// Audit event records input (JSONL or JSON array) used to compute freshness. Use "-" for stdin.
+    #[arg(long)]
+    pub events: Option<PathBuf>,
+
+    /// Zone to query when resolving live host-backed audit-chain status.
+    #[arg(long)]
+    pub zone: Option<String>,
+
+    /// Maximum quorum checkpoint age considered fresh.
+    #[arg(long, default_value_t = 60)]
+    pub max_age_seconds: u64,
+
+    /// Override current Unix time for deterministic artifact verification.
+    #[arg(long)]
+    pub now_unix_secs: Option<u64>,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
+    /// Require audit-chain status to come from at least this truth source.
+    #[arg(long, value_enum)]
+    pub require_source: Option<RequiredTruthSource>,
 }
 
 /// Arguments for the `fcp audit tail` command.
@@ -144,13 +203,25 @@ pub struct VerifyArgs {
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Require audit verification to come from at least this truth source.
+    #[arg(long, value_enum)]
+    pub require_source: Option<RequiredTruthSource>,
 }
 
 /// Arguments for the `fcp audit explain` command.
 #[derive(Args, Debug, Clone)]
 pub struct ExplainArgs {
-    /// Replay bundle path. May be a JSON file or a directory of bundle artifacts.
+    /// Replay bundle path. May be a JSON/CBOR file or a directory of bundle artifacts.
     pub bundle: PathBuf,
+
+    /// Restrict the explanation to a single zone.
+    #[arg(long, short = 'z')]
+    pub zone: Option<String>,
+
+    /// Restrict audit entries to this duration before the newest bundled entry.
+    #[arg(long)]
+    pub since: Option<String>,
 
     /// Output JSON instead of human-readable narrative.
     #[arg(long, default_value_t = false)]
@@ -186,6 +257,10 @@ pub struct MatrixArgs {
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Require audit matrix output to come from at least this truth source.
+    #[arg(long, value_enum)]
+    pub require_source: Option<RequiredTruthSource>,
 }
 
 /// Arguments for the `fwc audit gaps` command.
@@ -201,6 +276,10 @@ pub struct GapsArgs {
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Require audit gap output to come from at least this truth source.
+    #[arg(long, value_enum)]
+    pub require_source: Option<RequiredTruthSource>,
 }
 
 /// Run the audit command.
@@ -209,13 +288,29 @@ pub struct GapsArgs {
 ///
 /// Returns an error if the audit operation fails.
 pub fn run(args: AuditArgs) -> Result<()> {
+    run_with_host(args, None)
+}
+
+/// Run the audit command with an optional host endpoint supplied by the root CLI.
+///
+/// # Errors
+///
+/// Returns an error if the audit operation fails.
+pub fn run_with_host(args: AuditArgs, explicit_host: Option<&str>) -> Result<()> {
     match args.command {
+        AuditCommands::Chain(chain_args) => run_chain(&chain_args, explicit_host),
         AuditCommands::Tail(tail_args) => run_tail(&tail_args),
         AuditCommands::Verify(verify_args) => run_verify(&verify_args),
         AuditCommands::Explain(explain_args) => run_explain(&explain_args),
         AuditCommands::Timeline(timeline_args) => run_timeline(&timeline_args),
         AuditCommands::Matrix(matrix_args) => run_matrix(&matrix_args),
         AuditCommands::Gaps(gaps_args) => run_gaps(&gaps_args),
+    }
+}
+
+fn run_chain(args: &ChainArgs, explicit_host: Option<&str>) -> Result<()> {
+    match &args.command {
+        ChainCommands::Status(status_args) => run_chain_status(status_args, explicit_host),
     }
 }
 
@@ -378,6 +473,13 @@ struct AuditVerifyReport {
 }
 
 fn run_verify(args: &VerifyArgs) -> Result<()> {
+    enforce_audit_required_truth_source(
+        "audit verify",
+        args.require_source,
+        KnowledgeState::Offline,
+        args.json,
+    );
+
     let events_input = read_input(&args.events)?;
     let head_input = if let Some(ref path) = args.head {
         Some(read_input(path)?)
@@ -395,15 +497,15 @@ fn run_verify(args: &VerifyArgs) -> Result<()> {
 
 fn run_explain(args: &ExplainArgs) -> Result<()> {
     let bundle = load_explain_bundle(&args.bundle)?;
-    let explanation = fcp_audit::explain::explain_bundle(&bundle)?;
+    let report = build_explain_report(bundle, args.zone.as_deref(), args.since.as_deref())?;
     if args.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&explanation)
+            serde_json::to_string_pretty(&report)
                 .context("failed to serialize audit explanation")?
         );
     } else {
-        println!("{}", explanation.render_human());
+        println!("{}", report.render_human());
     }
     Ok(())
 }
@@ -440,6 +542,635 @@ fn run_timeline(args: &TimelineArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditChainStatusSource {
+    kind: String,
+    live: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AuditChainStatusReport {
+    schema_version: &'static str,
+    command: &'static str,
+    subcommand: &'static str,
+    status: fcp_audit::FreshnessLevel,
+    telemetry_state: &'static str,
+    source: AuditChainStatusSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zone_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_entry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_quorum_height: Option<u64>,
+    quorum_signed_checkpoints: u64,
+    quorum_signers: u64,
+    quorum_signer_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    producer_signature_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_count_consistent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quorum_freshness_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quorum_rotation_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_rotation_eta_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hlc_physical_drift_ms: Option<u64>,
+    max_age_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_quorum_checkpoint_snapshot: Option<Value>,
+    warnings: Vec<String>,
+}
+
+impl AuditChainStatusReport {
+    pub(crate) const fn schema_version(&self) -> &'static str {
+        self.schema_version
+    }
+
+    pub(crate) const fn status(&self) -> fcp_audit::FreshnessLevel {
+        self.status
+    }
+
+    pub(crate) const fn quorum_signed_checkpoints(&self) -> u64 {
+        self.quorum_signed_checkpoints
+    }
+
+    pub(crate) const fn quorum_signers(&self) -> u64 {
+        self.quorum_signers
+    }
+
+    pub(crate) const fn hlc_physical_drift_ms(&self) -> Option<u64> {
+        self.hlc_physical_drift_ms
+    }
+
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HostAuditChainStatusResponse {
+    status: fcp_audit::FreshnessLevel,
+    telemetry_state: String,
+    source: AuditChainStatusSource,
+    zone_id: String,
+    head_seq: Option<u64>,
+    head_entry: Option<String>,
+    last_quorum_height: Option<u64>,
+    quorum_signed_checkpoints: u64,
+    quorum_signers: u64,
+    #[serde(default)]
+    quorum_signer_ids: Vec<String>,
+    producer_signature_count: Option<u32>,
+    signature_count_consistent: Option<bool>,
+    coverage: Option<f64>,
+    quorum_freshness_secs: Option<u64>,
+    quorum_rotation_epoch: Option<String>,
+    next_rotation_eta_secs: Option<u64>,
+    hlc_physical_drift_ms: Option<u64>,
+    max_age_seconds: u64,
+    live_quorum_checkpoint_snapshot: Option<Value>,
+    #[serde(default)]
+    warnings: Vec<String>,
+}
+
+impl HostAuditChainStatusResponse {
+    fn into_report(self) -> AuditChainStatusReport {
+        let mut warnings = self.warnings;
+        if self.telemetry_state != "live-host" {
+            warnings.push(format!(
+                "host returned unexpected audit-chain telemetry_state `{}`",
+                self.telemetry_state
+            ));
+        }
+        if !self.source.live {
+            warnings.push("host audit-chain status source was not marked live".to_string());
+        }
+
+        AuditChainStatusReport {
+            schema_version: AUDIT_CHAIN_STATUS_SCHEMA_VERSION,
+            command: "audit",
+            subcommand: "chain status",
+            status: self.status,
+            telemetry_state: "live-host",
+            source: AuditChainStatusSource {
+                kind: self.source.kind,
+                live: true,
+                head_path: None,
+                events_path: None,
+            },
+            zone_id: Some(self.zone_id),
+            head_seq: self.head_seq,
+            head_entry: self.head_entry,
+            last_quorum_height: self.last_quorum_height,
+            quorum_signed_checkpoints: self.quorum_signed_checkpoints,
+            quorum_signers: self.quorum_signers,
+            quorum_signer_ids: self.quorum_signer_ids,
+            producer_signature_count: self.producer_signature_count,
+            signature_count_consistent: self.signature_count_consistent,
+            coverage: self.coverage,
+            quorum_freshness_secs: self.quorum_freshness_secs,
+            quorum_rotation_epoch: self.quorum_rotation_epoch,
+            next_rotation_eta_secs: self.next_rotation_eta_secs,
+            hlc_physical_drift_ms: self.hlc_physical_drift_ms,
+            max_age_seconds: self.max_age_seconds,
+            live_quorum_checkpoint_snapshot: self.live_quorum_checkpoint_snapshot,
+            warnings,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AuditHostClient {
+    client: BlockingClient,
+    base_url: String,
+}
+
+impl AuditHostClient {
+    fn new(endpoint: &str) -> Result<Self> {
+        let endpoint = normalize_audit_host_endpoint(endpoint)?;
+
+        #[cfg(unix)]
+        {
+            if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+                let socket_path = endpoint.strip_prefix("unix://").unwrap_or(&endpoint);
+                let client = BlockingClientBuilder::new()
+                    .unix_socket(socket_path)
+                    .build()
+                    .with_context(|| {
+                        format!(
+                            "failed to build Unix-socket client for host endpoint `{socket_path}`"
+                        )
+                    })?;
+                return Ok(Self {
+                    client,
+                    base_url: "http://localhost".to_owned(),
+                });
+            }
+        }
+
+        let client = BlockingClientBuilder::new()
+            .build()
+            .context("failed to build HTTP host client")?;
+        Ok(Self {
+            client,
+            base_url: endpoint,
+        })
+    }
+
+    fn chain_status(
+        &self,
+        zone: Option<&str>,
+        max_age_seconds: u64,
+        now_unix_secs: u64,
+    ) -> Result<HostAuditChainStatusResponse> {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(zone) = zone.map(str::trim).filter(|zone| !zone.is_empty()) {
+            query.append_pair("zone", zone);
+        }
+        query.append_pair("max_age_seconds", &max_age_seconds.to_string());
+        query.append_pair("now_unix_secs", &now_unix_secs.to_string());
+        let path = format!("/rpc/admin/audit/chain/status?{}", query.finish());
+        let response = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .send()
+            .with_context(|| format!("GET {path} from host admin API failed"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .with_context(|| format!("GET {path} returned an unreadable response body"))?;
+        if !status.is_success() {
+            bail!("GET {path} returned {status}: {body}");
+        }
+        serde_json::from_str(&body)
+            .with_context(|| format!("GET {path} returned invalid audit chain status JSON"))
+    }
+}
+
+fn normalize_audit_host_endpoint(endpoint: &str) -> Result<String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        bail!("host endpoint cannot be empty");
+    }
+    if endpoint.contains("://")
+        && !(endpoint.starts_with("http://")
+            || endpoint.starts_with("https://")
+            || endpoint.starts_with("tcp://")
+            || endpoint.starts_with("unix://"))
+    {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+
+    #[cfg(unix)]
+    if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+        let socket_path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+        if socket_path.trim().is_empty() {
+            bail!("Unix host endpoint must include a socket path");
+        }
+        return Ok(endpoint.to_owned());
+    }
+
+    let normalized = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_owned()
+    } else {
+        let stripped = endpoint.strip_prefix("tcp://").unwrap_or(endpoint);
+        format!("http://{stripped}")
+    };
+
+    let url =
+        Url::parse(&normalized).with_context(|| format!("invalid host endpoint `{endpoint}`"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+    if url.host_str().is_none() {
+        bail!("host endpoint must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("host endpoint must not include username or password components");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("host endpoint must not include query or fragment components");
+    }
+
+    Ok(normalized.trim_end_matches('/').to_owned())
+}
+
+fn resolve_audit_chain_status_host(explicit_host: Option<&str>) -> Option<String> {
+    explicit_host
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            ["FWC_HOST", "FCP_HOST_ENDPOINT", "FCP_HOST_BIND"]
+                .into_iter()
+                .find_map(|env_name| {
+                    std::env::var(env_name)
+                        .ok()
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty())
+                })
+        })
+}
+
+fn run_chain_status(args: &ChainStatusArgs, explicit_host: Option<&str>) -> Result<()> {
+    let now_unix_secs = args
+        .now_unix_secs
+        .unwrap_or_else(|| u64::try_from(Utc::now().timestamp()).unwrap_or_default());
+    let host = resolve_audit_chain_status_host(explicit_host);
+    let (report, truth_source) =
+        build_chain_status_report_with_source(args, now_unix_secs, host.as_deref())?;
+    enforce_audit_required_truth_source(
+        "audit chain status",
+        args.require_source,
+        truth_source,
+        args.json,
+    );
+
+    output_chain_status_report(&report, truth_source, args.json)
+}
+
+pub(crate) fn build_chain_status_report(
+    args: &ChainStatusArgs,
+    now_unix_secs: u64,
+) -> Result<AuditChainStatusReport> {
+    build_artifact_chain_status_report(args, now_unix_secs)
+}
+
+pub(crate) fn build_chain_status_report_resolving_host(
+    args: &ChainStatusArgs,
+    now_unix_secs: u64,
+    explicit_host: Option<&str>,
+) -> Result<(AuditChainStatusReport, KnowledgeState)> {
+    let host = resolve_audit_chain_status_host(explicit_host);
+    build_chain_status_report_with_source(args, now_unix_secs, host.as_deref())
+}
+
+fn build_chain_status_report_with_source(
+    args: &ChainStatusArgs,
+    now_unix_secs: u64,
+    host: Option<&str>,
+) -> Result<(AuditChainStatusReport, KnowledgeState)> {
+    if args.head.is_none()
+        && let Some(host) = host
+    {
+        match AuditHostClient::new(host).and_then(|client| {
+            client.chain_status(args.zone.as_deref(), args.max_age_seconds, now_unix_secs)
+        }) {
+            Ok(response) => return Ok((response.into_report(), KnowledgeState::HostBacked)),
+            Err(error) => {
+                let mut report = missing_chain_status_report(args);
+                report.warnings.push(format!(
+                    "host admin API audit-chain status query failed: {error}"
+                ));
+                return Ok((report, KnowledgeState::Offline));
+            }
+        }
+    }
+
+    Ok((
+        build_artifact_chain_status_report(args, now_unix_secs)?,
+        KnowledgeState::Offline,
+    ))
+}
+
+fn build_artifact_chain_status_report(
+    args: &ChainStatusArgs,
+    now_unix_secs: u64,
+) -> Result<AuditChainStatusReport> {
+    let Some(ref head_path) = args.head else {
+        return Ok(missing_chain_status_report(args));
+    };
+
+    let head_input = read_input(head_path)?;
+    let head = parse_signed_head(&head_input)?;
+    let events = if let Some(ref events_path) = args.events {
+        let events_input = read_input(events_path)?;
+        parse_signed_entries(&events_input)?
+    } else {
+        Vec::new()
+    };
+    let tip_entry = chain_status_tip_entry(&head, &events);
+    let quorum_freshness_secs =
+        tip_entry.map(|entry| now_unix_secs.saturating_sub(entry.occurred_at));
+    let freshness = classify_chain_status_freshness(
+        head.has_quorum(),
+        quorum_freshness_secs,
+        args.max_age_seconds,
+    );
+    let hlc_physical_drift_ms = tip_entry.map(|entry| {
+        now_unix_secs
+            .saturating_mul(1_000)
+            .abs_diff(entry.hlc.physical_ms)
+    });
+    let mut warnings = Vec::new();
+
+    if !head.signature_count_consistent() {
+        warnings.push(format!(
+            "producer signature_count={} but {} attached signatures were present",
+            head.signature_count,
+            head.signatures.len()
+        ));
+    }
+    if head.signatures.is_empty() {
+        warnings.push("signed head artifact carries no attached quorum signatures".to_string());
+    }
+    if args.events.is_none() {
+        warnings.push(
+            "no --events artifact supplied; quorum freshness and HLC drift cannot be bounded"
+                .to_string(),
+        );
+    } else if tip_entry.is_none() {
+        warnings.push(
+            "events artifact did not contain the signed head entry; freshness is unbounded"
+                .to_string(),
+        );
+    }
+    if let Some(entry) = tip_entry {
+        if entry.occurred_at > now_unix_secs {
+            warnings.push(format!(
+                "head entry timestamp {} is in the future relative to now {}",
+                entry.occurred_at, now_unix_secs
+            ));
+        }
+    }
+
+    Ok(AuditChainStatusReport {
+        schema_version: AUDIT_CHAIN_STATUS_SCHEMA_VERSION,
+        command: "audit",
+        subcommand: "chain status",
+        status: freshness,
+        telemetry_state: "artifact",
+        source: AuditChainStatusSource {
+            kind: "signed-head-artifact".to_string(),
+            live: false,
+            head_path: Some(head_path.display().to_string()),
+            events_path: args
+                .events
+                .as_ref()
+                .map(|events_path| events_path.display().to_string()),
+        },
+        zone_id: Some(head.zone_id.clone()),
+        head_seq: Some(head.head_seq),
+        head_entry: Some(head.head_entry.clone()),
+        last_quorum_height: head.has_quorum().then_some(head.head_seq),
+        quorum_signed_checkpoints: if head.has_quorum() { 1 } else { 0 },
+        quorum_signers: u64::try_from(head.signatures.len()).unwrap_or(u64::MAX),
+        quorum_signer_ids: head
+            .signatures
+            .iter()
+            .map(|signature| signature.issuer_kid.clone())
+            .collect(),
+        producer_signature_count: Some(head.signature_count),
+        signature_count_consistent: Some(head.signature_count_consistent()),
+        coverage: Some(head.coverage),
+        quorum_freshness_secs,
+        quorum_rotation_epoch: Some(head.epoch_id.clone()),
+        next_rotation_eta_secs: None,
+        hlc_physical_drift_ms,
+        max_age_seconds: args.max_age_seconds,
+        live_quorum_checkpoint_snapshot: None,
+        warnings,
+    })
+}
+
+fn missing_chain_status_report(args: &ChainStatusArgs) -> AuditChainStatusReport {
+    AuditChainStatusReport {
+        schema_version: AUDIT_CHAIN_STATUS_SCHEMA_VERSION,
+        command: "audit",
+        subcommand: "chain status",
+        status: fcp_audit::FreshnessLevel::Missing,
+        telemetry_state: "missing",
+        source: AuditChainStatusSource {
+            kind: "none".to_string(),
+            live: false,
+            head_path: None,
+            events_path: args
+                .events
+                .as_ref()
+                .map(|events_path| events_path.display().to_string()),
+        },
+        zone_id: None,
+        head_seq: None,
+        head_entry: None,
+        last_quorum_height: None,
+        quorum_signed_checkpoints: 0,
+        quorum_signers: 0,
+        quorum_signer_ids: Vec::new(),
+        producer_signature_count: None,
+        signature_count_consistent: None,
+        coverage: None,
+        quorum_freshness_secs: None,
+        quorum_rotation_epoch: None,
+        next_rotation_eta_secs: None,
+        hlc_physical_drift_ms: None,
+        max_age_seconds: args.max_age_seconds,
+        live_quorum_checkpoint_snapshot: None,
+        warnings: vec![
+            "no signed audit chain head artifact or live telemetry was supplied".to_string(),
+        ],
+    }
+}
+
+fn chain_status_tip_entry<'a>(
+    head: &fcp_audit::ChainHead,
+    events: &'a [fcp_audit::AuditEntry],
+) -> Option<&'a fcp_audit::AuditEntry> {
+    events
+        .iter()
+        .find(|entry| entry.id == head.head_entry)
+        .or_else(|| {
+            events.iter().find(|entry| {
+                let same_zone = entry.zone_id == head.zone_id;
+                let same_seq = entry.seq == head.head_seq;
+                same_zone && same_seq
+            })
+        })
+}
+
+const fn classify_chain_status_freshness(
+    has_quorum: bool,
+    quorum_freshness_secs: Option<u64>,
+    max_age_seconds: u64,
+) -> fcp_audit::FreshnessLevel {
+    if !has_quorum {
+        return fcp_audit::FreshnessLevel::Degraded;
+    }
+
+    match quorum_freshness_secs {
+        Some(age) if age <= max_age_seconds => fcp_audit::FreshnessLevel::Fresh,
+        Some(age) if age <= max_age_seconds.saturating_mul(4) => fcp_audit::FreshnessLevel::Stale,
+        Some(_) => fcp_audit::FreshnessLevel::Degraded,
+        None => fcp_audit::FreshnessLevel::Stale,
+    }
+}
+
+fn output_chain_status_report(
+    report: &AuditChainStatusReport,
+    truth_source: KnowledgeState,
+    json: bool,
+) -> Result<()> {
+    if json {
+        let payload =
+            audit_truth_source_payload(report, AUDIT_CHAIN_STATUS_SCHEMA_VERSION, truth_source)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .context("failed to serialize audit chain status report")?
+        );
+        return Ok(());
+    }
+
+    println!("audit chain status: {}", report.status);
+    println!("telemetry: {}", report.telemetry_state);
+    if let Some(ref zone_id) = report.zone_id {
+        println!("zone: {zone_id}");
+    }
+    if let Some(head_seq) = report.head_seq {
+        println!("head seq: {head_seq}");
+    }
+    println!("quorum signers: {}", report.quorum_signers);
+    if let Some(age) = report.quorum_freshness_secs {
+        println!("quorum freshness: {age}s");
+    }
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
+    print_audit_answer_source_footer(truth_source);
+    Ok(())
+}
+
+fn audit_truth_source_payload<T: Serialize>(
+    report: &T,
+    schema_version: &'static str,
+    truth_source: KnowledgeState,
+) -> Result<Value> {
+    let mut payload = serde_json::to_value(report).context("failed to serialize audit report")?;
+    inject_audit_truth_source_metadata(&mut payload, schema_version, truth_source);
+    Ok(payload)
+}
+
+fn inject_audit_truth_source_metadata(
+    payload: &mut Value,
+    schema_version: &'static str,
+    truth_source: KnowledgeState,
+) {
+    if let Some(object) = payload.as_object_mut() {
+        object
+            .entry("schema_version".to_owned())
+            .or_insert_with(|| Value::String(schema_version.to_owned()));
+        object.insert(
+            "_truth_source".to_owned(),
+            Value::String(truth_source.operator_truth_source().to_owned()),
+        );
+    }
+}
+
+fn print_audit_answer_source_footer(truth_source: KnowledgeState) {
+    if truth_source != KnowledgeState::MeshBacked {
+        println!("(answer source: {})", truth_source.operator_truth_source());
+    }
+}
+
+fn enforce_audit_required_truth_source(
+    command: &str,
+    requirement: Option<RequiredTruthSource>,
+    actual: KnowledgeState,
+    json: bool,
+) {
+    let Some(required) = requirement else {
+        return;
+    };
+    let Err(error) = required.validate(actual) else {
+        return;
+    };
+    let actual_source = error.actual.operator_truth_source();
+    let required_label = error.required.label();
+
+    if json {
+        let subcommand = command.strip_prefix("audit ").unwrap_or(command);
+        let payload = serde_json::json!({
+            "status": "error",
+            "command": "audit",
+            "subcommand": subcommand,
+            "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+            "_truth_source": actual_source,
+            "error": {
+                "type": "truth-source-unavailable",
+                "required": required_label,
+                "actual": actual_source,
+                "message": format!(
+                    "`fwc {command}` resolved from `{actual_source}` truth, which does not satisfy `--require-source {required_label}`."
+                ),
+                "recoverable": true,
+            },
+            "next_actions": [
+                "Retry after the required live truth source is reachable.".to_owned(),
+                format!("Relax the requirement if `{actual_source}` truth is acceptable for this workflow."),
+            ],
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .expect("truth-source-unavailable payload should serialize")
+        );
+    } else {
+        eprintln!(
+            "`fwc {command}` resolved from `{actual_source}` truth, which does not satisfy `--require-source {required_label}`."
+        );
+    }
+    std::process::exit(2);
+}
+
 fn read_input(path: &Path) -> Result<String> {
     if path.as_os_str() == "-" {
         let mut buf = String::new();
@@ -452,9 +1183,354 @@ fn read_input(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read input {}", path.display()))
 }
 
-fn load_explain_bundle(path: &Path) -> Result<fcp_audit::explain::ReplayBundle> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainReport {
+    status: String,
+    command: String,
+    subcommand: String,
+    filters: AuditExplainFilters,
+    source: AuditExplainSource,
+    entries_returned: usize,
+    audit_chain_range: Option<AuditExplainChainRange>,
+    entries: Vec<AuditExplainEntry>,
+    explanation: Option<CausalExplanation>,
+    warnings: Vec<String>,
+}
+
+impl AuditExplainReport {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "audit explain: {} entries from {}",
+            self.entries_returned, self.source.kind
+        );
+        if let Some(ref zone) = self.filters.zone_id {
+            let _ = writeln!(out, "zone: {zone}");
+        }
+        if let Some(ref since) = self.filters.since {
+            let _ = writeln!(out, "since: {since}");
+        }
+        if let Some(ref range) = self.audit_chain_range {
+            let _ = writeln!(out, "audit chain: {}..{}", range.start_seq, range.end_seq);
+        }
+        for entry in &self.entries {
+            let _ = write!(
+                out,
+                "{} seq={} zone={} event={}",
+                entry.id, entry.seq, entry.zone_id, entry.event_type
+            );
+            if entry.tombstoned {
+                let _ = write!(out, " tombstoned=true");
+            }
+            if let Some(height) = entry.quorum_height {
+                let _ = write!(out, " quorum_height={height}");
+            }
+            if !entry.quorum_signers.is_empty() {
+                let _ = write!(out, " signers={}", entry.quorum_signers.join(","));
+            }
+            if let Some(ref rationale) = entry.decision_rationale {
+                let _ = write!(out, " rationale={rationale}");
+            }
+            let _ = writeln!(out);
+        }
+        if let Some(ref explanation) = self.explanation {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "{}", explanation.render_human());
+        }
+        if !self.warnings.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Warnings:");
+            for warning in &self.warnings {
+                let _ = writeln!(out, "- {warning}");
+            }
+        }
+        out.trim_end().to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainFilters {
+    zone_id: Option<String>,
+    since: Option<String>,
+    since_seconds: Option<u64>,
+    reference_time_unix: Option<u64>,
+    cutoff_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainSource {
+    kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainChainRange {
+    start_seq: u64,
+    end_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainEntry {
+    id: String,
+    event_type: String,
+    severity: fcp_audit::Severity,
+    seq: u64,
+    occurred_at: u64,
+    zone_id: String,
+    actor: String,
+    connector_id: Option<String>,
+    operation_id: Option<String>,
+    correlation_id: String,
+    tombstoned: bool,
+    quorum_height: Option<u64>,
+    quorum_signers: Vec<String>,
+    decision_rationale: Option<String>,
+    reason_code: Option<String>,
+    datalog_derivation: Option<String>,
+}
+
+fn build_explain_report(
+    bundle: ReplayBundle,
+    zone_filter: Option<&str>,
+    since_filter: Option<&str>,
+) -> Result<AuditExplainReport> {
+    let since_seconds = since_filter
+        .map(parse_since_seconds)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("invalid --since value: {error}"))?;
+    let reference_time = bundle
+        .audit_entries
+        .iter()
+        .map(|entry| entry.occurred_at)
+        .max();
+    let cutoff = since_seconds
+        .zip(reference_time)
+        .map(|(since_seconds, reference_time)| reference_time.saturating_sub(since_seconds));
+
+    let mut audit_entries: Vec<AuditEntry> = bundle
+        .audit_entries
+        .into_iter()
+        .filter(|entry| zone_filter.is_none_or(|zone| entry.zone_id == zone))
+        .filter(|entry| cutoff.is_none_or(|cutoff| entry.occurred_at >= cutoff))
+        .collect();
+    audit_entries.sort_by(|left, right| {
+        left.seq
+            .cmp(&right.seq)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let receipts: Vec<fcp_audit::DecisionReceipt> = bundle
+        .receipts
+        .into_iter()
+        .filter(|receipt| zone_filter.is_none_or(|zone| receipt.zone_id == zone))
+        .filter(|receipt| cutoff.is_none_or(|cutoff| receipt.decided_at >= cutoff))
+        .collect();
+
+    let filtered_bundle = ReplayBundle {
+        audit_entries: audit_entries.clone(),
+        capability_tokens: bundle.capability_tokens,
+        receipts: receipts.clone(),
+    };
+
+    let mut warnings = Vec::new();
+    let explanation = match fcp_audit::explain::explain_bundle(&filtered_bundle) {
+        Ok(explanation) => Some(explanation),
+        Err(fcp_audit::explain::ExplainError::EmptyBundle) => {
+            warnings.push("filtered replay bundle contains no explainable evidence".to_string());
+            None
+        }
+        Err(fcp_audit::explain::ExplainError::NoInvocation) => {
+            warnings.push("filtered replay bundle contains no invocation audit entry".to_string());
+            None
+        }
+        Err(error) => return Err(error).context("failed to explain replay bundle"),
+    };
+
+    let entries: Vec<AuditExplainEntry> = audit_entries
+        .iter()
+        .map(|entry| explain_entry(entry, &receipts))
+        .collect();
+    let audit_chain_range =
+        entries
+            .first()
+            .zip(entries.last())
+            .map(|(first, last)| AuditExplainChainRange {
+                start_seq: first.seq,
+                end_seq: last.seq,
+            });
+
+    Ok(AuditExplainReport {
+        status: "ok".to_string(),
+        command: "audit".to_string(),
+        subcommand: "explain".to_string(),
+        filters: AuditExplainFilters {
+            zone_id: zone_filter.map(ToOwned::to_owned),
+            since: since_filter.map(ToOwned::to_owned),
+            since_seconds,
+            reference_time_unix: reference_time,
+            cutoff_unix: cutoff,
+        },
+        source: AuditExplainSource {
+            kind: "audit-chain-artifact".to_string(),
+        },
+        entries_returned: entries.len(),
+        audit_chain_range,
+        entries,
+        explanation,
+        warnings,
+    })
+}
+
+fn explain_entry(entry: &AuditEntry, receipts: &[fcp_audit::DecisionReceipt]) -> AuditExplainEntry {
+    let receipt = receipt_for_entry(entry, receipts);
+    let reason_code = receipt
+        .map(|receipt| receipt.reason_code.clone())
+        .or_else(|| metadata_string(entry, &["reason_code"]));
+    let decision_rationale = receipt
+        .and_then(|receipt| receipt.explanation.clone())
+        .or_else(|| metadata_string(entry, &["decision_rationale", "rationale", "explanation"]))
+        .or_else(|| reason_code.clone());
+
+    AuditExplainEntry {
+        id: entry.id.clone(),
+        event_type: entry.event_type.clone(),
+        severity: entry.severity,
+        seq: entry.seq,
+        occurred_at: entry.occurred_at,
+        zone_id: entry.zone_id.clone(),
+        actor: entry.actor.clone(),
+        connector_id: entry.connector_id.clone(),
+        operation_id: entry.operation_id.clone(),
+        correlation_id: entry.correlation_id.clone(),
+        tombstoned: is_tombstoned(entry),
+        quorum_height: metadata_u64(entry, &["quorum_height", "quorum.height"]),
+        quorum_signers: quorum_signers(entry),
+        decision_rationale,
+        reason_code,
+        datalog_derivation: metadata_string(entry, &["datalog_derivation", "derivation_summary"]),
+    }
+}
+
+fn receipt_for_entry<'a>(
+    entry: &AuditEntry,
+    receipts: &'a [fcp_audit::DecisionReceipt],
+) -> Option<&'a fcp_audit::DecisionReceipt> {
+    receipts
+        .iter()
+        .find(|receipt| receipt.audit_entry_id.as_deref() == Some(entry.id.as_str()))
+        .or_else(|| {
+            if entry.event_type != fcp_audit::event_types::CAPABILITY_INVOKE {
+                return None;
+            }
+            receipts.iter().find(|receipt| {
+                optional_match(
+                    receipt.connector_id.as_deref(),
+                    entry.connector_id.as_deref(),
+                ) && optional_match(
+                    receipt.operation_id.as_deref(),
+                    entry.operation_id.as_deref(),
+                ) && optional_match(
+                    receipt.correlation_id.as_deref(),
+                    Some(entry.correlation_id.as_str()),
+                )
+            })
+        })
+}
+
+fn optional_match(actual: Option<&str>, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| actual.is_none_or(|actual| actual == expected))
+}
+
+fn is_tombstoned(entry: &AuditEntry) -> bool {
+    entry.event_type.contains("tombstone")
+        || metadata_bool(entry, &["tombstoned", "tombstone", "tombstone_marker"])
+}
+
+fn quorum_signers(entry: &AuditEntry) -> Vec<String> {
+    let mut signers =
+        metadata_string_array(entry, &["quorum_signers", "signers", "quorum.signers"]);
+    if signers.is_empty() {
+        if let Some(ref issuer_kid) = entry.issuer_kid {
+            signers.push(issuer_kid.to_string());
+        }
+    }
+    signers
+}
+
+fn metadata_string(entry: &AuditEntry, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| metadata_value(entry, key))
+        .find_map(value_as_string)
+}
+
+fn metadata_u64(entry: &AuditEntry, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .filter_map(|key| metadata_value(entry, key))
+        .find_map(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|string| string.parse::<u64>().ok()))
+        })
+}
+
+fn metadata_bool(entry: &AuditEntry, keys: &[&str]) -> bool {
+    keys.iter()
+        .filter_map(|key| metadata_value(entry, key))
+        .any(|value| {
+            value.as_bool().unwrap_or_else(|| {
+                value
+                    .as_str()
+                    .is_some_and(|string| matches!(string, "true" | "yes" | "1"))
+            })
+        })
+}
+
+fn metadata_string_array(entry: &AuditEntry, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .filter_map(|key| metadata_value(entry, key))
+        .find_map(|value| {
+            value.as_array().map(|array| {
+                array
+                    .iter()
+                    .filter_map(value_as_string)
+                    .collect::<Vec<String>>()
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn metadata_value<'a>(entry: &'a AuditEntry, key: &str) -> Option<&'a serde_json::Value> {
+    if let Some(value) = entry.metadata.get(key) {
+        return Some(value);
+    }
+
+    let mut path = key.split('.');
+    let first = path.next()?;
+    let mut current = entry.metadata.get(first)?;
+    for segment in path {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+fn value_as_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(string) if !string.is_empty() => Some(string.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
+    }
+}
+
+fn load_explain_bundle(path: &Path) -> Result<ReplayBundle> {
     if path.is_dir() {
         return load_explain_bundle_dir(path);
+    }
+
+    if is_cbor_path(path) {
+        let input = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        return parse_explain_bundle_cbor(&input)
+            .with_context(|| format!("failed to parse CBOR replay bundle {}", path.display()));
     }
 
     let input = read_input(path)?;
@@ -462,7 +1538,13 @@ fn load_explain_bundle(path: &Path) -> Result<fcp_audit::explain::ReplayBundle> 
         .with_context(|| format!("failed to parse replay bundle {}", path.display()))
 }
 
-fn load_explain_bundle_dir(dir: &Path) -> Result<fcp_audit::explain::ReplayBundle> {
+fn load_explain_bundle_dir(dir: &Path) -> Result<ReplayBundle> {
+    if let Some(input) = read_optional_binary_artifact(dir, &["replay_bundle.cbor", "bundle.cbor"])?
+    {
+        return parse_explain_bundle_cbor(&input)
+            .with_context(|| format!("failed to parse CBOR replay bundle in {}", dir.display()));
+    }
+
     if let Some(input) = read_optional_artifact(dir, &["replay_bundle.json", "bundle.json"])? {
         return fcp_audit::explain::parse_replay_bundle(&input)
             .with_context(|| format!("failed to parse replay bundle in {}", dir.display()));
@@ -520,10 +1602,37 @@ fn load_explain_bundle_dir(dir: &Path) -> Result<fcp_audit::explain::ReplayBundl
     .with_context(|| format!("failed to parse decision receipts in {}", dir.display()))?
     .unwrap_or_default();
 
-    Ok(fcp_audit::explain::ReplayBundle {
+    Ok(ReplayBundle {
         audit_entries,
         capability_tokens,
         receipts,
+    })
+}
+
+fn is_cbor_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cbor"))
+}
+
+fn parse_explain_bundle_cbor(input: &[u8]) -> Result<ReplayBundle> {
+    let mut reader = input;
+    match ciborium::de::from_reader::<ReplayBundle, _>(&mut reader) {
+        Ok(bundle) if reader.is_empty() => return Ok(bundle),
+        Ok(_) => anyhow::bail!("CBOR replay bundle has trailing bytes"),
+        Err(_) => {}
+    }
+
+    let mut reader = input;
+    let entries = ciborium::de::from_reader::<Vec<AuditEntry>, _>(&mut reader)
+        .context("CBOR input is neither a replay bundle nor an audit-entry array")?;
+    if !reader.is_empty() {
+        anyhow::bail!("CBOR audit-entry array has trailing bytes");
+    }
+    Ok(ReplayBundle {
+        audit_entries: entries,
+        capability_tokens: Vec::new(),
+        receipts: Vec::new(),
     })
 }
 
@@ -532,6 +1641,18 @@ fn read_optional_artifact(dir: &Path, names: &[&str]) -> Result<Option<String>> 
         let path = dir.join(name);
         if path.is_file() {
             return fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))
+                .map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn read_optional_binary_artifact(dir: &Path, names: &[&str]) -> Result<Option<Vec<u8>>> {
+    for name in names {
+        let path = dir.join(name);
+        if path.is_file() {
+            return fs::read(&path)
                 .with_context(|| format!("failed to read {}", path.display()))
                 .map(Some);
         }
@@ -763,6 +1884,7 @@ fn signer_error_to_issue(
         fcp_audit::AuditError::SignatureInvalid { seq } => ("audit.signature_invalid", Some(*seq)),
         fcp_audit::AuditError::UnknownIssuer { seq } => ("audit.unknown_issuer", Some(*seq)),
         fcp_audit::AuditError::EmptySignedHead { seq } => ("audit.empty_signed_head", Some(*seq)),
+        fcp_audit::AuditError::DuplicateSigner { seq } => ("audit.duplicate_signer", Some(*seq)),
         _ => ("audit.signature_verification_error", None),
     };
     let object_id = seq.and_then(|seq| {
@@ -995,8 +2117,13 @@ fn verify_chain(
 
 fn output_verify_report(report: &AuditVerifyReport, json: bool) -> Result<()> {
     if json {
+        let payload = audit_truth_source_payload(
+            report,
+            AUDIT_VERIFY_SCHEMA_VERSION,
+            KnowledgeState::Offline,
+        )?;
         let payload =
-            serde_json::to_string_pretty(report).context("failed to serialize verify report")?;
+            serde_json::to_string_pretty(&payload).context("failed to serialize verify report")?;
         println!("{payload}");
         return Ok(());
     }
@@ -1016,6 +2143,7 @@ fn output_verify_report(report: &AuditVerifyReport, json: bool) -> Result<()> {
 
     if report.issues.is_empty() {
         println!("Issues: none");
+        print_audit_answer_source_footer(KnowledgeState::Offline);
         return Ok(());
     }
 
@@ -1031,6 +2159,7 @@ fn output_verify_report(report: &AuditVerifyReport, json: bool) -> Result<()> {
         }
     }
 
+    print_audit_answer_source_footer(KnowledgeState::Offline);
     Ok(())
 }
 
@@ -1483,7 +2612,10 @@ fn truncate(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_audit::{AuditEntry as SignedAuditEntry, Decision, DecisionReceipt, Severity};
+    use fcp_audit::{
+        AuditEntry as SignedAuditEntry, Decision, DecisionReceipt, Severity,
+        audit_entry_hlc_from_occurred_at,
+    };
     use fcp_crypto::{Ed25519Signature, Ed25519SigningKey};
     use std::collections::BTreeMap;
 
@@ -1496,6 +2628,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq,
             occurred_at: 1_700_000_000 + seq,
+            hlc: audit_entry_hlc_from_occurred_at(1_700_000_000 + seq, "user:alice"),
             prev: prev.map(ToOwned::to_owned),
             correlation_id: format!("corr-{seq}"),
             trace_context: None,
@@ -1532,6 +2665,7 @@ mod tests {
             trace_context: None,
             connector_id: entry.connector_id.clone(),
             operation_id: entry.operation_id.clone(),
+            confidence: Some(fcp_audit::ConformalScore::from_value(0.9, 12, 1, 0, None)),
             issuer_kid: None,
             signature: None,
         }
@@ -1601,6 +2735,11 @@ mod tests {
             explanation
                 .render_human()
                 .contains("revocation cascade did not trigger")
+        );
+        assert!(
+            explanation
+                .render_human()
+                .contains("confidence 0.900 (n=12, nonconforming=1)")
         );
     }
 
@@ -2739,6 +3878,7 @@ mod tests {
         let args = MatrixArgs {
             connector: Some("github".to_owned()),
             json: true,
+            require_source: None,
         };
         assert_eq!(args.connector.as_deref(), Some("github"));
         assert!(args.json);
@@ -2749,6 +3889,7 @@ mod tests {
         let args = MatrixArgs {
             connector: None,
             json: false,
+            require_source: None,
         };
         assert!(args.connector.is_none());
         assert!(!args.json);
@@ -2760,6 +3901,7 @@ mod tests {
             connector: None,
             blocking_only: true,
             json: false,
+            require_source: None,
         };
         assert!(args.blocking_only);
     }
@@ -2770,6 +3912,7 @@ mod tests {
             connector: Some("slack".to_owned()),
             blocking_only: false,
             json: true,
+            require_source: None,
         };
         assert_eq!(args.connector.as_deref(), Some("slack"));
         assert!(args.json);

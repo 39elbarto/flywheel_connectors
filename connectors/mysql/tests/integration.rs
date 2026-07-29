@@ -85,12 +85,10 @@ fn manifest_declares_strict_per_operation_network_constraints() {
 
     for operation_id in MYSQL_OPERATION_IDS {
         let Some(operation) = manifest.provides.operations.get(*operation_id) else {
-            assert!(false, "{operation_id} operation should exist");
-            continue;
+            panic!("{operation_id} operation should exist");
         };
         let Some(constraints) = operation.network_constraints.as_ref() else {
-            assert!(false, "{operation_id} should declare network_constraints");
-            continue;
+            panic!("{operation_id} should declare network_constraints");
         };
 
         assert_eq!(

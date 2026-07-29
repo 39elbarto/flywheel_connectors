@@ -215,7 +215,11 @@ fn docs_config(base_url: &str) -> serde_json::Value {
     })
 }
 
-fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    capabilities: &[&str],
+    instance_id: InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -228,12 +232,16 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // The connector honors requested_instance_id and verifies with
+        // verify_bound; pin it to the test instance so the token's INSTANCE_ID
+        // claim matches (instance-binding pattern, commit 16171621d).
+        requested_instance_id: Some(instance_id),
     }
 }
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -249,6 +257,10 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: connector verifies with verify_bound, which
+        // requires an INSTANCE_ID claim; bind to the test instance
+        // (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&constraints_cbor)
@@ -332,8 +344,18 @@ async fn google_docs_default_deny_compliance_suite_passes() {
 
     let mut connector = GoogleDocsConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["docs.write"]);
-    let token = build_token(&signing_key, "docs.write", &["docs.create"]);
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["docs.write"],
+        instance_id.clone(),
+    );
+    let token = build_token(
+        &signing_key,
+        instance_id.as_str(),
+        "docs.write",
+        &["docs.create"],
+    );
     let invoke = invoke_request("docs.get", json!({ "document_id": "doc_123" }), token);
 
     let dynamic = DynamicSuite {
@@ -377,8 +399,18 @@ async fn google_docs_happy_path_connector_suite_passes() {
 
     let mut connector = GoogleDocsConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["docs.read"]);
-    let token = build_token(&signing_key, "docs.read", &["docs.get"]);
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["docs.read"],
+        instance_id.clone(),
+    );
+    let token = build_token(
+        &signing_key,
+        instance_id.as_str(),
+        "docs.read",
+        &["docs.get"],
+    );
     let invoke = invoke_request("docs.get", json!({ "document_id": "doc_123" }), token);
 
     let suite = ConnectorSuite {

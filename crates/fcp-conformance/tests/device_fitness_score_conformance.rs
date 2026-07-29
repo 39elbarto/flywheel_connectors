@@ -25,7 +25,7 @@
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. **Baseline (no penalties, no bonuses)** = BASE_SCORE = 100.0.
+//! 1. **Baseline (no penalties, no bonuses)** = `BASE_SCORE` = 100.0.
 //! 2. **Each penalty/bonus magnitude** observable via single-knob
 //!    delta against baseline.
 //! 3. **Eligibility gates short-circuit to score=0**:
@@ -53,9 +53,17 @@ use fcp_mesh::{
 use fcp_prelude::{ConnectorId, ObjectId, ObjectIdKey, ZoneId};
 use fcp_tailscale::NodeId;
 use semver::Version;
+use std::cmp::Ordering;
 
 const EPSILON: f64 = 1e-6;
 const BASE_SCORE: f64 = 100.0;
+
+fn assert_zero_score(score: f64) {
+    assert!(
+        score.abs() < EPSILON,
+        "score MUST be 0.0 within epsilon; got {score}"
+    );
+}
 
 fn baseline_profile() -> DeviceProfile {
     // Configuration that triggers ZERO penalties and ZERO bonuses so
@@ -104,7 +112,7 @@ fn baseline_profile_yields_base_score_with_empty_ctx() {
 fn fitness_score_ineligible_constructor_yields_zero_score() {
     let f = FitnessScore::ineligible();
     assert!(!f.eligible);
-    assert_eq!(f.score, 0.0);
+    assert_zero_score(f.score);
 }
 
 // ─── Constant magnitudes (observable via single-knob delta) ─────────
@@ -309,7 +317,7 @@ fn requires_gpu_without_gpu_yields_ineligible() {
         !f.eligible,
         "requires_gpu+!has_gpu MUST short-circuit ineligible"
     );
-    assert_eq!(f.score, 0.0);
+    assert_zero_score(f.score);
 }
 
 #[test]
@@ -318,7 +326,7 @@ fn requires_tpu_without_tpu_yields_ineligible() {
     let ctx = FitnessContext::new().with_requires_tpu(true);
     let f = p.compute_fitness(&ctx);
     assert!(!f.eligible);
-    assert_eq!(f.score, 0.0);
+    assert_zero_score(f.score);
 }
 
 #[test]
@@ -330,7 +338,7 @@ fn insufficient_memory_yields_ineligible() {
         !f.eligible,
         "min_memory_mb > profile.memory_mb MUST short-circuit ineligible"
     );
-    assert_eq!(f.score, 0.0);
+    assert_zero_score(f.score);
 }
 
 #[test]
@@ -343,7 +351,7 @@ fn missing_required_connector_yields_ineligible() {
         !f.eligible,
         "required_connector absent MUST short-circuit ineligible"
     );
-    assert_eq!(f.score, 0.0);
+    assert_zero_score(f.score);
 }
 
 #[test]
@@ -467,14 +475,12 @@ fn ord_eligible_always_outranks_ineligible_regardless_of_score() {
     let eligible_zero = baseline_profile().compute_fitness(&baseline_ctx());
     // baseline score is 100.0 — easy. But test the documented total
     // order with explicit construction:
-    use std::cmp::Ordering;
     assert_eq!(eligible_zero.cmp(&ineligible), Ordering::Greater);
     assert_eq!(ineligible.cmp(&eligible_zero), Ordering::Less);
 }
 
 #[test]
 fn ord_among_eligible_higher_score_wins() {
-    use std::cmp::Ordering;
     let high = baseline_profile().compute_fitness(&baseline_ctx()); // 100.0
     let low_p = DeviceProfileBuilder::new(NodeId::new("low"))
         .cpu_cores(8)
@@ -495,7 +501,6 @@ fn ord_among_eligible_higher_score_wins() {
 
 #[test]
 fn ord_equal_scores_compare_equal() {
-    use std::cmp::Ordering;
     let a = baseline_profile().compute_fitness(&baseline_ctx());
     let b = baseline_profile().compute_fitness(&baseline_ctx());
     assert_eq!(a.cmp(&b), Ordering::Equal);

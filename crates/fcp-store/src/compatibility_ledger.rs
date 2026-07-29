@@ -1160,9 +1160,9 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let store = DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("open");
         let first = signed_ledger(1, None, &signer);
-        let first_root = store.put_ledger(first.clone()).expect("genesis");
+        let first_root = store.put_ledger(first).expect("genesis");
         let second = signed_ledger(2, Some(first_root), &signer);
-        let _second_root = store.put_ledger(second.clone()).expect("epoch 2");
+        let _second_root = store.put_ledger(second).expect("epoch 2");
         drop(store);
 
         // Tamper: rewrite the pointer to point at epoch 1 with the V1
@@ -1278,8 +1278,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let store = DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("open");
         let first = signed_ledger(1, None, &signer);
-        let _first_root = store.put_ledger(first).expect("genesis");
-        let second = signed_ledger(2, Some(_first_root), &signer);
+        let first_root = store.put_ledger(first).expect("genesis");
+        let second = signed_ledger(2, Some(first_root), &signer);
         let _ = store.put_ledger(second).expect("epoch 2");
         drop(store);
 
@@ -1296,7 +1296,7 @@ mod tests {
         );
         let v1_pointer = LatestLedgerPointer {
             mesh_id: "mesh-alpha".to_owned(),
-            root: _first_root,
+            root: first_root,
             sequence: 0,
             published_at_ms: 0,
         };

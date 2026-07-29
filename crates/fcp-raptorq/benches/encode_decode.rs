@@ -37,7 +37,7 @@ impl DecodeCase {
     }
 }
 
-fn config(symbol_size: u16) -> RaptorQConfig {
+const fn config(symbol_size: u16) -> RaptorQConfig {
     RaptorQConfig {
         symbol_size,
         repair_ratio_bps: 2_500,

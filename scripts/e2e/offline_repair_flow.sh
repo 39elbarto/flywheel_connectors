@@ -5,6 +5,10 @@ SCRIPT_NAME="e2e_offline_repair_flow"
 SEED="0xDEADBEEF"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR="${OFFLINE_REPAIR_TARGET_DIR:-/tmp/fcp-offline-repair-flow}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 STEP_CONTEXT="null"
 
 require_cmd() {
@@ -15,19 +19,30 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+    "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local log_path="$1"
+  local summary
+  summary="$(grep -aE '\[RCH\][[:space:]]+(remote|local|failed)' "${log_path}" | tail -n 1 || true)"
+  [[ "${summary}" =~ \[RCH\][[:space:]]+remote ]]
+}
+
+run_cargo_logged() {
+  local log_path="$1"
+  shift
+  local rc
+
+  run_cargo "$@" > "${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! rch_remote_summary_present "${log_path}"; then
+    echo "${SCRIPT_NAME}: rch command did not produce remote proof; see ${log_path}" >&2
+    echo "rch command did not produce remote proof" >> "${log_path}"
+    return 2
   fi
-  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- "$@"
+  return "${rc}"
 }
 
 now_ms() {
@@ -138,7 +153,7 @@ step_partial_loss_degrades_coverage() {
   local object_id_field="null"
   local object_id coverage_before_bps coverage_after_bps symbol_count
 
-  run_cargo test -p fcp-store --test store_repair_integration partial_loss_degrades_coverage -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration partial_loss_degrades_coverage -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   object_id="$(metric_for_test "${metrics_jsonl}" "partial_loss_degrades_coverage" '.object_id // empty')"
@@ -168,7 +183,7 @@ step_repair_controller_drives_convergence() {
   local object_id_field="null"
   local object_id coverage_bps repairs_succeeded symbols_added initial_queue_depth final_queue_depth
 
-  run_cargo test -p fcp-store --test store_repair_integration repair_controller_drives_convergence -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration repair_controller_drives_convergence -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   object_id="$(metric_for_test "${metrics_jsonl}" "repair_controller_drives_convergence" '.object_id // empty')"
@@ -200,7 +215,7 @@ step_repair_controller_drives_convergence() {
 
 step_mesh_degraded_control_plane_roundtrip() {
   local execution_log="${OUT_DIR}/meshnode_degraded_control_plane_roundtrip.execution.log"
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_degraded_control_plane_roundtrip -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-mesh --test mesh_integration meshnode_degraded_control_plane_roundtrip -- --nocapture || return
   grep -q "meshnode_degraded_control_plane_roundtrip ... ok" "${execution_log}" || {
     echo "Mesh degraded roundtrip marker missing in ${execution_log}" >&2
     exit 1
@@ -213,7 +228,7 @@ step_adversarial_decode_budget_checks() {
   local metrics_jsonl="${OUT_DIR}/adversarial_decode.metrics.jsonl"
   local budget_corrupt budget_duplicates received_unique
 
-  run_cargo test -p fcp-store --test store_repair_integration adversarial_ -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration adversarial_ -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   budget_corrupt="$(metric_for_test "${metrics_jsonl}" "adversarial_corrupted_symbols_reject_valid_reconstruction" '.details.decode_budget_ms // empty')"
@@ -230,7 +245,7 @@ step_adversarial_decode_budget_checks() {
 
 step_mesh_decode_status_feedback() {
   local execution_log="${OUT_DIR}/meshnode_decode_status_stops_transfer.execution.log"
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_decode_status_stops_transfer -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-mesh --test mesh_integration meshnode_decode_status_stops_transfer -- --nocapture || return
   grep -q "meshnode_decode_status_stops_transfer ... ok" "${execution_log}" || {
     echo "Decode-status feedback marker missing in ${execution_log}" >&2
     exit 1
@@ -238,7 +253,7 @@ step_mesh_decode_status_feedback() {
   STEP_CONTEXT='{"category":"targeted_repair_feedback","status":"decode_status_complete_stops_transfer"}'
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -270,6 +285,6 @@ run_step \
   "[\"${OUT_DIR}/meshnode_decode_status_stops_transfer.execution.log\"]" \
   step_mesh_decode_status_feedback
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

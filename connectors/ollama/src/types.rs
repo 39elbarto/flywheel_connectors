@@ -206,3 +206,79 @@ fn invalid<T>(message: &str) -> FcpResult<T> {
         message: message.into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chat_request_uses_default_model_and_provider_extensions() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "format": "json",
+                "keep_alive": "5m"
+            }),
+            "",
+        )
+        .expect("valid chat input should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+        assert_eq!(request.provider_extensions["format"], json!("json"));
+        assert_eq!(request.provider_extensions["keep_alive"], json!("5m"));
+    }
+
+    #[test]
+    fn chat_rejects_empty_messages() {
+        let error = chat_request_from_value(json!({"messages": []}), DEFAULT_MODEL)
+            .expect_err("empty messages should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn chat_rejects_invalid_candidate_count() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "n": 129
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("n above connector limit should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn model_ids_reject_newlines() {
+        let error = validate_ollama_model_id("model", "llama3\nlatest")
+            .expect_err("model ids with newlines should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn embeddings_reject_empty_batch_and_zero_dimensions() {
+        let batch_error = embeddings_request_from_value(
+            json!({
+                "input": [],
+                "model": DEFAULT_EMBEDDING_MODEL
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("empty embedding batch should fail");
+        let dimensions_error = embeddings_request_from_value(
+            json!({
+                "input": "hello",
+                "dimensions": 0
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("zero dimensions should fail");
+
+        assert!(matches!(batch_error, FcpError::InvalidRequest { .. }));
+        assert!(matches!(dimensions_error, FcpError::InvalidRequest { .. }));
+    }
+}

@@ -12,6 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::agent_readiness::{
+    AgentReadinessError, AgentReadinessReport, ReadinessAction, ReadinessOperatingMode,
+    ReadinessStatus,
+};
 use crate::proof_graph::{
     BeadOwner, ClaimId, ClaimNode, ClaimStatus, EvidenceId, EvidenceKind, EvidenceNode,
     FreshnessWindow, ProofGap, ProofGapId, ProofGapStatus, ProofGraph, ProofGraphError,
@@ -47,6 +51,9 @@ pub struct ProofGraphCorpus {
     /// Evidence bundle metadata summaries.
     #[serde(default)]
     pub evidence_bundles: Vec<EvidenceBundleRecord>,
+    /// Agent startup/readiness handoff reports.
+    #[serde(default)]
+    pub agent_readiness_reports: Vec<AgentReadinessProofRecord>,
 }
 
 impl Default for ProofGraphCorpus {
@@ -58,6 +65,7 @@ impl Default for ProofGraphCorpus {
             verification_scripts: Vec::new(),
             readiness_rows: Vec::new(),
             evidence_bundles: Vec::new(),
+            agent_readiness_reports: Vec::new(),
         }
     }
 }
@@ -215,6 +223,28 @@ pub struct EvidenceBundleRecord {
     pub source: SourceLocation,
 }
 
+/// Agent readiness report already produced by the operator handoff surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReadinessProofRecord {
+    /// Shared claim key for the readiness decision.
+    pub claim_key: String,
+    /// Redaction-safe report body.
+    pub report: AgentReadinessReport,
+    /// Redaction-safe path or artifact id for `report.json`.
+    pub report_path: String,
+    /// Optional redaction-safe path or artifact id for `events.jsonl`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_path: Option<String>,
+    /// Optional redaction-safe path or artifact id for `handoff.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_path: Option<String>,
+    /// Optional command that replays or regenerates the readiness report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun_argv: Option<Vec<String>>,
+    /// Source location for the report registration.
+    pub source: SourceLocation,
+}
+
 /// Deterministic `ProofGraph` indexer configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProofGraphIndexer {
@@ -257,6 +287,7 @@ impl ProofGraphIndexer {
         self.index_verification_scripts(&corpus.verification_scripts, &mut accumulator)?;
         self.index_readiness_rows(&corpus.readiness_rows, &mut accumulator)?;
         self.index_evidence_bundles(&corpus.evidence_bundles, &mut accumulator)?;
+        self.index_agent_readiness_reports(&corpus.agent_readiness_reports, &mut accumulator)?;
 
         let suggested_next_actions = accumulator.suggested_next_actions()?;
         ProofGraph::from_nodes(
@@ -287,6 +318,50 @@ impl ProofGraphIndexer {
                 "README status row is a documentation claim and evidence pointer",
             )?);
             accumulator.record_rerun(claim_key, false);
+        }
+        Ok(())
+    }
+
+    fn index_agent_readiness_reports(
+        &self,
+        reports: &[AgentReadinessProofRecord],
+        accumulator: &mut IndexAccumulator,
+    ) -> Result<(), ProofGraphIndexError> {
+        for record in reports {
+            record
+                .report
+                .validate()
+                .map_err(|error| readiness_index_error(&error))?;
+            let claim_key = canonical_claim_key(&record.claim_key);
+            let claim = self.claim_from_agent_readiness(record)?;
+            accumulator.claims.merge(claim_key.clone(), claim)?;
+
+            let report_evidence = self.agent_readiness_report_evidence(record)?;
+            let mut claim_has_rerun = report_evidence.rerun_command.is_some();
+            let report_evidence_id = report_evidence.id.clone();
+            accumulator.evidence.push(report_evidence);
+            accumulator.edges.push(SupportEdge::new(
+                claim_id_for_key(&claim_key)?,
+                report_evidence_id,
+                readiness_status_relationship(record.report.decision.status),
+                "Agent readiness report records current coordination, proof, and push posture",
+            )?);
+
+            for blocker_bead_id in readiness_blocker_bead_ids(&record.report) {
+                let blocker_evidence =
+                    self.agent_readiness_blocker_evidence(record, &blocker_bead_id)?;
+                claim_has_rerun |= blocker_evidence.rerun_command.is_some();
+                let blocker_evidence_id = blocker_evidence.id.clone();
+                accumulator.evidence.push(blocker_evidence);
+                accumulator.edges.push(SupportEdge::new(
+                    claim_id_for_key(&claim_key)?,
+                    blocker_evidence_id,
+                    SupportRelationship::DoesNotSupport,
+                    "Readiness decision names this Beads issue as an active blocker",
+                )?);
+            }
+
+            accumulator.record_rerun(claim_key, claim_has_rerun);
         }
         Ok(())
     }
@@ -720,6 +795,134 @@ impl ProofGraphIndexer {
             rerun_command,
         })
     }
+
+    fn claim_from_agent_readiness(
+        &self,
+        record: &AgentReadinessProofRecord,
+    ) -> Result<ClaimNode, ProofGraphError> {
+        let claim_key = canonical_claim_key(&record.claim_key);
+        let report = &record.report;
+        let mut tags = BTreeSet::from([
+            "agent-readiness".to_owned(),
+            format!("mode-{}", readiness_mode_label(report.decision.mode)),
+            format!("status-{}", readiness_status_label(report.decision.status)),
+        ]);
+        tags.extend(
+            readiness_blocker_bead_ids(report)
+                .into_iter()
+                .map(|bead_id| format!("blocker-{}", slug_tail(&bead_id))),
+        );
+
+        Ok(ClaimNode {
+            id: claim_id_for_key(&claim_key)?,
+            title: format!("Agent readiness {}", report.run_id),
+            statement: format!(
+                "Agent readiness mode={} status={} reason={}",
+                readiness_mode_label(report.decision.mode),
+                readiness_status_label(report.decision.status),
+                report
+                    .decision
+                    .primary_reason_code
+                    .as_deref()
+                    .unwrap_or("none")
+            ),
+            status: agent_readiness_claim_status(report.decision.status, report),
+            required_truth_source: TruthSource::NodeLocal,
+            freshness: self.freshness(report.finished_at_unix_ms),
+            redaction_class: RedactionClass::Internal,
+            owner: None,
+            tags,
+            proof_gaps: agent_readiness_proof_gaps(&claim_key, report)?,
+        })
+    }
+
+    fn agent_readiness_report_evidence(
+        &self,
+        record: &AgentReadinessProofRecord,
+    ) -> Result<EvidenceNode, ProofGraphIndexError> {
+        let report = &record.report;
+        let blocker_beads = readiness_blocker_bead_ids(report);
+        let blockers = if blocker_beads.is_empty() {
+            "none".to_owned()
+        } else {
+            blocker_beads.into_iter().collect::<Vec<_>>().join(",")
+        };
+        let rerun_command = record
+            .rerun_argv
+            .as_ref()
+            .map(|argv| {
+                rerun_command_from_argv(
+                    format!("rerun:agent-readiness:{}", slug_tail(&report.run_id)),
+                    argv,
+                )
+            })
+            .transpose()?;
+        Ok(EvidenceNode {
+            id: EvidenceId::new(format!(
+                "evidence:agent-readiness:{}:{}",
+                slug_tail(&record.claim_key),
+                slug_tail(&report.run_id)
+            ))?,
+            kind: EvidenceKind::NodeLocalRun,
+            summary: format!(
+                "Agent readiness report {} status={} mode={} blockers={}",
+                report.run_id,
+                readiness_status_label(report.decision.status),
+                readiness_mode_label(report.decision.mode),
+                blockers
+            ),
+            truth_source: TruthSource::NodeLocal,
+            freshness: self.freshness(report.finished_at_unix_ms),
+            redaction_class: RedactionClass::Internal,
+            source_ref: record.source.source_ref(),
+            content_digest: Some(content_digest(&[
+                &record.report_path,
+                &report.run_id,
+                readiness_status_label(report.decision.status),
+                readiness_mode_label(report.decision.mode),
+                &report
+                    .record_digest()
+                    .map_err(|error| readiness_index_error(&error))?,
+            ])),
+            rerun_command,
+        })
+    }
+
+    fn agent_readiness_blocker_evidence(
+        &self,
+        record: &AgentReadinessProofRecord,
+        blocker_bead_id: &str,
+    ) -> Result<EvidenceNode, ProofGraphError> {
+        Ok(EvidenceNode {
+            id: EvidenceId::new(format!(
+                "evidence:agent-readiness-blocker:{}:{}",
+                slug_tail(&record.report.run_id),
+                slug_tail(blocker_bead_id)
+            ))?,
+            kind: EvidenceKind::OperatorRecord,
+            summary: format!("Readiness report links blocker bead {blocker_bead_id}"),
+            truth_source: TruthSource::NodeLocal,
+            freshness: self.freshness(record.report.finished_at_unix_ms),
+            redaction_class: RedactionClass::Internal,
+            source_ref: record.source.source_ref(),
+            content_digest: Some(content_digest(&[&record.report.run_id, blocker_bead_id])),
+            rerun_command: Some(RerunCommand {
+                id: RerunCommandId::new(format!(
+                    "rerun:agent-readiness-blocker:{}",
+                    slug_tail(blocker_bead_id)
+                ))?,
+                argv: vec![
+                    "br".to_owned(),
+                    "show".to_owned(),
+                    blocker_bead_id.to_owned(),
+                    "--json".to_owned(),
+                ],
+                required_env_keys: BTreeSet::new(),
+                working_directory: Some(".".to_owned()),
+                requires_rch: false,
+            }),
+        })
+    }
 }
 
 impl BeadProofComment {
@@ -748,6 +951,12 @@ pub enum ProofGraphIndexError {
     /// Underlying graph validation failed.
     #[error(transparent)]
     Graph(#[from] ProofGraphError),
+    /// Agent readiness report validation failed.
+    #[error("invalid agent readiness report: {message}")]
+    AgentReadiness {
+        /// Redaction-safe validation error.
+        message: String,
+    },
 }
 
 #[derive(Default)]
@@ -908,10 +1117,20 @@ fn rerun_command_from_argv(id: String, argv: &[String]) -> Result<RerunCommand, 
 
 fn readme_status(status: &str) -> ClaimStatus {
     let normalized = status.to_ascii_uppercase();
-    if normalized.contains("PROVEN") {
-        ClaimStatus::Proven
-    } else if normalized.contains("NOT YET") {
+    // Negated proof phrasings ("NOT YET PROVEN", "UNPROVEN", "NOT PROVEN",
+    // "DISPROVEN") all contain the substring "PROVEN" but mean the opposite,
+    // so they MUST be checked before the bare `contains("PROVEN")` test.
+    // Otherwise a feature the README explicitly marks as not-proven is
+    // classified Proven, and claim_from_readme then suppresses its proof gap —
+    // silently reporting unproven work as fully proven.
+    let negated_proof = normalized.contains("NOT YET")
+        || normalized.contains("NOT PROVEN")
+        || normalized.contains("UNPROVEN")
+        || normalized.contains("DISPROVEN");
+    if negated_proof {
         ClaimStatus::Missing
+    } else if normalized.contains("PROVEN") {
+        ClaimStatus::Proven
     } else if normalized.contains("BLOCKED") {
         ClaimStatus::Blocked {
             reason: "README row marks the feature blocked".to_owned(),
@@ -939,6 +1158,134 @@ fn readiness_relationship(state: &str) -> SupportRelationship {
         "fail" | "failed" => SupportRelationship::Contradicts,
         "blocked" | "skip" | "skipped" => SupportRelationship::DoesNotSupport,
         _ => SupportRelationship::PartiallySupports,
+    }
+}
+
+const fn readiness_status_relationship(status: ReadinessStatus) -> SupportRelationship {
+    match status {
+        ReadinessStatus::Ok => SupportRelationship::Supports,
+        ReadinessStatus::Warn => SupportRelationship::PartiallySupports,
+        ReadinessStatus::Blocked | ReadinessStatus::Skipped | ReadinessStatus::Error => {
+            SupportRelationship::DoesNotSupport
+        }
+    }
+}
+
+fn agent_readiness_claim_status(
+    status: ReadinessStatus,
+    report: &AgentReadinessReport,
+) -> ClaimStatus {
+    match status {
+        ReadinessStatus::Ok => ClaimStatus::Proven,
+        ReadinessStatus::Warn | ReadinessStatus::Blocked => ClaimStatus::Blocked {
+            reason: report
+                .decision
+                .primary_reason_code
+                .clone()
+                .unwrap_or_else(|| "agent-readiness-degraded".to_owned()),
+        },
+        ReadinessStatus::Skipped => ClaimStatus::SkippedWithReason {
+            reason: report
+                .decision
+                .primary_reason_code
+                .clone()
+                .unwrap_or_else(|| "agent-readiness-skipped".to_owned()),
+        },
+        ReadinessStatus::Error => ClaimStatus::Failed {
+            reason: report
+                .decision
+                .primary_reason_code
+                .clone()
+                .unwrap_or_else(|| "agent-readiness-error".to_owned()),
+        },
+    }
+}
+
+fn agent_readiness_proof_gaps(
+    claim_key: &str,
+    report: &AgentReadinessReport,
+) -> Result<Vec<ProofGap>, ProofGraphError> {
+    let mut gaps = Vec::new();
+    for blocker_bead_id in readiness_blocker_bead_ids(report) {
+        gaps.push(ProofGap {
+            id: ProofGapId::new(format!(
+                "gap:{}:blocker:{}",
+                slug_tail(claim_key),
+                slug_tail(&blocker_bead_id)
+            ))?,
+            summary: format!("Readiness is blocked by Beads issue {blocker_bead_id}"),
+            status: ProofGapStatus::Blocked,
+            target_truth_source: TruthSource::NodeLocal,
+        });
+    }
+    for action in &report.decision.refused_actions {
+        gaps.push(ProofGap {
+            id: ProofGapId::new(format!(
+                "gap:{}:refused:{}",
+                slug_tail(claim_key),
+                readiness_action_label(*action)
+            ))?,
+            summary: format!(
+                "Readiness decision refuses {} while mode is {}",
+                readiness_action_label(*action),
+                readiness_mode_label(report.decision.mode)
+            ),
+            status: readiness_gap_status(report.decision.status),
+            target_truth_source: TruthSource::NodeLocal,
+        });
+    }
+    gaps.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(gaps)
+}
+
+fn readiness_blocker_bead_ids(report: &AgentReadinessReport) -> BTreeSet<String> {
+    let mut blocker_bead_ids = report.decision.blocker_bead_ids.clone();
+    blocker_bead_ids.extend(report.probes.beads.blocked_infra_bead_ids.iter().cloned());
+    blocker_bead_ids
+}
+
+fn readiness_index_error(error: &AgentReadinessError) -> ProofGraphIndexError {
+    ProofGraphIndexError::AgentReadiness {
+        message: error.to_string(),
+    }
+}
+
+const fn readiness_gap_status(status: ReadinessStatus) -> ProofGapStatus {
+    match status {
+        ReadinessStatus::Ok => ProofGapStatus::Missing,
+        ReadinessStatus::Warn | ReadinessStatus::Blocked => ProofGapStatus::Blocked,
+        ReadinessStatus::Skipped => ProofGapStatus::SkippedWithReason,
+        ReadinessStatus::Error => ProofGapStatus::Failed,
+    }
+}
+
+const fn readiness_status_label(status: ReadinessStatus) -> &'static str {
+    match status {
+        ReadinessStatus::Ok => "ok",
+        ReadinessStatus::Warn => "warn",
+        ReadinessStatus::Blocked => "blocked",
+        ReadinessStatus::Skipped => "skipped",
+        ReadinessStatus::Error => "error",
+    }
+}
+
+const fn readiness_mode_label(mode: ReadinessOperatingMode) -> &'static str {
+    match mode {
+        ReadinessOperatingMode::FullMailBeadsRch => "full_mail_beads_rch",
+        ReadinessOperatingMode::BeadsOnly => "beads_only",
+        ReadinessOperatingMode::ReadOnlyPlanning => "read_only_planning",
+        ReadinessOperatingMode::ProofBlocked => "proof_blocked",
+        ReadinessOperatingMode::OperatorActionRequired => "operator_action_required",
+    }
+}
+
+const fn readiness_action_label(action: ReadinessAction) -> &'static str {
+    match action {
+        ReadinessAction::Coordinate => "coordinate",
+        ReadinessAction::ClaimBead => "claim_bead",
+        ReadinessAction::EditFiles => "edit_files",
+        ReadinessAction::CargoProof => "cargo_proof",
+        ReadinessAction::Push => "push",
     }
 }
 
@@ -1017,6 +1364,8 @@ fn slug_tail(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_readiness::{ReadinessDecision, ReadinessStatus};
+    use crate::agent_readiness_probe::{NoNetworkProbeFixture, NoNetworkProbeScenario};
 
     const NOW: u64 = 1_800_000_000_000;
     const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -1054,6 +1403,54 @@ mod tests {
             source: source(".beads/issues.jsonl", 42),
             proof_comments: Vec::new(),
         }
+    }
+
+    fn readiness_record(
+        claim_key: &str,
+        run_id: &str,
+        scenario: NoNetworkProbeScenario,
+        rerun_argv: Option<Vec<&str>>,
+    ) -> AgentReadinessProofRecord {
+        let report = NoNetworkProbeFixture {
+            run_id: run_id.to_owned(),
+            agent_name: "Codex".to_owned(),
+            observed_at_unix_ms: NOW,
+            scenario,
+            owned_path_globs: BTreeSet::from(["crates/fcp-evidence/**".to_owned()]),
+        }
+        .build_report()
+        .expect("readiness fixture report");
+        AgentReadinessProofRecord {
+            claim_key: claim_key.to_owned(),
+            report,
+            report_path: format!("artifacts/readiness/{run_id}/report.json"),
+            events_path: Some(format!("artifacts/readiness/{run_id}/events.jsonl")),
+            handoff_path: Some(format!("artifacts/readiness/{run_id}/handoff.json")),
+            rerun_argv: rerun_argv.map(|argv| argv.into_iter().map(str::to_owned).collect()),
+            source: source("artifacts/readiness/manifest.json", 1),
+        }
+    }
+
+    fn disk_pressure_record() -> AgentReadinessProofRecord {
+        let mut record = readiness_record(
+            "agent-readiness-disk-pressure",
+            "disk-pressure",
+            NoNetworkProbeScenario::Healthy,
+            None,
+        );
+        record.report.probes.disk.check_result.status = ReadinessStatus::Blocked;
+        record.report.probes.disk.check_result.reason_code = Some("disk-pressure".to_owned());
+        record.report.probes.disk.check_result.remediation =
+            Some("defer proof until scratch storage recovers".to_owned());
+        record.report.probes.disk.external_scratch_available = false;
+        if let Some(mount) = record.report.probes.disk.checked_mounts.first_mut() {
+            mount.free_bytes = 42;
+            mount.capacity_percent = 100;
+            mount.threshold_status = ReadinessStatus::Blocked;
+        }
+        record.report.decision = ReadinessDecision::from_probes(&record.report.probes);
+        record.report.validate().expect("disk pressure report");
+        record
     }
 
     fn fixture_corpus() -> ProofGraphCorpus {
@@ -1151,6 +1548,62 @@ mod tests {
                 .proof_gaps
                 .iter()
                 .any(|gap| gap.status == ProofGapStatus::Stale)
+        );
+    }
+
+    #[test]
+    fn readme_status_does_not_misclassify_negated_proof_as_proven() {
+        // Positive phrasings still classify as Proven (including incidental
+        // substrings like "NOTE" that are not negations).
+        assert!(matches!(readme_status("Proven"), ClaimStatus::Proven));
+        assert!(matches!(readme_status("PROVEN"), ClaimStatus::Proven));
+        assert!(matches!(
+            readme_status("Proven, see note"),
+            ClaimStatus::Proven
+        ));
+
+        // Negated phrasings all contain the substring "PROVEN" but must NOT be
+        // classified Proven, or claim_from_readme suppresses the proof gap and
+        // reports unproven work as fully proven.
+        for status in [
+            "Not yet proven",
+            "Not yet",
+            "Unproven",
+            "UNPROVEN",
+            "Not proven",
+            "Disproven",
+        ] {
+            assert!(
+                !matches!(readme_status(status), ClaimStatus::Proven),
+                "status {status:?} must not classify as Proven"
+            );
+            assert!(
+                matches!(
+                    readme_relationship(status),
+                    SupportRelationship::DoesNotSupport
+                ),
+                "status {status:?} must not support the claim"
+            );
+        }
+    }
+
+    #[test]
+    fn readme_row_marked_not_proven_yields_a_proof_gap() {
+        // End-to-end guard: a README row explicitly marked not-proven must
+        // produce a non-Proven claim carrying an outstanding proof gap.
+        let indexer = ProofGraphIndexer::new(NOW);
+        let claim = indexer
+            .claim_from_readme(&row(
+                "telemetry-otlp",
+                "Telemetry OTLP",
+                "Not yet proven",
+                90,
+            ))
+            .expect("claim from readme");
+        assert!(!matches!(claim.status, ClaimStatus::Proven));
+        assert!(
+            !claim.proof_gaps.is_empty(),
+            "a not-proven README claim must carry a proof gap"
         );
     }
 
@@ -1338,5 +1791,107 @@ mod tests {
 
         assert_eq!(graph.claims.len(), 2);
         assert_eq!(graph.evidence.len(), 6);
+    }
+
+    #[test]
+    fn agent_readiness_mail_failure_links_to_blocker_bead_without_greenwash() {
+        let graph = ProofGraphIndexer::new(NOW)
+            .index(&ProofGraphCorpus {
+                agent_readiness_reports: vec![readiness_record(
+                    "agent-readiness-mail",
+                    "mail-db-error",
+                    NoNetworkProbeScenario::AgentMailUnavailable,
+                    Some(vec![
+                        "fwc",
+                        "agent-readiness",
+                        "replay",
+                        "--report",
+                        "artifacts/readiness/mail-db-error/report.json",
+                    ]),
+                )],
+                ..ProofGraphCorpus::default()
+            })
+            .expect("index readiness mail failure");
+
+        let claim_id = ClaimId::new("claim:agent-readiness-mail").unwrap();
+        let claim = graph.claims.get(&claim_id).expect("readiness claim");
+        assert!(matches!(
+            &claim.status,
+            ClaimStatus::Blocked { reason } if reason == "agent-mail-db-error"
+        ));
+        assert!(claim.proof_gaps.iter().any(|gap| gap.id.to_string()
+            == "gap:agent-readiness-mail:blocker:flywheel_connectors-d5yeb"
+            && gap.status == ProofGapStatus::Blocked));
+
+        let blocker = graph
+            .evidence
+            .values()
+            .find(|node| {
+                node.id
+                    .as_str()
+                    .contains("agent-readiness-blocker:mail-db-error:flywheel_connectors-d5yeb")
+            })
+            .expect("d5yeb blocker evidence");
+        assert_eq!(
+            blocker.rerun_command.as_ref().expect("blocker rerun").argv,
+            vec!["br", "show", "flywheel_connectors-d5yeb", "--json"]
+        );
+        assert!(graph.support_edges.iter().any(|edge| {
+            edge.claim_id == claim_id
+                && edge.evidence_id == blocker.id
+                && edge.relationship == SupportRelationship::DoesNotSupport
+        }));
+    }
+
+    #[test]
+    fn agent_readiness_rch_and_disk_blockers_route_to_rfbrc() {
+        let graph = ProofGraphIndexer::new(NOW)
+            .index(&ProofGraphCorpus {
+                agent_readiness_reports: vec![
+                    readiness_record(
+                        "agent-readiness-rch",
+                        "rch-unavailable",
+                        NoNetworkProbeScenario::RchUnavailable,
+                        None,
+                    ),
+                    disk_pressure_record(),
+                ],
+                ..ProofGraphCorpus::default()
+            })
+            .expect("index readiness proof blockers");
+
+        for claim_tail in ["agent-readiness-rch", "agent-readiness-disk-pressure"] {
+            let claim_id = ClaimId::new(format!("claim:{claim_tail}")).unwrap();
+            let claim = graph.claims.get(&claim_id).expect("readiness claim");
+            assert!(matches!(&claim.status, ClaimStatus::Blocked { .. }));
+            assert!(
+                claim.proof_gaps.iter().any(|gap| {
+                    gap.id.to_string()
+                        == format!("gap:{claim_tail}:blocker:flywheel_connectors-rfbrc")
+                        && gap.status == ProofGapStatus::Blocked
+                }),
+                "{claim_tail} should link rfbrc as blocker proof debt"
+            );
+        }
+
+        assert!(
+            graph
+                .evidence
+                .values()
+                .filter(|node| {
+                    node.id.as_str().contains("agent-readiness-blocker")
+                        && node.rerun_command.as_ref().is_some_and(|command| {
+                            command.argv
+                                == vec![
+                                    "br".to_owned(),
+                                    "show".to_owned(),
+                                    "flywheel_connectors-rfbrc".to_owned(),
+                                    "--json".to_owned(),
+                                ]
+                        })
+                })
+                .count()
+                >= 2
+        );
     }
 }

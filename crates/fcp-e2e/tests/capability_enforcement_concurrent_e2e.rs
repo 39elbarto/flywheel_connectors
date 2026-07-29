@@ -13,38 +13,8 @@
 //!      `verify_unbound_calls == promote_with_instance_calls` MUST
 //!      hold. A regression that lets a connector skip the
 //!      instance-binding promotion would surface as an inequality.
-//!
-//!   B. **UnboundVerified cannot reach an executor that requires
-//!      BoundVerified — runtime cross-check**. The compile-time
-//!      check is pinned by `crates/fcp-core/tests/typestate_compile_fail.rs`;
-//!      this harness adds the runtime guarantee that an executor
-//!      typed `fn(CapabilityToken<BoundVerified>)` only fires when
-//!      `promote_with_instance` succeeded. Half the workers are
-//!      "honest" (matching instance → executor fires); half are
-//!      "rogue" (wrong instance → promote fails → executor MUST NOT
-//!      fire). Counters distinguish reach.
-//!
-//!   C. **Four rejection paths each emit `Severity::Warning` audit
-//!      entries under concurrent load**. Workers concurrently
-//!      exercise zone-mismatch, capability-mismatch, expired-token,
-//!      and revoked-token rejections, all sharing one `InvokeAuditChain`.
-//!      After join: each rejection kind has ≥1 Warning entry, the
-//!      chain's hash linkage is intact (`verify_chain` reports clean),
-//!      and the per-zone monotonic seq is dense.
-//!
-//!   D. **RevocationSeal staleness fires within SLA under network
-//!      jitter**. Concurrent gateway workers take seals and validate
-//!      them after a simulated network jitter window; concurrent
-//!      revocators advance `head_seq` mid-flight. A worker whose seal
-//!      was taken at `head_seq=k` and whose `validate_seal` runs
-//!      after a revocation has bumped the head MUST observe
-//!      `SealValidation::Stale`. We pin the timing contract: any
-//!      Stale outcome is observed within `REVOCATION_SLA_BUDGET_MS`
-//!      of the revocation publish time. Catches a regression that
-//!      caches `head_seq` on the seal-taker side and misses the
-//!      registry advance.
 
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_arguments)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -139,7 +109,7 @@ fn audit_context(zone: &str, op_index: usize, reason: &str) -> InvokeAuditContex
         zone_id: zone.into(),
         actor: "user:concurrent-cap-e2e".into(),
         connector_id: "fcp.test.concurrent".into(),
-        operation: format!("op_{reason}").into(),
+        operation: format!("op_{reason}"),
         operation_id: format!("op-cap-e2e-{reason}-{op_index}"),
         correlation_id: Some(format!("corr-{reason}-{op_index}")),
         occurred_at: 1_700_000_000 + op_index as u64,

@@ -5,6 +5,10 @@ SCRIPT_NAME="e2e_raptorq_adversarial_decode_stress"
 SEED="0xADV3RSAR1"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR="${RAPTORQ_ADVERSARIAL_TARGET_DIR:-/tmp/fcp-raptorq-adversarial-decode}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 STEP_CONTEXT="null"
 
 require_cmd() {
@@ -15,19 +19,47 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+    "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local log_path="$1"
+  local summary
+  summary="$(grep -aE '\[RCH\][[:space:]]+(remote|local|failed)' "${log_path}" | tail -n 1 || true)"
+  [[ "${summary}" =~ \[RCH\][[:space:]]+remote ]]
+}
+
+run_cargo_to_log() {
+  local mode="$1"
+  local log_path="$2"
+  shift 2
+  local rc
+
+  if [[ "${mode}" == "append" ]]; then
+    run_cargo "$@" >> "${log_path}" 2>&1
+  else
+    run_cargo "$@" > "${log_path}" 2>&1
   fi
-  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- "$@"
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! rch_remote_summary_present "${log_path}"; then
+    echo "${SCRIPT_NAME}: rch command did not produce remote proof; see ${log_path}" >&2
+    echo "rch command did not produce remote proof" >> "${log_path}"
+    return 2
+  fi
+  return "${rc}"
+}
+
+run_cargo_logged() {
+  local log_path="$1"
+  shift
+  run_cargo_to_log truncate "${log_path}" "$@"
+}
+
+run_cargo_logged_append() {
+  local log_path="$1"
+  shift
+  run_cargo_to_log append "${log_path}" "$@"
 }
 
 now_ms() {
@@ -138,7 +170,7 @@ step_adversarial_corrupted_symbols() {
   local metrics_jsonl="${OUT_DIR}/adversarial_corrupted.metrics.jsonl"
   local decode_budget_ms
 
-  run_cargo test -p fcp-store --test store_repair_integration adversarial_corrupted_symbols_reject_valid_reconstruction -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration adversarial_corrupted_symbols_reject_valid_reconstruction -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   decode_budget_ms="$(metric_for_test "${metrics_jsonl}" "adversarial_corrupted_symbols_reject_valid_reconstruction" '.details.decode_budget_ms // empty')"
@@ -158,7 +190,7 @@ step_adversarial_reordered_duplicates() {
   local metrics_jsonl="${OUT_DIR}/adversarial_reordered.metrics.jsonl"
   local decode_budget_ms received_unique
 
-  run_cargo test -p fcp-store --test store_repair_integration adversarial_reordered_duplicate_symbols_reconstruct -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration adversarial_reordered_duplicate_symbols_reconstruct -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   decode_budget_ms="$(metric_for_test "${metrics_jsonl}" "adversarial_reordered_duplicate_symbols_reconstruct" '.details.decode_budget_ms // empty')"
@@ -177,7 +209,7 @@ step_adversarial_reordered_duplicates() {
 step_decode_admission_limits() {
   local execution_log="${OUT_DIR}/decode_admission.execution.log"
 
-  run_cargo test -p fcp-raptorq admission_controller -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-raptorq admission_controller -- --nocapture || return
 
   local pass_count
   pass_count=$(grep -c "test .* ok" "${execution_log}" || true)
@@ -195,7 +227,7 @@ step_decode_admission_limits() {
 step_decode_permit_bounds() {
   local execution_log="${OUT_DIR}/decode_permit_bounds.execution.log"
 
-  run_cargo test -p fcp-raptorq permit_ -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-raptorq permit_ -- --nocapture || return
 
   local pass_count
   pass_count=$(grep -c "test .* ok" "${execution_log}" || true)
@@ -213,8 +245,8 @@ step_decode_permit_bounds() {
 step_mesh_admission_enforcement() {
   local execution_log="${OUT_DIR}/mesh_admission.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration test_rate_limiting -- --nocapture > "${execution_log}" 2>&1
-  run_cargo test -p fcp-mesh --test mesh_integration test_decode_capacity_enforcement -- --nocapture >> "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-mesh --test mesh_integration test_rate_limiting -- --nocapture || return
+  run_cargo_logged_append "${execution_log}" test -p fcp-mesh --test mesh_integration test_decode_capacity_enforcement -- --nocapture || return
 
   local pass_count
   pass_count=$(grep -c "test .* ok" "${execution_log}" || true)
@@ -232,7 +264,7 @@ step_mesh_admission_enforcement() {
 step_decode_context_pressure() {
   local execution_log="${OUT_DIR}/decode_context_pressure.execution.log"
 
-  run_cargo test -p fcp-raptorq decode_with_context -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-raptorq decode_with_context -- --nocapture || return
 
   local pass_count
   pass_count=$(grep -c "test .* ok" "${execution_log}" || true)
@@ -246,7 +278,7 @@ step_decode_context_pressure() {
     "${pass_count}")"
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -283,6 +315,6 @@ run_step \
   "[\"${OUT_DIR}/decode_context_pressure.execution.log\"]" \
   step_decode_context_pressure
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

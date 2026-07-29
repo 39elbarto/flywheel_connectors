@@ -1,22 +1,31 @@
 //! Generic email connector implementation.
 
-use std::time::Instant;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use fcp_async_core::channel::{broadcast, oneshot, watch};
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ConnectorId, ConnectorMetrics, EventCaps, EventData, EventEnvelope, EventInfo, FcpConnector,
+    FcpError, FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo,
+    OrderingPolicy, Principal, ReplayBufferInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest,
+    SubscribeResult, TrustLevel, UnsubscribeRequest, ZoneId,
 };
-use fcp_sdk::prelude::*;
-use serde_json::json;
+use fcp_sdk::runtime::SupervisorConfig;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::EmailGenericClient;
-use crate::types::EmailGenericConfig;
+use crate::types::{
+    EmailGenericConfig, EmailInboundMessage, EmailInboundPolicyDecision, EmailSeenUidCache,
+    normalize_sender_address,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const CAP_READ: &str = "email_generic.read";
@@ -24,7 +33,11 @@ const CAP_WRITE: &str = "email_generic.write";
 const OP_HEALTH: &str = "email_generic.health";
 const OP_LIST_MAILBOXES: &str = "email_generic.list_mailboxes";
 const OP_SEARCH_MESSAGES: &str = "email_generic.search_messages";
+const OP_POLL_INBOUND_ONCE: &str = "email_generic.poll_inbound_once";
 const OP_SEND_MESSAGE: &str = "email_generic.send_message";
+const EVENT_INBOUND_PREVIEW: &str = "email.inbound.preview";
+const INBOUND_EVENT_BUFFER_CAPACITY: usize = 128;
+const INBOUND_EVENT_BUFFER_CAPACITY_U32: u32 = 128;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorCheck {
@@ -47,13 +60,184 @@ impl DoctorResult {
     }
 }
 
+#[derive(Debug, Clone)]
+struct EmailInboundMonitorStats {
+    status: String,
+    reason: String,
+    polls_started: u64,
+    polls_completed: u64,
+    emitted_events: u64,
+    dropped_events: u64,
+    blocking_polls_cancelled: u64,
+    last_error: Option<String>,
+}
+
+impl Default for EmailInboundMonitorStats {
+    fn default() -> Self {
+        Self {
+            status: "idle".into(),
+            reason: "subscribe starts supervised IMAP RFC822 polling and event fan-out".into(),
+            polls_started: 0,
+            polls_completed: 0,
+            emitted_events: 0,
+            dropped_events: 0,
+            blocking_polls_cancelled: 0,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct EmailInboundMonitorTaskState {
+    task: Option<fcp_async_core::task::JoinHandle<()>>,
+    shutdown_tx: Option<watch::Sender<bool>>,
+}
+
+struct EmailInboundMonitorRuntime {
+    event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    state: Mutex<EmailInboundMonitorTaskState>,
+    stats: Arc<Mutex<EmailInboundMonitorStats>>,
+    next_event_seq: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for EmailInboundMonitorRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailInboundMonitorRuntime")
+            .field("stats", &self.stats_snapshot())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for EmailInboundMonitorRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EmailInboundMonitorRuntime {
+    fn new() -> Self {
+        let (event_tx, _) = broadcast::channel(INBOUND_EVENT_BUFFER_CAPACITY);
+        Self {
+            event_tx,
+            state: Mutex::new(EmailInboundMonitorTaskState::default()),
+            stats: Arc::new(Mutex::new(EmailInboundMonitorStats::default())),
+            next_event_seq: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    fn subscribe_events(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
+        self.event_tx.subscribe()
+    }
+
+    fn stats_snapshot(&self) -> EmailInboundMonitorStats {
+        self.stats.lock().map_or_else(
+            |_| EmailInboundMonitorStats::default(),
+            |stats| stats.clone(),
+        )
+    }
+
+    fn update_stats<F>(&self, f: F)
+    where
+        F: FnOnce(&mut EmailInboundMonitorStats),
+    {
+        if let Ok(mut stats) = self.stats.lock() {
+            f(&mut stats);
+        }
+    }
+
+    fn ensure_running(
+        &self,
+        client: EmailGenericClient,
+        config: EmailGenericConfig,
+        zone: ZoneId,
+        connector_id: ConnectorId,
+        instance_id: InstanceId,
+    ) -> FcpResult<bool> {
+        let mut task_state = self.state.lock().map_err(|_| FcpError::Internal {
+            message: "email inbound monitor state lock poisoned".into(),
+        })?;
+        if task_state.task.is_some() {
+            return Ok(false);
+        }
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let event_tx = self.event_tx.clone();
+        let monitor_stats = Arc::clone(&self.stats);
+        let next_event_seq = Arc::clone(&self.next_event_seq);
+        let task = fcp_async_core::task::spawn(async move {
+            run_email_inbound_monitor(
+                client,
+                config,
+                zone,
+                connector_id,
+                instance_id,
+                event_tx,
+                next_event_seq,
+                monitor_stats,
+                shutdown_rx,
+            )
+            .await;
+        });
+
+        task_state.shutdown_tx = Some(shutdown_tx);
+        task_state.task = Some(task);
+        drop(task_state);
+
+        self.update_stats(|stats| {
+            stats.status = "running".into();
+            stats.reason = "supervised IMAP RFC822 polling is running".into();
+            stats.last_error = None;
+        });
+        Ok(true)
+    }
+
+    async fn stop(&self) {
+        let task = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            if let Some(shutdown_tx) = state.shutdown_tx.take() {
+                let _ = shutdown_tx.send(true);
+            }
+            state.task.take()
+        };
+
+        if task.is_some() {
+            self.update_stats(|stats| {
+                stats.status = "stopping".into();
+                stats.reason = "shutdown signal sent to supervised inbound monitor".into();
+            });
+        }
+
+        if let Some(task) = task
+            && let Err(error) = task.await
+        {
+            self.update_stats(|stats| {
+                stats.status = "error".into();
+                stats.reason = "supervised inbound monitor join failed".into();
+                stats.last_error = Some(error.to_string());
+            });
+            return;
+        }
+
+        self.update_stats(|stats| {
+            if stats.status == "stopping" || stats.status == "running" {
+                stats.status = "stopped".into();
+                stats.reason = "supervised inbound monitor stopped cleanly".into();
+            }
+        });
+    }
+}
+
 #[derive(Debug)]
 pub struct EmailGenericConnector {
     base: BaseConnector,
     config: Option<EmailGenericConfig>,
     client: Option<EmailGenericClient>,
+    monitor: Arc<EmailInboundMonitorRuntime>,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
+    zone: Option<ZoneId>,
 }
 
 impl EmailGenericConnector {
@@ -63,9 +247,15 @@ impl EmailGenericConnector {
             base: BaseConnector::new(ConnectorId::from_static("fcp.email-generic")),
             config: None,
             client: None,
+            monitor: Arc::new(EmailInboundMonitorRuntime::new()),
             started_at: Instant::now(),
             verifier: None,
+            zone: None,
         }
+    }
+
+    pub const fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {
@@ -74,11 +264,29 @@ impl EmailGenericConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
-    fn inbound_monitor_state() -> serde_json::Value {
+    pub fn subscribe_events(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
+        self.monitor.subscribe_events()
+    }
+
+    fn inbound_monitor_state(&self) -> serde_json::Value {
+        let stats = self.monitor.stats_snapshot();
+        let poll_mailbox_configured = self
+            .config
+            .as_ref()
+            .is_some_and(|config| !config.monitor_policy.mailbox().is_empty());
         json!({
-            "status": "deferred",
-            "streaming": false,
-            "reason": "supervised inbound polling/event fan-out is tracked by flywheel_connectors-4kw5f.4.2",
+            "status": stats.status,
+            "streaming": true,
+            "reason": stats.reason,
+            "event_topic": EVENT_INBOUND_PREVIEW,
+            "buffer_events": INBOUND_EVENT_BUFFER_CAPACITY,
+            "poll_mailbox_configured": poll_mailbox_configured,
+            "polls_started": stats.polls_started,
+            "polls_completed": stats.polls_completed,
+            "emitted_events": stats.emitted_events,
+            "dropped_events": stats.dropped_events,
+            "blocking_polls_cancelled": stats.blocking_polls_cancelled,
+            "last_error": stats.last_error,
             "pre_emission_policy": {
                 "sender_allowlist": true,
                 "automated_sender_suppression": true,
@@ -103,6 +311,7 @@ impl EmailGenericConnector {
             "required": [
                 "allowed_senders_configured",
                 "allowed_senders_count",
+                "mailbox_configured",
                 "require_allowed_sender",
                 "drop_automated",
                 "allow_attachments",
@@ -114,6 +323,7 @@ impl EmailGenericConnector {
             "properties": {
                 "allowed_senders_configured": { "type": "boolean" },
                 "allowed_senders_count": { "type": "integer", "minimum": 0 },
+                "mailbox_configured": { "type": "boolean" },
                 "require_allowed_sender": { "type": "boolean" },
                 "drop_automated": { "type": "boolean" },
                 "allow_attachments": { "type": "boolean" },
@@ -127,12 +337,35 @@ impl EmailGenericConnector {
     fn inbound_monitor_schema() -> serde_json::Value {
         json!({
             "type": "object",
-            "required": ["status", "streaming", "reason", "pre_emission_policy"],
+            "required": [
+                "status",
+                "streaming",
+                "reason",
+                "event_topic",
+                "buffer_events",
+                "poll_mailbox_configured",
+                "polls_started",
+                "polls_completed",
+                "emitted_events",
+                "dropped_events",
+                "blocking_polls_cancelled",
+                "last_error",
+                "pre_emission_policy"
+            ],
             "additionalProperties": false,
             "properties": {
-                "status": { "type": "string", "enum": ["deferred"] },
-                "streaming": { "type": "boolean", "enum": [false] },
+                "status": { "type": "string", "enum": ["idle", "running", "stopping", "stopped", "error"] },
+                "streaming": { "type": "boolean", "enum": [true] },
                 "reason": { "type": "string", "minLength": 1 },
+                "event_topic": { "type": "string", "enum": [EVENT_INBOUND_PREVIEW] },
+                "buffer_events": { "type": "integer", "minimum": 1 },
+                "poll_mailbox_configured": { "type": "boolean" },
+                "polls_started": { "type": "integer", "minimum": 0 },
+                "polls_completed": { "type": "integer", "minimum": 0 },
+                "emitted_events": { "type": "integer", "minimum": 0 },
+                "dropped_events": { "type": "integer", "minimum": 0 },
+                "blocking_polls_cancelled": { "type": "integer", "minimum": 0 },
+                "last_error": { "type": ["string", "null"] },
                 "pre_emission_policy": {
                     "type": "object",
                     "required": [
@@ -153,6 +386,21 @@ impl EmailGenericConnector {
                         "thread_metadata": { "type": "boolean" }
                     }
                 }
+            }
+        })
+    }
+
+    fn inbound_event_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["mailbox", "uid", "sender", "policy_decision", "preview"],
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": { "type": "string", "minLength": 1 },
+                "uid": { "type": "string", "minLength": 1 },
+                "sender": { "type": ["string", "null"] },
+                "policy_decision": { "type": "string", "enum": ["accept"] },
+                "preview": { "type": "object" }
             }
         })
     }
@@ -217,6 +465,142 @@ impl EmailGenericConnector {
                 "uids": {
                     "type": "array",
                     "items": { "type": "integer", "minimum": 0 }
+                }
+            }
+        })
+    }
+
+    fn poll_inbound_once_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["mailbox"],
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": { "type": "string", "minLength": 1 },
+                "seen_uids": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                }
+            }
+        })
+    }
+
+    fn nullable_bounded_text_schema() -> serde_json::Value {
+        json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "required": ["text", "original_chars", "truncated"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "text": { "type": "string" },
+                        "original_chars": { "type": "integer", "minimum": 0 },
+                        "truncated": { "type": "boolean" }
+                    }
+                },
+                { "type": "null" }
+            ]
+        })
+    }
+
+    fn attachment_summary_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["filename", "media_type", "size_bytes", "class", "exposed", "reason"],
+            "additionalProperties": false,
+            "properties": {
+                "filename": { "type": "string" },
+                "media_type": { "type": "string" },
+                "size_bytes": { "type": "integer", "minimum": 0 },
+                "class": { "type": "string", "enum": ["image", "document"] },
+                "exposed": { "type": "boolean" },
+                "reason": {
+                    "anyOf": [
+                        { "type": "string" },
+                        { "type": "null" }
+                    ]
+                }
+            }
+        })
+    }
+
+    fn nullable_thread_schema() -> serde_json::Value {
+        json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "required": ["subject", "message_id", "in_reply_to", "references", "reply_subject"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "subject": { "type": "string" },
+                        "message_id": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "in_reply_to": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "references": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "reply_subject": { "type": "string" }
+                    }
+                },
+                { "type": "null" }
+            ]
+        })
+    }
+
+    fn poll_inbound_once_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": [
+                "mailbox",
+                "fetched_count",
+                "accepted_count",
+                "dropped_count",
+                "seen_uids",
+                "messages"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": { "type": "string", "minLength": 1 },
+                "fetched_count": { "type": "integer", "minimum": 0 },
+                "accepted_count": { "type": "integer", "minimum": 0 },
+                "dropped_count": { "type": "integer", "minimum": 0 },
+                "seen_uids": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                },
+                "messages": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["uid", "decision", "tainted", "text", "attachments", "thread"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "uid": { "type": "string", "minLength": 1 },
+                            "decision": {
+                                "type": "string",
+                                "enum": ["accept", "drop_automated", "drop_sender_not_allowed"]
+                            },
+                            "tainted": { "type": "boolean" },
+                            "text": Self::nullable_bounded_text_schema(),
+                            "attachments": {
+                                "type": "array",
+                                "items": Self::attachment_summary_schema()
+                            },
+                            "thread": Self::nullable_thread_schema()
+                        }
+                    }
                 }
             }
         })
@@ -290,9 +674,9 @@ impl EmailGenericConnector {
             });
             checks.push(DoctorCheck {
                 name: "inbound_monitor".into(),
-                passed: false,
+                passed: true,
                 message:
-                    "Supervised poller is deferred; pre-emission sender, UID, body, attachment, and thread guardrails are available"
+                    "Supervised IMAP RFC822 polling and bounded event fan-out are available through subscribe"
                         .into(),
                 critical: false,
             });
@@ -376,6 +760,33 @@ impl EmailGenericConnector {
                 requires_approval: Some(ApprovalMode::None),
             },
             OperationInfo {
+                id: OperationId::from_static(OP_POLL_INBOUND_ONCE),
+                summary: "Poll unseen inbound messages once".into(),
+                description: Some(
+                    "Fetch unseen IMAP messages once, apply inbound monitor policy, and return bounded previews plus updated seen UID state."
+                        .into(),
+                ),
+                input_schema: Self::poll_inbound_once_input_schema(),
+                output_schema: Self::poll_inbound_once_output_schema(),
+                capability: CapabilityId::from_static(CAP_READ),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: "Use this to run one bounded inbound mailbox check without starting a subscription.".into(),
+                    common_mistakes: vec![
+                        "Treating this one-shot read operation as a durable subscription or replay buffer.".into(),
+                        "Dropping the returned seen_uids state before the next poll, which can repeat message previews.".into(),
+                    ],
+                    examples: vec![
+                        "{\"mailbox\":\"INBOX\",\"seen_uids\":[\"101\",\"102\"]}".into(),
+                    ],
+                    related: vec![CapabilityId::from_static(OP_SEARCH_MESSAGES)],
+                },
+                rate_limit: None,
+                requires_approval: Some(ApprovalMode::None),
+            },
+            OperationInfo {
                 id: OperationId::from_static(OP_SEND_MESSAGE),
                 summary: "Send an email".into(),
                 description: Some("Send an email through SMTP.".into()),
@@ -400,11 +811,47 @@ impl EmailGenericConnector {
         ]
     }
 
+    fn required_string_input<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {
+        input
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Missing {field}"),
+            })
+    }
+
+    fn seen_uid_cache_from_input(input: &Value, cap: usize) -> FcpResult<EmailSeenUidCache> {
+        let mut seen_uids = EmailSeenUidCache::new(cap)?;
+        let Some(value) = input.get("seen_uids") else {
+            return Ok(seen_uids);
+        };
+        let values = value.as_array().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "seen_uids must be an array of strings".into(),
+        })?;
+        for value in values {
+            let uid = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "seen_uids entries must be strings".into(),
+            })?;
+            if uid.trim().is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "seen_uids entries must not be empty".into(),
+                });
+            }
+            seen_uids.observe(uid.to_owned());
+        }
+        Ok(seen_uids)
+    }
+
     fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let required_cap = match req.operation.as_str() {
-            OP_HEALTH | OP_LIST_MAILBOXES | OP_SEARCH_MESSAGES => {
+            OP_HEALTH | OP_LIST_MAILBOXES | OP_SEARCH_MESSAGES | OP_POLL_INBOUND_ONCE => {
                 CapabilityId::from_static(CAP_READ)
             }
             OP_SEND_MESSAGE => CapabilityId::from_static(CAP_WRITE),
@@ -425,7 +872,7 @@ impl EmailGenericConnector {
                 "smtp_host": config.smtp.host,
                 "manifest_hash": Self::manifest_hash(),
                 "monitor_policy": config.monitor_policy.redacted_state(),
-                "inbound_monitor": Self::inbound_monitor_state(),
+                "inbound_monitor": self.inbound_monitor_state(),
             }),
             OP_LIST_MAILBOXES => client
                 .list_mailboxes()
@@ -450,6 +897,45 @@ impl EmailGenericConnector {
                 client
                     .search_messages(mailbox, query)
                     .map_err(|error| error.to_fcp_error())?
+            }
+            OP_POLL_INBOUND_ONCE => {
+                let mailbox = Self::required_string_input(&req.input, "mailbox")?;
+                let mut seen_uids = Self::seen_uid_cache_from_input(
+                    &req.input,
+                    config.monitor_policy.seen_uid_cap,
+                )?;
+                let messages = client
+                    .fetch_unseen_inbound_messages(mailbox, &mut seen_uids)
+                    .map_err(|error| error.to_fcp_error())?;
+                let mut accepted_count = 0_usize;
+                let mut dropped_count = 0_usize;
+                let messages = messages
+                    .iter()
+                    .map(|message| {
+                        let preview = config.monitor_policy.prepare_inbound_message(message);
+                        if preview.decision == EmailInboundPolicyDecision::Accept {
+                            accepted_count += 1;
+                        } else {
+                            dropped_count += 1;
+                        }
+                        json!({
+                            "uid": &message.uid,
+                            "decision": preview.decision,
+                            "tainted": preview.tainted,
+                            "text": preview.text,
+                            "attachments": preview.attachments,
+                            "thread": preview.thread,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({
+                    "mailbox": mailbox,
+                    "fetched_count": messages.len(),
+                    "accepted_count": accepted_count,
+                    "dropped_count": dropped_count,
+                    "seen_uids": seen_uids.uids(),
+                    "messages": messages,
+                })
             }
             OP_SEND_MESSAGE => {
                 let to = req
@@ -523,11 +1009,13 @@ impl FcpConnector for EmailGenericConnector {
         let config = EmailGenericConfig::from_value(config)?;
         let client =
             EmailGenericClient::from_config(&config).map_err(|error| error.to_fcp_error())?;
+        self.monitor.stop().await;
         self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
+        self.zone = None;
         Ok(())
     }
 
@@ -538,6 +1026,7 @@ impl FcpConnector for EmailGenericConnector {
             req.zone.clone(),
             self.base.instance_id.clone(),
         ));
+        self.zone = Some(req.zone.clone());
         Ok(HandshakeResponse {
             status: "accepted".into(),
             capabilities_granted: granted_capabilities(req.capabilities_requested),
@@ -545,9 +1034,9 @@ impl FcpConnector for EmailGenericConnector {
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
-                streaming: false,
+                streaming: true,
                 replay: false,
-                min_buffer_events: 0,
+                min_buffer_events: INBOUND_EVENT_BUFFER_CAPACITY_U32,
                 requires_ack: false,
             }),
             auth_caps: None,
@@ -572,7 +1061,7 @@ impl FcpConnector for EmailGenericConnector {
                 .config
                 .as_ref()
                 .map(|config| config.monitor_policy.redacted_state()),
-            "inbound_monitor": Self::inbound_monitor_state(),
+            "inbound_monitor": self.inbound_monitor_state(),
         }));
         snapshot
     }
@@ -596,9 +1085,11 @@ impl FcpConnector for EmailGenericConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        self.monitor.stop().await;
         self.config = None;
         self.client = None;
         self.verifier = None;
+        self.zone = None;
         self.base.set_handshaken(false);
         self.base.set_configured(false);
         Ok(())
@@ -607,13 +1098,17 @@ impl FcpConnector for EmailGenericConnector {
     fn introspect(&self) -> Introspection {
         Introspection {
             operations: Self::operations_info(),
-            events: Vec::new(),
+            events: vec![EventInfo {
+                topic: EVENT_INBOUND_PREVIEW.into(),
+                schema: Self::inbound_event_schema(),
+                requires_ack: false,
+            }],
             resource_types: Vec::new(),
             auth_caps: None,
             event_caps: Some(EventCaps {
-                streaming: false,
+                streaming: true,
                 replay: false,
-                min_buffer_events: 0,
+                min_buffer_events: INBOUND_EVENT_BUFFER_CAPACITY_U32,
                 requires_ack: false,
             }),
         }
@@ -664,18 +1159,65 @@ impl FcpConnector for EmailGenericConnector {
         Ok(SimulateResponse::allowed(req.id))
     }
 
-    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
-        Err(FcpError::StreamingNotSupported)
+    async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        self.base.check_ready()?;
+        let confirmed_topics = confirm_inbound_topics(&req.topics)?;
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?.clone();
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?.clone();
+        let zone = self.zone.clone().unwrap_or_else(ZoneId::private);
+        let _started = self.monitor.ensure_running(
+            client,
+            config,
+            zone,
+            self.base.id.clone(),
+            self.base.instance_id.clone(),
+        )?;
+        Ok(SubscribeResponse {
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {
+                confirmed_topics,
+                cursors: HashMap::new(),
+                replay_supported: false,
+                buffer: Some(ReplayBufferInfo {
+                    min_events: INBOUND_EVENT_BUFFER_CAPACITY_U32,
+                    overflow: "stream.reset".into(),
+                }),
+            },
+        })
     }
 
-    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
-        Err(FcpError::StreamingNotSupported)
+    async fn unsubscribe(&self, req: UnsubscribeRequest) -> FcpResult<()> {
+        let _ = confirm_inbound_topics(&req.topics)?;
+        self.monitor.stop().await;
+        Ok(())
     }
+}
+
+fn confirm_inbound_topics(topics: &[String]) -> FcpResult<Vec<String>> {
+    if topics.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "subscribe requires at least one topic".into(),
+        });
+    }
+    let mut confirmed = Vec::new();
+    for topic in topics {
+        if topic == EVENT_INBOUND_PREVIEW {
+            confirmed.push(topic.clone());
+        } else {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unsupported email-generic event topic: {topic}"),
+            });
+        }
+    }
+    Ok(confirmed)
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
-        OP_HEALTH | OP_LIST_MAILBOXES | OP_SEARCH_MESSAGES => {
+        OP_HEALTH | OP_LIST_MAILBOXES | OP_SEARCH_MESSAGES | OP_POLL_INBOUND_ONCE => {
             Ok(CapabilityId::from_static(CAP_READ))
         }
         OP_SEND_MESSAGE => Ok(CapabilityId::from_static(CAP_WRITE)),
@@ -695,6 +1237,235 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
             operation: None,
         })
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_email_inbound_monitor(
+    client: EmailGenericClient,
+    config: EmailGenericConfig,
+    zone: ZoneId,
+    connector_id: ConnectorId,
+    instance_id: InstanceId,
+    event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    next_event_seq: Arc<AtomicU64>,
+    stats: Arc<Mutex<EmailInboundMonitorStats>>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let supervisor = SupervisorConfig {
+        base_backoff_ms: 250,
+        max_backoff_ms: 5_000,
+        max_consecutive_failures: 3,
+        ..SupervisorConfig::default()
+    };
+    let poll_interval = Duration::from_secs(config.monitor_policy.poll_interval_secs);
+    let mailbox = config.monitor_policy.mailbox().to_owned();
+    let seen_uids = match EmailSeenUidCache::new(config.monitor_policy.seen_uid_cap) {
+        Ok(cache) => Arc::new(Mutex::new(cache)),
+        Err(error) => {
+            update_monitor_stats(&stats, |stats| {
+                stats.status = "error".into();
+                stats.reason = "failed to initialize inbound UID cache".into();
+                stats.last_error = Some(error.to_string());
+            });
+            return;
+        }
+    };
+    let mut consecutive_failures = 0_u32;
+
+    loop {
+        if *shutdown.borrow() {
+            update_monitor_stats(&stats, |stats| {
+                stats.status = "stopped".into();
+                stats.reason = "supervised inbound monitor observed shutdown before polling".into();
+            });
+            return;
+        }
+
+        update_monitor_stats(&stats, |stats| {
+            stats.status = "running".into();
+            stats.polls_started = stats.polls_started.saturating_add(1);
+        });
+
+        let poll = poll_inbound_on_blocking_thread(
+            client.clone(),
+            mailbox.clone(),
+            Arc::clone(&seen_uids),
+        );
+        let poll_result = fcp_async_core::select! {
+            biased;
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    update_monitor_stats(&stats, |stats| {
+                        stats.status = "stopped".into();
+                        stats.reason = "shutdown cancelled the in-flight blocking IMAP poll boundary".into();
+                        stats.blocking_polls_cancelled = stats.blocking_polls_cancelled.saturating_add(1);
+                    });
+                    return;
+                }
+                continue;
+            },
+            result = poll => result,
+        };
+
+        match poll_result {
+            Ok(messages) => {
+                consecutive_failures = 0;
+                let (emitted, dropped) = emit_inbound_preview_events(
+                    &InboundEventEmitContext {
+                        config: &config,
+                        zone: &zone,
+                        connector_id: &connector_id,
+                        instance_id: &instance_id,
+                        event_tx: &event_tx,
+                        next_event_seq: &next_event_seq,
+                        mailbox: &mailbox,
+                    },
+                    messages,
+                );
+                update_monitor_stats(&stats, |stats| {
+                    stats.polls_completed = stats.polls_completed.saturating_add(1);
+                    stats.emitted_events = stats
+                        .emitted_events
+                        .saturating_add(u64::try_from(emitted).unwrap_or(u64::MAX));
+                    stats.dropped_events = stats
+                        .dropped_events
+                        .saturating_add(u64::try_from(dropped).unwrap_or(u64::MAX));
+                    stats.reason = "last supervised inbound poll completed".into();
+                    stats.last_error = None;
+                });
+                if fcp_async_core::shutdown::sleep_or_shutdown(poll_interval, &mut shutdown)
+                    .await
+                    .is_err()
+                {
+                    update_monitor_stats(&stats, |stats| {
+                        stats.status = "stopped".into();
+                        stats.reason =
+                            "supervised inbound monitor stopped during poll interval".into();
+                    });
+                    return;
+                }
+            }
+            Err(message) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                update_monitor_stats(&stats, |stats| {
+                    stats.last_error = Some(message.clone());
+                    stats.reason = "supervised inbound poll failed; retry backoff active".into();
+                });
+                if consecutive_failures >= supervisor.max_consecutive_failures {
+                    update_monitor_stats(&stats, |stats| {
+                        stats.status = "error".into();
+                        stats.reason =
+                            "supervised inbound monitor reached max poll failures".into();
+                    });
+                    return;
+                }
+                let delay = Duration::from_millis(supervisor.compute_backoff(consecutive_failures));
+                if fcp_async_core::shutdown::sleep_or_shutdown(delay, &mut shutdown)
+                    .await
+                    .is_err()
+                {
+                    update_monitor_stats(&stats, |stats| {
+                        stats.status = "stopped".into();
+                        stats.reason =
+                            "supervised inbound monitor stopped during retry backoff".into();
+                    });
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn update_monitor_stats<F>(stats: &Arc<Mutex<EmailInboundMonitorStats>>, f: F)
+where
+    F: FnOnce(&mut EmailInboundMonitorStats),
+{
+    if let Ok(mut stats) = stats.lock() {
+        f(&mut stats);
+    }
+}
+
+async fn poll_inbound_on_blocking_thread(
+    client: EmailGenericClient,
+    mailbox: String,
+    seen_uids: Arc<Mutex<EmailSeenUidCache>>,
+) -> Result<Vec<EmailInboundMessage>, String> {
+    let (tx, rx) = oneshot::channel();
+    thread::Builder::new()
+        .name("email-generic-inbound-poll".into())
+        .spawn(move || {
+            let result = seen_uids
+                .lock()
+                .map_err(|_| "seen UID cache lock poisoned".to_owned())
+                .and_then(|mut seen| {
+                    client
+                        .fetch_unseen_inbound_messages(&mailbox, &mut seen)
+                        .map_err(|error| error.to_string())
+                });
+            let _ = tx.send(result);
+        })
+        .map_err(|error| format!("failed to spawn blocking IMAP poll worker: {error}"))?;
+    rx.await
+        .map_err(|_| "blocking IMAP poll worker dropped result".to_owned())?
+}
+
+struct InboundEventEmitContext<'a> {
+    config: &'a EmailGenericConfig,
+    zone: &'a ZoneId,
+    connector_id: &'a ConnectorId,
+    instance_id: &'a InstanceId,
+    event_tx: &'a broadcast::Sender<FcpResult<EventEnvelope>>,
+    next_event_seq: &'a AtomicU64,
+    mailbox: &'a str,
+}
+
+fn emit_inbound_preview_events(
+    context: &InboundEventEmitContext<'_>,
+    messages: Vec<EmailInboundMessage>,
+) -> (usize, usize) {
+    let mut emitted = 0_usize;
+    let mut dropped = 0_usize;
+    for message in messages {
+        let preview = context
+            .config
+            .monitor_policy
+            .prepare_inbound_message(&message);
+        if preview.decision != EmailInboundPolicyDecision::Accept {
+            dropped = dropped.saturating_add(1);
+            continue;
+        }
+        let seq = context.next_event_seq.fetch_add(1, Ordering::SeqCst);
+        let cursor = format!("{}:{}", context.mailbox, message.uid);
+        let sender = normalize_sender_address(&message.sender);
+        let payload = json!({
+            "mailbox": context.mailbox,
+            "uid": message.uid,
+            "sender": sender.clone(),
+            "policy_decision": "accept",
+            "preview": preview,
+        });
+        let principal = Principal {
+            kind: "email_sender".into(),
+            id: sender.unwrap_or_else(|| "unknown".into()),
+            trust: TrustLevel::Paired,
+            display: None,
+        };
+        let data = EventData::new(
+            context.connector_id.clone(),
+            context.instance_id.clone(),
+            context.zone.clone(),
+            principal,
+            payload,
+        );
+        let envelope = EventEnvelope::new(EVENT_INBOUND_PREVIEW, data)
+            .with_seq(seq)
+            .with_cursor(cursor)
+            .with_stream_key(context.mailbox)
+            .with_ordering(OrderingPolicy::PerKey);
+        let _ = context.event_tx.send(Ok(envelope));
+        emitted = emitted.saturating_add(1);
+    }
+    (emitted, dropped)
 }
 
 #[cfg(test)]
@@ -758,6 +1529,7 @@ mod tests {
         (OP_HEALTH, "health"),
         (OP_LIST_MAILBOXES, "list_mailboxes"),
         (OP_SEARCH_MESSAGES, "search_messages"),
+        (OP_POLL_INBOUND_ONCE, "poll_inbound_once"),
         (OP_SEND_MESSAGE, "send_message"),
     ];
 
@@ -834,6 +1606,7 @@ mod tests {
         json!({
             "allowed_senders_configured": true,
             "allowed_senders_count": 1,
+            "mailbox_configured": true,
             "require_allowed_sender": false,
             "drop_automated": true,
             "allow_attachments": false,
@@ -844,13 +1617,61 @@ mod tests {
     }
 
     fn sample_health_output() -> serde_json::Value {
+        let connector = EmailGenericConnector::new();
         json!({
             "status": "ok",
             "imap_host": "imap.example.com",
             "smtp_host": "smtp.example.com",
             "manifest_hash": EmailGenericConnector::manifest_hash(),
             "monitor_policy": sample_monitor_policy(),
-            "inbound_monitor": EmailGenericConnector::inbound_monitor_state()
+            "inbound_monitor": connector.inbound_monitor_state()
+        })
+    }
+
+    fn sample_poll_inbound_once_output() -> serde_json::Value {
+        json!({
+            "mailbox": "INBOX",
+            "fetched_count": 2,
+            "accepted_count": 1,
+            "dropped_count": 1,
+            "seen_uids": ["11", "12"],
+            "messages": [
+                {
+                    "uid": "11",
+                    "decision": "accept",
+                    "tainted": true,
+                    "text": {
+                        "text": "[Subject: Deploy ready]\n\ngreen",
+                        "original_chars": 31,
+                        "truncated": false
+                    },
+                    "attachments": [
+                        {
+                            "filename": "plan.pdf",
+                            "media_type": "application/pdf",
+                            "size_bytes": 4,
+                            "class": "document",
+                            "exposed": false,
+                            "reason": "attachments_disabled"
+                        }
+                    ],
+                    "thread": {
+                        "subject": "Deploy ready",
+                        "message_id": "<msg-11@example.com>",
+                        "in_reply_to": null,
+                        "references": null,
+                        "reply_subject": "Re: Deploy ready"
+                    }
+                },
+                {
+                    "uid": "12",
+                    "decision": "drop_sender_not_allowed",
+                    "tainted": true,
+                    "text": null,
+                    "attachments": [],
+                    "thread": null
+                }
+            ]
         })
     }
 
@@ -870,7 +1691,7 @@ mod tests {
     #[test]
     fn operations_catalog_contains_expected_entries() {
         let operations = EmailGenericConnector::operations_info();
-        assert_eq!(operations.len(), 4);
+        assert_eq!(operations.len(), 5);
         assert!(
             operations
                 .iter()
@@ -879,12 +1700,13 @@ mod tests {
     }
 
     #[test]
-    fn operations_catalog_contains_all_four_ops() {
+    fn operations_catalog_contains_all_read_and_write_ops() {
         let ops = EmailGenericConnector::operations_info();
         let ids: Vec<&str> = ops.iter().map(|o| o.id.as_str()).collect();
         assert!(ids.contains(&OP_HEALTH));
         assert!(ids.contains(&OP_LIST_MAILBOXES));
         assert!(ids.contains(&OP_SEARCH_MESSAGES));
+        assert!(ids.contains(&OP_POLL_INBOUND_ONCE));
         assert!(ids.contains(&OP_SEND_MESSAGE));
     }
 
@@ -938,7 +1760,7 @@ mod tests {
                 "imap_host": "imap.example.com",
                 "smtp_host": "smtp.example.com",
                 "manifest_hash": EmailGenericConnector::manifest_hash(),
-                "inbound_monitor": EmailGenericConnector::inbound_monitor_state()
+                "inbound_monitor": EmailGenericConnector::new().inbound_monitor_state()
             }),
         )?;
         assert_schema_rejects(
@@ -949,7 +1771,7 @@ mod tests {
                 "smtp_host": "smtp.example.com",
                 "manifest_hash": "not-a-hash",
                 "monitor_policy": sample_monitor_policy(),
-                "inbound_monitor": EmailGenericConnector::inbound_monitor_state()
+                "inbound_monitor": EmailGenericConnector::new().inbound_monitor_state()
             }),
         )?;
 
@@ -992,6 +1814,33 @@ mod tests {
         assert_schema_rejects(
             &search_output,
             &json!({"mailbox": "INBOX", "query": "deploy", "uids": [], "extra": true}),
+        )?;
+
+        let poll_input = operation_schema(&manifest, "poll_inbound_once", "input_schema")?;
+        assert_schema_accepts(&poll_input, &json!({"mailbox": "INBOX"}))?;
+        assert_schema_accepts(
+            &poll_input,
+            &json!({"mailbox": "INBOX", "seen_uids": ["1", "2"]}),
+        )?;
+        assert_schema_rejects(&poll_input, &json!({}))?;
+        assert_schema_rejects(&poll_input, &json!({"mailbox": ""}))?;
+        assert_schema_rejects(&poll_input, &json!({"mailbox": "INBOX", "seen_uids": [1]}))?;
+        assert_schema_rejects(
+            &poll_input,
+            &json!({"mailbox": "INBOX", "seen_uids": [], "extra": true}),
+        )?;
+
+        let poll_output = operation_schema(&manifest, "poll_inbound_once", "output_schema")?;
+        assert_schema_accepts(&poll_output, &sample_poll_inbound_once_output())?;
+        assert_schema_rejects(
+            &poll_output,
+            &json!({
+                "mailbox": "INBOX",
+                "fetched_count": 1,
+                "accepted_count": 1,
+                "seen_uids": ["11"],
+                "messages": []
+            }),
         )?;
 
         let send_input = operation_schema(&manifest, "send_message", "input_schema")?;
@@ -1071,7 +1920,12 @@ mod tests {
     #[test]
     fn read_operations_are_safe() {
         let ops = EmailGenericConnector::operations_info();
-        for op_id in [OP_HEALTH, OP_LIST_MAILBOXES, OP_SEARCH_MESSAGES] {
+        for op_id in [
+            OP_HEALTH,
+            OP_LIST_MAILBOXES,
+            OP_SEARCH_MESSAGES,
+            OP_POLL_INBOUND_ONCE,
+        ] {
             let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
             assert_eq!(op.safety_tier, SafetyTier::Safe, "{op_id} should be Safe");
             assert_eq!(
@@ -1085,7 +1939,12 @@ mod tests {
     #[test]
     fn read_operations_use_read_capability() {
         let ops = EmailGenericConnector::operations_info();
-        for op_id in [OP_HEALTH, OP_LIST_MAILBOXES, OP_SEARCH_MESSAGES] {
+        for op_id in [
+            OP_HEALTH,
+            OP_LIST_MAILBOXES,
+            OP_SEARCH_MESSAGES,
+            OP_POLL_INBOUND_ONCE,
+        ] {
             let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
             assert_eq!(op.capability.as_str(), CAP_READ);
         }
@@ -1143,6 +2002,7 @@ mod tests {
             "health",
             "list_mailboxes",
             "search_messages",
+            "poll_inbound_once",
             "send_message",
         ] {
             let marker = format!("[provides.operations.{operation}.ai_hints]");
@@ -1176,16 +2036,19 @@ mod tests {
     fn introspect_returns_all_operations() {
         let connector = EmailGenericConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 4);
+        assert_eq!(intro.operations.len(), 5);
     }
 
     #[test]
-    fn introspect_reports_no_streaming() {
+    fn introspect_reports_inbound_streaming() {
         let connector = EmailGenericConnector::new();
         let intro = connector.introspect();
+        assert_eq!(intro.events.len(), 1);
+        assert_eq!(intro.events[0].topic, EVENT_INBOUND_PREVIEW);
         let caps = intro.event_caps.expect("should have event_caps");
-        assert!(!caps.streaming);
+        assert!(caps.streaming);
         assert!(!caps.replay);
+        assert_eq!(caps.min_buffer_events, INBOUND_EVENT_BUFFER_CAPACITY_U32);
     }
 
     #[test]
@@ -1219,6 +2082,10 @@ mod tests {
         );
         assert_eq!(
             required_capability(OP_SEARCH_MESSAGES).unwrap().as_str(),
+            CAP_READ
+        );
+        assert_eq!(
+            required_capability(OP_POLL_INBOUND_ONCE).unwrap().as_str(),
             CAP_READ
         );
     }
@@ -1303,6 +2170,7 @@ mod tests {
                 "imap": { "host": "h", "username": "u", "password": "p" },
                 "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" },
                 "monitor_policy": {
+                    "mailbox": "Alerts",
                     "allowed_senders": ["Allowed@Example.com"],
                     "allow_attachments": true,
                     "poll_interval_secs": 30,
@@ -1320,14 +2188,16 @@ mod tests {
             true
         );
         assert_eq!(details["monitor_policy"]["allow_attachments"], true);
+        assert_eq!(details["monitor_policy"]["mailbox_configured"], true);
         assert_eq!(details["monitor_policy"]["poll_interval_secs"], 30);
-        assert_eq!(details["inbound_monitor"]["status"], "deferred");
+        assert_eq!(details["inbound_monitor"]["status"], "idle");
+        assert_eq!(details["inbound_monitor"]["streaming"], true);
         assert!(!details.to_string().contains("Allowed@Example.com"));
         assert!(!details.to_string().contains("allowed@example.com"));
     }
 
     #[fcp_async_core::runtime::test]
-    async fn doctor_after_configure_reports_noncritical_monitor_deferral() {
+    async fn doctor_after_configure_reports_noncritical_monitor_available() {
         let mut connector = EmailGenericConnector::new();
         connector
             .configure(json!({
@@ -1344,7 +2214,7 @@ mod tests {
             .iter()
             .find(|check| check.name == "inbound_monitor")
             .expect("inbound monitor check should be present");
-        assert!(!monitor.passed);
+        assert!(monitor.passed);
         assert!(!monitor.critical);
         let policy = result
             .checks

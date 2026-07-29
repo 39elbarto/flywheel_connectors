@@ -29,6 +29,7 @@ struct KubernetesConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 struct KubernetesAccessPolicy {
     allowed_namespaces: Option<BTreeSet<String>>,
     allow_write_operations: bool,
@@ -1818,14 +1819,11 @@ fn is_local_test_host(host: &str) -> bool {
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {
-    let parsed = match Url::parse(base_url) {
-        Ok(url) => url,
-        Err(_) => {
-            return (
-                false,
-                "base_url must be an absolute URL with a scheme and host".into(),
-            );
-        }
+    let Ok(parsed) = Url::parse(base_url) else {
+        return (
+            false,
+            "base_url must be an absolute URL with a scheme and host".into(),
+        );
     };
 
     let Some(host_part) = parsed.host_str() else {
@@ -1860,10 +1858,7 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     if !secure_or_local {
         return (
             false,
-            format!(
-                "base_url must use https for non-local hosts (got {}://{host_part})",
-                scheme
-            ),
+            format!("base_url must use https for non-local hosts (got {scheme}://{host_part})"),
         );
     }
 

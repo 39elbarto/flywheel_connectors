@@ -2293,7 +2293,7 @@ fn generate_error_rs(short_name: &str) -> String {
 use std::time::Duration;
 
 use fcp_async_core::AsyncError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_sdk::prelude::FcpError;
 
 /// Connector-specific errors.
@@ -2955,9 +2955,8 @@ use std::time::{{Duration, Instant}};
 {mutex_import}
 
 use fcp_sdk::prelude::*;
-use fcp_sdk::migration::{{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-}};
+use fcp_sdk::migration::{{AttemptOutcome, HttpRetryConfig, RetryLoop}};
+use fcp_sdk::{{ConnectorRuntime, ConnectorRuntimeConfig}};
 use sha2::{{Digest, Sha256}};
 
 use crate::config::{struct_name}Config;
@@ -4076,7 +4075,7 @@ async fn test_error_codes_correct() {{
 #[test]
 fn test_error_mapping_rate_limit() {{
     use {crate_ident}::error::{struct_name}Error;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let err = {struct_name}Error::RateLimited {{ retry_after_ms: 5000 }};
     assert!(err.is_retryable(), "rate limit should be retryable");
@@ -4089,7 +4088,7 @@ fn test_error_mapping_rate_limit() {{
 #[test]
 fn test_error_mapping_config() {{
     use {crate_ident}::error::{struct_name}Error;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let err = {struct_name}Error::Config("bad key".into());
     assert!(!err.is_retryable(), "config error should not be retryable");
@@ -4102,7 +4101,7 @@ fn test_error_mapping_config() {{
 #[test]
 fn test_error_mapping_runtime() {{
     use {crate_ident}::error::{struct_name}Error;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let err = {struct_name}Error::Runtime("cancelled".into());
     assert!(!err.is_retryable(), "runtime error should not be retryable");
@@ -4115,7 +4114,7 @@ fn test_error_mapping_runtime() {{
 fn test_error_mapping_from_async_timeout() {{
     use {crate_ident}::error::{struct_name}Error;
     use fcp_async_core::AsyncError;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let async_err = AsyncError::Timeout {{ timeout_ms: 30000 }};
     let err = {struct_name}Error::from_async_error(async_err);
@@ -4126,7 +4125,7 @@ fn test_error_mapping_from_async_timeout() {{
 fn test_error_mapping_from_async_cancelled() {{
     use {crate_ident}::error::{struct_name}Error;
     use fcp_async_core::AsyncError;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let async_err = AsyncError::Cancelled;
     let err = {struct_name}Error::from_async_error(async_err);
@@ -5223,9 +5222,15 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
     // Check for #![forbid(unsafe_code)] in main.rs and lib.rs
     let main_rs_path = path.join("src/main.rs");
     let lib_rs_path = path.join("src/lib.rs");
+    let main_exists = main_rs_path.exists();
+    let lib_exists = lib_rs_path.exists();
     let mut forbids_unsafe = true;
 
-    if main_rs_path.exists() {
+    if !main_exists && !lib_exists {
+        forbids_unsafe = false;
+    }
+
+    if main_exists {
         let content = fs::read_to_string(&main_rs_path)?;
         if !content.contains("#![forbid(unsafe_code)]") {
             forbids_unsafe = false;
@@ -5235,11 +5240,9 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
                 file: Some("src/main.rs".to_string()),
             });
         }
-    } else {
-        forbids_unsafe = false;
     }
 
-    if lib_rs_path.exists() {
+    if lib_exists {
         let content = fs::read_to_string(&lib_rs_path)?;
         if !content.contains("#![forbid(unsafe_code)]") {
             forbids_unsafe = false;
@@ -5249,8 +5252,6 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
                 file: Some("src/lib.rs".to_string()),
             });
         }
-    } else {
-        forbids_unsafe = false;
     }
 
     checks.push(PrecheckItem {

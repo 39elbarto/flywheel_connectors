@@ -27,8 +27,9 @@ test-support = []
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
-fcp-sdk = { path = "../../crates/fcp-sdk" }
+fcp-sdk = { path = "../../crates/fcp-sdk", features = ["connector-http"] }
 fcp-cbor = { path = "../../crates/fcp-cbor" }
+fcp-manifest = { path = "../../crates/fcp-manifest" }
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -37,9 +38,11 @@ blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+hex.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -50,5 +53,6 @@ ciborium.workspace = true
 wiremock.workspace = true
 futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
-fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
+jsonschema.workspace = true
+toml.workspace = true

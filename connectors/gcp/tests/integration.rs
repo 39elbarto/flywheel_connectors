@@ -15,7 +15,8 @@ use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_gcp::connector::GcpConnector;
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InvokeRequest, OperationId, RequestId, SafetyTier, ZoneId,
+    HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, OperationId, RequestId,
+    SafetyTier, ZoneId,
 };
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
@@ -28,7 +29,7 @@ const OP_COMPUTE_START_INSTANCE: &str = "gcp.compute.start_instance";
 const OP_PROJECTS_GET: &str = "gcp.projects.get";
 const OP_STORAGE_DELETE_OBJECT: &str = "gcp.storage.delete_object";
 
-fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_req(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -46,11 +47,15 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
         ],
         host: None,
         transport_caps: None,
-        requested_instance_id: None,
+        requested_instance_id: Some(instance_id.clone()),
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    op: &'static str,
+) -> CapabilityToken {
     let capability = match op {
         OP_STORAGE_DELETE_OBJECT => "gcp.storage.write",
         _ => panic!("unsupported test operation: {op}"),
@@ -66,11 +71,13 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
     let raw = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
+        .target_instance(instance_id.as_str())
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints cbor should validate")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -100,9 +107,13 @@ fn invoke_req(
     }
 }
 
-async fn setup_connector(mock_url: &str, access_token: &str) -> (GcpConnector, Ed25519SigningKey) {
+async fn setup_connector(
+    mock_url: &str,
+    access_token: &str,
+) -> (GcpConnector, Ed25519SigningKey, InstanceId) {
     let mut connector = GcpConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     connector
         .configure(json!({
             "mode": "access_token",
@@ -117,10 +128,13 @@ async fn setup_connector(mock_url: &str, access_token: &str) -> (GcpConnector, E
         .await
         .unwrap();
     connector
-        .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+        .handshake(handshake_req(
+            signing_key.verifying_key().to_bytes(),
+            &instance_id,
+        ))
         .await
         .unwrap();
-    (connector, signing_key)
+    (connector, signing_key, instance_id)
 }
 
 #[fcp_async_core::runtime::test]
@@ -217,7 +231,7 @@ async fn self_check_ready_with_access_token_and_evidence() {
         .mount(&server)
         .await;
 
-    let (connector, _signing_key) = setup_connector(&server.uri(), "ya29.test").await;
+    let (connector, _signing_key, _instance_id) = setup_connector(&server.uri(), "ya29.test").await;
     let doctor = serde_json::to_value(connector.doctor()).unwrap();
     assert_doctor_response_valid(&doctor);
     println!(
@@ -275,7 +289,7 @@ async fn self_check_retryable_project_api_failure_reports_degraded() {
         .mount(&server)
         .await;
 
-    let (connector, _signing_key) = setup_connector(&server.uri(), "ya29.test").await;
+    let (connector, _signing_key, _instance_id) = setup_connector(&server.uri(), "ya29.test").await;
     let report = connector.self_check().await.unwrap();
     let value = serde_json::to_value(&report).unwrap();
     assert_self_check_not_ready(&value);
@@ -296,7 +310,7 @@ async fn invoke_dangerous_storage_delete_preserves_artifact_evidence() {
         .mount(&server)
         .await;
 
-    let (connector, signing_key) = setup_connector(&server.uri(), "ya29.test").await;
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri(), "ya29.test").await;
     let response = connector
         .invoke(invoke_req(
             OP_STORAGE_DELETE_OBJECT,
@@ -304,7 +318,7 @@ async fn invoke_dangerous_storage_delete_preserves_artifact_evidence() {
                 "bucket": "test-bucket",
                 "object": "artifact.txt"
             }),
-            generate_valid_token(&signing_key, OP_STORAGE_DELETE_OBJECT),
+            generate_valid_token(&signing_key, &instance_id, OP_STORAGE_DELETE_OBJECT),
         ))
         .await
         .unwrap();

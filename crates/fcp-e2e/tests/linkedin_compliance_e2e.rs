@@ -204,7 +204,7 @@ impl FcpConnector for LinkedInConnectorAdapter {
             message: "LinkedIn verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        verifier.verify_bound(
             &req.capability_token,
             &required_capability,
             &req.operation,
@@ -227,7 +227,7 @@ impl FcpConnector for LinkedInConnectorAdapter {
             message: "LinkedIn verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        verifier.verify_bound(
             &req.capability_token,
             &required_capability,
             &req.operation,
@@ -339,6 +339,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -354,9 +355,14 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: adapter verifies with `verify_bound`,
+        // which requires an INSTANCE_ID claim; bind to the adapter instance
+        // (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -469,6 +475,7 @@ async fn linkedin_default_deny_compliance_suite_passes() {
     );
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "linkedin.profile.read",
         &["linkedin.profile.get"],
     );
@@ -524,6 +531,7 @@ async fn linkedin_allow_valid_token_connector_suite_passes() {
     );
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "linkedin.profile.read",
         &["linkedin.profile.get"],
     );

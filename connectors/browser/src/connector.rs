@@ -1,18 +1,19 @@
 //! FCP Browser Connector implementation.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::ApprovalScope::Execution;
 use fcp_prelude::{
-    AgentHint, ApprovalMode, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId,
-    CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
-    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
-    SimulateResponse,
+    ApprovalMode, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, Introspection, OperationId, OperationInfo,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -54,6 +55,25 @@ const READABLE_CONTENT_DEFAULT_MAX_CHARS: usize = 200_000;
 const READABLE_CONTENT_ABSOLUTE_MAX_CHARS: usize = 1_000_000;
 const DOCUMENT_TEXT_EXTRACTION_CAP_CHARS: usize = 200_000;
 const DOCUMENT_RENDER_PIXEL_CAP: usize = 4_000_000;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: &[&str] = &[
+    "browser.navigate",
+    "browser.screenshot",
+    "browser.render_pdf",
+    "browser.extract_text",
+    "browser.extract_links",
+    "browser.wait_for_selector",
+    "browser.click",
+    "browser.fill_form",
+    "browser.evaluate_js",
+    "browser.get_cookies",
+    "browser.set_cookies",
+    "browser.session.save",
+    "browser.session.restore",
+    "browser.session.describe",
+    "browser.set_proxy",
+    "browser.clear_proxy",
+];
 
 #[derive(Debug, Clone, Serialize)]
 struct BrowserNetworkGuardProfile {
@@ -211,6 +231,12 @@ impl BrowserConnector {
         self.base.instance_id.as_str()
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -223,7 +249,8 @@ impl BrowserConnector {
             .map_err(|e| FcpError::Internal {
                 message: format!("Failed to create HTTP client: {e}"),
             })?
-            .with_browser_url(&config.browser_url);
+            .with_browser_url(&config.browser_url)
+            .continue_direct_cdp_manager_from(self.client.as_ref());
         if let Some(launcher_config) = config.rust_owned_launcher.clone() {
             client = client
                 .with_rust_owned_launcher(launcher_config)
@@ -276,7 +303,7 @@ impl BrowserConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:browser-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -570,577 +597,7 @@ impl BrowserConnector {
     /// Handle introspect method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations: vec![
-                op_info(
-                    "browser.navigate",
-                    "Navigate to a URL and wait for page load",
-                    json!({
-                        "type": "object",
-                        "required": ["url"],
-                        "properties": {
-                            "url": { "type": "string" },
-                            "wait_until": { "type": "string" },
-                            "timeout_ms": { "type": "integer" },
-                            "user_agent": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["url", "status"],
-                        "properties": {
-                            "url": { "type": "string" },
-                            "status": { "type": "integer" },
-                            "title": { "type": "string" }
-                        }
-                    }),
-                    "browser.navigate",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::None,
-                    AgentHint {
-                        when_to_use: "Navigate the browser to a URL. Always call this before extraction or screenshot operations.".into(),
-                        common_mistakes: vec![
-                            "Not waiting for page load before extracting content.".into(),
-                            "Navigating to internal/private IPs.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"url": "https://example.com", "wait_until": "networkidle"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("browser.screenshot"),
-                            CapabilityId::from_static("browser.extract_text"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.screenshot",
-                    "Capture a screenshot of the current page or a specific element",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "selector": { "type": "string" },
-                            "full_page": { "type": "boolean" },
-                            "format": { "type": "string" },
-                            "quality": { "type": "integer" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["image_data", "width", "height"],
-                        "properties": {
-                            "image_data": { "type": "string" },
-                            "width": { "type": "integer" },
-                            "height": { "type": "integer" }
-                        }
-                    }),
-                    "browser.capture",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Capture a visual screenshot of the current page or element for inspection.".into(),
-                        common_mistakes: vec!["Taking screenshots before page fully loads.".into()],
-                        examples: vec![r#"{"full_page": true, "format": "png"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("browser.navigate"),
-                            CapabilityId::from_static("browser.render_pdf"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.render_pdf",
-                    "Render the current page as a PDF document",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "format": { "type": "string" },
-                            "landscape": { "type": "boolean" },
-                            "print_background": { "type": "boolean" },
-                            "max_pages": { "type": "integer" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["pdf_data", "page_count"],
-                        "properties": {
-                            "pdf_data": { "type": "string" },
-                            "page_count": { "type": "integer" },
-                            "external_content": { "type": "object" },
-                            "document_extraction": { "type": "object" }
-                        }
-                    }),
-                    "browser.capture",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Render the current page as a PDF for archival or offline reading.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"format": "a4", "print_background": true}"#.into()],
-                        related: vec![CapabilityId::from_static("browser.screenshot")],
-                    },
-                ),
-                op_info(
-                    "browser.extract_text",
-                    "Extract text content from the page or a specific element",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "selector": { "type": "string" },
-                            "include_hidden": { "type": "boolean" },
-                            "output_mode": { "type": "string", "enum": ["text", "markdown"] },
-                            "max_chars": { "type": "integer" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["text"],
-                        "properties": {
-                            "text": { "type": "string" },
-                            "word_count": { "type": "integer" },
-                            "output_mode": { "type": "string" },
-                            "guardrails": { "type": "object" },
-                            "external_content": { "type": "object" },
-                            "readability": { "type": "object" }
-                        }
-                    }),
-                    "browser.extract",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Extract text content from the currently loaded page.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"selector": "article"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("browser.extract_links"),
-                            CapabilityId::from_static("browser.navigate"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.extract_links",
-                    "Extract all links from the page or a specific element",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "selector": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["links"],
-                        "properties": {
-                            "links": { "type": "array" }
-                        }
-                    }),
-                    "browser.extract",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Extract all hyperlinks from the current page.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"selector": "nav"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("browser.extract_text"),
-                            CapabilityId::from_static("browser.navigate"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.wait_for_selector",
-                    "Wait for an element matching a CSS selector to appear",
-                    json!({
-                        "type": "object",
-                        "required": ["selector"],
-                        "properties": {
-                            "selector": { "type": "string" },
-                            "state": { "type": "string" },
-                            "timeout_ms": { "type": "integer" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["found"],
-                        "properties": {
-                            "found": { "type": "boolean" }
-                        }
-                    }),
-                    "browser.extract",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Wait for a dynamic element to appear before interacting with it.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"selector": ".results-loaded", "timeout_ms": 5000}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("browser.click"),
-                            CapabilityId::from_static("browser.extract_text"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.click",
-                    "Click an element identified by CSS selector",
-                    json!({
-                        "type": "object",
-                        "required": ["selector"],
-                        "properties": {
-                            "selector": { "type": "string" },
-                            "timeout_ms": { "type": "integer" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["clicked"],
-                        "properties": {
-                            "clicked": { "type": "boolean" },
-                            "navigation_url": { "type": "string" }
-                        }
-                    }),
-                    "browser.interact",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::None,
-                    AgentHint {
-                        when_to_use: "Click a button, link, or interactive element on the page.".into(),
-                        common_mistakes: vec!["Clicking before element is visible/interactable.".into()],
-                        examples: vec![r#"{"selector": "button.submit"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("browser.fill_form"),
-                            CapabilityId::from_static("browser.wait_for_selector"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.fill_form",
-                    "Fill form fields with provided values",
-                    json!({
-                        "type": "object",
-                        "required": ["fields"],
-                        "properties": {
-                            "fields": { "type": "object" },
-                            "submit_selector": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["filled_count"],
-                        "properties": {
-                            "filled_count": { "type": "integer" },
-                            "submitted": { "type": "boolean" }
-                        }
-                    }),
-                    "browser.interact",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::None,
-                    AgentHint {
-                        when_to_use: "Fill in form fields (inputs, textareas, selects) and optionally submit.".into(),
-                        common_mistakes: vec![
-                            "Filling fields before they are rendered.".into(),
-                            "Not handling dynamic forms that add fields after interaction.".into(),
-                        ],
-                        examples: vec![
-                            r##"{"fields": {"#email": "test@example.com"}, "submit_selector": "button[type=submit]"}"##.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("browser.click"),
-                            CapabilityId::from_static("browser.wait_for_selector"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.evaluate_js",
-                    "Execute JavaScript in the page context and return the result",
-                    json!({
-                        "type": "object",
-                        "required": ["expression"],
-                        "properties": {
-                            "expression": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["result"],
-                        "properties": {
-                            "result": { "type": "string" }
-                        }
-                    }),
-                    "browser.execute",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::None,
-                    AgentHint {
-                        when_to_use: "Execute arbitrary JavaScript in page context. Dangerous - use only when extraction or interaction APIs are insufficient.".into(),
-                        common_mistakes: vec![
-                            "Injecting untrusted user input into expressions (XSS risk).".into(),
-                            "Returning non-serializable objects (Promises, DOM nodes).".into(),
-                        ],
-                        examples: vec![r#"{"expression": "document.title"}"#.into()],
-                        related: vec![CapabilityId::from_static("browser.extract_text")],
-                    },
-                ),
-                op_info(
-                    "browser.get_cookies",
-                    "Get cookies for the current page or a specific domain",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "domain": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["cookies"],
-                        "properties": {
-                            "cookies": { "type": "array" }
-                        }
-                    }),
-                    "browser.cookies",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Retrieve cookies for session inspection or debugging.".into(),
-                        common_mistakes: vec!["Leaking session cookies to untrusted contexts.".into()],
-                        examples: vec![r#"{"domain": "example.com"}"#.into()],
-                        related: vec![CapabilityId::from_static("browser.set_cookies")],
-                    },
-                ),
-                op_info(
-                    "browser.set_cookies",
-                    "Set cookies in the browser session",
-                    json!({
-                        "type": "object",
-                        "required": ["cookies"],
-                        "properties": {
-                            "cookies": { "type": "array" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["set_count"],
-                        "properties": {
-                            "set_count": { "type": "integer" }
-                        }
-                    }),
-                    "browser.cookies",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Inject cookies for authenticated session setup.".into(),
-                        common_mistakes: vec!["Setting cookies on wrong domain.".into()],
-                        examples: vec![
-                            r#"{"cookies": [{"name": "session", "value": "abc123", "domain": "example.com", "path": "/"}]}"#.into(),
-                        ],
-                        related: vec![CapabilityId::from_static("browser.get_cookies")],
-                    },
-                ),
-                op_info(
-                    "browser.session.save",
-                    "Persist current browser cookies into a mesh state object",
-                    json!({
-                        "type": "object",
-                        "required": ["lease_seq", "lease_object_id"],
-                        "properties": {
-                            "domain": { "type": "string" },
-                            "lease_seq": { "type": "integer" },
-                            "lease_object_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["state_object_id", "seq", "lease_seq", "cookie_count", "payload_cbor_size", "captured_at"],
-                        "properties": {
-                            "state_object_id": { "type": "string" },
-                            "prev_state_object_id": { "type": "string" },
-                            "seq": { "type": "integer" },
-                            "lease_seq": { "type": "integer" },
-                            "lease_object_id": { "type": "string" },
-                            "cookie_count": { "type": "integer" },
-                            "payload_cbor_size": { "type": "integer" },
-                            "captured_at": { "type": "integer" },
-                            "domain": { "type": "string" },
-                            "audit": { "type": "object" }
-                        }
-                    }),
-                    "browser.sessions",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::BestEffort,
-                    AgentHint {
-                        when_to_use: "Persist authenticated browser cookies as mesh state before failover or restart.".into(),
-                        common_mistakes: vec![
-                            "Omitting lease metadata for singleton-writer fencing.".into(),
-                            "Persisting cookies from an unintended domain scope.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"domain":"example.com","lease_seq":12,"lease_object_id":"lease-obj-123"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("browser.session.restore"),
-                            CapabilityId::from_static("browser.session.describe"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.session.restore",
-                    "Restore browser cookies from a saved mesh state object",
-                    json!({
-                        "type": "object",
-                        "required": ["lease_seq", "lease_object_id"],
-                        "properties": {
-                            "state_object_id": { "type": "string" },
-                            "lease_seq": { "type": "integer" },
-                            "lease_object_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["state_object_id", "restored_count", "lease_seq", "cookie_count", "captured_at"],
-                        "properties": {
-                            "state_object_id": { "type": "string" },
-                            "restored_count": { "type": "integer" },
-                            "cookie_count": { "type": "integer" },
-                            "seq": { "type": "integer" },
-                            "saved_lease_seq": { "type": "integer" },
-                            "lease_seq": { "type": "integer" },
-                            "lease_object_id": { "type": "string" },
-                            "captured_at": { "type": "integer" },
-                            "domain": { "type": "string" },
-                            "audit": { "type": "object" }
-                        }
-                    }),
-                    "browser.sessions",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Restore a previously captured session on a fresh browser worker.".into(),
-                        common_mistakes: vec![
-                            "Using a stale lease_seq from a pre-failover writer.".into(),
-                            "Assuming state_object_id defaults when no head exists.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"state_object_id":"state-obj-abc","lease_seq":13,"lease_object_id":"lease-obj-124"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("browser.session.save"),
-                            CapabilityId::from_static("browser.get_cookies"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.session.describe",
-                    "Describe metadata for a saved browser session state object",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "state_object_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["state_object_id", "seq", "lease_seq", "cookie_count", "captured_at", "payload_cbor_size", "is_head"],
-                        "properties": {
-                            "state_object_id": { "type": "string" },
-                            "prev_state_object_id": { "type": "string" },
-                            "seq": { "type": "integer" },
-                            "lease_seq": { "type": "integer" },
-                            "lease_object_id": { "type": "string" },
-                            "cookie_count": { "type": "integer" },
-                            "captured_at": { "type": "integer" },
-                            "domain": { "type": "string" },
-                            "payload_cbor_size": { "type": "integer" },
-                            "is_head": { "type": "boolean" }
-                        }
-                    }),
-                    "browser.sessions",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Inspect session metadata without exposing cookie values.".into(),
-                        common_mistakes: vec!["Expecting raw cookie values in this operation output.".into()],
-                        examples: vec![r#"{"state_object_id":"state-obj-abc"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("browser.session.save"),
-                            CapabilityId::from_static("browser.session.restore"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "browser.set_proxy",
-                    "Configure an outbound proxy for browser traffic",
-                    json!({
-                        "type": "object",
-                        "required": ["server"],
-                        "properties": {
-                            "server": { "type": "string" },
-                            "bypass_list": { "type": "array", "items": { "type": "string" } },
-                            "username": { "type": "string" },
-                            "password": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["enabled", "mode"],
-                        "properties": {
-                            "enabled": { "type": "boolean" },
-                            "mode": { "type": "string" },
-                            "server": { "type": "string" },
-                            "audit": { "type": "object" }
-                        }
-                    }),
-                    "browser.proxy",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::BestEffort,
-                    AgentHint {
-                        when_to_use: "Route browser requests through a controlled proxy. Dangerous because it changes outbound trust boundaries.".into(),
-                        common_mistakes: vec![
-                            "Sending credentials to untrusted proxy endpoints.".into(),
-                            "Forgetting bypass rules for local callback URLs.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"server": "http://proxy.example.com:8080", "bypass_list": ["localhost"]}"#.into(),
-                        ],
-                        related: vec![CapabilityId::from_static("browser.clear_proxy")],
-                    },
-                ),
-                op_info(
-                    "browser.clear_proxy",
-                    "Clear outbound proxy configuration",
-                    json!({
-                        "type": "object",
-                        "properties": {}
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["enabled", "mode"],
-                        "properties": {
-                            "enabled": { "type": "boolean" },
-                            "mode": { "type": "string" },
-                            "server": { "type": "string" },
-                            "audit": { "type": "object" }
-                        }
-                    }),
-                    "browser.proxy",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Revert browser networking to direct mode after proxy-based workflows.".into(),
-                        common_mistakes: vec!["Assuming proxy state is reset between sessions.".into()],
-                        examples: vec![r"{}".into()],
-                        related: vec![CapabilityId::from_static("browser.set_proxy")],
-                    },
-                ),
-            ],
+            operations: typed_operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -2440,39 +1897,62 @@ fn dangerous_operation_audit(
     })
 }
 
-#[allow(clippy::fn_params_excessive_bools)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    let requires_approval = match safety_tier {
-        SafetyTier::Risky => Some(ApprovalMode::Policy),
-        SafetyTier::Dangerous | SafetyTier::Critical | SafetyTier::Forbidden => {
-            Some(ApprovalMode::ElevationToken)
-        }
-        SafetyTier::Safe => None,
-    };
+fn typed_operations_info() -> Vec<OperationInfo> {
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
+}
 
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Browser manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
     OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval,
-        safety_tier,
-        idempotency,
-        ai_hints,
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
     }
 }
 
@@ -2482,13 +1962,133 @@ mod tests {
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use fcp_manifest::ConnectorManifest;
     use fcp_prelude::CapabilityConstraints;
-    use std::path::PathBuf;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        path::PathBuf,
+        thread::{self, JoinHandle},
+        time::Duration as StdDuration,
     };
+
+    struct TestControlResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Vec<u8>,
+        content_type: &'static str,
+    }
+
+    impl TestControlResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: impl serde::Serialize,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: serde_json::to_vec(&body).expect("serialize response json"),
+                content_type: "application/json",
+            }
+        }
+
+        fn text(method: &'static str, path: &'static str, status: u16, body: &str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: body.as_bytes().to_vec(),
+                content_type: "text/plain; charset=utf-8",
+            }
+        }
+    }
+
+    struct TestControlServer {
+        base_url: String,
+        _handle: JoinHandle<()>,
+    }
+
+    impl TestControlServer {
+        fn respond(response: TestControlResponse) -> Self {
+            Self::respond_sequence(vec![response])
+        }
+
+        fn respond_sequence(responses: Vec<TestControlResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().expect("accept browser client request");
+                    handle_test_control_request(stream, &response);
+                }
+            });
+            Self {
+                base_url,
+                _handle: handle,
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+    }
+
+    fn handle_test_control_request(mut stream: TcpStream, response: &TestControlResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("request method");
+        let raw_path = parts.next().expect("request target");
+        let path = raw_path.split('?').next().expect("request path");
+        assert_eq!(method, response.method);
+        assert_eq!(path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().expect("content-length parses");
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        let status_text = match response.status {
+            404 => "Not Found",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response.status,
+            status_text,
+            response.content_type,
+            response.body.len(),
+        )
+        .expect("write response header");
+        if stream.write_all(&response.body).is_ok() {
+            let _ = stream.flush();
+        }
+    }
 
     fn test_constraints_cbor() -> Vec<u8> {
         let constraints = CapabilityConstraints {
@@ -2536,6 +2136,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(BrowserConnector::manifest_hash(), expected);
+        assert_ne!(
+            BrowserConnector::manifest_hash(),
+            "sha256:browser-connector-v1"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -2687,6 +2300,7 @@ mod tests {
         let ops = result["operations"].as_array().unwrap();
         let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
 
+        assert_eq!(op_ids, OPERATION_ORDER);
         assert!(op_ids.contains(&"browser.navigate"));
         assert!(op_ids.contains(&"browser.screenshot"));
         assert!(op_ids.contains(&"browser.render_pdf"));
@@ -2703,7 +2317,70 @@ mod tests {
         assert!(op_ids.contains(&"browser.session.describe"));
         assert!(op_ids.contains(&"browser.set_proxy"));
         assert!(op_ids.contains(&"browser.clear_proxy"));
-        assert_eq!(ops.len(), 16);
+        assert_eq!(ops.len(), OPERATION_ORDER.len());
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("manifest should validate");
+        let operations = typed_operations_info();
+        let ids: Vec<_> = operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect();
+
+        assert_eq!(ids, OPERATION_ORDER);
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_str())
+                .expect("runtime operation should exist in manifest");
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).unwrap(),
+                serde_json::to_value(&manifest_operation.ai_hints).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).unwrap(),
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| &rate_limit.0)
+                )
+                .unwrap()
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_serializes_typed_operation_catalog() {
+        let connector = BrowserConnector::new();
+        let introspection = connector.handle_introspect().await.unwrap();
+
+        assert_eq!(
+            introspection["operations"],
+            serde_json::to_value(typed_operations_info()).unwrap()
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -3255,18 +2932,16 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_accepts_fcp_browser_control_plane_health() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
-            )
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "GET",
+            "/health",
+            200,
+            browser_control_contract_descriptor(),
+        ));
 
         let mut connector = BrowserConnector::new();
         connector
-            .handle_configure(json!({ "browser_url": mock_server.uri() }))
+            .handle_configure(json!({ "browser_url": server.uri() }))
             .await
             .unwrap();
 
@@ -3276,24 +2951,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_rejects_raw_chrome_cdp_endpoint() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/json/version"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "Browser": "Chrome/123.0.0.0",
-                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond_sequence(vec![
+            TestControlResponse::text("GET", "/health", 404, "not found"),
+            TestControlResponse::json(
+                "GET",
+                "/json/version",
+                200,
+                json!({
+                    "Browser": "Chrome/123.0.0.0",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"
+                }),
+            ),
+        ]);
 
         let mut connector = BrowserConnector::new();
         connector
-            .handle_configure(json!({ "browser_url": mock_server.uri() }))
+            .handle_configure(json!({ "browser_url": server.uri() }))
             .await
             .unwrap();
 
@@ -3320,14 +2993,10 @@ mod tests {
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
         let computed = manifest
             .compute_interface_hash()
-            .expect("compute interface hash");
-        assert_eq!(manifest.manifest.interface_hash, computed);
+            .expect("interface hash computes");
 
-        let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2
-            .compute_interface_hash()
-            .expect("compute interface hash");
-        assert_eq!(computed, computed2);
+        let expected_hash = "blake3-256:fcp.interface.v2:3a47308a4d0ff45ad64dcc688000bc79edb1bc2cee800160be681c069debd83a";
+        assert_eq!(computed.to_string(), expected_hash);
     }
 
     // ── require_str sync tests ──────────────────────────────────────

@@ -4,29 +4,34 @@
 //! cache these objects, but this module is the content-addressed storage seam
 //! that host and SDK code can share as the mesh-native path lands.
 
-use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ciborium::de::from_reader_with_recursion_limit;
 use ciborium::value::Value as CborValue;
 use fcp_async_core::channel::broadcast;
 use fcp_cbor::{
-    CanonicalSerializer, MAX_CANONICAL_OBJECT_BYTES, MAX_CANONICALIZATION_DEPTH,
-    MAX_DESERIALIZATION_RECURSION_LIMIT, SchemaId, SerializationError,
+    CanonicalSerializer, MAX_CANONICALIZATION_DEPTH, MAX_DESERIALIZATION_RECURSION_LIMIT, SchemaId,
+    SerializationError,
 };
+use fcp_crypto::Ed25519VerifyingKey;
 use fcp_prelude::{
-    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateChange, ConnectorStateChangeKind,
-    ConnectorStateChangeStream, ConnectorStateError, ConnectorStateModel, ConnectorStateObject,
-    ConnectorStateRoot, ConnectorStateSnapshot, ConnectorStateStore, InstanceId, ObjectHeader,
-    ObjectId, ObjectIdKey, RetentionClass, StorageMeta, StoredObject, ZoneId,
+    BackoffPolicy, ConnectorId, ConnectorStateAppendOutcome, ConnectorStateCanonicalStatus,
+    ConnectorStateChange, ConnectorStateChangeKind, ConnectorStateChangeStream,
+    ConnectorStateError, ConnectorStateModel, ConnectorStateObject, ConnectorStateRoot,
+    ConnectorStateSnapshot, ConnectorStateStore, ConnectorStateWriteAuthorization, InstanceId,
+    ObjectHeader, ObjectId, ObjectIdKey, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use futures_util::stream;
+use parking_lot::RwLock;
 use semver::Version;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::{ObjectStore, ObjectStoreError};
+use crate::{ObjectStore, ObjectStoreError, SymbolStore};
 
 /// Marker file name written by host-local connector-state cache directories.
 ///
@@ -41,6 +46,8 @@ pub const CONNECTOR_STATE_TRACING_TARGET: &str = "fcp.connector_state";
 pub const CONNECTOR_STATE_READ_EVENT: &str = "fcp.connector_state.read";
 /// Structured event name emitted for connector-state writes.
 pub const CONNECTOR_STATE_WRITE_EVENT: &str = "fcp.connector_state.write";
+/// Structured event name emitted when connector-state root writes are retried.
+pub const CONNECTOR_STATE_WRITE_RETRY_EVENT: &str = "fcp.connector_state.write.retry";
 /// Structured event name emitted for connector-state snapshots.
 pub const CONNECTOR_STATE_SNAPSHOT_EVENT: &str = "fcp.connector_state.snapshot";
 /// Structured event name emitted for connector-state compaction.
@@ -58,6 +65,7 @@ pub const CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC: &str =
 pub const CONNECTOR_STATE_LATENCY_SECONDS_METRIC: &str = "fcp_connector_state_latency_seconds";
 const CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY: usize = 1_024;
 const DEFAULT_SNAPSHOT_EVERY_SECS: u64 = 24 * 60 * 60;
+const MAX_CONNECTOR_STATE_CBOR_BYTES: usize = 1024 * 1024;
 
 /// Errors returned by [`FcpStoreConnectorStateStore`].
 #[derive(Debug, Error)]
@@ -117,6 +125,10 @@ pub enum ConnectorStateStoreError {
     #[error("connector state object has invalid state_cbor: {0}")]
     InvalidStateCbor(SerializationError),
 
+    /// A state object signature does not verify against the authorized writer.
+    #[error("connector state object signature verification failed: {0}")]
+    InvalidStateSignature(String),
+
     /// A state object used a sequence number that does not follow the head.
     #[error("connector state sequence mismatch: expected {expected}, got {got}")]
     SequenceMismatch {
@@ -133,9 +145,71 @@ pub enum ConnectorStateStoreError {
     /// Sequence increment overflowed.
     #[error("connector state sequence overflow at {0}")]
     SequenceOverflow(u64),
+
+    /// The canonical state chain loops back to an already visited object.
+    #[error("connector state chain contains a cycle at {0}")]
+    ChainCycle(ObjectId),
+
+    /// A state object was signed by a writer key outside the trusted set.
+    #[error("connector state writer key {writer_public_key} is not in the trusted writer set")]
+    UntrustedWriterKey {
+        /// Hex-encoded writer public key embedded in the rejected object.
+        writer_public_key: String,
+    },
 }
 
 type Result<T> = std::result::Result<T, ConnectorStateStoreError>;
+
+#[derive(Debug, Clone)]
+struct CachedConnectorStateRoot {
+    generation: u64,
+    object_id: ObjectId,
+    root: ConnectorStateRoot,
+}
+
+/// Canonical connector-state evidence collected immediately before yielding
+/// a singleton-writer lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConnectorStateLeaseYieldFlush {
+    /// Connector represented by this flush barrier.
+    pub connector_id: ConnectorId,
+    /// Optional connector instance represented by the root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<InstanceId>,
+    /// Zone that owns the canonical state.
+    pub zone_id: ZoneId,
+    /// Content-addressed root object that was verified, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_object_id: Option<ObjectId>,
+    /// Current canonical state-object head, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_object_id: Option<ObjectId>,
+    /// Last committed canonical sequence number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_canonical_seq: Option<u64>,
+    /// Fencing token on the canonical head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_seq: Option<u64>,
+    /// Lease object authorizing the canonical head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_object_id: Option<ObjectId>,
+}
+
+impl ConnectorStateLeaseYieldFlush {
+    #[must_use]
+    fn missing(store: &FcpStoreConnectorStateStore) -> Self {
+        Self {
+            connector_id: store.connector_id.clone(),
+            instance_id: store.instance_id.clone(),
+            zone_id: store.zone_id.clone(),
+            root_object_id: None,
+            head_object_id: None,
+            last_canonical_seq: None,
+            lease_seq: None,
+            lease_object_id: None,
+        }
+    }
+}
 
 /// Connector-state store backed by an [`ObjectStore`].
 #[derive(Clone)]
@@ -149,7 +223,11 @@ pub struct FcpStoreConnectorStateStore {
     retention: RetentionClass,
     snapshot_every_entries: u64,
     snapshot_every_secs: u64,
-    change_tx: broadcast::Sender<ConnectorStateChange>,
+    state_object_write_retry_policy: BackoffPolicy,
+    root_write_retry_policy: BackoffPolicy,
+    change_bus: Arc<ConnectorStateChangeBus>,
+    root_cache: Arc<RwLock<Option<CachedConnectorStateRoot>>>,
+    trusted_writer_keys: Option<Arc<HashSet<[u8; 32]>>>,
 }
 
 impl FcpStoreConnectorStateStore {
@@ -161,7 +239,7 @@ impl FcpStoreConnectorStateStore {
         connector_id: ConnectorId,
         zone_id: ZoneId,
     ) -> Self {
-        let (change_tx, _change_rx) = broadcast::channel(CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY);
+        let change_bus = shared_change_bus(&object_store, &connector_id, &zone_id);
         Self {
             object_store,
             object_id_key,
@@ -172,8 +250,38 @@ impl FcpStoreConnectorStateStore {
             retention: RetentionClass::Pinned,
             snapshot_every_entries: 1_000,
             snapshot_every_secs: DEFAULT_SNAPSHOT_EVERY_SECS,
-            change_tx,
+            state_object_write_retry_policy: BackoffPolicy::new(
+                0,
+                Duration::ZERO,
+                Duration::ZERO,
+                1.0,
+            ),
+            root_write_retry_policy: BackoffPolicy::new(0, Duration::ZERO, Duration::ZERO, 1.0),
+            change_bus,
+            root_cache: Arc::new(RwLock::new(None)),
+            trusted_writer_keys: None,
         }
+    }
+
+    /// Pin the writer public keys trusted on the canonical read path.
+    ///
+    /// The append boundary already binds each incoming state object's
+    /// `writer_public_key` to a verified [`ConnectorStateWriteAuthorization`],
+    /// but stored objects are otherwise verified only against their own
+    /// embedded writer key. The keyed content-id blocks non-members, yet a
+    /// zone member holding the shared [`ObjectIdKey`] could plant a
+    /// self-signed chain for this connector and have it selected canonical.
+    /// With a pin configured, every state object loaded on the read path must
+    /// carry a writer key from this set; anything else fails closed with
+    /// [`ConnectorStateStoreError::UntrustedWriterKey`]. Append authorizations
+    /// whose writer key is outside the pin are refused at write time.
+    #[must_use]
+    pub fn with_trusted_writer_keys<I>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = [u8; 32]>,
+    {
+        self.trusted_writer_keys = Some(Arc::new(keys.into_iter().collect()));
+        self
     }
 
     /// Scope the store to one connector instance.
@@ -215,6 +323,30 @@ impl FcpStoreConnectorStateStore {
         self
     }
 
+    /// Configure retries for transient canonical state-object writes.
+    ///
+    /// The default policy has zero retries so fail-closed storage errors stay
+    /// bounded for hot-path callers. Hosts that can tolerate a short bounded
+    /// retry window can opt in when the backing mesh/object store may recover
+    /// quickly after a transient I/O outage before the root is written.
+    #[must_use]
+    pub const fn with_state_object_write_retry_policy(mut self, policy: BackoffPolicy) -> Self {
+        self.state_object_write_retry_policy = policy;
+        self
+    }
+
+    /// Configure retries for transient canonical root writes.
+    ///
+    /// The default policy has zero retries so fail-closed storage errors stay
+    /// bounded for hot-path callers. Hosts that can tolerate a short bounded
+    /// retry window can opt in when the backing mesh/object store may recover
+    /// quickly after a transient I/O outage.
+    #[must_use]
+    pub const fn with_root_write_retry_policy(mut self, policy: BackoffPolicy) -> Self {
+        self.root_write_retry_policy = policy;
+        self
+    }
+
     /// Schema used for canonical state-root objects.
     #[must_use]
     pub fn root_schema_id() -> SchemaId {
@@ -250,6 +382,7 @@ impl FcpStoreConnectorStateStore {
             Ok(None) => "miss",
             Err(_) => "error",
         };
+        self.record_read_cache_telemetry("read", telemetry_result);
         self.record_operation_telemetry(
             CONNECTOR_STATE_READ_EVENT,
             "read",
@@ -259,8 +392,48 @@ impl FcpStoreConnectorStateStore {
         result
     }
 
+    /// Observe a root object announcement from an external propagation layer.
+    ///
+    /// `FcpStoreConnectorStateStore` intentionally has no direct dependency on
+    /// `fcp-mesh`, but mesh or host adapters can call this after a replicated
+    /// `ConnectorStateRoot` object arrives locally. The root is loaded from the
+    /// object store and validated before a cache-invalidation change is emitted.
+    ///
+    /// # Errors
+    /// Returns an error if the root object is missing, malformed, foreign to
+    /// this connector+zone store, or references a missing head object.
+    pub async fn observe_replicated_root(
+        &self,
+        root_object_id: ObjectId,
+    ) -> Result<ConnectorStateChange> {
+        let stored = self.object_store.get(&root_object_id).await?;
+        let root: ConnectorStateRoot =
+            self.decode_stored(&stored, &Self::root_schema_id(), "connector state root")?;
+        self.validate_root(&root)?;
+        let seq = self.root_head_seq(&root).await?;
+
+        Ok(self.publish_change(
+            ConnectorStateChangeKind::RootUpdated,
+            Some(root_object_id),
+            seq,
+        ))
+    }
+
     async fn read_root_inner(&self) -> Result<Option<(ObjectId, ConnectorStateRoot)>> {
-        let mut best: Option<(ObjectId, ConnectorStateRoot)> = None;
+        if let Some((object_id, root)) = self.cached_root() {
+            return Ok(Some((object_id, root)));
+        }
+
+        // Sample the change generation *before* scanning. A concurrent writer
+        // bumps the generation only after the new root object is durably
+        // stored (append_object_inner: store_root_with_retry then
+        // publish_change(RootUpdated)). Caching under this pre-scan value means
+        // any root update that races our scan advances the generation past it,
+        // so the next read misses the cache and rescans rather than serving
+        // this now-stale result as fresh.
+        let generation = self.change_bus.generation();
+
+        let mut best: Option<(ObjectId, ConnectorStateRoot, Option<u64>)> = None;
 
         for object_id in self.object_store.list_zone(&self.zone_id).await {
             let stored = self.object_store.get(&object_id).await?;
@@ -274,27 +447,65 @@ impl FcpStoreConnectorStateStore {
                 continue;
             }
             self.validate_root(&root)?;
+            let head_seq = self.root_head_seq(&root).await?;
 
-            let replace = best.as_ref().is_none_or(|(best_id, best_root)| {
-                root.header
-                    .created_at
-                    .cmp(&best_root.header.created_at)
-                    .then(object_id.cmp(best_id))
-                    .is_gt()
-            });
+            let replace = best
+                .as_ref()
+                .is_none_or(|(best_id, best_root, best_head_seq)| {
+                    head_seq
+                        .cmp(best_head_seq)
+                        .then(root.header.created_at.cmp(&best_root.header.created_at))
+                        .then(object_id.cmp(best_id))
+                        .is_gt()
+                });
             if replace {
-                best = Some((object_id, root));
+                best = Some((object_id, root, head_seq));
             }
         }
 
-        Ok(best)
+        let root = best.map(|(object_id, root, _head_seq)| (object_id, root));
+        if let Some((object_id, root)) = &root {
+            self.cache_root(generation, *object_id, root.clone());
+        }
+        Ok(root)
+    }
+
+    fn cached_root(&self) -> Option<(ObjectId, ConnectorStateRoot)> {
+        let generation = self.change_bus.generation();
+        self.root_cache
+            .read()
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+            .map(|cached| (cached.object_id, cached.root.clone()))
+    }
+
+    fn cache_root(&self, generation: u64, object_id: ObjectId, root: ConnectorStateRoot) {
+        *self.root_cache.write() = Some(CachedConnectorStateRoot {
+            generation,
+            object_id,
+            root,
+        });
+    }
+
+    async fn root_head_seq(&self, root: &ConnectorStateRoot) -> Result<Option<u64>> {
+        match root.head {
+            Some(head_id) => self
+                .load_state_object(&head_id)
+                .await
+                .map(|(_object_id, state)| Some(state.seq)),
+            None => Ok(None),
+        }
     }
 
     /// Store a state root and return its content-addressed object id.
     ///
+    /// This is intentionally not part of the public store API. Canonical
+    /// connector-state mutation must enter through [`ConnectorStateStore`],
+    /// which requires a [`ConnectorStateWriteAuthorization`] witness.
+    ///
     /// # Errors
     /// Returns an error when the root identity or schema does not match this store.
-    pub async fn store_root(&self, root: ConnectorStateRoot) -> Result<ObjectId> {
+    async fn store_root(&self, root: ConnectorStateRoot) -> Result<ObjectId> {
         self.validate_root(&root)?;
         let stored = self.stored_object(&root.header, &root, self.retention)?;
         let object_id = stored.object_id;
@@ -302,11 +513,36 @@ impl FcpStoreConnectorStateStore {
         Ok(object_id)
     }
 
+    async fn store_root_with_retry(&self, root: ConnectorStateRoot) -> Result<ObjectId> {
+        let mut delays = self.root_write_retry_policy.retry_delays();
+        let mut retry_index = 0_u32;
+
+        loop {
+            match self.store_root(root.clone()).await {
+                Ok(root_id) => return Ok(root_id),
+                Err(err) if Self::is_retryable_write_error(&err) => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err);
+                    };
+                    self.record_write_retry("write_root", retry_index, delay, &err);
+                    retry_index = retry_index.saturating_add(1);
+                    if !delay.is_zero() {
+                        fcp_async_core::time::sleep(delay).await;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     /// Append a state object if its prev pointer matches the canonical head.
+    ///
+    /// This is the internal append primitive used after the public trait
+    /// boundary verifies [`ConnectorStateWriteAuthorization`].
     ///
     /// # Errors
     /// Returns an error when the incoming object is malformed or storage fails.
-    pub async fn append_object(
+    async fn append_object(
         &self,
         state_obj: ConnectorStateObject,
     ) -> Result<ConnectorStateAppendOutcome> {
@@ -359,10 +595,14 @@ impl FcpStoreConnectorStateStore {
             });
         }
 
-        let object_id = self.store_state_object(state_obj.clone()).await?;
+        let object_id = self
+            .store_state_object_with_retry(state_obj.clone())
+            .await?;
         let root = self.root_for_head(&state_obj, object_id);
-        let root_object_id = self.store_root(root).await?;
-        let snapshot_object_id = self.maybe_emit_snapshot(object_id, &state_obj).await?;
+        let root_object_id = self.store_root_with_retry(root).await?;
+        let snapshot_object_id = self
+            .maybe_emit_snapshot_after_root_commit(object_id, &state_obj)
+            .await;
 
         self.publish_change(
             ConnectorStateChangeKind::ObjectAppended,
@@ -406,6 +646,7 @@ impl FcpStoreConnectorStateStore {
             Ok(_) => "hit",
             Err(_) => "error",
         };
+        self.record_read_cache_telemetry("read", telemetry_result);
         self.record_operation_telemetry(
             CONNECTOR_STATE_READ_EVENT,
             "read",
@@ -424,31 +665,119 @@ impl FcpStoreConnectorStateStore {
             return Ok(Vec::new());
         }
 
-        let mut states = Vec::new();
-        for object_id in self.object_store.list_zone(&self.zone_id).await {
-            let stored = self.object_store.get(&object_id).await?;
-            if stored.header.schema != Self::state_object_schema_id() {
-                continue;
-            }
+        let Some((_root_id, root)) = self.read_root().await? else {
+            return Ok(Vec::new());
+        };
 
-            let state = self.load_state_from_stored(object_id, &stored)?;
-            if !self.state_belongs_to_store(&state) {
-                continue;
+        let mut states = Vec::new();
+        let mut visited = HashSet::new();
+        let mut next = root.head;
+        while let Some(object_id) = next {
+            if !visited.insert(object_id) {
+                return Err(ConnectorStateStoreError::ChainCycle(object_id));
             }
-            if after_seq.is_some_and(|min_seq| state.seq <= min_seq) {
-                continue;
-            }
+            let (_loaded_id, state) = self.load_state_object(&object_id).await?;
+            next = state.prev;
             states.push((object_id, state));
         }
 
-        states.sort_by(|(left_id, left), (right_id, right)| {
-            left.seq
-                .cmp(&right.seq)
-                .then(left.lease_seq.cmp(&right.lease_seq))
-                .then(left_id.cmp(right_id))
-        });
+        states.reverse();
+        states.retain(|(_object_id, state)| after_seq.is_none_or(|min_seq| state.seq > min_seq));
         states.truncate(limit);
         Ok(states)
+    }
+
+    /// Return canonical root/head/sequence status for operator explain routes.
+    ///
+    /// When a symbol store is supplied, `mesh_replica_count` is derived from
+    /// the root object's symbol distribution. Without that distribution, the
+    /// field remains `None` rather than inventing a replica count from a
+    /// placement policy target.
+    ///
+    /// # Errors
+    /// Returns an error if the canonical root or head cannot be decoded.
+    pub async fn canonical_status(
+        &self,
+        symbol_store: Option<&dyn SymbolStore>,
+    ) -> Result<ConnectorStateCanonicalStatus> {
+        let Some((root_id, root)) = self.read_root().await? else {
+            return Ok(ConnectorStateCanonicalStatus::missing(
+                self.connector_id.clone(),
+            ));
+        };
+
+        let last_canonical_seq = match root.head {
+            Some(head_id) => Some(self.load_state_object(&head_id).await?.1.seq),
+            None => None,
+        };
+        let mesh_replica_count = match symbol_store {
+            Some(symbol_store) => symbol_store
+                .get_distribution(&root_id)
+                .await
+                .map(|distribution| distribution.distinct_nodes()),
+            None => None,
+        };
+
+        Ok(ConnectorStateCanonicalStatus::from_root(
+            Some(root_id),
+            &root,
+            last_canonical_seq,
+            mesh_replica_count,
+        ))
+    }
+
+    /// Verify the canonical connector-state root and head before yielding a
+    /// singleton-writer lease.
+    ///
+    /// The store does not buffer connector-local writes, so callers must append
+    /// any in-flight state object before invoking this barrier. This method is
+    /// the fail-closed durability check used by host/supervisor adapters: it
+    /// reloads the canonical root, verifies the referenced head object, returns
+    /// the head sequence and fencing evidence, and emits lease flush telemetry.
+    ///
+    /// # Errors
+    /// Returns an error if the canonical root or referenced head is malformed,
+    /// missing, or fails content-id verification.
+    pub async fn flush_before_lease_yield(&self) -> Result<ConnectorStateLeaseYieldFlush> {
+        let result = self.flush_before_lease_yield_inner().await;
+        let outcome = match &result {
+            Ok(flush) if flush.root_object_id.is_some() => "success",
+            Ok(_) => "no_state",
+            Err(_) => "error",
+        };
+        fcp_telemetry::metrics::record_lease_flushed_on_yield("singleton_writer", outcome);
+        result
+    }
+
+    async fn flush_before_lease_yield_inner(&self) -> Result<ConnectorStateLeaseYieldFlush> {
+        let Some((root_object_id, root)) = self.read_root().await? else {
+            return Ok(ConnectorStateLeaseYieldFlush::missing(self));
+        };
+
+        let Some(head_object_id) = root.head else {
+            return Ok(ConnectorStateLeaseYieldFlush {
+                connector_id: root.connector_id,
+                instance_id: root.instance_id,
+                zone_id: root.zone_id,
+                root_object_id: Some(root_object_id),
+                head_object_id: None,
+                last_canonical_seq: None,
+                lease_seq: None,
+                lease_object_id: None,
+            });
+        };
+        let (_loaded_id, head) = self.load_state_object(&head_object_id).await?;
+
+        Ok(ConnectorStateLeaseYieldFlush {
+            connector_id: root.connector_id,
+            instance_id: root.instance_id,
+            zone_id: root.zone_id,
+            root_object_id: Some(root_object_id),
+            head_object_id: Some(head_object_id),
+            last_canonical_seq: Some(head.seq),
+            lease_seq: Some(head.lease_seq),
+            lease_object_id: Some(head.lease_object_id),
+        })
     }
 
     /// Emit a snapshot for the current head, if any.
@@ -532,9 +861,21 @@ impl FcpStoreConnectorStateStore {
     }
 
     async fn compact_inner(&self, before_seq: u64) -> Result<usize> {
+        // The current head is still referenced by the root, so relaxing its
+        // retention would let a retention-only GC strand the live chain
+        // (`read_root`/`current_head` would then fail with `MissingHead`).
+        // Honor the documented "non-head chain entries" contract and never
+        // touch the head, even when `before_seq` exceeds the head sequence.
+        let head_object_id = match self.read_root().await? {
+            Some((_root_id, root)) => root.head,
+            None => return Ok(0),
+        };
         let states = self.read_chain(None, usize::MAX).await?;
         let mut updated = 0;
         for (object_id, state) in states {
+            if head_object_id.as_ref() == Some(&object_id) {
+                continue;
+            }
             if state.seq < before_seq {
                 self.object_store
                     .set_retention(&object_id, RetentionClass::Ephemeral)
@@ -599,6 +940,31 @@ impl FcpStoreConnectorStateStore {
         Ok(object_id)
     }
 
+    async fn store_state_object_with_retry(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId> {
+        let mut delays = self.state_object_write_retry_policy.retry_delays();
+        let mut retry_index = 0_u32;
+
+        loop {
+            match self.store_state_object(state_obj.clone()).await {
+                Ok(object_id) => return Ok(object_id),
+                Err(err) if Self::is_retryable_write_error(&err) => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err);
+                    };
+                    self.record_write_retry("write_state_object", retry_index, delay, &err);
+                    retry_index = retry_index.saturating_add(1);
+                    if !delay.is_zero() {
+                        fcp_async_core::time::sleep(delay).await;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     async fn maybe_emit_snapshot(
         &self,
         object_id: ObjectId,
@@ -613,6 +979,30 @@ impl FcpStoreConnectorStateStore {
             return Ok(None);
         }
         self.emit_snapshot(object_id, state_obj).await.map(Some)
+    }
+
+    async fn maybe_emit_snapshot_after_root_commit(
+        &self,
+        object_id: ObjectId,
+        state_obj: &ConnectorStateObject,
+    ) -> Option<ObjectId> {
+        match self.maybe_emit_snapshot(object_id, state_obj).await {
+            Ok(snapshot_object_id) => snapshot_object_id,
+            Err(err) => {
+                tracing::warn!(
+                    target: CONNECTOR_STATE_TRACING_TARGET,
+                    event_type = CONNECTOR_STATE_SNAPSHOT_EVENT,
+                    connector_id = %self.connector_id,
+                    zone_id = %self.zone_id,
+                    operation = "snapshot_after_root_commit",
+                    result = "skipped_after_error",
+                    seq = state_obj.seq,
+                    error = %err,
+                    "connector-state append already committed root; skipping failed snapshot emission"
+                );
+                None
+            }
+        }
     }
 
     async fn elapsed_snapshot_due(&self, state_obj: &ConnectorStateObject) -> Result<bool> {
@@ -783,12 +1173,36 @@ impl FcpStoreConnectorStateStore {
         Ok(())
     }
 
+    fn verify_authorized_state_signature(
+        state: &ConnectorStateObject,
+        authorization: &ConnectorStateWriteAuthorization,
+    ) -> Result<()> {
+        if state.writer_public_key != authorization.writer_public_key() {
+            return Err(ConnectorStateStoreError::InvalidStateSignature(
+                "state writer key does not match append authorization".to_string(),
+            ));
+        }
+        Self::verify_state_signature(state)
+    }
+
+    fn verify_state_signature(state: &ConnectorStateObject) -> Result<()> {
+        let verifying_key =
+            Ed25519VerifyingKey::from_bytes(&state.writer_public_key).map_err(|err| {
+                ConnectorStateStoreError::InvalidStateSignature(format!(
+                    "state writer key rejected: {err}"
+                ))
+            })?;
+        state
+            .verify_signature_with(&verifying_key)
+            .map_err(|err| ConnectorStateStoreError::InvalidStateSignature(err.to_string()))
+    }
+
     fn validate_state_cbor(state_cbor: &[u8]) -> Result<()> {
-        if state_cbor.len() > MAX_CANONICAL_OBJECT_BYTES {
+        if state_cbor.len() > MAX_CONNECTOR_STATE_CBOR_BYTES {
             return Err(ConnectorStateStoreError::InvalidStateCbor(
                 SerializationError::PayloadTooLarge {
                     len: state_cbor.len(),
-                    max: MAX_CANONICAL_OBJECT_BYTES,
+                    max: MAX_CONNECTOR_STATE_CBOR_BYTES,
                 },
             ));
         }
@@ -844,6 +1258,24 @@ impl FcpStoreConnectorStateStore {
             return Err(ConnectorStateStoreError::ContentIdMismatch {
                 claimed: object_id,
                 computed,
+            });
+        }
+        self.ensure_trusted_writer(state)?;
+        Self::verify_state_signature(state)?;
+        Ok(())
+    }
+
+    /// Enforce the read-path writer pin, when one is configured.
+    ///
+    /// Without a pin this is a no-op: the object is then only bound to its own
+    /// embedded writer key by [`Self::verify_state_signature`], which keyed
+    /// content-ids protect from non-members but not from zone insiders.
+    fn ensure_trusted_writer(&self, state: &ConnectorStateObject) -> Result<()> {
+        if let Some(trusted) = &self.trusted_writer_keys
+            && !trusted.contains(&state.writer_public_key)
+        {
+            return Err(ConnectorStateStoreError::UntrustedWriterKey {
+                writer_public_key: writer_key_hex(&state.writer_public_key),
             });
         }
         Ok(())
@@ -972,6 +1404,46 @@ impl FcpStoreConnectorStateStore {
         })
     }
 
+    fn ensure_write_authorized(
+        &self,
+        connector_id: &ConnectorId,
+        authorization: &ConnectorStateWriteAuthorization,
+    ) -> std::result::Result<(), ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        if authorization.connector_id() != connector_id {
+            return Err(ConnectorStateError::AuthorizationDenied {
+                connector_id: connector_id.clone(),
+                reason: format!(
+                    "authorization connector {} does not match append connector {}",
+                    authorization.connector_id(),
+                    connector_id
+                ),
+            });
+        }
+        if authorization.zone_id() != &self.zone_id {
+            return Err(ConnectorStateError::AuthorizationDenied {
+                connector_id: connector_id.clone(),
+                reason: format!(
+                    "authorization zone {} does not match store zone {}",
+                    authorization.zone_id(),
+                    self.zone_id
+                ),
+            });
+        }
+        if let Some(trusted) = &self.trusted_writer_keys
+            && !trusted.contains(&authorization.writer_public_key())
+        {
+            return Err(ConnectorStateError::AuthorizationDenied {
+                connector_id: connector_id.clone(),
+                reason: format!(
+                    "authorization writer key {} is not in the store's trusted writer set",
+                    writer_key_hex(&authorization.writer_public_key())
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn record_operation_telemetry(
         &self,
         event_type: &'static str,
@@ -997,12 +1469,74 @@ impl FcpStoreConnectorStateStore {
         );
     }
 
+    fn record_read_cache_telemetry(&self, operation: &'static str, result: &'static str) {
+        let Some(metric_name) = Self::read_cache_metric_for_result(result) else {
+            return;
+        };
+        fcp_telemetry::metrics::increment_counter(
+            metric_name,
+            &[("operation", operation), ("result", result)],
+        );
+        if metric_name == CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC {
+            tracing::info!(
+                target: CONNECTOR_STATE_TRACING_TARGET,
+                event_type = CONNECTOR_STATE_FALL_THROUGH_EVENT,
+                connector_id = %self.connector_id,
+                zone_id = %self.zone_id,
+                operation,
+                cache_result = result,
+                canonical_storage = "mesh",
+                result = "fcp-store-read",
+                metric_name,
+                "connector-state cache miss fell through to canonical fcp-store"
+            );
+        }
+    }
+
+    const fn read_cache_metric_for_result(result: &str) -> Option<&'static str> {
+        match result.as_bytes() {
+            b"hit" => Some(CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC),
+            b"miss" => Some(CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC),
+            _ => None,
+        }
+    }
+
+    fn record_write_retry(
+        &self,
+        operation: &'static str,
+        retry_index: u32,
+        delay: Duration,
+        err: &ConnectorStateStoreError,
+    ) {
+        tracing::warn!(
+            target: CONNECTOR_STATE_TRACING_TARGET,
+            event_type = CONNECTOR_STATE_WRITE_RETRY_EVENT,
+            connector_id = %self.connector_id,
+            zone_id = %self.zone_id,
+            operation,
+            result = "retry",
+            retry_index,
+            retry_delay_ms = delay.as_millis(),
+            reason = %err,
+        );
+    }
+
+    const fn is_retryable_write_error(err: &ConnectorStateStoreError) -> bool {
+        matches!(
+            err,
+            ConnectorStateStoreError::ObjectStore(ObjectStoreError::Io(_))
+        )
+    }
+
     fn publish_change(
         &self,
         kind: ConnectorStateChangeKind,
         object_id: Option<ObjectId>,
         seq: Option<u64>,
-    ) {
+    ) -> ConnectorStateChange {
+        if matches!(kind, ConnectorStateChangeKind::RootUpdated) {
+            self.change_bus.mark_root_updated();
+        }
         let change = ConnectorStateChange {
             connector_id: self.connector_id.clone(),
             instance_id: self.instance_id.clone(),
@@ -1012,7 +1546,8 @@ impl FcpStoreConnectorStateStore {
             seq,
             observed_at: Self::now_unix_seconds(),
         };
-        let _ = self.change_tx.send(change);
+        let _ = self.change_bus.sender.send(change.clone());
+        change
     }
 
     fn now_unix_seconds() -> u64 {
@@ -1040,8 +1575,11 @@ impl FcpStoreConnectorStateStore {
             | ConnectorStateStoreError::MissingLeaseReference(_)
             | ConnectorStateStoreError::EmptyStateCbor
             | ConnectorStateStoreError::InvalidStateCbor(_)
+            | ConnectorStateStoreError::InvalidStateSignature(_)
             | ConnectorStateStoreError::SequenceMismatch { .. }
             | ConnectorStateStoreError::SequenceOverflow(_)
+            | ConnectorStateStoreError::ChainCycle(_)
+            | ConnectorStateStoreError::UntrustedWriterKey { .. }
             | ConnectorStateStoreError::Serialization(_) => ConnectorStateError::MalformedState {
                 connector_id: self.connector_id.clone(),
                 reason: err.to_string(),
@@ -1066,9 +1604,14 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
     async fn append_object(
         &self,
         connector_id: &ConnectorId,
+        authorization: &ConnectorStateWriteAuthorization,
         object: ConnectorStateObject,
     ) -> std::result::Result<ConnectorStateAppendOutcome, ConnectorStateError> {
-        self.ensure_requested_connector(connector_id)?;
+        self.ensure_write_authorized(connector_id, authorization)?;
+        self.validate_incoming_state_object(&object)
+            .map_err(|err| self.to_connector_state_error(err))?;
+        Self::verify_authorized_state_signature(&object, authorization)
+            .map_err(|err| self.to_connector_state_error(err))?;
         Self::append_object(self, object)
             .await
             .map_err(|err| self.to_connector_state_error(err))
@@ -1089,6 +1632,16 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
                     .map(|(_object_id, state)| state)
                     .collect()
             })
+            .map_err(|err| self.to_connector_state_error(err))
+    }
+
+    async fn canonical_status(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> std::result::Result<ConnectorStateCanonicalStatus, ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        Self::canonical_status(self, None)
+            .await
             .map_err(|err| self.to_connector_state_error(err))
     }
 
@@ -1138,7 +1691,7 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
         connector_id: &ConnectorId,
     ) -> std::result::Result<ConnectorStateChangeStream, ConnectorStateError> {
         self.ensure_requested_connector(connector_id)?;
-        let receiver = self.change_tx.subscribe();
+        let receiver = self.change_bus.sender.subscribe();
         let connector_id = self.connector_id.clone();
         Ok(Box::pin(stream::unfold(receiver, move |mut receiver| {
             let connector_id = connector_id.clone();
@@ -1161,19 +1714,98 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
     }
 }
 
+#[derive(Debug)]
+struct ConnectorStateChangeBus {
+    sender: broadcast::Sender<ConnectorStateChange>,
+    root_generation: AtomicU64,
+}
+
+impl ConnectorStateChangeBus {
+    fn new() -> Self {
+        let (sender, _receiver) = broadcast::channel(CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY);
+        Self {
+            sender,
+            root_generation: AtomicU64::new(0),
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.root_generation.load(Ordering::Acquire)
+    }
+
+    fn mark_root_updated(&self) {
+        self.root_generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConnectorStateChangeBusKey {
+    object_store_addr: usize,
+    connector_id: String,
+    zone_id: String,
+}
+
+type ConnectorStateChangeBusRegistry =
+    parking_lot::Mutex<HashMap<ConnectorStateChangeBusKey, Weak<ConnectorStateChangeBus>>>;
+
+fn change_bus_registry() -> &'static ConnectorStateChangeBusRegistry {
+    static REGISTRY: OnceLock<ConnectorStateChangeBusRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+fn shared_change_bus(
+    object_store: &Arc<dyn ObjectStore>,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> Arc<ConnectorStateChangeBus> {
+    let key = ConnectorStateChangeBusKey {
+        object_store_addr: Arc::as_ptr(object_store).cast::<()>() as usize,
+        connector_id: connector_id.to_string(),
+        zone_id: zone_id.as_str().to_owned(),
+    };
+    let mut registry = change_bus_registry().lock();
+    if let Some(existing) = registry.get(&key).and_then(Weak::upgrade) {
+        return existing;
+    }
+
+    let change_bus = Arc::new(ConnectorStateChangeBus::new());
+    registry.insert(key, Arc::downgrade(&change_bus));
+    registry.retain(|_, candidate| candidate.strong_count() > 0);
+    change_bus
+}
+
 fn headers_match(left: &ObjectHeader, right: &ObjectHeader) -> Result<bool> {
     Ok(fcp_cbor::to_canonical_cbor(left)? == fcp_cbor::to_canonical_cbor(right)?)
+}
+
+fn writer_key_hex(key: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    key.iter().fold(String::with_capacity(64), |mut out, byte| {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+        out
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use fcp_prelude::{Provenance, Signature};
+    use bytes::Bytes;
+    use chrono::Duration;
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+    use fcp_prelude::{
+        CONNECTOR_STATE_APPEND_OPERATION_ID, CONNECTOR_STATE_WRITE_CAPABILITY_ID,
+        CapabilityConstraints, CapabilityToken, CapabilityVerifier, Provenance, Signature,
+        connector_state_resource_uri,
+    };
     use futures_util::StreamExt;
 
     use super::*;
-    use crate::{MemoryObjectStore, MemoryObjectStoreConfig};
+    use crate::{
+        MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+        ObjectSymbolMeta, ObjectTransmissionInfo, StoredSymbol, SymbolMeta,
+    };
 
     fn run_async<F, T>(future: F) -> T
     where
@@ -1184,6 +1816,10 @@ mod tests {
 
     fn store() -> Arc<MemoryObjectStore> {
         Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()))
+    }
+
+    fn symbol_store() -> MemorySymbolStore {
+        MemorySymbolStore::new(MemorySymbolStoreConfig::default())
     }
 
     fn object_id_key() -> ObjectIdKey {
@@ -1214,6 +1850,132 @@ mod tests {
         FcpStoreConnectorStateStore::new(object_store, object_id_key(), connector_id(), zone_id())
     }
 
+    struct FailNthPutObjectStore {
+        inner: Arc<dyn ObjectStore>,
+        fail_on_put: usize,
+        puts: AtomicUsize,
+    }
+
+    impl FailNthPutObjectStore {
+        fn new(inner: Arc<dyn ObjectStore>, fail_on_put: usize) -> Self {
+            Self {
+                inner,
+                fail_on_put,
+                puts: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for FailNthPutObjectStore {
+        async fn put(&self, object: StoredObject) -> std::result::Result<(), ObjectStoreError> {
+            let put_number = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
+            if put_number == self.fail_on_put {
+                return Err(ObjectStoreError::Io(
+                    "simulated connector state put outage".to_string(),
+                ));
+            }
+            self.inner.put(object).await
+        }
+
+        async fn get(&self, id: &ObjectId) -> std::result::Result<StoredObject, ObjectStoreError> {
+            self.inner.get(id).await
+        }
+
+        async fn exists(&self, id: &ObjectId) -> bool {
+            self.inner.exists(id).await
+        }
+
+        async fn delete(&self, id: &ObjectId) -> std::result::Result<(), ObjectStoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn get_header(
+            &self,
+            id: &ObjectId,
+        ) -> std::result::Result<ObjectHeader, ObjectStoreError> {
+            self.inner.get_header(id).await
+        }
+
+        async fn get_storage_meta(
+            &self,
+            id: &ObjectId,
+        ) -> std::result::Result<StorageMeta, ObjectStoreError> {
+            self.inner.get_storage_meta(id).await
+        }
+
+        async fn set_retention(
+            &self,
+            id: &ObjectId,
+            retention: RetentionClass,
+        ) -> std::result::Result<(), ObjectStoreError> {
+            self.inner.set_retention(id, retention).await
+        }
+
+        async fn list_zone(&self, zone_id: &ZoneId) -> Vec<ObjectId> {
+            self.inner.list_zone(zone_id).await
+        }
+
+        async fn storage_used(&self) -> u64 {
+            self.inner.storage_used().await
+        }
+
+        async fn storage_quota(&self) -> u64 {
+            self.inner.storage_quota().await
+        }
+    }
+
+    fn capability_constraints_cbor(resource_allow: Vec<String>) -> Vec<u8> {
+        let constraints = CapabilityConstraints {
+            resource_allow,
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).unwrap();
+        cbor
+    }
+
+    fn write_authorization_with_key() -> (ConnectorStateWriteAuthorization, Ed25519SigningKey) {
+        let connector_id = connector_id();
+        let zone_id = zone_id();
+        let instance_id = InstanceId::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let now = fcp_prelude::Utc::now();
+        let token = CapabilityToken::from_raw(
+            CapabilityTokenBuilder::new()
+                .capability_id(CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+                .zone_id(zone_id.as_str())
+                .target_instance(instance_id.as_str())
+                .principal("principal:test")
+                .operations(&[CONNECTOR_STATE_APPEND_OPERATION_ID])
+                .issuer("node:test")
+                .validity(now, now + Duration::hours(1))
+                .try_constraints_cbor(&capability_constraints_cbor(vec![
+                    connector_state_resource_uri(&connector_id),
+                ]))
+                .unwrap()
+                .sign(&signing_key)
+                .unwrap(),
+        );
+        let verifier = CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            zone_id.clone(),
+            instance_id,
+        );
+        let authorization = ConnectorStateWriteAuthorization::verify_append_token(
+            &verifier,
+            token,
+            &connector_id,
+            &zone_id,
+        )
+        .unwrap();
+        (authorization, signing_key)
+    }
+
+    fn write_authorization() -> ConnectorStateWriteAuthorization {
+        write_authorization_with_key().0
+    }
+
     fn header(schema: SchemaId, created_at: u64, lease: Option<ObjectId>) -> ObjectHeader {
         ObjectHeader {
             schema,
@@ -1227,8 +1989,12 @@ mod tests {
         }
     }
 
+    fn test_state_signing_key() -> Ed25519SigningKey {
+        Ed25519SigningKey::from_bytes(&[0x5a; 32]).expect("fixed test signing key should parse")
+    }
+
     fn state(seq: u64, prev: Option<ObjectId>, lease: ObjectId) -> ConnectorStateObject {
-        ConnectorStateObject {
+        let mut state = ConnectorStateObject {
             header: header(
                 FcpStoreConnectorStateStore::state_object_schema_id(),
                 1_700_000_000 + seq,
@@ -1243,8 +2009,26 @@ mod tests {
             updated_at: 1_700_000_000 + seq,
             lease_seq: seq + 10,
             lease_object_id: lease,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
-        }
+        };
+        state
+            .sign_with(&test_state_signing_key())
+            .expect("test connector state should sign");
+        state
+    }
+
+    fn signed_state(
+        seq: u64,
+        prev: Option<ObjectId>,
+        lease: ObjectId,
+        signing_key: &Ed25519SigningKey,
+    ) -> ConnectorStateObject {
+        let mut state = state(seq, prev, lease);
+        state
+            .sign_with(signing_key)
+            .expect("test connector state should sign");
+        state
     }
 
     fn root_with_head(head: Option<ObjectId>, created_at: u64) -> ConnectorStateRoot {
@@ -1279,9 +2063,40 @@ mod tests {
                 ..
             } => (object_id, snapshot_object_id),
             ConnectorStateAppendOutcome::Conflict { .. } => {
-                assert!(false, "unexpected conflict");
-                (ObjectId::from_bytes([0; 32]), None)
+                panic!("unexpected conflict");
             }
+        }
+    }
+
+    fn store_root_symbols(symbol_store: &MemorySymbolStore, root_id: ObjectId) {
+        let meta = ObjectSymbolMeta {
+            object_id: root_id,
+            zone_id: zone_id(),
+            oti: ObjectTransmissionInfo {
+                transfer_length: 8,
+                symbol_size: 4,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 4,
+                payload_hash: None,
+            },
+            source_symbols: 2,
+            first_symbol_at: 1_700_000_000,
+        };
+        run_async(symbol_store.put_object_meta(meta)).unwrap();
+
+        for (esi, source_node) in [(0, 10), (1, 20)] {
+            run_async(symbol_store.put_symbol(StoredSymbol {
+                meta: SymbolMeta {
+                    object_id: root_id,
+                    esi,
+                    zone_id: zone_id(),
+                    source_node: Some(source_node),
+                    stored_at: 1_700_000_001 + u64::from(esi),
+                },
+                data: Bytes::from_static(b"root"),
+            }))
+            .unwrap();
         }
     }
 
@@ -1347,9 +2162,46 @@ mod tests {
     }
 
     #[test]
+    fn read_cache_metric_selection_matches_hit_miss_contract() {
+        assert_eq!(
+            FcpStoreConnectorStateStore::read_cache_metric_for_result("hit"),
+            Some(CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC)
+        );
+        assert_eq!(
+            FcpStoreConnectorStateStore::read_cache_metric_for_result("miss"),
+            Some(CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC)
+        );
+        assert_eq!(
+            FcpStoreConnectorStateStore::read_cache_metric_for_result("error"),
+            None
+        );
+    }
+
+    #[test]
+    fn read_cache_telemetry_records_hit_and_fall_through_without_panic() {
+        let state_store = test_store(store());
+        state_store.record_read_cache_telemetry("read", "hit");
+        state_store.record_read_cache_telemetry("read", "miss");
+        state_store.record_read_cache_telemetry("read", "error");
+    }
+
+    #[test]
     fn read_root_empty_store_returns_none() {
         let state_store = test_store(store());
         assert!(run_async(state_store.read_root()).unwrap().is_none());
+    }
+
+    #[test]
+    fn canonical_status_empty_store_reports_missing_root() {
+        let state_store = test_store(store());
+        let status = run_async(state_store.canonical_status(None)).unwrap();
+
+        assert_eq!(status.connector_id, connector_id());
+        assert!(!status.root_present);
+        assert!(status.root_object_id.is_none());
+        assert!(status.head_object_id.is_none());
+        assert!(status.last_canonical_seq.is_none());
+        assert!(status.mesh_replica_count.is_none());
     }
 
     #[test]
@@ -1395,12 +2247,328 @@ mod tests {
     }
 
     #[test]
+    fn read_chain_follows_committed_root_and_hides_unrooted_state() {
+        let object_store = store();
+        let state_store = test_store(object_store.clone());
+        let orphan = state(7, None, lease_id(7));
+        let stored = state_store
+            .stored_object(&orphan.header, &orphan, RetentionClass::Pinned)
+            .unwrap();
+        run_async(object_store.put(stored)).unwrap();
+
+        assert!(run_async(state_store.read_root()).unwrap().is_none());
+        assert!(
+            run_async(state_store.read_chain(None, 10))
+                .unwrap()
+                .is_empty()
+        );
+
+        let (head, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].0, head);
+        assert_eq!(chain[0].1.seq, 0);
+        assert_ne!(chain[0].1.lease_object_id, lease_id(7));
+    }
+
+    #[test]
+    fn read_root_rejects_stored_state_with_invalid_signature() {
+        let object_store = store();
+        let state_store = test_store(object_store.clone());
+        let mut bad_state = state(0, None, lease_id(1));
+        bad_state.signature = Signature::zero();
+        let stored = state_store
+            .stored_object(&bad_state.header, &bad_state, RetentionClass::Pinned)
+            .unwrap();
+        let bad_head = stored.object_id;
+        run_async(object_store.put(stored)).unwrap();
+        run_async(state_store.store_root(root_with_head(Some(bad_head), 1_700_000_100))).unwrap();
+
+        let err = run_async(state_store.read_root()).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::InvalidStateSignature(_)
+        ));
+    }
+
+    #[test]
+    fn pinned_read_accepts_trusted_writer_chain() {
+        let object_store = store();
+        let state_store = test_store(object_store)
+            .with_trusted_writer_keys([test_state_signing_key().verifying_key().to_bytes()]);
+
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
+
+        let root = run_async(state_store.read_root()).unwrap().unwrap().1;
+        assert_eq!(root.head, Some(head1));
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 2);
+    }
+
+    #[test]
+    fn pinned_read_rejects_state_from_untrusted_writer() {
+        let object_store = store();
+        let unpinned = test_store(object_store.clone());
+        let (legit_head, _) = append_ok(&unpinned, state(0, None, lease_id(1)));
+
+        // A zone insider holding the shared object-id key plants a
+        // self-signed higher-seq chain: valid schema, valid content-id,
+        // valid self-signature, but a foreign writer key.
+        let insider_key = Ed25519SigningKey::from_bytes(&[0x77; 32]).unwrap();
+        let forged = signed_state(5, None, lease_id(9), &insider_key);
+        let stored = unpinned
+            .stored_object(&forged.header, &forged, RetentionClass::Pinned)
+            .unwrap();
+        let forged_head = stored.object_id;
+        run_async(object_store.put(stored)).unwrap();
+        run_async(unpinned.store_root(root_with_head(Some(forged_head), 1_700_000_500))).unwrap();
+
+        // Without a pin the forged chain outranks the legitimate head — this
+        // is the nr4cq insider gap the pin exists to close.
+        let unpinned_root = run_async(unpinned.read_root()).unwrap().unwrap().1;
+        assert_eq!(unpinned_root.head, Some(forged_head));
+        assert_ne!(unpinned_root.head, Some(legit_head));
+
+        // With the pin, reads fail closed on the untrusted writer key.
+        let pinned = test_store(object_store)
+            .with_trusted_writer_keys([test_state_signing_key().verifying_key().to_bytes()]);
+        let err = run_async(pinned.read_root()).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::UntrustedWriterKey { .. }
+        ));
+        let err = run_async(pinned.read_chain(None, 10)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::UntrustedWriterKey { .. }
+        ));
+    }
+
+    #[test]
+    fn trait_append_rejects_authorization_writer_outside_pin() {
+        let object_store = store();
+        let (authorization, signing_key) = write_authorization_with_key();
+
+        // Pin includes the authorization writer: append commits.
+        let matching = test_store(object_store.clone())
+            .with_trusted_writer_keys([signing_key.verifying_key().to_bytes()]);
+        let outcome = run_async(
+            <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
+                &matching,
+                &connector_id(),
+                &authorization,
+                signed_state(0, None, lease_id(1), &signing_key),
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            ConnectorStateAppendOutcome::Committed { .. }
+        ));
+
+        // Pin excludes the authorization writer: append is refused before any
+        // object is validated or stored.
+        let excluding = test_store(object_store).with_trusted_writer_keys([[0xEE_u8; 32]]);
+        let err = run_async(
+            <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
+                &excluding,
+                &connector_id(),
+                &authorization,
+                signed_state(1, None, lease_id(2), &signing_key),
+            ),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateError::AuthorizationDenied { .. }
+        ));
+    }
+
+    #[test]
     fn append_second_object_links_to_previous_head() {
         let state_store = test_store(store());
         let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
         let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
         let root = run_async(state_store.read_root()).unwrap().unwrap().1;
         assert_eq!(root.head, Some(head1));
+    }
+
+    #[test]
+    fn append_retries_transient_state_object_write_with_policy() {
+        let inner: Arc<dyn ObjectStore> = store();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(FailNthPutObjectStore::new(inner, 1));
+        let state_store = test_store(object_store).with_state_object_write_retry_policy(
+            BackoffPolicy::new(1, std::time::Duration::ZERO, std::time::Duration::ZERO, 1.0),
+        );
+
+        let (head, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+
+        let root = run_async(state_store.read_root()).unwrap().unwrap().1;
+        assert_eq!(root.head, Some(head));
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].1.seq, 0);
+        assert_eq!(chain[0].1.lease_object_id, lease_id(1));
+    }
+
+    #[test]
+    fn append_commits_when_post_root_snapshot_write_fails() {
+        let inner: Arc<dyn ObjectStore> = store();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(FailNthPutObjectStore::new(inner, 3));
+        let state_store = test_store(object_store).with_snapshot_every_entries(1);
+
+        let outcome = run_async(state_store.append_object(state(0, None, lease_id(1)))).unwrap();
+        let ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } = outcome
+        else {
+            panic!("post-root snapshot failure must not report a conflict");
+        };
+
+        assert_eq!(seq, 0);
+        assert!(snapshot_object_id.is_none());
+        let root = run_async(state_store.read_root()).unwrap().unwrap().1;
+        assert_eq!(root.head, Some(object_id));
+        assert!(root.header.refs.contains(&object_id));
+
+        let stored_root = run_async(state_store.object_store.get(&root_object_id)).unwrap();
+        assert_eq!(
+            stored_root.header.schema,
+            FcpStoreConnectorStateStore::root_schema_id()
+        );
+
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].0, object_id);
+        assert_eq!(chain[0].1.seq, 0);
+        assert!(run_async(state_store.latest_snapshot()).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_root_prefers_highest_head_sequence_over_newer_stale_root() {
+        let state_store = test_store(store());
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
+        run_async(state_store.store_root(root_with_head(Some(head0), 9_999_999_999))).unwrap();
+
+        let root = run_async(state_store.read_root()).unwrap().unwrap().1;
+        assert_eq!(root.head, Some(head1));
+
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].1.seq, 0);
+        assert_eq!(chain[1].1.seq, 1);
+    }
+
+    #[test]
+    fn canonical_status_reports_root_head_and_sequence() {
+        let state_store = test_store(store());
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let outcome =
+            run_async(state_store.append_object(state(1, Some(head0), lease_id(2)))).unwrap();
+        let (head1, root1, seq1) = match outcome {
+            ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                ..
+            } => (object_id, root_object_id, seq),
+            ConnectorStateAppendOutcome::Conflict { .. } => panic!("unexpected conflict"),
+        };
+
+        let status = run_async(state_store.canonical_status(None)).unwrap();
+
+        assert!(status.root_present);
+        assert_eq!(status.connector_id, connector_id());
+        assert_eq!(status.zone_id, Some(zone_id()));
+        assert_eq!(status.model, Some(ConnectorStateModel::SingletonWriter));
+        assert_eq!(status.root_object_id, Some(root1));
+        assert_eq!(status.head_object_id, Some(head1));
+        assert_eq!(status.last_canonical_seq, Some(seq1));
+        assert_eq!(status.state_schema_version, Some(1));
+        assert_eq!(status.mesh_replica_count, None);
+    }
+
+    #[test]
+    fn canonical_status_reports_proven_root_replica_count_from_symbols() {
+        let state_store = test_store(store());
+        let symbol_store = symbol_store();
+        let outcome = run_async(state_store.append_object(state(0, None, lease_id(1)))).unwrap();
+        let (head, root, seq) = match outcome {
+            ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                ..
+            } => (object_id, root_object_id, seq),
+            ConnectorStateAppendOutcome::Conflict { .. } => panic!("unexpected conflict"),
+        };
+        store_root_symbols(&symbol_store, root);
+
+        let status = run_async(state_store.canonical_status(Some(&symbol_store))).unwrap();
+
+        assert_eq!(status.root_object_id, Some(root));
+        assert_eq!(status.head_object_id, Some(head));
+        assert_eq!(status.last_canonical_seq, Some(seq));
+        assert_eq!(status.mesh_replica_count, Some(2));
+    }
+
+    #[test]
+    fn flush_before_lease_yield_reports_committed_root_head_and_fence() {
+        let state_store = test_store(store());
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let outcome =
+            run_async(state_store.append_object(state(1, Some(head0), lease_id(2)))).unwrap();
+        let (head1, root1) = match outcome {
+            ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                ..
+            } => (object_id, root_object_id),
+            ConnectorStateAppendOutcome::Conflict { .. } => panic!("unexpected conflict"),
+        };
+
+        let flush = run_async(state_store.flush_before_lease_yield()).unwrap();
+
+        assert_eq!(flush.connector_id, connector_id());
+        assert_eq!(flush.instance_id, None);
+        assert_eq!(flush.zone_id, zone_id());
+        assert_eq!(flush.root_object_id, Some(root1));
+        assert_eq!(flush.head_object_id, Some(head1));
+        assert_eq!(flush.last_canonical_seq, Some(1));
+        assert_eq!(flush.lease_seq, Some(11));
+        assert_eq!(flush.lease_object_id, Some(lease_id(2)));
+    }
+
+    #[test]
+    fn flush_before_lease_yield_reports_no_state_without_fabricating_root() {
+        let state_store = test_store(store());
+
+        let flush = run_async(state_store.flush_before_lease_yield()).unwrap();
+
+        assert_eq!(flush.connector_id, connector_id());
+        assert_eq!(flush.zone_id, zone_id());
+        assert!(flush.root_object_id.is_none());
+        assert!(flush.head_object_id.is_none());
+        assert!(flush.last_canonical_seq.is_none());
+        assert!(flush.lease_seq.is_none());
+        assert!(flush.lease_object_id.is_none());
+    }
+
+    #[test]
+    fn flush_before_lease_yield_fails_closed_on_missing_root_head() {
+        let state_store = test_store(store());
+        let missing_head = ObjectId::from_bytes([0xE7; 32]);
+        run_async(state_store.store_root(root_with_head(Some(missing_head), 1_700_000_200)))
+            .unwrap();
+
+        let err = run_async(state_store.flush_before_lease_yield()).unwrap_err();
+
+        assert!(matches!(err, ConnectorStateStoreError::MissingHead(id) if id == missing_head));
     }
 
     #[test]
@@ -1419,7 +2587,7 @@ mod tests {
                 assert_eq!(canonical_seq, Some(0));
             }
             ConnectorStateAppendOutcome::Committed { .. } => {
-                assert!(false, "expected conflict");
+                panic!("expected conflict");
             }
         }
     }
@@ -1530,6 +2698,33 @@ mod tests {
     }
 
     #[test]
+    fn append_state_cbor_at_size_cap_reaches_parse_gate() {
+        let state_store = test_store(store());
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor = vec![0xff; MAX_CONNECTOR_STATE_CBOR_BYTES];
+        let err = run_async(state_store.append_object(incoming)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::InvalidStateCbor(SerializationError::CborDeserialize(_))
+        ));
+    }
+
+    #[test]
+    fn append_rejects_state_cbor_above_size_cap() {
+        let state_store = test_store(store());
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor = vec![0xff; MAX_CONNECTOR_STATE_CBOR_BYTES + 1];
+        let err = run_async(state_store.append_object(incoming)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::InvalidStateCbor(SerializationError::PayloadTooLarge {
+                len,
+                max: MAX_CONNECTOR_STATE_CBOR_BYTES,
+            }) if len == MAX_CONNECTOR_STATE_CBOR_BYTES + 1
+        ));
+    }
+
+    #[test]
     fn trait_append_maps_invalid_state_cbor_to_malformed_state() {
         let state_store = test_store(store());
         let mut incoming = state(0, None, lease_id(1));
@@ -1539,6 +2734,7 @@ mod tests {
             <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
                 &state_store,
                 &connector_id(),
+                &write_authorization(),
                 incoming,
             ),
         )
@@ -1548,17 +2744,59 @@ mod tests {
     }
 
     #[test]
-    fn trait_append_maps_quota_failure_to_storage_unavailable() {
-        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig {
-            max_bytes: 1,
-        }));
-        let state_store = test_store(object_store);
+    fn trait_append_rejects_state_writer_key_mismatch() {
+        let state_store = test_store(store());
+        let authorization = write_authorization();
 
         let err = run_async(
             <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
                 &state_store,
                 &connector_id(),
+                &authorization,
                 state(0, None, lease_id(1)),
+            ),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ConnectorStateError::MalformedState { .. }));
+        assert!(run_async(state_store.read_root()).unwrap().is_none());
+    }
+
+    #[test]
+    fn trait_append_rejects_invalid_state_signature() {
+        let state_store = test_store(store());
+        let (authorization, signing_key) = write_authorization_with_key();
+        let mut incoming = signed_state(0, None, lease_id(1), &signing_key);
+        incoming.signature = Signature::zero();
+
+        let err = run_async(
+            <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
+                &state_store,
+                &connector_id(),
+                &authorization,
+                incoming,
+            ),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ConnectorStateError::MalformedState { .. }));
+        assert!(run_async(state_store.read_root()).unwrap().is_none());
+    }
+
+    #[test]
+    fn trait_append_maps_quota_failure_to_storage_unavailable() {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig {
+            max_bytes: 1,
+        }));
+        let state_store = test_store(object_store);
+        let (authorization, signing_key) = write_authorization_with_key();
+
+        let err = run_async(
+            <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
+                &state_store,
+                &connector_id(),
+                &authorization,
+                signed_state(0, None, lease_id(1), &signing_key),
             ),
         )
         .unwrap_err();
@@ -1634,6 +2872,9 @@ mod tests {
         assert!(run_async(scoped.read_root()).unwrap().is_none());
         let mut scoped_state = state(0, None, lease_id(2));
         scoped_state.instance_id = Some(instance);
+        scoped_state
+            .sign_with(&test_state_signing_key())
+            .expect("instance-scoped test state should sign");
         append_ok(&scoped, scoped_state);
         assert!(run_async(scoped.read_root()).unwrap().is_some());
     }
@@ -1660,6 +2901,33 @@ mod tests {
         let new_meta = run_async(object_store.get_storage_meta(&head1)).unwrap();
         assert_eq!(old_meta.retention, RetentionClass::Ephemeral);
         assert_eq!(new_meta.retention, RetentionClass::Pinned);
+    }
+
+    #[test]
+    fn compact_never_marks_head_even_when_before_seq_exceeds_head() {
+        // Per the documented contract, compact only relaxes retention on
+        // non-head chain entries. A `before_seq` past the head sequence must
+        // still leave the head Pinned, or a retention-only GC could delete the
+        // live head and strand the root (MissingHead).
+        let object_store = store();
+        let state_store = test_store(object_store.clone());
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
+
+        let count = run_async(state_store.compact(u64::MAX)).unwrap();
+
+        // Only the non-head predecessor is relaxed; the head is preserved.
+        assert_eq!(count, 1);
+        let old_meta = run_async(object_store.get_storage_meta(&head0)).unwrap();
+        let head_meta = run_async(object_store.get_storage_meta(&head1)).unwrap();
+        assert_eq!(old_meta.retention, RetentionClass::Ephemeral);
+        assert_eq!(
+            head_meta.retention,
+            RetentionClass::Pinned,
+            "head must remain Pinned even when before_seq exceeds its sequence"
+        );
+        // The chain is still fully resolvable through the preserved head.
+        assert!(run_async(state_store.read_root()).unwrap().is_some());
     }
 
     #[test]
@@ -1707,6 +2975,84 @@ mod tests {
         assert_eq!(snapshot.kind, ConnectorStateChangeKind::SnapshotEmitted);
         assert_eq!(snapshot.object_id, Some(snapshot_object_id));
         assert_eq!(snapshot.seq, Some(0));
+    }
+
+    #[test]
+    fn subscribe_changes_reaches_independent_handles_for_same_store() {
+        let object_store = store();
+        let writer = test_store(object_store.clone())
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let reader = test_store(object_store)
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let mut changes = run_async(reader.subscribe_changes(&connector_id())).unwrap();
+
+        let outcome = run_async(writer.append_object(state(0, None, lease_id(1)))).unwrap();
+        let ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } = outcome
+        else {
+            panic!("unexpected conflict");
+        };
+        assert_eq!(seq, 0);
+        assert_eq!(snapshot_object_id, None);
+
+        let appended = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(appended.kind, ConnectorStateChangeKind::ObjectAppended);
+        assert_eq!(appended.object_id, Some(object_id));
+        assert_eq!(appended.seq, Some(0));
+
+        let root = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(root.kind, ConnectorStateChangeKind::RootUpdated);
+        assert_eq!(root.object_id, Some(root_object_id));
+        assert_eq!(root.seq, Some(0));
+
+        let reader_root = run_async(reader.read_root()).unwrap().expect("root");
+        assert_eq!(reader_root.1.head, Some(object_id));
+    }
+
+    #[test]
+    fn observed_replicated_root_invalidates_independent_change_bus() {
+        let inner: Arc<dyn ObjectStore> = store();
+        let writer_object_store: Arc<dyn ObjectStore> =
+            Arc::new(FailNthPutObjectStore::new(Arc::clone(&inner), usize::MAX));
+        let reader_object_store: Arc<dyn ObjectStore> =
+            Arc::new(FailNthPutObjectStore::new(inner, usize::MAX));
+        let writer = test_store(writer_object_store)
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let reader = test_store(reader_object_store)
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let mut changes = run_async(reader.subscribe_changes(&connector_id())).unwrap();
+
+        let outcome = run_async(writer.append_object(state(0, None, lease_id(1)))).unwrap();
+        let ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } = outcome
+        else {
+            panic!("unexpected conflict");
+        };
+        assert_eq!(seq, 0);
+        assert_eq!(snapshot_object_id, None);
+
+        let observed = run_async(reader.observe_replicated_root(root_object_id)).unwrap();
+        assert_eq!(observed.kind, ConnectorStateChangeKind::RootUpdated);
+        assert_eq!(observed.object_id, Some(root_object_id));
+        assert_eq!(observed.seq, Some(0));
+
+        let delivered = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(delivered, observed);
+
+        let reader_root = run_async(reader.read_root()).unwrap().expect("root");
+        assert_eq!(reader_root.1.head, Some(object_id));
     }
 
     #[test]
@@ -1855,7 +3201,9 @@ mod tests {
         stored.header.created_at += 1;
         stored.object_id =
             StoredObject::derive_id(&stored.header, &stored.body, &object_id_key()).unwrap();
+        let tampered_state_id = stored.object_id;
         run_async(object_store.put(stored)).unwrap();
+        run_async(state_store.store_root(root_with_head(Some(tampered_state_id), 11))).unwrap();
         let err = run_async(state_store.read_chain(None, 1)).unwrap_err();
         assert!(matches!(err, ConnectorStateStoreError::HeaderBodyMismatch));
     }

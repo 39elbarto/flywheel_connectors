@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:d264ec6b3430649d5af43f764c8e5334a09a6c05fd392d05b08d75e6241e0c43"
 
 [connector]
 id = "fcp.terraform"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Terraform Cloud/Enterprise IaC management"
 archetypes = ["operational"]
 format = "native"
+status = "ready"
 
 [connector.state]
 model = "singleton_writer"
@@ -22,168 +23,36 @@ migration_hint = "Stores plan artifact hashes and drift checkpoints."
 
 [zones]
 home = "z:infra"
-allowed_sources = ["z:owner", "z:infra"]
+allowed_sources = [
+    "z:owner",
+    "z:infra",
+]
 allowed_targets = ["z:infra"]
-forbidden = ["z:public", "z:community", "z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+    "z:work",
+]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
 optional = [
     "terraform.plan",
     "terraform.apply",
     "terraform.state",
     "terraform.state_write",
 ]
-forbidden = ["system.exec", "network.listen", "media.download", "media.upload"]
-
-# ── Read-only plan operations ───────────────────────────────────────
-
-[provides.operations."terraform.init"]
-description = "Initialize a Terraform working directory"
-capability = "terraform.plan"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["workspace_id"] }
-output_schema = { type = "object", required = ["status"] }
-
-[provides.operations."terraform.init".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
-port_allow = [443]
-require_sni = true
-
-[provides.operations."terraform.init".ai_hints]
-when_to_use = "Initialize a Terraform working directory before running plan or apply."
-common_mistakes = [
-    "Running init in the wrong workspace — always verify workspace_id matches the intended environment.",
-    "Not re-running init after changing provider versions or backend configuration.",
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.download",
+    "media.upload",
 ]
-examples = ['{"workspace_id": "ws-abc123"}']
-related = ["terraform.validate", "terraform.plan"]
-
-[provides.operations."terraform.validate"]
-description = "Validate Terraform configuration syntax and consistency"
-capability = "terraform.plan"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["workspace_id"] }
-output_schema = { type = "object", required = ["valid", "diagnostics"] }
-
-[provides.operations."terraform.validate".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
-port_allow = [443]
-require_sni = true
-
-[provides.operations."terraform.validate".ai_hints]
-when_to_use = "Check configuration syntax and consistency before planning."
-common_mistakes = [
-    "Assuming validate catches all errors — it only checks syntax and internal consistency, not provider-side issues.",
-    "Not running init first — validate requires initialized providers and modules.",
-]
-examples = ['{"workspace_id": "ws-abc123"}']
-related = ["terraform.init", "terraform.plan"]
-
-[provides.operations."terraform.plan"]
-description = "Generate a Terraform execution plan (read-only)"
-capability = "terraform.plan"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["workspace_id"] }
-output_schema = { type = "object", required = ["plan_id", "status", "resource_changes"] }
-
-[provides.operations."terraform.plan".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
-port_allow = [443]
-require_sni = true
-
-[provides.operations."terraform.plan".ai_hints]
-when_to_use = "Generate an execution plan to preview changes before applying."
-common_mistakes = [
-    "Treating plan output as current state — plans are speculative and may differ at apply time if infrastructure changes.",
-    "Not reviewing resource_changes carefully — a 'replace' (destroy+create) is much more disruptive than an 'update'.",
-    "Forgetting that plan acquires a state lock — concurrent plans on the same workspace will fail.",
-]
-examples = ['{"workspace_id": "ws-abc123"}']
-related = ["terraform.show_plan", "terraform.apply"]
-
-[provides.operations."terraform.show_plan"]
-description = "Display details of a saved plan file"
-capability = "terraform.plan"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["plan_id"] }
-output_schema = { type = "object", required = ["plan_id", "status", "resources"] }
-
-[provides.operations."terraform.show_plan".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
-port_allow = [443]
-require_sni = true
-
-[provides.operations."terraform.show_plan".ai_hints]
-when_to_use = "Inspect the details of a previously generated plan."
-common_mistakes = [
-    "Using a stale plan_id — plans expire and become invalid after infrastructure or configuration changes.",
-    "Not checking if the plan was generated with the current state version.",
-]
-examples = ['{"plan_id": "run-abc123"}']
-related = ["terraform.plan", "terraform.apply"]
-
-[provides.operations."terraform.detect_drift"]
-description = "Detect configuration drift against real infrastructure"
-capability = "terraform.plan"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["workspace_id"] }
-output_schema = { type = "object", required = ["drifted", "changes"] }
-
-[provides.operations."terraform.detect_drift".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
-port_allow = [443]
-require_sni = true
-
-[provides.operations."terraform.detect_drift".ai_hints]
-when_to_use = "Detect if real infrastructure has drifted from the Terraform state."
-common_mistakes = [
-    "Interpreting all drift as problematic — some drift is expected (e.g., auto-scaling group sizes, timestamps).",
-    "Not understanding that drift detection performs a refresh, which acquires a state lock.",
-]
-examples = ['{"workspace_id": "ws-abc123"}']
-related = ["terraform.plan", "terraform.state_list"]
-
-[provides.operations."terraform.list_modules"]
-description = "List modules used in the configuration"
-capability = "terraform.plan"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["organization"] }
-output_schema = { type = "object", required = ["modules"] }
-
-[provides.operations."terraform.list_modules".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
-port_allow = [443]
-require_sni = true
-
-[provides.operations."terraform.list_modules".ai_hints]
-when_to_use = "List Terraform modules used in the configuration for auditing or dependency analysis."
-common_mistakes = [
-    "Confusing registry modules (e.g., hashicorp/consul/aws) with local path modules — they have different source formats.",
-    "Not checking module version constraints — pinned versions may be outdated.",
-]
-examples = ['{"organization": "my-org"}']
-related = ["terraform.validate", "terraform.init"]
-
-# ── Dangerous apply/destroy operations ──────────────────────────────
 
 [provides.operations."terraform.apply"]
 description = "Apply a previously generated plan to modify infrastructure"
@@ -192,13 +61,39 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["run_id"] }
-output_schema = { type = "object", required = ["status", "applied"] }
+revocation_freshness = "safe"
+
+[provides.operations."terraform.apply".input_schema]
+required = ["run_id"]
+type = "object"
+
+[provides.operations."terraform.apply".output_schema]
+required = [
+    "status",
+    "applied",
+]
+type = "object"
 
 [provides.operations."terraform.apply".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
 port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
 require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
 
 [provides.operations."terraform.apply".ai_hints]
 when_to_use = "Apply a previously generated plan to create, update, or destroy infrastructure resources."
@@ -209,7 +104,10 @@ common_mistakes = [
     "Applying to the wrong workspace — double-check run_id maps to the intended environment.",
 ]
 examples = ['{"run_id": "run-abc123"}']
-related = ["terraform.plan", "terraform.show_plan"]
+related = [
+    "terraform.plan",
+    "terraform.show_plan",
+]
 
 [provides.operations."terraform.destroy"]
 description = "Destroy all resources managed by a configuration"
@@ -218,13 +116,39 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["workspace_id"] }
-output_schema = { type = "object", required = ["status", "destroyed"] }
+revocation_freshness = "safe"
+
+[provides.operations."terraform.destroy".input_schema]
+required = ["workspace_id"]
+type = "object"
+
+[provides.operations."terraform.destroy".output_schema]
+required = [
+    "status",
+    "destroyed",
+]
+type = "object"
 
 [provides.operations."terraform.destroy".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
 port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
 require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
 
 [provides.operations."terraform.destroy".ai_hints]
 when_to_use = "Destroy all resources managed by a Terraform workspace. This is irreversible for most resources."
@@ -235,84 +159,63 @@ common_mistakes = [
     "Not planning a destroy first to review what will be removed.",
 ]
 examples = ['{"workspace_id": "ws-abc123"}']
-related = ["terraform.plan", "terraform.state_list"]
+related = [
+    "terraform.plan",
+    "terraform.state_list",
+]
 
-# ── State read operations ───────────────────────────────────────────
-
-[provides.operations."terraform.state_list"]
-description = "List all resources in the Terraform state"
-capability = "terraform.state"
+[provides.operations."terraform.detect_drift"]
+description = "Detect configuration drift against real infrastructure"
+capability = "terraform.plan"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
-input_schema = { type = "object", required = ["workspace_id"] }
-output_schema = { type = "object", required = ["resources"] }
+revocation_freshness = "safe"
 
-[provides.operations."terraform.state_list".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
+[provides.operations."terraform.detect_drift".input_schema]
+required = ["workspace_id"]
+type = "object"
+
+[provides.operations."terraform.detect_drift".output_schema]
+required = [
+    "drifted",
+    "changes",
+]
+type = "object"
+
+[provides.operations."terraform.detect_drift".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
 port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
 require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
 
-[provides.operations."terraform.state_list".ai_hints]
-when_to_use = "List all resource addresses in the Terraform state for inventory or auditing."
+[provides.operations."terraform.detect_drift".ai_hints]
+when_to_use = "Detect if real infrastructure has drifted from the Terraform state."
 common_mistakes = [
-    "Confusing resource addresses (e.g., module.vpc.aws_subnet.main[0]) with resource IDs (provider-specific identifiers).",
-    "Assuming the state reflects current infrastructure — state may be stale if resources were modified outside Terraform.",
+    "Interpreting all drift as problematic — some drift is expected (e.g., auto-scaling group sizes, timestamps).",
+    "Not understanding that drift detection performs a refresh, which acquires a state lock.",
 ]
 examples = ['{"workspace_id": "ws-abc123"}']
-related = ["terraform.state_show", "terraform.detect_drift"]
-
-[provides.operations."terraform.state_show"]
-description = "Show attributes of a single resource in state"
-capability = "terraform.state"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["workspace_id", "resource_address"] }
-output_schema = { type = "object", required = ["resource"] }
-
-[provides.operations."terraform.state_show".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
-port_allow = [443]
-require_sni = true
-
-[provides.operations."terraform.state_show".ai_hints]
-when_to_use = "Inspect the attributes of a single resource in the Terraform state."
-common_mistakes = [
-    "Using incorrect resource address syntax — module resources require the full path (e.g., module.vpc.aws_subnet.main).",
-    "Not using array index for count-based resources (e.g., aws_instance.web[0] vs aws_instance.web).",
-    "Assuming shown attributes are current — run detect_drift to verify.",
+related = [
+    "terraform.plan",
+    "terraform.state_list",
 ]
-examples = ['{"workspace_id": "ws-abc123", "resource_address": "aws_instance.web[0]"}']
-related = ["terraform.state_list", "terraform.detect_drift"]
-
-[provides.operations."terraform.output"]
-description = "Read Terraform output values"
-capability = "terraform.state"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-input_schema = { type = "object", required = ["workspace_id"] }
-output_schema = { type = "object", required = ["outputs"] }
-
-[provides.operations."terraform.output".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
-port_allow = [443]
-require_sni = true
-
-[provides.operations."terraform.output".ai_hints]
-when_to_use = "Read Terraform output values to retrieve computed infrastructure details (IPs, endpoints, ARNs)."
-common_mistakes = [
-    "Assuming outputs are always up to date — outputs reflect the last apply, not current infrastructure state.",
-    "Not checking for sensitive outputs — they may be redacted unless explicitly unmasked.",
-]
-examples = ['{"workspace_id": "ws-abc123"}']
-related = ["terraform.state_show", "terraform.state_list"]
-
-# ── State write operation ───────────────────────────────────────────
 
 [provides.operations."terraform.import"]
 description = "Import an existing resource into Terraform state"
@@ -321,13 +224,43 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "strict"
-input_schema = { type = "object", required = ["workspace_id", "resource_address", "resource_id"] }
-output_schema = { type = "object", required = ["status", "imported"] }
+revocation_freshness = "safe"
+
+[provides.operations."terraform.import".input_schema]
+required = [
+    "workspace_id",
+    "resource_address",
+    "resource_id",
+]
+type = "object"
+
+[provides.operations."terraform.import".output_schema]
+required = [
+    "status",
+    "imported",
+]
+type = "object"
 
 [provides.operations."terraform.import".network_constraints]
-host_allow = ["app.terraform.io", "*.terraform.io"]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
 port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
 require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
 
 [provides.operations."terraform.import".ai_hints]
 when_to_use = "Import an existing cloud resource into Terraform state so it can be managed by Terraform."
@@ -338,21 +271,440 @@ common_mistakes = [
     "Not running plan after import to verify the configuration matches the imported resource's actual attributes.",
 ]
 examples = ['{"workspace_id": "ws-abc123", "resource_address": "aws_instance.web", "resource_id": "i-0123456789abcdef0"}']
-related = ["terraform.state_list", "terraform.state_show", "terraform.plan"]
+related = [
+    "terraform.state_list",
+    "terraform.state_show",
+    "terraform.plan",
+]
 
-# ── Sandbox ─────────────────────────────────────────────────────────
+[provides.operations."terraform.init"]
+description = "Initialize a Terraform working directory"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."terraform.init".input_schema]
+required = ["workspace_id"]
+type = "object"
+
+[provides.operations."terraform.init".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."terraform.init".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.init".ai_hints]
+when_to_use = "Initialize a Terraform working directory before running plan or apply."
+common_mistakes = [
+    "Running init in the wrong workspace — always verify workspace_id matches the intended environment.",
+    "Not re-running init after changing provider versions or backend configuration.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = [
+    "terraform.validate",
+    "terraform.plan",
+]
+
+[provides.operations."terraform.list_modules"]
+description = "List modules used in the configuration"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."terraform.list_modules".input_schema]
+required = ["organization"]
+type = "object"
+
+[provides.operations."terraform.list_modules".output_schema]
+required = ["modules"]
+type = "object"
+
+[provides.operations."terraform.list_modules".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.list_modules".ai_hints]
+when_to_use = "List Terraform modules used in the configuration for auditing or dependency analysis."
+common_mistakes = [
+    "Confusing registry modules (e.g., hashicorp/consul/aws) with local path modules — they have different source formats.",
+    "Not checking module version constraints — pinned versions may be outdated.",
+]
+examples = ['{"organization": "my-org"}']
+related = [
+    "terraform.validate",
+    "terraform.init",
+]
+
+[provides.operations."terraform.output"]
+description = "Read Terraform output values"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."terraform.output".input_schema]
+required = ["workspace_id"]
+type = "object"
+
+[provides.operations."terraform.output".output_schema]
+required = ["outputs"]
+type = "object"
+
+[provides.operations."terraform.output".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.output".ai_hints]
+when_to_use = "Read Terraform output values to retrieve computed infrastructure details (IPs, endpoints, ARNs)."
+common_mistakes = [
+    "Assuming outputs are always up to date — outputs reflect the last apply, not current infrastructure state.",
+    "Not checking for sensitive outputs — they may be redacted unless explicitly unmasked.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = [
+    "terraform.state_show",
+    "terraform.state_list",
+]
+
+[provides.operations."terraform.plan"]
+description = "Generate a Terraform execution plan (read-only)"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."terraform.plan".input_schema]
+required = ["workspace_id"]
+type = "object"
+
+[provides.operations."terraform.plan".output_schema]
+required = [
+    "plan_id",
+    "status",
+    "resource_changes",
+]
+type = "object"
+
+[provides.operations."terraform.plan".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.plan".ai_hints]
+when_to_use = "Generate an execution plan to preview changes before applying."
+common_mistakes = [
+    "Treating plan output as current state — plans are speculative and may differ at apply time if infrastructure changes.",
+    "Not reviewing resource_changes carefully — a 'replace' (destroy+create) is much more disruptive than an 'update'.",
+    "Forgetting that plan acquires a state lock — concurrent plans on the same workspace will fail.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = [
+    "terraform.show_plan",
+    "terraform.apply",
+]
+
+[provides.operations."terraform.show_plan"]
+description = "Display details of a saved plan file"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."terraform.show_plan".input_schema]
+required = ["plan_id"]
+type = "object"
+
+[provides.operations."terraform.show_plan".output_schema]
+required = [
+    "plan_id",
+    "status",
+    "resources",
+]
+type = "object"
+
+[provides.operations."terraform.show_plan".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.show_plan".ai_hints]
+when_to_use = "Inspect the details of a previously generated plan."
+common_mistakes = [
+    "Using a stale plan_id — plans expire and become invalid after infrastructure or configuration changes.",
+    "Not checking if the plan was generated with the current state version.",
+]
+examples = ['{"plan_id": "run-abc123"}']
+related = [
+    "terraform.plan",
+    "terraform.apply",
+]
+
+[provides.operations."terraform.state_list"]
+description = "List all resources in the Terraform state"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."terraform.state_list".input_schema]
+required = ["workspace_id"]
+type = "object"
+
+[provides.operations."terraform.state_list".output_schema]
+required = ["resources"]
+type = "object"
+
+[provides.operations."terraform.state_list".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.state_list".ai_hints]
+when_to_use = "List all resource addresses in the Terraform state for inventory or auditing."
+common_mistakes = [
+    "Confusing resource addresses (e.g., module.vpc.aws_subnet.main[0]) with resource IDs (provider-specific identifiers).",
+    "Assuming the state reflects current infrastructure — state may be stale if resources were modified outside Terraform.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = [
+    "terraform.state_show",
+    "terraform.detect_drift",
+]
+
+[provides.operations."terraform.state_show"]
+description = "Show attributes of a single resource in state"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."terraform.state_show".input_schema]
+required = [
+    "workspace_id",
+    "resource_address",
+]
+type = "object"
+
+[provides.operations."terraform.state_show".output_schema]
+required = ["resource"]
+type = "object"
+
+[provides.operations."terraform.state_show".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.state_show".ai_hints]
+when_to_use = "Inspect the attributes of a single resource in the Terraform state."
+common_mistakes = [
+    "Using incorrect resource address syntax — module resources require the full path (e.g., module.vpc.aws_subnet.main).",
+    "Not using array index for count-based resources (e.g., aws_instance.web[0] vs aws_instance.web).",
+    "Assuming shown attributes are current — run detect_drift to verify.",
+]
+examples = ['{"workspace_id": "ws-abc123", "resource_address": "aws_instance.web[0]"}']
+related = [
+    "terraform.state_list",
+    "terraform.detect_drift",
+]
+
+[provides.operations."terraform.validate"]
+description = "Validate Terraform configuration syntax and consistency"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."terraform.validate".input_schema]
+required = ["workspace_id"]
+type = "object"
+
+[provides.operations."terraform.validate".output_schema]
+required = [
+    "valid",
+    "diagnostics",
+]
+type = "object"
+
+[provides.operations."terraform.validate".network_constraints]
+host_allow = [
+    "app.terraform.io",
+    "*.terraform.io",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.validate".ai_hints]
+when_to_use = "Check configuration syntax and consistency before planning."
+common_mistakes = [
+    "Assuming validate catches all errors — it only checks syntax and internal consistency, not provider-side issues.",
+    "Not running init first — validate requires initialized providers and modules.",
+]
+examples = ['{"workspace_id": "ws-abc123"}']
+related = [
+    "terraform.init",
+    "terraform.plan",
+]
 
 [sandbox]
 profile = "strict"
 memory_mb = 512
 cpu_percent = 75
 wall_clock_timeout_ms = 1800000
-fs_readonly_paths = ["/usr", "/lib"]
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
 fs_writable_paths = ["$CONNECTOR_STATE"]
 deny_exec = true
 deny_ptrace = true
-
-# ── Rate limits ─────────────────────────────────────────────────────
 
 [[rate_limits.pools]]
 id = "terraform.plan"
@@ -383,15 +735,15 @@ burst = 5
 scope = "instance"
 
 [rate_limits.operation_pools]
-"terraform.init" = ["terraform.plan"]
-"terraform.validate" = ["terraform.plan"]
+"terraform.output" = ["terraform.state"]
 "terraform.plan" = ["terraform.plan"]
-"terraform.show_plan" = ["terraform.plan"]
 "terraform.detect_drift" = ["terraform.plan"]
+"terraform.validate" = ["terraform.plan"]
 "terraform.list_modules" = ["terraform.plan"]
+"terraform.state_show" = ["terraform.state"]
 "terraform.apply" = ["terraform.apply"]
+"terraform.show_plan" = ["terraform.plan"]
+"terraform.import" = ["terraform.state_write"]
 "terraform.destroy" = ["terraform.apply"]
 "terraform.state_list" = ["terraform.state"]
-"terraform.state_show" = ["terraform.state"]
-"terraform.output" = ["terraform.state"]
-"terraform.import" = ["terraform.state_write"]
+"terraform.init" = ["terraform.plan"]

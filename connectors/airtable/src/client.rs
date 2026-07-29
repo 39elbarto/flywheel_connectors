@@ -9,8 +9,9 @@ use std::time::Duration;
 use base64::Engine;
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode, Url, header, redirect::Policy};
 use tracing::instrument;
 
@@ -663,7 +664,7 @@ impl AirtableClient {
 
         RetryLoop::execute(&ctx, &policy, |_attempt| {
             let req = self.apply_auth(self.client.get(url));
-            async move { Self::execute_once(req).await }
+            async move { Self::execute_once(req, true).await }
         })
         .await
     }
@@ -693,7 +694,7 @@ impl AirtableClient {
 
         RetryLoop::execute(&ctx, &policy, |_attempt| {
             let req = self.apply_auth(self.client.get(&url));
-            async move { Self::execute_once(req).await }
+            async move { Self::execute_once(req, false).await }
         })
         .await
     }
@@ -763,7 +764,7 @@ impl AirtableClient {
 
         RetryLoop::execute(&ctx, &policy, |_attempt| {
             let req = self.apply_auth(self.client.delete(url));
-            async move { Self::execute_once(req).await }
+            async move { Self::execute_once(req, true).await }
         })
         .await
     }
@@ -774,6 +775,12 @@ impl AirtableClient {
         path: &str,
         body: &serde_json::Value,
     ) -> AirtableResult<T> {
+        // br-kxd3e: PATCH and PUT address records by id and set fields to
+        // values, so they converge; only POST creates records, and a replay
+        // creates a SECOND set. Note this client already treats every
+        // non-success status as terminal, so the transport arm in
+        // `execute_once` is the only place a replay could happen.
+        let replay_safe = method != reqwest::Method::POST;
         let url = format!("{}{path}", self.base_url);
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         let ctx = self.runtime.request_context();
@@ -783,13 +790,14 @@ impl AirtableClient {
             let req = self
                 .apply_auth(self.client.request(method.clone(), &url))
                 .json(body);
-            async move { Self::execute_once(req).await }
+            async move { Self::execute_once(req, replay_safe).await }
         })
         .await
     }
 
     async fn execute_once<T: serde::de::DeserializeOwned>(
         req: reqwest::RequestBuilder,
+        replay_safe: bool,
     ) -> AttemptOutcome<T, AirtableError> {
         match req.send().await {
             Ok(resp) => {
@@ -815,15 +823,10 @@ impl AirtableClient {
                 }
             }
             Err(e) => {
-                let err: AirtableError = e.into();
-                if err.is_retryable() {
-                    AttemptOutcome::Retryable {
-                        retry_after: None,
-                        error: err,
-                    }
-                } else {
-                    AttemptOutcome::Terminal(err)
-                }
+                // Only a connect-phase failure proves the create never reached
+                // Airtable.
+                let replayable = replay_safe || !transport_error_reached_service(&e);
+                AttemptOutcome::retryable_if_replayable(e.into(), None, replayable)
             }
         }
     }
@@ -975,477 +978,6 @@ fn is_local_test_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{bearer_token, body_json, header, method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_bases() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/meta/bases"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "bases": [
-                    { "id": "appTest123", "name": "My Base", "permissionLevel": "create" }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client.list_bases(None).await.unwrap();
-        assert_eq!(result.bases.len(), 1);
-        assert_eq!(result.bases[0].id, "appTest123");
-        assert_eq!(result.bases[0].name, "My Base");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_record() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/appABC/tblXYZ/recDEF"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "recDEF",
-                "fields": { "Name": "Test Record", "Status": "Active" },
-                "createdTime": "2025-01-01T00:00:00.000Z"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let record = client
-            .get_record("appABC", "tblXYZ", "recDEF")
-            .await
-            .unwrap();
-        assert_eq!(record.id, "recDEF");
-        assert_eq!(record.fields["Name"], "Test Record");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_webhooks() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/bases/appABC/webhooks"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "webhooks": [
-                    {
-                        "id": "ach123",
-                        "notificationUrl": "https://hooks.flywheel.dev/airtable",
-                        "cursorForNextPayload": 5,
-                        "isHookEnabled": true,
-                        "areNotificationsEnabled": true
-                    }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client.list_webhooks("appABC").await.unwrap();
-        assert_eq!(result.webhooks.len(), 1);
-        assert_eq!(result.webhooks[0].id, "ach123");
-        assert_eq!(result.webhooks[0].cursor_for_next_payload, Some(5));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_webhook() {
-        let server = MockServer::start().await;
-        let specification = serde_json::json!({
-            "options": {
-                "filters": {
-                    "dataTypes": ["tableData"],
-                    "recordChangeScope": "tblXYZ"
-                }
-            }
-        });
-
-        Mock::given(method("POST"))
-            .and(path("/bases/appABC/webhooks"))
-            .and(bearer_token("test_token"))
-            .and(header("content-type", "application/json"))
-            .and(body_json(serde_json::json!({
-                "notificationUrl": "https://hooks.flywheel.dev/airtable",
-                "specification": specification
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "ach123",
-                "macSecretBase64": "Zm9vYmFy",
-                "expirationTime": "2026-03-16T00:00:00.000Z"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client
-            .create_webhook(
-                "appABC",
-                Some("https://hooks.flywheel.dev/airtable"),
-                &specification,
-            )
-            .await
-            .unwrap();
-        assert_eq!(result.id, "ach123");
-        assert_eq!(result.mac_secret_base64, "Zm9vYmFy");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_refresh_webhook() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/bases/appABC/webhooks/ach123/refresh"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "expirationTime": "2026-03-16T00:00:00.000Z"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client.refresh_webhook("appABC", "ach123").await.unwrap();
-        assert_eq!(
-            result.expiration_time.as_deref(),
-            Some("2026-03-16T00:00:00.000Z")
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_set_webhook_notifications() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/bases/appABC/webhooks/ach123/enableNotifications"))
-            .and(bearer_token("test_token"))
-            .and(header("content-type", "application/json"))
-            .and(body_json(serde_json::json!({
-                "enable": false
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "ach123",
-                "areNotificationsEnabled": false
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client
-            .set_webhook_notifications("appABC", "ach123", false)
-            .await
-            .unwrap();
-        assert_eq!(result["id"], "ach123");
-        assert_eq!(result["areNotificationsEnabled"], false);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_delete_webhook() {
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/bases/appABC/webhooks/ach123"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "ach123",
-                "isHookEnabled": false,
-                "areNotificationsEnabled": false
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client.delete_webhook("appABC", "ach123").await.unwrap();
-        assert_eq!(result["id"], "ach123");
-        assert_eq!(result["areNotificationsEnabled"], false);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_webhook_payloads() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/bases/appABC/webhooks/ach123/payloads"))
-            .and(query_param("cursor", "4"))
-            .and(query_param("limit", "10"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "cursor": 5,
-                "mightHaveMore": false,
-                "payloads": [
-                    {
-                        "timestamp": "2026-03-09T00:00:00.000Z",
-                        "baseTransactionNumber": 4,
-                        "payloadFormat": "v0"
-                    }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client
-            .list_webhook_payloads("appABC", "ach123", Some(4), Some(10))
-            .await
-            .unwrap();
-        assert_eq!(result.cursor, Some(5));
-        assert!(!result.might_have_more);
-        assert_eq!(result.payloads.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_record() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/appABC/tblXYZ"))
-            .and(bearer_token("test_token"))
-            .and(header("content-type", "application/json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "recNEW",
-                "fields": { "Name": "New Record" },
-                "createdTime": "2025-01-02T00:00:00.000Z"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let fields = serde_json::json!({ "Name": "New Record" });
-        let record = client
-            .create_record("appABC", "tblXYZ", &fields, None)
-            .await
-            .unwrap();
-        assert_eq!(record.id, "recNEW");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_delete_record() {
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/appABC/tblXYZ/recDEL"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "recDEL",
-                "deleted": true
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client
-            .delete_record("appABC", "tblXYZ", "recDEL")
-            .await
-            .unwrap();
-        assert!(result.deleted);
-        assert_eq!(result.id, "recDEL");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_update_records() {
-        let server = MockServer::start().await;
-        Mock::given(method("PATCH"))
-            .and(path("/appABC/tblXYZ"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "records": [
-                    { "id": "recA", "fields": { "Status": "Done" } },
-                    { "id": "recB", "fields": { "Status": "Done" } }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let records = vec![
-            serde_json::json!({ "id": "recA", "fields": { "Status": "Done" } }),
-            serde_json::json!({ "id": "recB", "fields": { "Status": "Done" } }),
-        ];
-        let result = client
-            .update_records("appABC", "tblXYZ", &records, Some(true))
-            .await
-            .unwrap();
-        assert_eq!(result.records.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_upsert_records() {
-        let server = MockServer::start().await;
-        Mock::given(method("PATCH"))
-            .and(path("/appABC/tblXYZ"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "records": [
-                    { "id": "recA", "fields": { "External ID": "ext-1" } }
-                ],
-                "createdRecords": ["recA"],
-                "updatedRecords": []
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let records = vec![serde_json::json!({
-            "fields": { "External ID": "ext-1", "Name": "Alpha" }
-        })];
-        let result = client
-            .upsert_records(
-                "appABC",
-                "tblXYZ",
-                &records,
-                &[String::from("External ID")],
-                Some(true),
-            )
-            .await
-            .unwrap();
-        assert_eq!(result.records.len(), 1);
-        assert_eq!(result.created_records, vec!["recA"]);
-        assert!(result.updated_records.is_empty());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_delete_records() {
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/appABC/tblXYZ"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "records": [
-                    { "id": "recA", "deleted": true },
-                    { "id": "recB", "deleted": true }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client
-            .delete_records(
-                "appABC",
-                "tblXYZ",
-                &[String::from("recA"), String::from("recB")],
-            )
-            .await
-            .unwrap();
-        assert_eq!(result.records.len(), 2);
-        assert!(result.records.iter().all(|record| record.deleted));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_unauthorized_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/meta/bases"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "error": { "type": "AUTHENTICATION_REQUIRED", "message": "Invalid API key" }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("bad_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client.list_bases(None).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AirtableError::Unauthorized));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limit_no_retry() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/meta/bases"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri())
-            .with_retry_config(0, 100, 100);
-        let result = client.list_bases(None).await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            AirtableError::RateLimited {
-                retry_after_secs: 30
-            }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_update_record() {
-        let server = MockServer::start().await;
-        Mock::given(method("PATCH"))
-            .and(path("/appABC/tblXYZ/recUPD"))
-            .and(bearer_token("test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "recUPD",
-                "fields": { "Status": "Done" },
-                "createdTime": "2025-01-01T00:00:00.000Z"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let fields = serde_json::json!({ "Status": "Done" });
-        let record = client
-            .update_record("appABC", "tblXYZ", "recUPD", &fields, None)
-            .await
-            .unwrap();
-        assert_eq!(record.id, "recUPD");
-        assert_eq!(record.fields["Status"], "Done");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_api_error_response() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/appABC/tblXYZ/recBAD"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "error": {
-                    "type": "NOT_FOUND",
-                    "message": "Could not find record"
-                }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = AirtableClient::new("test_token")
-            .unwrap()
-            .with_base_url(server.uri());
-        let result = client.get_record("appABC", "tblXYZ", "recBAD").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            AirtableError::Api {
-                ref error_type,
-                ref message,
-                status_code: Some(404),
-            } if error_type == "NOT_FOUND" && message.contains("Could not find record")
-        ));
-    }
 
     // ── Auth unit tests ──────────────────────────────────────────
 

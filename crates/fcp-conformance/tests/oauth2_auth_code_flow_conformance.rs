@@ -20,7 +20,7 @@ use url::Url;
 
 // ── RFC 6749 §4.1.1: authorization request ───────────────────────────
 
-/// Build a baseline OAuth2 client against an in-memory endpoint so URL
+/// Build a baseline `OAuth2` client against an in-memory endpoint so URL
 /// construction is deterministic. Any test that needs a network path
 /// should use the `_with_mock_server` suite next to fcp-oauth's own
 /// unit tests — the conformance suite stays pure-logic.

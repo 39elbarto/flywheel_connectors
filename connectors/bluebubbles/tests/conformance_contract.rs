@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use fcp_bluebubbles::error::BlueBubblesError;
 use fcp_bluebubbles::{CONNECTOR_ID, new_connector};
 use fcp_prelude::{FcpConnector, FcpError, IdempotencyClass, SafetyTier};
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_testkit::{OperationContract, assert_operation_contracts};
 use serde_json::{Value, json};
 

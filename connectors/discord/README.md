@@ -1,7 +1,7 @@
 # Discord Connector V3 Contract
 
 > **Status**: runtime contract documented with known manifest/introspection drift
-> **Bead**: `flywheel_connectors-4kw5f.12`
+> **Bead**: `flywheel_connectors-6n7.19`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
 > **REST upstream**: https://discord.com/developers/docs/reference
@@ -58,7 +58,7 @@ The runtime, manifest, and introspection metadata are not fully aligned in this 
 - The Gateway event mapper can emit additional `discord.*` topics, including update/delete/guild/channel/interaction variants, but the formal introspection event list has not caught up.
 - `subscribe` does not validate requested topic names against the introspection or manifest event catalogs.
 - Runtime allows loopback endpoints for deterministic tests in debug/test builds, while the manifest network constraints remain production-strict.
-- Hidden non-final delivery suppression exists for `discord.send_message`, but no manifest policy describes that delivery-control extension.
+- `manifest.toml` now describes `discord.send_message` delivery-control fields and `discord.message` `fcp_delivery` metadata, but the broader manifest/introspection drift above still remains.
 
 Operators should treat this README as the current truthfulness snapshot. A follow-up should align manifest operation IDs, approval metadata, event introspection, and subscription validation before this connector is described as fully contract-aligned.
 
@@ -147,6 +147,21 @@ The policy parser accepts stable Discord snowflake IDs, selected `discord:*` pre
 
 `discord.send_message` calls the coordination layer before visible/final sends and includes coordination audit records in the response. Hidden non-final progress/tool delivery can be suppressed before a Discord REST send and returns a delivery receipt instead.
 
+## Inbound Delivery Correlation
+
+`discord.message` events include an `fcp_delivery` object that lets an agent tie an inbound Gateway event to a later outbound reply. The object contains:
+
+- `session_key`: opaque correlation key for `discord.send_message`
+- `event_kind`: `room_event` for guild messages or `direct_message` for DMs
+- `channel_id`
+- `guild_id` when the source event came from a guild
+- `message_id`: source Discord message ID
+- `retention`: `pending_until_outbound_delivery`
+
+`discord.send_message` accepts `delivery.inbound_event.session_key`. Hidden non-final progress/tool sends with that key are suppressed before REST and return `delivery.inbound_event.status = pending`, so the inbound event remains pending. Visible sends to the wrong channel return `target_mismatch` and retain the pending event. Visible Discord REST failures also retain the pending event. A matching visible REST success returns `marked_delivered`, records the source and delivered Discord message IDs, and clears the pending record; a later send with the same session key returns `not_found`. Each connector instance authenticates one bot user, so the account side of the match is the configured bot account and the explicit retained target is the normalized Discord channel ID inside that instance.
+
+Delivery accounting logs are structured and redaction-safe: they include delivery state, visibility, kind, counts, and Discord message IDs, but not bot tokens or message bodies.
+
 ## Operation Inventory
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Rationale |
@@ -203,7 +218,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - bound capability-token verification and denial cases
 - input validation for snowflake IDs, message length, embed count, embed character totals, delivery controls, and thread-name bounds
 - endpoint URL policy rejection for userinfo, query strings, fragments, bad schemes, public plaintext, and non-Discord hosts
-- Gateway state files, lease fencing, inbound-policy filtering, event envelope mapping, and loopback Gateway behavior
+- Gateway state files, lease fencing, inbound-policy filtering, event envelope mapping, loopback Gateway behavior, and inbound delivery retention through hidden progress, target mismatch, visible 5xx, final success, and shutdown
 
 ## Source Notes
 

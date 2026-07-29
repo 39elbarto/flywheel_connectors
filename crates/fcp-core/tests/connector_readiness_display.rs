@@ -1,5 +1,5 @@
 //! Pin `ReadinessDescriptor` constructors + status-folding + serde shape —
-//! the closest analogue to "ConnectorReadiness Display"
+//! the closest analogue to "`ConnectorReadiness` Display"
 //! (flywheel_connectors-gmw4e).
 //!
 //! Bead asks for `ConnectorReadiness` Display + serde pinning. No type
@@ -7,26 +7,26 @@
 //! readiness-shaped struct is [`ReadinessDescriptor`] at
 //! `crates/fcp-core/src/connector_descriptors.rs:546` — the shared
 //! readiness metadata used during connector bring-up + runtime health.
-//! It does NOT have a `Display` impl (ReadinessDescriptor is a struct,
+//! It does NOT have a `Display` impl (`ReadinessDescriptor` is a struct,
 //! not an enum); its "Display" surface is the `status: DescriptorStatus`
 //! field + `summary` operator-facing string + the embedded
 //! `SelfCheckReport`/`ReadinessResponse`/`ConnectorHealth`.
 //!
-//! No prior test pins ReadinessDescriptor. Coverage:
+//! No prior test pins `ReadinessDescriptor`. Coverage:
 //!   * 6-field JSON shape with skip-when-None + skip-when-empty for the
 //!     5 optional fields,
 //!   * `unverifiable` + `not_yet_measured` constructors set the documented
 //!     status + summary,
-//!   * `from_self_check` projects SelfCheckStatus → DescriptorStatus and
-//!     emits a DescriptorCheck only when reason_code is present,
+//!   * `from_self_check` projects `SelfCheckStatus` → `DescriptorStatus` and
+//!     emits a `DescriptorCheck` only when `reason_code` is present,
 //!   * `from_readiness_response` aggregates: status=Ready iff ready==true
 //!     AND every component ready, else Failed; checks are sorted by id;
 //!     summary differs between ready/not-ready,
-//!   * `with_health` folds health status via DescriptorStatus::combine,
+//!   * `with_health` folds health status via `DescriptorStatus::combine`,
 //!     sets summary fallback only when None,
 //!   * `with_check` accumulates checks and folds status,
 //!   * JSON+CBOR round-trip preserves all fields,
-//!   * Empty-checks Vec is omitted from wire form (skip_serializing_if).
+//!   * Empty-checks Vec is omitted from wire form (`skip_serializing_if`).
 
 use fcp_core::{
     ConnectorHealth, DescriptorCheck, DescriptorStatus, ReadinessDescriptor, ReadinessResponse,

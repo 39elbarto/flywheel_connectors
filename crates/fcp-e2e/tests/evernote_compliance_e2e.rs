@@ -196,7 +196,7 @@ impl FcpConnector for EvernoteConnectorAdapter {
             message: "Evernote verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
         let request_id = req.id.clone();
         let value = self
             .connector
@@ -210,7 +210,7 @@ impl FcpConnector for EvernoteConnectorAdapter {
             message: "Evernote verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
         let value = self
             .connector
             .handle_simulate(json!({"operation_id": req.operation.as_str(), "input": req.input}))
@@ -307,6 +307,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -325,9 +326,14 @@ fn build_token(
             .zone_id("z:work")
             .principal("user:test")
             .operations(operations)
+            // dja9u typestate ratchet: adapter verifies with `verify_bound`,
+            // which requires an INSTANCE_ID claim; bind to the adapter
+            // instance (instance-binding pattern, commit 16171621d).
+            .target_instance(instance_id)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("valid constraints")
             .sign(signing_key)
             .expect("capability token sign"),
     )
@@ -402,6 +408,7 @@ async fn evernote_default_deny_compliance_suite_passes() {
     );
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "evernote.notes.read",
         &["evernote.notes.list"],
     );
@@ -458,6 +465,7 @@ async fn evernote_allow_valid_token_connector_suite_passes() {
     );
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "evernote.notebooks.read",
         &["evernote.notebooks.list"],
     );

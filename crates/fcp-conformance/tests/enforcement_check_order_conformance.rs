@@ -12,21 +12,21 @@
 //! Properties pinned (NORMATIVE):
 //!
 //! 1. **Canonical sequence** — exactly 14 entries in the documented
-//!    order: CanonicalDecode → ZoneMembership → CapabilityVerify →
-//!    RevocationCascade → DeploymentTier → HolderProof →
-//!    CheckpointFreshness → RevocationFreshness → TaintApproval →
-//!    PolicyCeiling → CapabilityConstraints → ConnectorManifest →
-//!    Budget → RateLimit.
+//!    order: `CanonicalDecode` → `ZoneMembership` → `CapabilityVerify` →
+//!    `RevocationCascade` → `DeploymentTier` → `HolderProof` →
+//!    `CheckpointFreshness` → `RevocationFreshness` → `TaintApproval` →
+//!    `PolicyCeiling` → `CapabilityConstraints` → `ConnectorManifest` →
+//!    Budget → `RateLimit`.
 //! 2. **`COUNT` matches the array length** (= 14).
 //! 3. **`index_of` agrees with array position** for every variant.
 //! 4. **`runs_before` is the < relation on indices.**
-//! 5. **`as_str` snake_case wire form** for each variant.
+//! 5. **`as_str` `snake_case` wire form** for each variant.
 //! 6. **`Display` equals `as_str`.**
 //! 7. **Pipeline determinism** — repeated calls yield identical
 //!    arrays (no allocation surprise, no re-ordering).
 //! 8. **Cheap-first ordering** — the documented design rule that
 //!    decode/zone run before crypto, which run before stateful
-//!    checks. Pinned via specific runs_before assertions.
+//!    checks. Pinned via specific `runs_before` assertions.
 //! 9. **`CheckOutcome::is_allow` / `is_deny` are mutually exclusive**
 //!    and reflect their variants.
 
@@ -99,7 +99,7 @@ fn runs_before_is_strict_less_than_on_indices() {
 #[test]
 fn runs_before_is_irreflexive() {
     // No check runs before itself.
-    for &check in EnforcementCheckOrder::canonical_order().iter() {
+    for &check in &EnforcementCheckOrder::canonical_order() {
         assert!(
             !EnforcementCheckOrder::runs_before(check, check),
             "runs_before({check:?}, {check:?}) MUST be false (irreflexive)"
@@ -145,7 +145,7 @@ fn as_str_matches_snake_case_wire_form_for_each_variant() {
 
 #[test]
 fn display_equals_as_str_for_every_variant() {
-    for &variant in EnforcementCheckOrder::canonical_order().iter() {
+    for &variant in &EnforcementCheckOrder::canonical_order() {
         assert_eq!(
             format!("{variant}"),
             variant.as_str(),
@@ -156,7 +156,7 @@ fn display_equals_as_str_for_every_variant() {
 
 #[test]
 fn json_serde_roundtrip_uses_snake_case() {
-    for &variant in EnforcementCheckOrder::canonical_order().iter() {
+    for &variant in &EnforcementCheckOrder::canonical_order() {
         let json = serde_json::to_string(&variant).expect("serialize");
         let expected = format!("\"{}\"", variant.as_str());
         assert_eq!(
@@ -294,11 +294,11 @@ fn every_enforcement_check_id_appears_in_canonical_order_exactly_once() {
     let order = EnforcementCheckOrder::canonical_order();
     // EnforcementCheckId derives Hash but not Ord — use HashSet.
     let mut seen = std::collections::HashSet::new();
-    for &check in order.iter() {
+    for &check in &order {
         assert!(
             seen.insert(check),
             "canonical_order MUST NOT contain duplicates; saw {check:?} twice"
         );
     }
-    assert_eq!(seen.len(), 11);
+    assert_eq!(seen.len(), EnforcementCheckOrder::COUNT);
 }

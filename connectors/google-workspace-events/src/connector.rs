@@ -15,9 +15,12 @@ use fcp_prelude::{
 };
 use reqwest::Url;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::{DEFAULT_EVENTS_BASE_URL, DEFAULT_PUBSUB_BASE_URL, WorkspaceEventsClient};
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Validated connector configuration.
 struct WorkspaceEventsConfig {
@@ -252,6 +255,13 @@ impl WorkspaceEventsConnector {
         }
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(
         &mut self,
         params: serde_json::Value,
@@ -322,7 +332,7 @@ impl WorkspaceEventsConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-workspace-events-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1023,8 +1033,6 @@ fn op_info(
 mod tests {
     use super::*;
     use std::future::Future;
-    use wiremock::matchers::{body_string_contains, method, path, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
     where
@@ -1098,6 +1106,19 @@ mod tests {
         let connector = WorkspaceEventsConnector::new();
         let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["status"], "not_configured");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(WorkspaceEventsConnector::manifest_hash(), expected);
+        assert_ne!(
+            WorkspaceEventsConnector::manifest_hash(),
+            "sha256:google-workspace-events-connector-v1"
+        );
     }
 
     #[test]
@@ -1191,136 +1212,5 @@ mod tests {
         }]);
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0]["decoded_json"]["event"], "created");
-    }
-
-    #[test]
-    fn list_subscriptions_uses_workspace_events_endpoint() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/v1/subscriptions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "subscriptions": [
-                        { "name": "subscriptions/abc", "state": "ACTIVE" }
-                    ],
-                    "nextPageToken": ""
-                })))
-                .mount(&server)
-                .await;
-
-            let mut connector = WorkspaceEventsConnector::new();
-            connector
-                .handle_configure(json!({
-                    "access_token": "test-token",
-                    "events_base_url": format!("{}/v1", server.uri()),
-                    "pubsub_base_url": format!("{}/v1", server.uri()),
-                }))
-                .await
-                .unwrap();
-
-            let result = connector
-                .handle_invoke(json!({
-                    "operation": "workspace_events.list_subscriptions",
-                    "input": {}
-                }))
-                .await
-                .unwrap();
-            assert_eq!(result["subscriptions"][0]["name"], "subscriptions/abc");
-        });
-    }
-
-    #[test]
-    fn create_subscription_posts_expected_shape() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/subscriptions"))
-                .and(body_string_contains("pubsubTopic"))
-                .and(body_string_contains(
-                    "google.workspace.chat.message.v1.created",
-                ))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "name": "operations/create-subscription-1",
-                    "done": false
-                })))
-                .mount(&server)
-                .await;
-
-            let mut connector = WorkspaceEventsConnector::new();
-            connector
-                .handle_configure(json!({
-                    "access_token": "test-token",
-                    "events_base_url": format!("{}/v1", server.uri()),
-                    "pubsub_base_url": format!("{}/v1", server.uri()),
-                }))
-                .await
-                .unwrap();
-
-            let result = connector
-                .handle_invoke(json!({
-                    "operation": "workspace_events.create_subscription",
-                    "input": {
-                        "target_resource": "//chat.googleapis.com/spaces/AAAA",
-                        "event_types": ["google.workspace.chat.message.v1.created"],
-                        "pubsub_topic": "projects/demo/topics/workspace-events"
-                    }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(
-                result["operation"]["name"],
-                "operations/create-subscription-1"
-            );
-        });
-    }
-
-    #[test]
-    fn pull_events_reads_pubsub_delivery_path() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path_regex(r"/v1/projects/.+/subscriptions/.+:pull"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "receivedMessages": [
-                        {
-                            "ackId": "ack-1",
-                            "deliveryAttempt": 1,
-                            "message": {
-                                "data": STANDARD.encode(br#"{"event":"created"}"#),
-                                "messageId": "msg-1",
-                                "publishTime": "2026-03-14T18:00:00Z"
-                            }
-                        }
-                    ]
-                })))
-                .mount(&server)
-                .await;
-
-            let mut connector = WorkspaceEventsConnector::new();
-            connector
-                .handle_configure(json!({
-                    "access_token": "test-token",
-                    "events_base_url": format!("{}/v1", server.uri()),
-                    "pubsub_base_url": format!("{}/v1", server.uri()),
-                }))
-                .await
-                .unwrap();
-
-            let result = connector
-                .handle_invoke(json!({
-                    "operation": "workspace_events.pull_events",
-                    "input": {
-                        "pubsub_subscription": "projects/demo/subscriptions/workspace-events",
-                        "max_messages": 5
-                    }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(result["received_messages"][0]["ackId"], "ack-1");
-            assert_eq!(
-                result["decoded_events"][0]["decoded_json"]["event"],
-                "created"
-            );
-        });
     }
 }

@@ -33,12 +33,17 @@
 //! retainable behind a trait so a future durable backend can be
 //! swapped in without touching the call sites.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 
-use fcp_audit::{AuditEntry, AuditEntryBuilder, AuditError, Severity};
+use fcp_audit::{
+    AuditEntry, AuditEntryIdFields, AuditError, FreshnessLevel, HybridLogicalClock,
+    HybridLogicalTimestamp, Severity, audit_entry_hlc_from_occurred_at, compute_audit_entry_id,
+    otlp_export::{AuditOtlpExporterStatus, FireAndForgetExporter},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracing::warn;
 
 /// Defence-in-depth bound on the optimistic-CAS retry loop.
 ///
@@ -61,6 +66,9 @@ pub const CAS_RETRY_BUDGET: usize = 64;
 /// semantics while guaranteeing progress before the defensive retry
 /// budget trips.
 pub const SERIALIZED_COMMIT_FALLBACK_ATTEMPTS: usize = 8;
+
+/// Stable schema for host-backed invoke audit-chain status snapshots.
+pub const INVOKE_AUDIT_CHAIN_STATUS_SCHEMA_VERSION: &str = "fcp.host.invoke_audit_chain_status.v1";
 
 /// Event type strings for invoke-chain audit entries.
 pub mod event_types {
@@ -180,11 +188,152 @@ pub struct InvokeAuditContext {
     pub occurred_at: u64,
 }
 
+#[derive(Debug)]
+struct InvokeAuditEntryTemplate {
+    event_type: &'static str,
+    severity: Severity,
+    actor: String,
+    zone_id: String,
+    connector_id: String,
+    operation_id: String,
+    correlation_id: String,
+    metadata: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClockAnomaly {
+    requested: u64,
+    previous: u64,
+    clamped: u64,
+}
+
+impl ClockAnomaly {
+    fn detect(requested_occurred_at: u64, previous_occurred_at: Option<u64>) -> Option<Self> {
+        let previous_occurred_at = previous_occurred_at?;
+        (requested_occurred_at < previous_occurred_at).then_some(Self {
+            requested: requested_occurred_at,
+            previous: previous_occurred_at,
+            clamped: previous_occurred_at,
+        })
+    }
+
+    const fn skew_secs(self) -> u64 {
+        self.previous.saturating_sub(self.requested)
+    }
+}
+
+impl InvokeAuditEntryTemplate {
+    fn new(ctx: &InvokeAuditContext, phase: InvokePhase) -> Self {
+        let event_type = phase.event_type();
+        let severity = phase.severity();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("operation".to_string(), json!(&ctx.operation));
+        metadata.extend(phase.into_metadata());
+
+        Self {
+            event_type,
+            severity,
+            actor: ctx.actor.clone(),
+            zone_id: ctx.zone_id.clone(),
+            connector_id: ctx.connector_id.clone(),
+            operation_id: ctx.operation_id.clone(),
+            correlation_id: ctx.correlation_id.clone().unwrap_or_default(),
+            metadata,
+        }
+    }
+
+    fn compute_id(
+        &self,
+        seq: u64,
+        occurred_at: u64,
+        hlc: &HybridLogicalTimestamp,
+        prev: Option<&str>,
+        metadata: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<String, AuditError> {
+        compute_audit_entry_id(AuditEntryIdFields {
+            event_type: self.event_type,
+            severity: self.severity,
+            actor: &self.actor,
+            zone_id: &self.zone_id,
+            seq,
+            occurred_at,
+            hlc,
+            prev,
+            correlation_id: &self.correlation_id,
+            trace_context: None,
+            connector_id: Some(&self.connector_id),
+            operation_id: Some(&self.operation_id),
+            metadata,
+        })
+        .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))
+    }
+
+    fn materialize(
+        &self,
+        seq: u64,
+        occurred_at: u64,
+        hlc: HybridLogicalTimestamp,
+        prev: Option<String>,
+        id: String,
+        metadata: Option<BTreeMap<String, serde_json::Value>>,
+    ) -> AuditEntry {
+        AuditEntry {
+            id,
+            event_type: self.event_type.to_string(),
+            severity: self.severity,
+            actor: self.actor.clone(),
+            zone_id: self.zone_id.clone(),
+            seq,
+            occurred_at,
+            hlc,
+            prev,
+            correlation_id: self.correlation_id.clone(),
+            trace_context: None,
+            connector_id: Some(self.connector_id.clone()),
+            operation_id: Some(self.operation_id.clone()),
+            metadata: metadata.unwrap_or_else(|| self.metadata.clone()),
+            issuer_kid: None,
+            signature: None,
+        }
+    }
+
+    fn metadata_with_clock_anomaly(
+        &self,
+        anomaly: ClockAnomaly,
+    ) -> BTreeMap<String, serde_json::Value> {
+        let mut metadata = self.metadata.clone();
+        metadata.insert("alert".to_string(), json!("clock_anomaly"));
+        metadata.insert("clock_anomaly".to_string(), json!(true));
+        metadata.insert(
+            "clock_anomaly_kind".to_string(),
+            json!("wall_clock_regressed"),
+        );
+        metadata.insert(
+            "clock_anomaly_requested_occurred_at".to_string(),
+            json!(anomaly.requested),
+        );
+        metadata.insert(
+            "clock_anomaly_previous_occurred_at".to_string(),
+            json!(anomaly.previous),
+        );
+        metadata.insert(
+            "clock_anomaly_clamped_occurred_at".to_string(),
+            json!(anomaly.clamped),
+        );
+        metadata.insert(
+            "clock_anomaly_skew_secs".to_string(),
+            json!(anomaly.skew_secs()),
+        );
+        metadata
+    }
+}
+
 #[derive(Debug, Default)]
 struct ZoneChain {
     last_seq: Option<u64>,
     last_id: Option<String>,
     last_occurred_at: Option<u64>,
+    last_hlc: Option<HybridLogicalTimestamp>,
     entries: Vec<AuditEntry>,
     metrics: InvokeAuditChainMetrics,
 }
@@ -207,6 +356,8 @@ pub struct InvokeAuditChainMetrics {
     pub serialized_fallbacks: usize,
     /// Retry-budget exhaustions surfaced as typed contention errors.
     pub contention_exhaustions: usize,
+    /// Entries that detected and annotated wall-clock rollback.
+    pub clock_anomalies: usize,
 }
 
 impl InvokeAuditChainMetrics {
@@ -215,6 +366,81 @@ impl InvokeAuditChainMetrics {
     pub const fn committed_entries(self) -> usize {
         self.optimistic_commits + self.serialized_fallbacks
     }
+}
+
+/// Live source descriptor for host-backed invoke audit-chain status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvokeAuditChainStatusSource {
+    /// Source kind used by operator JSON.
+    pub kind: String,
+    /// Whether this source was queried live.
+    pub live: bool,
+}
+
+/// Live quorum-checkpoint availability attached to host-backed status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveQuorumCheckpointSnapshot {
+    /// Whether quorum checkpoint data is available.
+    pub available: bool,
+    /// Machine-readable reason when checkpoint data is unavailable.
+    pub reason_code: String,
+    /// Human-readable redaction-safe detail.
+    pub detail: String,
+}
+
+/// Redaction-safe status snapshot for the host invoke audit chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvokeAuditChainStatusSnapshot {
+    /// Stable schema identifier.
+    pub schema_version: String,
+    /// Freshness classification for the current snapshot.
+    pub status: FreshnessLevel,
+    /// Operator-facing telemetry state.
+    pub telemetry_state: String,
+    /// Live source descriptor.
+    pub source: InvokeAuditChainStatusSource,
+    /// Zone whose chain was queried.
+    pub zone_id: String,
+    /// Current head sequence for the zone, if any entries exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_seq: Option<u64>,
+    /// Current head entry id for the zone, if any entries exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_entry: Option<String>,
+    /// Number of committed audit entries for this zone.
+    pub audit_entries: u64,
+    /// Last observed audit event time, if any entries exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_observed_at: Option<u64>,
+    /// Quorum-signed checkpoint count. Zero until checkpoint signing is wired.
+    pub quorum_signed_checkpoints: u64,
+    /// Number of quorum signers present in the live checkpoint snapshot.
+    pub quorum_signers: u64,
+    /// Quorum signer ids present in the live checkpoint snapshot.
+    pub quorum_signer_ids: Vec<String>,
+    /// Last quorum checkpoint height, if a signed checkpoint exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_quorum_height: Option<u64>,
+    /// Freshness of the latest quorum checkpoint in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quorum_freshness_secs: Option<u64>,
+    /// Current quorum rotation epoch, if checkpoint telemetry provides it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quorum_rotation_epoch: Option<String>,
+    /// Seconds until the next rotation, if checkpoint telemetry provides it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_rotation_eta_secs: Option<u64>,
+    /// Drift between wall clock and the latest entry HLC physical component.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hlc_physical_drift_ms: Option<u64>,
+    /// Maximum age used by the caller for freshness classification.
+    pub max_age_seconds: u64,
+    /// Explicit checkpoint availability so callers do not infer quorum.
+    pub live_quorum_checkpoint_snapshot: LiveQuorumCheckpointSnapshot,
+    /// Append-path counters for the queried zone.
+    pub append_metrics: InvokeAuditChainMetrics,
+    /// Redaction-safe warnings explaining degraded or missing states.
+    pub warnings: Vec<String>,
 }
 
 /// Per-host hash-linked invoke audit chain.
@@ -255,6 +481,9 @@ pub struct InvokeAuditChain {
     /// hot path; write-locked only when a new zone is first
     /// observed.
     chains: RwLock<HashMap<String, Arc<Mutex<ZoneChain>>>>,
+    /// Optional fire-and-forget OTLP exporter. The audit chain remains
+    /// canonical; exporter failure never affects append success.
+    otlp_exporter: Option<Arc<FireAndForgetExporter>>,
 }
 
 impl InvokeAuditChain {
@@ -262,6 +491,29 @@ impl InvokeAuditChain {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct an empty chain with audit OTLP export enabled.
+    #[must_use]
+    pub fn new_with_otlp_exporter(exporter: Arc<FireAndForgetExporter>) -> Self {
+        Self {
+            chains: RwLock::new(HashMap::new()),
+            otlp_exporter: Some(exporter),
+        }
+    }
+
+    /// Return the attached exporter, if any.
+    #[must_use]
+    pub fn otlp_exporter(&self) -> Option<Arc<FireAndForgetExporter>> {
+        self.otlp_exporter.as_ref().map(Arc::clone)
+    }
+
+    /// Snapshot the attached exporter status.
+    #[must_use]
+    pub fn otlp_status(&self) -> Option<AuditOtlpExporterStatus> {
+        self.otlp_exporter
+            .as_ref()
+            .map(|exporter| exporter.status())
     }
 
     /// Get-or-insert the per-zone handle. Optimised for the
@@ -303,12 +555,14 @@ impl InvokeAuditChain {
         ctx: &InvokeAuditContext,
         phase: InvokePhase,
     ) -> Result<AuditEntry, AuditError> {
-        self.append_with_contention_policy(
+        let entry = self.append_with_contention_policy(
             ctx,
             phase,
             CAS_RETRY_BUDGET,
             Some(SERIALIZED_COMMIT_FALLBACK_ATTEMPTS),
-        )
+        )?;
+        self.emit_otlp(&entry);
+        Ok(entry)
     }
 
     /// Same as [`Self::append`] but with a caller-supplied CAS retry
@@ -331,7 +585,15 @@ impl InvokeAuditChain {
         phase: InvokePhase,
         retry_budget: usize,
     ) -> Result<AuditEntry, AuditError> {
-        self.append_with_contention_policy(ctx, phase, retry_budget, None)
+        let entry = self.append_with_contention_policy(ctx, phase, retry_budget, None)?;
+        self.emit_otlp(&entry);
+        Ok(entry)
+    }
+
+    fn emit_otlp(&self, entry: &AuditEntry) {
+        if let Some(exporter) = &self.otlp_exporter {
+            let _ = exporter.try_export_entry(entry);
+        }
     }
 
     fn append_with_contention_policy(
@@ -341,29 +603,7 @@ impl InvokeAuditChain {
         retry_budget: usize,
         serialized_fallback_after: Option<usize>,
     ) -> Result<AuditEntry, AuditError> {
-        let event_type = phase.event_type();
-        let severity = phase.severity();
-        let metadata = phase.into_metadata();
-
-        // Build the immutable parts of the entry once; only seq +
-        // prev change between retries.
-        let base_builder = AuditEntryBuilder::new()
-            .event_type(event_type)
-            .severity(severity)
-            .actor(&ctx.actor)
-            .zone_id(&ctx.zone_id)
-            .connector_id(&ctx.connector_id)
-            .operation_id(&ctx.operation_id)
-            .meta("operation", json!(ctx.operation));
-        let base_builder = if let Some(cid) = ctx.correlation_id.clone() {
-            base_builder.correlation_id(cid)
-        } else {
-            base_builder
-        };
-        let base_builder = metadata
-            .into_iter()
-            .fold(base_builder, |b, (k, v)| b.meta(k, v));
-
+        let template = InvokeAuditEntryTemplate::new(ctx, phase);
         let zone = self.zone_handle(&ctx.zone_id);
 
         // br-uwlj5 optimistic-CAS retry loop. Constant in practice:
@@ -375,27 +615,34 @@ impl InvokeAuditChain {
             // 1. Snapshot (last_seq, last_id) under the per-zone
             //    Mutex — short critical section, no allocation
             //    beyond the optional String clone of last_id.
-            let (next_seq, prev_snapshot, last_occurred_at) = {
+            let (next_seq, prev_snapshot, last_occurred_at, last_hlc) = {
                 let z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
                 (
                     z.last_seq.map_or(0u64, |s| s.saturating_add(1)),
                     z.last_id.clone(),
                     z.last_occurred_at,
+                    z.last_hlc.clone(),
                 )
             };
             let occurred_at = monotonic_occurred_at(ctx.occurred_at, last_occurred_at);
+            let hlc = next_audit_hlc(&template.actor, occurred_at, last_hlc.as_ref());
+            let clock_anomaly = ClockAnomaly::detect(ctx.occurred_at, last_occurred_at);
+            let metadata_override =
+                clock_anomaly.map(|anomaly| template.metadata_with_clock_anomaly(anomaly));
+            let metadata = metadata_override.as_ref().unwrap_or(&template.metadata);
 
-            // 2. Build entry + encode canonical + hash OUTSIDE
-            //    any lock. This is the dominant cost; running it
-            //    lock-free is the load-bearing perf win.
-            let mut builder = base_builder.clone().seq(next_seq).occurred_at(occurred_at);
-            if let Some(p) = prev_snapshot {
-                builder = builder.prev(p);
-            }
-            let entry = builder
-                .build_with_computed_id()
-                .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
-            let real_id = entry.id.clone();
+            // 2. Encode canonical + hash OUTSIDE any lock. This is the
+            //    dominant cost; running it lock-free is the load-bearing
+            //    perf win. On failed CAS attempts, keep this path borrowed:
+            //    the full owned AuditEntry is only materialized after the
+            //    snapshot wins the commit race.
+            let real_id = template.compute_id(
+                next_seq,
+                occurred_at,
+                &hlc,
+                prev_snapshot.as_deref(),
+                metadata,
+            )?;
 
             // 3. Re-lock + CAS commit. If another append landed
             //    on this zone between (1) and (3), our prev /
@@ -404,14 +651,29 @@ impl InvokeAuditChain {
             //    or sequential same-zone) this loop runs once.
             {
                 let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
-                if z.last_id.as_deref() == entry.prev.as_deref() {
+                if z.last_id.as_deref() == prev_snapshot.as_deref() {
+                    let entry = template.materialize(
+                        next_seq,
+                        occurred_at,
+                        hlc,
+                        prev_snapshot,
+                        real_id,
+                        metadata_override,
+                    );
                     z.last_seq = Some(next_seq);
-                    z.last_id = Some(real_id);
+                    z.last_id = Some(entry.id.clone());
                     z.last_occurred_at = Some(occurred_at);
+                    z.last_hlc = Some(entry.hlc.clone());
                     z.entries.push(entry.clone());
                     z.metrics.entries = z.entries.len();
                     z.metrics.optimistic_commits = z.metrics.optimistic_commits.saturating_add(1);
+                    if clock_anomaly.is_some() {
+                        z.metrics.clock_anomalies = z.metrics.clock_anomalies.saturating_add(1);
+                    }
                     drop(z);
+                    if let Some(anomaly) = clock_anomaly {
+                        emit_clock_anomaly(&entry, anomaly);
+                    }
                     return Ok(entry);
                 }
                 z.metrics.stale_head_retries = z.metrics.stale_head_retries.saturating_add(1);
@@ -427,7 +689,7 @@ impl InvokeAuditChain {
             // whose snapshot cannot go stale because the snapshot and
             // commit happen in the same critical section.
             if serialized_fallback_after.is_some_and(|fallback_after| attempts >= fallback_after) {
-                return Self::append_serialized(&zone, &base_builder, ctx.occurred_at);
+                return Self::append_serialized(&zone, &template, ctx.occurred_at);
             }
 
             // Defence in depth against pathological retry storms
@@ -457,26 +719,34 @@ impl InvokeAuditChain {
 
     fn append_serialized(
         zone: &Arc<Mutex<ZoneChain>>,
-        base_builder: &AuditEntryBuilder,
+        template: &InvokeAuditEntryTemplate,
         requested_occurred_at: u64,
     ) -> Result<AuditEntry, AuditError> {
         let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
         let next_seq = z.last_seq.map_or(0u64, |s| s.saturating_add(1));
         let occurred_at = monotonic_occurred_at(requested_occurred_at, z.last_occurred_at);
-        let mut builder = base_builder.clone().seq(next_seq).occurred_at(occurred_at);
-        if let Some(prev) = z.last_id.clone() {
-            builder = builder.prev(prev);
-        }
-        let entry = builder
-            .build_with_computed_id()
-            .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
+        let hlc = next_audit_hlc(&template.actor, occurred_at, z.last_hlc.as_ref());
+        let clock_anomaly = ClockAnomaly::detect(requested_occurred_at, z.last_occurred_at);
+        let metadata_override =
+            clock_anomaly.map(|anomaly| template.metadata_with_clock_anomaly(anomaly));
+        let metadata = metadata_override.as_ref().unwrap_or(&template.metadata);
+        let prev = z.last_id.clone();
+        let id = template.compute_id(next_seq, occurred_at, &hlc, prev.as_deref(), metadata)?;
+        let entry = template.materialize(next_seq, occurred_at, hlc, prev, id, metadata_override);
         z.last_seq = Some(next_seq);
         z.last_id = Some(entry.id.clone());
         z.last_occurred_at = Some(occurred_at);
+        z.last_hlc = Some(entry.hlc.clone());
         z.entries.push(entry.clone());
         z.metrics.entries = z.entries.len();
         z.metrics.serialized_fallbacks = z.metrics.serialized_fallbacks.saturating_add(1);
+        if clock_anomaly.is_some() {
+            z.metrics.clock_anomalies = z.metrics.clock_anomalies.saturating_add(1);
+        }
         drop(z);
+        if let Some(anomaly) = clock_anomaly {
+            emit_clock_anomaly(&entry, anomaly);
+        }
         Ok(entry)
     }
 
@@ -548,10 +818,124 @@ impl InvokeAuditChain {
             .expect("InvokeAuditChain zone mutex poisoned")
             .metrics
     }
+
+    /// Build a redaction-safe live status snapshot for one zone.
+    ///
+    /// The current invoke audit chain is live host telemetry, but it is not a
+    /// quorum-signed checkpoint stream yet. This method therefore reports
+    /// committed entries and HLC drift without fabricating quorum signers.
+    #[must_use]
+    pub fn status_for_zone(
+        &self,
+        zone_id: &str,
+        now_unix_secs: u64,
+        max_age_seconds: u64,
+    ) -> InvokeAuditChainStatusSnapshot {
+        let entries = self.entries_for_zone(zone_id);
+        let append_metrics = self.metrics_for_zone(zone_id);
+        let tip_entry = entries.last();
+        let mut warnings = Vec::new();
+
+        if tip_entry.is_none() {
+            warnings.push(format!(
+                "live host invoke audit chain has no entries for zone `{zone_id}`"
+            ));
+        } else {
+            warnings.push(
+                "live host invoke audit chain is available, but quorum-signed checkpoint telemetry is not wired yet"
+                    .to_owned(),
+            );
+        }
+        if append_metrics.clock_anomalies > 0 {
+            warnings.push(format!(
+                "{} clock anomaly event(s) were recorded in this zone",
+                append_metrics.clock_anomalies
+            ));
+        }
+        if let Some(entry) = tip_entry
+            && entry.occurred_at > now_unix_secs
+        {
+            warnings.push(format!(
+                "head entry timestamp {} is in the future relative to now {}",
+                entry.occurred_at, now_unix_secs
+            ));
+        }
+
+        let hlc_physical_drift_ms = tip_entry.map(|entry| {
+            now_unix_secs
+                .saturating_mul(1_000)
+                .abs_diff(entry.hlc.physical_ms)
+        });
+
+        InvokeAuditChainStatusSnapshot {
+            schema_version: INVOKE_AUDIT_CHAIN_STATUS_SCHEMA_VERSION.to_owned(),
+            status: if tip_entry.is_some() {
+                FreshnessLevel::Degraded
+            } else {
+                FreshnessLevel::Missing
+            },
+            telemetry_state: "live-host".to_owned(),
+            source: InvokeAuditChainStatusSource {
+                kind: "host-invoke-audit-chain".to_owned(),
+                live: true,
+            },
+            zone_id: zone_id.to_owned(),
+            head_seq: tip_entry.map(|entry| entry.seq),
+            head_entry: tip_entry.map(|entry| entry.id.clone()),
+            audit_entries: u64::try_from(entries.len()).unwrap_or(u64::MAX),
+            last_observed_at: tip_entry.map(|entry| entry.occurred_at),
+            quorum_signed_checkpoints: 0,
+            quorum_signers: 0,
+            quorum_signer_ids: Vec::new(),
+            last_quorum_height: None,
+            quorum_freshness_secs: None,
+            quorum_rotation_epoch: None,
+            next_rotation_eta_secs: None,
+            hlc_physical_drift_ms,
+            max_age_seconds,
+            live_quorum_checkpoint_snapshot: LiveQuorumCheckpointSnapshot {
+                available: false,
+                reason_code: "quorum-checkpoint-telemetry-unwired".to_owned(),
+                detail: "host invoke-chain entries are live, but quorum checkpoint signing is not exposed yet"
+                    .to_owned(),
+            },
+            append_metrics,
+            warnings,
+        }
+    }
 }
 
 fn monotonic_occurred_at(requested: u64, previous: Option<u64>) -> u64 {
     previous.map_or(requested, |last| requested.max(last))
+}
+
+fn next_audit_hlc(
+    node_id: &str,
+    occurred_at: u64,
+    previous: Option<&HybridLogicalTimestamp>,
+) -> HybridLogicalTimestamp {
+    let physical_ms = audit_entry_hlc_from_occurred_at(occurred_at, node_id).physical_ms;
+    previous.map_or_else(
+        || HybridLogicalTimestamp::from_physical(physical_ms, node_id),
+        |previous| {
+            let mut clock = HybridLogicalClock::new(node_id);
+            clock.merge(previous, physical_ms)
+        },
+    )
+}
+
+fn emit_clock_anomaly(entry: &AuditEntry, anomaly: ClockAnomaly) {
+    warn!(
+        target: "fcp.audit.clock_anomaly",
+        entry_id = %entry.id,
+        zone_id = %entry.zone_id,
+        actor = %entry.actor,
+        requested_occurred_at = anomaly.requested,
+        previous_occurred_at = anomaly.previous,
+        clamped_occurred_at = anomaly.clamped,
+        skew_secs = anomaly.skew_secs(),
+        "audit append detected wall-clock rollback and advanced HLC logical counter"
+    );
 }
 
 #[cfg(test)]
@@ -583,6 +967,65 @@ mod tests {
         assert_eq!(entry.event_type, event_types::INVOKE_ALLOW);
         assert_eq!(entry.severity, Severity::Info);
         assert_eq!(entry.zone_id, "z:work");
+        assert_eq!(entry.hlc.node_id, "agent:test");
+        assert_eq!(
+            entry.hlc.physical_ms,
+            entry.occurred_at.saturating_mul(1_000)
+        );
+    }
+
+    #[test]
+    fn invoke_audit_chain_status_reports_live_missing_without_entries() {
+        let chain = InvokeAuditChain::new();
+        let status = chain.status_for_zone("z:work", 1_700_000_030, 60);
+
+        assert_eq!(
+            status.schema_version,
+            INVOKE_AUDIT_CHAIN_STATUS_SCHEMA_VERSION
+        );
+        assert_eq!(status.status, FreshnessLevel::Missing);
+        assert_eq!(status.telemetry_state, "live-host");
+        assert_eq!(status.source.kind, "host-invoke-audit-chain");
+        assert!(status.source.live);
+        assert_eq!(status.zone_id, "z:work");
+        assert_eq!(status.audit_entries, 0);
+        assert_eq!(status.quorum_signed_checkpoints, 0);
+        assert_eq!(status.quorum_signers, 0);
+        assert!(!status.live_quorum_checkpoint_snapshot.available);
+        assert!(
+            status
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("no entries"))
+        );
+    }
+
+    #[test]
+    fn invoke_audit_chain_status_reports_live_entries_without_fabricating_quorum() {
+        let chain = InvokeAuditChain::new();
+        let entry = chain
+            .append(&ctx("z:work", "op-1"), InvokePhase::PreflightAllow)
+            .unwrap();
+
+        let status = chain.status_for_zone("z:work", 1_700_000_030, 60);
+
+        assert_eq!(status.status, FreshnessLevel::Degraded);
+        assert_eq!(status.head_seq, Some(entry.seq));
+        assert_eq!(status.head_entry.as_deref(), Some(entry.id.as_str()));
+        assert_eq!(status.audit_entries, 1);
+        assert_eq!(status.last_observed_at, Some(entry.occurred_at));
+        assert_eq!(status.quorum_signed_checkpoints, 0);
+        assert_eq!(status.quorum_signers, 0);
+        assert!(status.quorum_signer_ids.is_empty());
+        assert!(status.last_quorum_height.is_none());
+        assert_eq!(status.hlc_physical_drift_ms, Some(30_000));
+        assert_eq!(status.append_metrics.entries, 1);
+        assert!(
+            status
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("quorum-signed checkpoint telemetry"))
+        );
     }
 
     #[test]
@@ -613,6 +1056,80 @@ mod tests {
             first.seq + 1
         );
         assert_eq!(second.event_type, event_types::INVOKE_RESULT);
+        assert!(
+            second.hlc > first.hlc,
+            "second entry HLC must advance even when wall-clock seconds are equal"
+        );
+    }
+
+    #[test]
+    fn invoke_audit_chain_clock_step_back_marks_anomaly_without_hlc_regression() {
+        let chain = InvokeAuditChain::new();
+        let mut first_ctx = ctx("z:work", "op-rollback-1");
+        first_ctx.occurred_at = 1_700_000_010;
+        let first = chain
+            .append(&first_ctx, InvokePhase::PreflightAllow)
+            .unwrap();
+
+        let mut second_ctx = ctx("z:work", "op-rollback-2");
+        second_ctx.occurred_at = 1_700_000_000;
+        let second = chain
+            .append(&second_ctx, InvokePhase::PreflightAllow)
+            .unwrap();
+
+        assert_eq!(second.occurred_at, first.occurred_at);
+        assert_eq!(second.hlc.physical_ms, first.hlc.physical_ms);
+        assert!(
+            second.hlc > first.hlc,
+            "clock rollback must advance the logical counter instead of regressing HLC"
+        );
+        assert_eq!(
+            second.metadata.get("alert").and_then(|v| v.as_str()),
+            Some("clock_anomaly")
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_kind")
+                .and_then(|v| v.as_str()),
+            Some("wall_clock_regressed")
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_requested_occurred_at")
+                .and_then(serde_json::Value::as_u64),
+            Some(second_ctx.occurred_at)
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_previous_occurred_at")
+                .and_then(serde_json::Value::as_u64),
+            Some(first.occurred_at)
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_clamped_occurred_at")
+                .and_then(serde_json::Value::as_u64),
+            Some(first.occurred_at)
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_skew_secs")
+                .and_then(serde_json::Value::as_u64),
+            Some(10)
+        );
+        assert_eq!(chain.metrics_for_zone("z:work").clock_anomalies, 1);
     }
 
     #[test]
@@ -990,6 +1507,10 @@ mod tests {
         assert_eq!(
             entries[1].occurred_at, entries[0].occurred_at,
             "same-zone commit order must remain non-decreasing for fcp-audit verification"
+        );
+        assert!(
+            entries[1].hlc > entries[0].hlc,
+            "HLC must preserve strict causal order when wall-clock seconds are clamped"
         );
         let report = fcp_audit::verify_chain(&entries, None, Some("z:work"));
         assert!(

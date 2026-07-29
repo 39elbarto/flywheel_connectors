@@ -1,13 +1,14 @@
 //! FCP `DocuSign` Connector implementation.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
-    ProvisioningStep, ProvisioningStepType, RecipeId, RetryConfig, RiskLevel, SafetyTier,
-    SelfCheckReport, StepId, WebhookRecipe, WebhookVerification,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, OAuthRecipe,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, RetryConfig, SelfCheckReport, StepId, WebhookRecipe, WebhookVerification,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,25 @@ use crate::{
     client::{DocuSignAuth, DocuSignClient, ListEnvelopesParams},
     error::DocuSignError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 15] = [
+    "docusign.list_envelopes",
+    "docusign.get_envelope",
+    "docusign.create_envelope",
+    "docusign.send_envelope",
+    "docusign.void_envelope",
+    "docusign.add_recipients",
+    "docusign.list_templates",
+    "docusign.get_template",
+    "docusign.download_documents",
+    "docusign.stream_connect_events",
+    "docusign.update_recipients",
+    "docusign.add_tabs",
+    "docusign.resend_envelope",
+    "docusign.list_documents",
+    "docusign.create_from_template",
+];
 
 /// Parsed and validated `DocuSign` connector configuration.
 #[derive(Debug, Clone)]
@@ -736,305 +756,69 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Build typed operations info for introspection.
-#[allow(clippy::too_many_lines)]
 fn typed_operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static("docusign.list_envelopes"),
-            summary: "List envelopes with optional status and date filters".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "from_date": {"type": "string"}, "to_date": {"type": "string"}, "status": {"type": "string"}, "count": {"type": "integer"}}, "required": ["account_id"]}),
-            output_schema: json!({"type": "object", "properties": {"envelopes": {"type": "array"}}}),
-            capability: CapabilityId::from_static("docusign.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to browse or search envelopes by status, date range, or text"
-                    .into(),
-                common_mistakes: vec!["Forgetting to provide account_id".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.get_envelope"),
-            summary: "Get envelope status, metadata, and recipient progress".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}, "include": {"type": "string"}}, "required": ["account_id", "envelope_id"]}),
-            output_schema: json!({"type": "object", "properties": {"envelope": {"type": "object"}}}),
-            capability: CapabilityId::from_static("docusign.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to check the status or details of a specific envelope".into(),
-                common_mistakes: vec!["Not providing both account_id and envelope_id".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.create_envelope"),
-            summary: "Create a new envelope with documents and recipients".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_definition": {"type": "object"}}, "required": ["account_id", "envelope_definition"]}),
-            output_schema: json!({"type": "object", "properties": {"envelopeId": {"type": "string"}}}),
-            capability: CapabilityId::from_static("docusign.write"),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use to create a new envelope for document signing workflows".into(),
-                common_mistakes: vec![
-                    "Not including envelope_definition with documents and recipients".into(),
-                ],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.write")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.send_envelope"),
-            summary: "Send a draft envelope to recipients for signing".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}}, "required": ["account_id", "envelope_id"]}),
-            output_schema: json!({"type": "object", "properties": {"status": {"type": "string"}}}),
-            capability: CapabilityId::from_static("docusign.send"),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "Use to send a created draft envelope to recipients for signing"
-                    .into(),
-                common_mistakes: vec!["Sending an envelope that is not in draft status".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.send")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.void_envelope"),
-            summary: "Void a sent envelope that has not been completed".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}, "voided_reason": {"type": "string"}}, "required": ["account_id", "envelope_id", "voided_reason"]}),
-            output_schema: json!({"type": "object", "properties": {"status": {"type": "string"}}}),
-            capability: CapabilityId::from_static("docusign.send"),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to void/cancel an envelope that has been sent but not completed"
-                    .into(),
-                common_mistakes: vec!["Trying to void an already completed envelope".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.send")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.add_recipients"),
-            summary: "Add or modify recipients on a draft envelope".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}, "recipients": {"type": "object"}}, "required": ["account_id", "envelope_id", "recipients"]}),
-            output_schema: json!({"type": "object", "properties": {"recipients": {"type": "object"}}}),
-            capability: CapabilityId::from_static("docusign.write"),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to add or update recipients on an existing draft envelope".into(),
-                common_mistakes: vec!["Modifying recipients on a sent envelope".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.write")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.list_templates"),
-            summary: "List available templates in an account".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "search_text": {"type": "string"}}, "required": ["account_id"]}),
-            output_schema: json!({"type": "object", "properties": {"templates": {"type": "array"}}}),
-            capability: CapabilityId::from_static("docusign.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to discover available templates for creating envelopes".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.get_template"),
-            summary: "Get template details including documents and recipients".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "template_id": {"type": "string"}}, "required": ["account_id", "template_id"]}),
-            output_schema: json!({"type": "object", "properties": {"template": {"type": "object"}}}),
-            capability: CapabilityId::from_static("docusign.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to inspect a template before creating an envelope from it".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.download_documents"),
-            summary: "Download signed documents from a completed envelope".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}, "document_id": {"type": "string"}}, "required": ["account_id", "envelope_id"]}),
-            output_schema: json!({"type": "object", "properties": {"document": {"type": "string", "description": "Base64-encoded document"}}}),
-            capability: CapabilityId::from_static("docusign.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to download completed/signed documents from an envelope".into(),
-                common_mistakes: vec!["Downloading from an incomplete envelope".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.stream_connect_events"),
-            summary: "Stream DocuSign Connect webhook events".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "since_ts": {"type": "string"}}, "required": ["account_id"]}),
-            output_schema: json!({"type": "object", "properties": {"events": {"type": "array"}, "streaming": {"type": "boolean"}}}),
-            capability: CapabilityId::from_static("docusign.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to poll for Connect webhook events since a timestamp".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.update_recipients"),
-            summary: "Update existing recipients on an envelope".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}, "recipients": {"type": "object"}}, "required": ["account_id", "envelope_id", "recipients"]}),
-            output_schema: json!({"type": "object", "properties": {"recipients": {"type": "object"}}}),
-            capability: CapabilityId::from_static("docusign.write"),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "Use to update existing recipients on an envelope (e.g. change email, name, routing order)".into(),
-                common_mistakes: vec!["Updating recipients on a completed envelope".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.write")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.add_tabs"),
-            summary: "Add tabs/fields to an envelope recipient".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}, "recipient_id": {"type": "string"}, "tabs": {"type": "object"}}, "required": ["account_id", "envelope_id", "recipient_id", "tabs"]}),
-            output_schema: json!({"type": "object", "properties": {"tabs": {"type": "object"}}}),
-            capability: CapabilityId::from_static("docusign.write"),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use to add signature tabs, text fields, or other form fields to a recipient on an envelope".into(),
-                common_mistakes: vec!["Adding tabs without specifying correct page and position coordinates".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.write")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.resend_envelope"),
-            summary: "Resend notifications for an envelope".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}}, "required": ["account_id", "envelope_id"]}),
-            output_schema: json!({"type": "object", "properties": {"envelopeId": {"type": "string"}}}),
-            capability: CapabilityId::from_static("docusign.write"),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to resend signing notification emails to recipients who have not yet signed".into(),
-                common_mistakes: vec!["Resending to recipients who have already completed signing".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.write")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.list_documents"),
-            summary: "List documents in an envelope".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "envelope_id": {"type": "string"}}, "required": ["account_id", "envelope_id"]}),
-            output_schema: json!({"type": "object", "properties": {"documents": {"type": "object"}}}),
-            capability: CapabilityId::from_static("docusign.read"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use to list documents contained in an envelope before downloading".into(),
-                common_mistakes: vec![],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.read")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("docusign.create_from_template"),
-            summary: "Create an envelope from a template".into(),
-            description: None,
-            input_schema: json!({"type": "object", "properties": {"account_id": {"type": "string"}, "template_id": {"type": "string"}, "template_roles": {"type": "array"}, "status": {"type": "string"}}, "required": ["account_id", "template_id", "template_roles"]}),
-            output_schema: json!({"type": "object", "properties": {"envelopeId": {"type": "string"}, "status": {"type": "string"}}}),
-            capability: CapabilityId::from_static("docusign.write"),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use to create a new envelope from an existing template, populating template roles with recipient details".into(),
-                common_mistakes: vec!["Not providing all required template roles defined in the template".into()],
-                examples: vec![],
-                related: vec![CapabilityId::from_static("docusign.write")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-    ]
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, fcp_manifest::OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded DocuSign manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 /// Build the operations info for introspection (JSON format for simulate).
 fn operations_info() -> serde_json::Value {
-    serde_json::to_value(typed_operations_info()).unwrap_or_default()
+    static OPERATIONS: OnceLock<serde_json::Value> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| serde_json::to_value(typed_operations_info()).unwrap_or_default())
+        .clone()
 }
 
 /// Build the provisioning recipe for the `DocuSign` connector.
@@ -1198,6 +982,13 @@ fn is_docusign_account_api_root(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strict_docusign_manifest() -> Result<ConnectorManifest, String> {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())?;
+        manifest.validate().map_err(|error| error.to_string())?;
+        Ok(manifest)
+    }
 
     #[test]
     fn config_from_access_token() {
@@ -1443,6 +1234,66 @@ mod tests {
         assert!(ids.contains(&"docusign.resend_envelope"));
         assert!(ids.contains(&"docusign.list_documents"));
         assert!(ids.contains(&"docusign.create_from_template"));
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_docusign_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).expect("serialize runtime hints"),
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .expect("serialize manifest hints")
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -1901,7 +1752,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "docusign.oauth2_pkce");
-        assert!(v["steps"].as_array().unwrap().len() == 4);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 4);
     }
 
     #[test]

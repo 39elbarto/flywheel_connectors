@@ -23,7 +23,8 @@
     clippy::needless_pass_by_value,
     clippy::redundant_closure_for_method_calls,
     clippy::single_match_else,
-    clippy::unreadable_literal
+    clippy::unreadable_literal,
+    clippy::unused_async_trait_impl
 )]
 
 pub mod config;
@@ -38,11 +39,15 @@ use fcp_prelude::{
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};
 
 use crate::config::{DoctorCheck, DoctorResult, VectorDbConfig, VectorDbProvider};
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// FCP Vector Database Connector.
 pub struct VectorDbConnector {
@@ -88,6 +93,18 @@ impl VectorDbConnector {
     #[must_use]
     pub fn provider(&self) -> Option<VectorDbProvider> {
         self.config.as_ref().map(|c| c.provider)
+    }
+
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_core::InstanceId {
+        &self.base.instance_id
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     /// Handle configure method.
@@ -165,7 +182,7 @@ impl VectorDbConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:vectordb-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -463,7 +480,7 @@ impl VectorDbConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
-        verifier.verify(token, &required_capability, &op_id, &[])?;
+        verifier.verify_bound(token, &required_capability, &op_id, &[])?;
 
         match operation {
             "vectordb.list_collections" => Self::invoke_list_collections(input),
@@ -1273,10 +1290,22 @@ mod tests {
     use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_prelude::{
-        CapabilityId, CapabilityToken, HandshakeRequest, IdempotencyClass, InstanceId, ZoneId,
+        CapabilityConstraints, CapabilityId, CapabilityToken, HandshakeRequest, IdempotencyClass,
+        InstanceId, ZoneId,
     };
     use fcp_testkit::LogCapture;
     use std::time::Instant;
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = VectorDbConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:vectordb-connector-v1");
+    }
 
     struct TestLog {
         test_name: &'static str,
@@ -1394,15 +1423,26 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &str,
         operations: &[&str],
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
+        // C3.4: tokens MUST include constraints (default-deny)
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let token = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
             .principal("user:test")
             .operations(operations)
             .issuer("node:test")
+            .target_instance(instance_id.as_str())
             .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("valid constraints")
             .sign(signing_key)
             .expect("capability token sign");
         CapabilityToken::from_raw(token)
@@ -1775,6 +1815,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.read",
             &["vectordb.list_collections"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -1823,6 +1864,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.read",
             &["vectordb.list_collections"],
+            connector.instance_id(),
         );
         let response = connector
             .handle_invoke(json!({
@@ -1873,6 +1915,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -1920,6 +1963,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.delete",
             &["vectordb.delete_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2728,6 +2772,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.query_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2770,6 +2815,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.query_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2812,6 +2858,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.query_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2854,6 +2901,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2896,6 +2944,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2943,6 +2992,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.fetch_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -2986,6 +3036,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.read",
             &["vectordb.fetch_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3025,6 +3076,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.delete",
             &["vectordb.delete_vectors"],
+            connector.instance_id(),
         );
         // No ids, no filter, no delete_all
         let result = connector
@@ -3068,6 +3120,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.delete",
             &["vectordb.delete_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3108,6 +3161,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.update_vector_metadata"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3152,6 +3206,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3194,6 +3249,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3236,6 +3292,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3278,6 +3335,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.write",
             &["vectordb.create_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3319,6 +3377,7 @@ mod tests {
             &signing_key,
             "vectordb.collections.delete",
             &["vectordb.delete_collection"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3404,6 +3463,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let long_id = "x".repeat(513);
         let result = connector
@@ -3450,6 +3510,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({
@@ -3495,6 +3556,7 @@ mod tests {
             &signing_key,
             "vectordb.vectors.write",
             &["vectordb.upsert_vectors"],
+            connector.instance_id(),
         );
         let result = connector
             .handle_invoke(json!({

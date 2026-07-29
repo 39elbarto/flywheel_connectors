@@ -4,7 +4,7 @@
 //! Uses real crypto keys for signature/encryption roundtrips without
 //! external dependencies.
 
-use fcp_crypto::{AeadKey, Ed25519SigningKey, X25519SecretKey};
+use fcp_crypto::{AeadKey, Ed25519SigningKey, MlDsa65SigningKey, PqSigningPolicy, X25519SecretKey};
 use fcp_prelude::{
     ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId,
 };
@@ -13,7 +13,7 @@ use fcp_protocol::{
     FcpsFrame, FcpsFrameHeader, FrameFlags, MeshSessionAck, MeshSessionHello, MeshSessionId,
     ReplayWindow, SessionCookie, SessionCryptoSuite, SessionDirection, SessionNonce,
     SignedFcpsFrame, SymbolAck, SymbolAckReason, SymbolContext, SymbolRecord, SymbolRequest,
-    TransportLimits, ZoneKeyAlgorithm,
+    TransportLimits, ZoneKeyAlgorithm, verify_hybrid_signed_fcps_frame,
 };
 
 // ── helpers ──
@@ -57,6 +57,10 @@ fn test_object_header() -> ObjectHeader {
 
 fn test_signing_key() -> Ed25519SigningKey {
     Ed25519SigningKey::generate()
+}
+
+fn test_pq_signing_key() -> MlDsa65SigningKey {
+    MlDsa65SigningKey::generate().expect("ML-DSA signing key")
 }
 
 const fn test_aead_key() -> AeadKey {
@@ -215,8 +219,9 @@ fn fcps_frame_encode_decode_roundtrip() {
 // ── SignedFcpsFrame ──
 
 #[test]
-fn signed_frame_sign_and_verify() {
+fn hybrid_signed_frame_sign_and_verify() {
     let signing_key = test_signing_key();
+    let pq_signing_key = test_pq_signing_key();
     let header = FcpsFrameHeader {
         version: fcp_protocol::FCPS_VERSION,
         flags: FrameFlags::default(),
@@ -241,17 +246,25 @@ fn signed_frame_sign_and_verify() {
     };
 
     let source_id = test_node_id("node-1");
-    let signed = SignedFcpsFrame::new(frame, source_id, 12345, &signing_key).expect("sign");
+    let signed =
+        SignedFcpsFrame::new_hybrid(&frame, source_id, 12345, &signing_key, &pq_signing_key)
+            .expect("sign");
 
-    signed
-        .verify(&signing_key.verifying_key())
-        .expect("verify should pass");
+    verify_hybrid_signed_fcps_frame(
+        &signed,
+        &signing_key.verifying_key(),
+        pq_signing_key.verifying_key(),
+        PqSigningPolicy::BothRequired,
+        65535,
+    )
+    .expect("verify should pass");
 }
 
 #[test]
-fn signed_frame_wrong_key_fails() {
+fn hybrid_signed_frame_wrong_key_fails() {
     let signing_key = test_signing_key();
     let wrong_key = test_signing_key();
+    let pq_signing_key = test_pq_signing_key();
     let frame = FcpsFrame {
         header: FcpsFrameHeader {
             version: fcp_protocol::FCPS_VERSION,
@@ -269,8 +282,21 @@ fn signed_frame_wrong_key_fails() {
         symbols: vec![],
     };
 
-    let signed = SignedFcpsFrame::new(frame, test_node_id("n1"), 100, &signing_key).expect("sign");
-    let result = signed.verify(&wrong_key.verifying_key());
+    let signed = SignedFcpsFrame::new_hybrid(
+        &frame,
+        test_node_id("n1"),
+        100,
+        &signing_key,
+        &pq_signing_key,
+    )
+    .expect("sign");
+    let result = verify_hybrid_signed_fcps_frame(
+        &signed,
+        &wrong_key.verifying_key(),
+        pq_signing_key.verifying_key(),
+        PqSigningPolicy::BothRequired,
+        65535,
+    );
     assert!(result.is_err());
 }
 

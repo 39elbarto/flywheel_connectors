@@ -1,10 +1,11 @@
 # Together AI Connector V3 Contract
 
-> **Status**: manifest/runtime contract documented
+> **Status**: manifest-derived runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/together_connector_verification.sh`
 > **Primary upstream**: https://docs.together.ai/
+> **Interface hash**: `blake3-256:fcp.interface.v2:dbae532304c558d6655d5c0ccdba6a87e8777bc466cc4c0833c4a1545b0bd6d7`
 
 ## Purpose
 
@@ -35,6 +36,8 @@ Important runtime truths the contract preserves:
 - Together model IDs must include a namespace and model segment, for example `openai/gpt-oss-20b`.
 - SSE chat streaming returns redaction-safe chunk metadata and assembled text from a bounded invoke call; FCP subscribe is not implemented.
 - The legacy completions operation exists only for older callers that cannot send chat messages.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+- Runtime introspection derives operation metadata, schemas, approval mode, rate limits, and AI hints from the embedded strict manifest while preserving the six-operation order documented here.
 
 ## First-Slice Scope
 
@@ -148,6 +151,7 @@ The deterministic integration evidence is anchored on WireMock loopback runs cov
 - `connectors/together/src/types.rs` defines chat, embedding, legacy prompt, model ID, reasoning-effort, safety-model, and request validation.
 - `connectors/together/manifest.toml` defines the six-operation catalog, network constraints, sandbox boundary, and no-listener/no-exec posture.
 - `connectors/together/tests/conformance.rs` checks manifest and runtime operation surface alignment.
+- Connector unit tests assert that runtime operation metadata and schemas match the strict manifest.
 - `connectors/together/tests/provider_contract.rs` checks provider registry metadata and redaction behavior.
 - `connectors/together/tests/integration.rs` covers loopback chat, streaming, embeddings, model listing, health, redaction, rate limits, cancellation, trait invoke, and JSONL evidence.
 - `connectors/together/tests/live_verification.rs` emits structured skip records unless `TOGETHER_API_KEY` is present.

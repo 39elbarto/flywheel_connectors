@@ -1,6 +1,6 @@
 # Cloudflare Connector V3 Contract
 
-> **Status**: runtime contract documented with known manifest/capability metadata drift
+> **Status**: runtime contract documented; operation metadata is manifest-derived
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/cloudflare_connector_verification.sh`
@@ -63,11 +63,11 @@ Important runtime truths the contract preserves:
 - `self_check` calls `/user/tokens/verify` when credential material is configured.
 - `introspect` exposes no streaming support.
 
-## Known Contract Gaps
+## Remaining Contract Gaps
 
-The runtime, manifest, and policy metadata are not fully aligned in this checkout:
+The manifest operation catalog and runtime introspection metadata are aligned in this checkout. Remaining gaps are in simulation strictness and provider surface depth:
 
-- `manifest.toml` has `capabilities.optional = []`, while manifest operation entries and runtime introspection use operation-specific capabilities such as `cloudflare.dns.read`, `cloudflare.dns.write`, `cloudflare.workers.write`, and `cloudflare.kv.write`.
+- `manifest.toml` now declares the operation-specific capabilities in `capabilities.optional`, and runtime introspection derives operation metadata from the manifest instead of duplicating it in Rust.
 - `simulate` is less strict than `invoke`; it does not exercise the bound capability verifier.
 - `cloudflare.workers.deploy` accepts raw JavaScript source only. It does not support module metadata, assets, bindings, compatibility dates, secrets, routes, or Wrangler-style upload bundles.
 - `cloudflare.pages.create_deployment` sends only `{ "branch": <branch> }` to the deployment endpoint.
@@ -75,7 +75,7 @@ The runtime, manifest, and policy metadata are not fully aligned in this checkou
 - `cloudflare.kv.get` returns the raw value as a string and does not decode JSON.
 - DNS update is a full `PUT` style replacement using the runtime fields, not a partial patch operation.
 
-Operators should treat this README as the current truthfulness snapshot. A follow-up should align manifest optional capabilities, tighten simulation, and expand operation-specific provider payload support before this connector is described as complete Cloudflare coverage.
+Operators should treat this README as the current truthfulness snapshot. A follow-up should tighten simulation and expand operation-specific provider payload support before this connector is described as complete Cloudflare coverage.
 
 ## First-Slice Scope
 
@@ -196,6 +196,8 @@ These are excluded on purpose:
 - operator guidance, manifest hash, verification script, artifact root, and rerun commands
 - operation metadata, schemas, capability IDs, risk levels, safety tiers, idempotency, and approval modes
 - self-check proof through `/user/tokens/verify` when credential material is configured
+- gated live sandbox DNS lifecycle proof through `cloudflare.health`, `cloudflare.dns.create_record`, `cloudflare.dns.list_records`, `cloudflare.dns.delete_record`, and post-delete list verification
+- gated live auth-denial proof with an intentionally invalid API token
 - simulation allow behavior, currently without operation/capability validation
 
 The deterministic integration evidence is anchored on connector-local tests covering:
@@ -227,6 +229,7 @@ The verification surface captures:
 - manifest validation through `fwc`
 - runtime operation contract tests
 - deterministic WireMock Cloudflare API coverage
+- gated Cloudflare sandbox DNS mutation proof when `FCP_LIVE_SANDBOX=1` and sandbox credentials are configured
 - auth, base URL, input validation, capability-token, provider error, lifecycle, introspection, and self-check tests
 - formatting, check, and clippy proof through `rch`
 - UBS on changed files before commit
@@ -239,10 +242,12 @@ The verification surface captures:
 - Use a non-production zone, Pages project, Workers script name, and KV namespace for mutation tests.
 - Prefer a scoped API token with only the permissions needed for the operations under test.
 - Avoid legacy global API-key mode unless a specific compatibility test requires it.
+- To run the gated live DNS suite, set `FCP_LIVE_SANDBOX=1`, `CLOUDFLARE_SANDBOX_API_TOKEN`, `CLOUDFLARE_SANDBOX_ACCOUNT_ID`, `CLOUDFLARE_SANDBOX_ZONE_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. `CLOUDFLARE_SANDBOX_BASE_URL` defaults to `https://api.cloudflare.com/client/v4`.
 
 **Dedicated environment**:
 
 - Keep DNS mutations confined to a disposable zone.
+- The gated live suite creates one synthetic TXT record, verifies it appears in the DNS record list, deletes it, and verifies the record ID is absent from a second DNS list. Do not point it at a production zone.
 - Keep Workers deploy/delete confined to a disposable script name with no production routes.
 - Keep Pages deployments confined to a disposable project and branch.
 - Keep KV writes/deletes confined to a disposable namespace.

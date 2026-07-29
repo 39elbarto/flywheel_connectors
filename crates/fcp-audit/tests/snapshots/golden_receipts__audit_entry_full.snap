@@ -1,5 +1,6 @@
 ---
 source: crates/fcp-audit/tests/golden_receipts.rs
+assertion_line: 187
 expression: entry
 ---
 {
@@ -10,6 +11,11 @@ expression: entry
   "zone_id": "z:prod",
   "seq": 42,
   "occurred_at": 1700003600,
+  "hlc": {
+    "physical_ms": 1700003600000,
+    "logical": 0,
+    "node_id": "agent:service-account@example.com"
+  },
   "prev": "entry-full-0041",
   "correlation_id": "req-abc-123",
   "trace_context": {

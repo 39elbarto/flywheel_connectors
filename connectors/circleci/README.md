@@ -1,8 +1,10 @@
 # CircleCI Connector V3 Contract
 
-> **Status**: planning contract
-> **Bead**: `flywheel_connectors-j05nu.4.2.1`
-> **Unblocks**: `flywheel_connectors-j05nu.4.2.2`
+> **Status**: PROVEN runtime contract documented with remote CircleCI verifier proof
+> **Bead**: `flywheel_connectors-angoc.16.5`
+> **Verification script**: `scripts/e2e/circleci_connector_verification.sh`
+> **Proof**: `/tmp/fcp-circleci-proof2-20260606T212949Z/circleci_connector_verification.jsonl`, sha256 `c3a0d8d16066f8a0217533cb22f78ab025b26a933ac0b2c10a0e20ea8756a022`, 6 passed steps, rch remote `vmi1156319`
+> **Connector**: `fcp.circleci`
 > **Primary upstreams**:
 > - https://circleci.com/docs/guides/toolkit/api-developers-guide/
 > - https://circleci.com/docs/api/v2/
@@ -11,13 +13,13 @@
 
 ## Purpose
 
-This document fixes the first implementation slice for `fcp.circleci` so the follow-on runtime bead can converge on a stable contract instead of inventing CircleCI scope while coding.
+This document fixes the proven runtime slice for `fcp.circleci` so the connector stays aligned with its manifest, operation inventory, and verifier proof.
 
 The connector targets CircleCI API v2 as a request-response CI/CD control surface. The intended first slice is project discovery plus pipeline, workflow, and job inspection, with a narrow set of risky workflow and pipeline mutation flows.
 
 ## Current Runtime Snapshot
 
-The current connector code already exposes these operations:
+The connector exposes these operations:
 
 - `circleci.projects.list`
 - `circleci.pipelines.list`
@@ -31,13 +33,13 @@ The current connector code already exposes these operations:
 - `circleci.jobs.get`
 - `circleci.health`
 
-The current implementation bead is reconciling manifest and runtime so this operation inventory is now the authoritative first-slice surface.
+The current implementation derives runtime operation metadata from `manifest.toml`, so this operation inventory is the authoritative first-slice surface.
 
 ## First-Slice Scope
 
 The first CircleCI slice is intentionally narrow:
 
-- Read the authenticated user’s accessible projects through `GET /me/collaborations`.
+- Read the authenticated user's accessible projects through `GET /me/collaborations`.
 - List and inspect pipelines.
 - Trigger a pipeline run for a known project slug.
 - List and inspect workflows associated with a pipeline.
@@ -69,7 +71,7 @@ The connector is `operational` and effectively stateless aside from configuratio
 - `deny_private_ranges = true`
 - No cross-host redirects
 - API v2 responses may return `429` with `Retry-After`; the runtime must honor that header.
-- The connector’s default request timeout is `30_000 ms`.
+- The connector's default request timeout is `30_000 ms`.
 - `project_slug` is the only path input that legitimately contains `/`; all other IDs are single path segments and should remain sanitized accordingly.
 
 ## Capability Families
@@ -99,6 +101,19 @@ The connector is `operational` and effectively stateless aside from configuratio
 | `circleci.jobs.get` | `GET /project/{project_slug}/job/{job_number}` | `circleci.jobs.read` | `Safe` | `Low` | `None` | Read-only inspection of a specific job. |
 | `circleci.health` | `GET /me` | `circleci.projects.read` | `Safe` | `Low` | `Strict` | Deterministic auth/reachability probe used for configure, doctor, and self-check. |
 
+## Operator Guidance
+
+- Use a dedicated sandbox CircleCI account or project for verification; personal API tokens inherit the user's full visible project authority.
+- Run `circleci.health` before project, pipeline, workflow, or job operations when validating a fresh deployment.
+- Keep `project_slug` explicit and provider-qualified, such as `gh/org/repo` or `circleci/<org-id>/<project-id>`.
+- Treat `circleci.pipelines.trigger`, `circleci.workflows.cancel`, and `circleci.workflows.rerun` as real CI/CD mutations that can consume compute or affect deployments.
+- Treat localhost and CircleCI Server `base_url` overrides as deterministic test-only configuration until a later manifest formalizes them.
+
+Rerun commands:
+
+- `env -u CARGO_TARGET_DIR RUN_ID=manual-circleci bash scripts/e2e/circleci_connector_verification.sh`
+- `scripts/graduation/run_gauntlet.sh connectors/circleci`
+
 ## Explicit Non-Goals
 
 The first implementation slice does not include these provider surfaces:
@@ -123,16 +138,60 @@ These are excluded on purpose:
 
 ## Implementation Notes For `flywheel_connectors-j05nu.4.2.2`
 
-- Reconcile manifest and runtime so every exposed operation is declared truthfully with typed schemas.
+- Keep manifest and runtime metadata aligned through manifest-derived introspection and parity tests.
 - Fix the current drift between runtime idempotency semantics and actual provider behavior, especially for pipeline trigger and workflow rerun.
 - Decide whether the recommended `pipeline/run` trigger endpoint should replace or supplement the current `POST /project/{project_slug}/pipeline` path for supported project types.
 - Make the auth contract explicit: either keep pure `api_token` mode or formalize secretless credential injection as a first-class config surface.
 - `doctor()` and `self_check()` should report token validity, server-host policy, project-slug expectations, and rerun/cancel caveats explicitly.
 - Tests should cover project slug variants, `429 Retry-After`, unauthorized token handling, workflow mutation duplication hazards, and CircleCI Server `base_url` overrides.
 
+## Live Verification Bundle
+
+Verification script: `scripts/e2e/circleci_connector_verification.sh`
+
+The tracked deterministic verifier runs the CircleCI crate check, formatting
+check, local no-mock test, full connector test suite, clippy, and a redaction
+scan over its JSONL/log artifacts. The script requires accepted `rch` remote
+worker execution for each Cargo step; local fallback is classified as
+`infra_blocked` rather than proof.
+
+`connectors/circleci/tests/local_non_mock.rs` covers the production connector boundary against a raw TCP loopback CircleCI API fixture. It exercises `circleci.projects.list`, `circleci.pipelines.list`, `circleci.pipelines.trigger`, `circleci.health`, `Circle-Token` forwarding, trigger parameter body preservation, `429 Retry-After` mapping, and redaction-safe evidence logs without live CircleCI credentials.
+
+Latest accepted proof: `/tmp/fcp-circleci-proof2-20260606T212949Z/circleci_connector_verification.jsonl` (sha256 `c3a0d8d16066f8a0217533cb22f78ab025b26a933ac0b2c10a0e20ea8756a022`) recorded 6 passed steps on `97fe5da6c`, with remote Cargo steps on `vmi1156319` and redaction scan passing.
+
+Focused proof for this connector:
+
+```bash
+OUT_ROOT=/tmp/fcp-circleci-e2e bash scripts/e2e/circleci_connector_verification.sh
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-readme cargo test -p fcp-circleci --test local_non_mock -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-readme cargo test -p fcp-circleci -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-readme cargo clippy -p fcp-circleci --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-readme cargo fmt -p fcp-circleci -- --check
+```
+
+The live suite is sandbox-required and must gated-skip unless `FCP_LIVE_SANDBOX=1`
+is set with all of these values:
+
+- `CIRCLECI_SANDBOX_TOKEN`: personal API token for a dedicated sandbox account or project.
+- `CIRCLECI_SANDBOX_PROJECT_SLUG`: sandbox project slug, such as `gh/org/repo`.
+- `FCP_SANDBOX_RUN_NAMESPACE`: shared namespace recorded in redaction-safe evidence.
+
+Run the proof lane with:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-bky21 cargo test -p fcp-circleci --test live_verification -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-bky21 cargo clippy -p fcp-circleci --all-targets -- -D warnings
+```
+
+The current sandbox proof is intentionally non-mutating: it performs the
+idempotent `circleci.health` auth/reachability probe plus
+`circleci.projects.list` and `circleci.pipelines.list`, records a three-call
+ceiling, and emits JSONL evidence with `pipeline_triggered=false`. It does not
+trigger, cancel, or rerun pipelines.
+
 ## Source Notes
 
-This contract is grounded in CircleCI’s official docs:
+This contract is grounded in CircleCI's official docs:
 
 - API v2 is personal-token based and uses the `Circle-Token` header.
 - The provider documents user, pipeline, job, workflow, project, trigger, schedule, insights, and other categories beyond the current connector slice.

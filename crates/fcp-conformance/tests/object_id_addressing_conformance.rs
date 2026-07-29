@@ -22,11 +22,11 @@ use fcp_cbor::SchemaId;
 use fcp_prelude::{ObjectId, ObjectIdKey, ObjectIdParseError, ZoneId};
 use semver::Version;
 
-fn key_a() -> ObjectIdKey {
+const fn key_a() -> ObjectIdKey {
     ObjectIdKey::from_bytes([0xA1; 32])
 }
 
-fn key_b() -> ObjectIdKey {
+const fn key_b() -> ObjectIdKey {
     ObjectIdKey::from_bytes([0xB2; 32])
 }
 
@@ -107,7 +107,7 @@ fn parse_prefixed_rejects_short_hex_with_wrong_length() {
         ObjectIdParseError::WrongLength { actual } => {
             assert_eq!(actual, 16, "WrongLength must report the actual length");
         }
-        other => panic!("expected WrongLength, got {other:?}"),
+        ObjectIdParseError::InvalidHex => panic!("expected WrongLength, got InvalidHex"),
     }
 }
 

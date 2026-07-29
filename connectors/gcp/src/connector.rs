@@ -12,7 +12,8 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::json;
@@ -880,10 +881,14 @@ impl FcpConnector for GcpConnector {
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
         self.base.set_handshaken(true);
+        let verifier_instance_id = req
+            .requested_instance_id
+            .clone()
+            .unwrap_or_else(|| self.base.instance_id.clone());
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            self.base.instance_id.clone(),
+            verifier_instance_id,
         ));
         let caps = req
             .capabilities_requested

@@ -72,14 +72,14 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google-meet`, while runtime `BaseConnector` ID is `google-meet`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-meet-connector-v1` even though the manifest carries a concrete `interface_hash`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime capability-token verification currently uses an empty resource URI list for Meet operations. Capabilities are operation-bound but not resource-bound to a normalized space, conference record, participant, transcript, or Drive document.
 - Runtime `health()` and `doctor()` are local/config/scope diagnostics. `self_check()` deliberately returns `api_probe_deferred` for direct-token configurations instead of probing Meet.
 - `GoogleMeetClient::shutdown()` is a placeholder. Connector shutdown clears active live-session state, but it does not clear config, client, verifier, session, configured flags, or handshaken flags.
 - Manifest network host allow-lists include `www.googleapis.com` broadly for Meet API operations because Drive-backed artifact export shares this connector; runtime Drive egress is limited to explicit text-export paths.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should add resource URI binding, decide whether provider-backed self-check belongs here, replace the placeholder handshake hash, narrow manifest host policy if operation-level separation is desired, and reset lifecycle state consistently on shutdown.
+A follow-up parity bead should add resource URI binding, decide whether provider-backed self-check belongs here, narrow manifest host policy if operation-level separation is desired, and reset lifecycle state consistently on shutdown.
 
 ## First-Slice Scope
 

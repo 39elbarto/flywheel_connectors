@@ -457,4 +457,32 @@ mod tests {
         let error = json_to_firestore_document(&serde_json::json!(["bad"])).unwrap_err();
         assert!(error.contains("JSON object"));
     }
+
+    #[test]
+    fn firestore_value_to_json_preserves_unparseable_integer_text() {
+        let value = FirestoreValue {
+            integer_value: Some("18446744073709551616".into()),
+            ..FirestoreValue::default()
+        };
+
+        assert_eq!(
+            firestore_value_to_json(&value),
+            Value::String("18446744073709551616".into())
+        );
+    }
+
+    #[test]
+    fn realtime_get_request_defaults_optional_query_fields() {
+        let request: RealtimeGetRequest = serde_json::from_value(serde_json::json!({}))
+            .expect("empty realtime get request should deserialize");
+
+        assert_eq!(request.path, "");
+        assert!(request.order_by.is_none());
+        assert!(request.start_at.is_none());
+        assert!(request.end_at.is_none());
+        assert!(request.equal_to.is_none());
+        assert!(request.limit_to_first.is_none());
+        assert!(request.limit_to_last.is_none());
+        assert!(!request.shallow);
+    }
 }

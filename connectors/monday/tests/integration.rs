@@ -554,6 +554,29 @@ async fn updates_create_missing_body() {
 // -- Error handling --
 
 #[fcp_async_core::runtime::test]
+async fn error_200_empty_body_is_not_success() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let err = c
+        .handle_invoke(json!({
+            "operation_id": "monday.boards.list",
+            "input": {}
+        }))
+        .await
+        .expect_err("empty GraphQL success body must fail closed");
+    assert!(
+        err.to_string().contains("empty response body"),
+        "unexpected error: {err}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

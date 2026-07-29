@@ -1,11 +1,13 @@
 # Feishu/Lark Connector V3 Contract
 
-> **Status**: implemented first-slice contract with readiness bundle
+> **Status**: PROVEN runtime contract documented with remote Feishu/Lark verifier proof
 > **Beads**:
 > - `flywheel_connectors-j05nu.8.7.1`
 > - `flywheel_connectors-j05nu.8.7.2`
 > - `flywheel_connectors-j05nu.8.7.3`
 > **Verification script**: `scripts/e2e/feishu_connector_verification.sh`
+> **Proof bundle**: `/Users/jemanuel/projects/flywheel_connectors/.codex-targets/feishu-verification/20260607T053029Z/evidence/summary.json` (`sha256:9153fd0294c3e78d9465a14d33f8559c78eddd1a85242ce23f148cdf91e14421`, `overall_status=infra_blocked` only because the initial crate-suite lane hit remote worker disk exhaustion; all other verifier lanes passed)
+> **Supplemental crate-suite proof**: `/Users/jemanuel/projects/flywheel_connectors/.codex-targets/feishu-verification/20260607T053029Z/logs/crate_suite_retry.log` (`sha256:02074e4df3b2cecdbf6f2933c539d97c2c918a0a600856cbbe138497a5afcc7f`, `rch` job `29871232832767154` on `vmi1227854`, exit 0)
 > **Primary upstream**: `https://open.feishu.cn/document/`
 
 ## Purpose
@@ -34,7 +36,8 @@ Important runtime truths from `connector.rs`, `client.rs`, and `manifest.toml`:
 
 - Configuration is `base_url`, `app_id`, `app_secret`, retry policy, bounded `request_timeout_ms`, and optional `webhook_state` settings for connector-owned dedupe persistence.
 - One connector instance is bound to one installed tenant app and one tenant access token flow.
-- Production roots are `https://open.feishu.cn` and `https://open.larksuite.com`; localhost and `127.0.0.1` overrides are allowed only for deterministic test harnesses.
+- Production roots are `https://open.feishu.cn` and `https://open.larksuite.com`; deterministic test harnesses use mock configuration outside the published manifest policy.
+- `feishu.messages.send` and `feishu.messages.reply` claim chat ownership before tenant-token or provider message HTTP work. Successful responses include redaction-safe `coordination` audit records.
 - `health` and `self_check()` are grounded in the tenant-access-token internal auth endpoint and now emit operator guidance, verification-script references, provisioning details, and structured self-check evidence.
 - Docs, sheets, and calendar reads are known-resource operations. This connector does not search Drive, enumerate arbitrary docs, or mutate calendar state.
 - Webhook ingestion is host-forwarded request processing only. It validates signature/token, applies sender/chat/comment policy, and uses connector-owned dedupe state before event emission. Embedded listener lifecycle, websocket events, cross-tenant brokering, and user-delegated OAuth remain explicit non-goals in the current slice.
@@ -78,6 +81,8 @@ This slice is intentionally closer to "tenant app request-response automation" t
 - Stable first-slice identifiers include `message_id`, `chat_id`, `user_id`, `document_id`, `spreadsheet_token`, and `calendar_id`.
 - `receive_id_type` supports `open_id`, `user_id`, `union_id`, `email`, and `chat_id` for send paths.
 - `user_id_type` supports `open_id`, `user_id`, and `union_id` for directory reads.
+- Optional `chat_coordination` config supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`. This connector defaults to the in-memory backend for local deterministic tests and connector-local fixtures.
+- Send-path coordination hashes `receive_id_type + receive_id`; reply-path coordination hashes the target `message_id`. Duplicate active owners return `FcpError::Unauthorized` code `4090` before Feishu token issuance or message HTTP.
 
 ## Network And Runtime Invariants
 
@@ -88,7 +93,7 @@ This slice is intentionally closer to "tenant app request-response automation" t
 - `deny_private_ranges = true`
 - `deny_tailnet_ranges = true`
 - `deny_ip_literals = true`
-- Localhost overrides are allowed only for deterministic tests
+- Deterministic tests use harness-level mock configuration; the published manifest denies localhost and private ranges
 - The connector remains request-response only; webhook ingestion is a host-forwarded operation and does not open a listener socket
 
 ## Capability Families
@@ -102,12 +107,12 @@ This slice is intentionally closer to "tenant app request-response automation" t
 | `feishu.docs.read` | Known-token docs and sheets reads |
 | `feishu.calendar.read` | Calendar event listing |
 
-## Accepted Operation Inventory
+## Operation Inventory
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `feishu.messages.send` | `POST /open-apis/im/v1/messages` | `feishu.messages.write` | `Risky` | `Medium` | `None` | Sends one bot-authored message through the installed tenant app. |
-| `feishu.messages.reply` | `POST /open-apis/im/v1/messages/{message_id}/reply` | `feishu.messages.write` | `Risky` | `Medium` | `None` | Replies to one existing visible message. |
+| `feishu.messages.send` | chat coordination claim, then `POST /open-apis/im/v1/messages` | `feishu.messages.write` | `Risky` | `Medium` | `None` | Sends one bot-authored message after duplicate-owner denial. |
+| `feishu.messages.reply` | chat coordination claim, then `POST /open-apis/im/v1/messages/{message_id}/reply` | `feishu.messages.write` | `Risky` | `Medium` | `None` | Replies to one existing visible message after duplicate-owner denial. |
 | `feishu.messages.get` | `GET /open-apis/im/v1/messages/{message_id}` | `feishu.messages.read` | `Safe` | `Low` | `Strict` | Reads one known message by ID. |
 | `feishu.chats.list` | `GET /open-apis/im/v1/chats` | `feishu.chats.read` | `Safe` | `Low` | `Strict` | Lists visible chats with pagination. |
 | `feishu.chats.get` | `GET /open-apis/im/v1/chats/{chat_id}` | `feishu.chats.read` | `Safe` | `Low` | `Strict` | Reads one visible chat by ID. |
@@ -142,6 +147,7 @@ The readiness closeout bead for this connector surface is `flywheel_connectors-j
   - `rch exec -- cargo check -p fcp-feishu --all-targets`
   - `rch exec -- cargo fmt --manifest-path connectors/feishu/Cargo.toml --check`
   - `rch exec -- cargo test -p fcp-feishu --test integration -- --nocapture`
+  - `rch exec -- cargo test -p fcp-feishu --test live_verification -- --nocapture`
   - `rch exec -- cargo test -p fcp-feishu -- --nocapture`
   - `rch exec -- cargo clippy -p fcp-feishu --all-targets -- -D warnings`
 
@@ -157,21 +163,24 @@ Prerequisites:
 - Use a disposable Feishu/Lark tenant app or a localhost mock server.
 - Grant the tenant app the scopes needed for the operations you plan to verify.
 - Keep one connector instance bound to one app credential pair and one production host boundary.
+- For gated live sandbox proof, set `FCP_LIVE_SANDBOX=1`, `FEISHU_SANDBOX_APP_ID`, `FEISHU_SANDBOX_APP_SECRET`, `FEISHU_SANDBOX_TENANT_KEY`, `FEISHU_SANDBOX_CHAT_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. `FEISHU_SANDBOX_BASE_URL` defaults to `https://open.feishu.cn`.
 
 Dedicated environment:
 
 - Never aim the verification bundle at a production chat where `feishu.messages.send` or `feishu.messages.reply` would cause operational harm.
+- The live sandbox suite sends one namespaced bot message to the dedicated sandbox chat after invalid-secret denial, tenant-token health, and chat metadata checks. Messages are treated as immutable provider artifacts; JSONL evidence hashes tenant, chat, namespace, and message identifiers and never logs raw content.
 
 Redaction rules:
 
 - Redact `app_secret`, tenant access tokens, Authorization headers, and copied auth payloads.
 - Treat `app_id`, message IDs, chat IDs, user IDs, document IDs, spreadsheet tokens, calendar IDs, email addresses, and raw content bodies as sensitive tenant metadata.
 - Sanitize live response payloads before exporting artifacts.
+- Outbound chat coordination audit records must contain only redaction-safe claim keys, channel identifiers, owner identifiers, outcomes, and reasons. They must not include raw Feishu receiver IDs, message IDs, or content bodies.
 
 Common remediation:
 
 - `not_configured`: configure app credentials, timeout, retry policy, and a valid `base_url`, then rerun `self_check`.
-- `network_constraints_invalid`: use `https://open.feishu.cn` or `https://open.larksuite.com` for live runs, or an explicit localhost override for deterministic tests.
+- `network_constraints_invalid`: use `https://open.feishu.cn` or `https://open.larksuite.com` for live runs; deterministic mock runs should stay in the harness configuration rather than widening the published manifest policy.
 - `feishu_auth_rejected`: rotate the tenant app secret, verify the credential pair against the tenant auth endpoint, and rerun the verification bundle.
 - `self_check_retryable`: respect the upstream retry window or increase timeout and retry settings before rerunning.
 
@@ -182,5 +191,6 @@ Rerun commands:
 - `rch exec -- cargo check -p fcp-feishu --all-targets`
 - `rch exec -- cargo fmt --manifest-path connectors/feishu/Cargo.toml --check`
 - `rch exec -- cargo test -p fcp-feishu --test integration -- --nocapture`
+- `rch exec -- cargo test -p fcp-feishu --test live_verification -- --nocapture`
 - `rch exec -- cargo test -p fcp-feishu -- --nocapture`
 - `rch exec -- cargo clippy -p fcp-feishu --all-targets -- -D warnings`

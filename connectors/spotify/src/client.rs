@@ -5,7 +5,8 @@ use std::fmt::{self, Write as _};
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -108,13 +109,18 @@ impl SpotifyClient {
     }
 
     async fn handle_response(&self, resp: Response) -> SpotifyResult<serde_json::Value> {
+        self.handle_response_with_empty_action(resp, false).await
+    }
+
+    async fn handle_response_with_empty_action(
+        &self,
+        resp: Response,
+        allow_empty_ok: bool,
+    ) -> SpotifyResult<serde_json::Value> {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body, allow_empty_ok)
         } else {
             self.handle_error(status, resp).await
         }
@@ -182,7 +188,7 @@ impl SpotifyClient {
             .header("Content-Type", "application/json")
             .json(body);
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.handle_response_with_empty_action(resp, true).await
     }
 
     #[instrument(skip(self), fields(url))]
@@ -194,7 +200,7 @@ impl SpotifyClient {
             .header("Accept", "application/json")
             .header("Content-Length", "0");
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.handle_response_with_empty_action(resp, true).await
     }
 
     #[instrument(skip(self, body), fields(url))]
@@ -219,7 +225,7 @@ impl SpotifyClient {
             .header("Accept", "application/json")
             .header("Content-Length", "0");
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.handle_response_with_empty_action(resp, true).await
     }
 
     #[instrument(skip(self), fields(url))]
@@ -230,7 +236,7 @@ impl SpotifyClient {
             .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.handle_response_with_empty_action(resp, true).await
     }
 
     #[instrument(skip(self, body), fields(url))]
@@ -248,6 +254,23 @@ impl SpotifyClient {
             .json(body);
         let resp = req.send().await?;
         self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn delete_with_body_empty_action(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> SpotifyResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %redact_url(&url), "DELETE (with body, empty action) request");
+        let req = self
+            .add_auth(self.client.delete(&url))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        let resp = req.send().await?;
+        self.handle_response_with_empty_action(resp, true).await
     }
 
     // -- Profile --
@@ -503,7 +526,7 @@ impl SpotifyClient {
     ) -> SpotifyResult<serde_json::Value> {
         let mut path = "/me/player/play".to_string();
         if let Some(did) = device_id {
-            path = format!("{path}?device_id={did}");
+            path = format!("{path}?device_id={}", percent_encode(did));
         }
         let mut body = serde_json::json!({});
         if let Some(ctx) = context_uri {
@@ -519,7 +542,7 @@ impl SpotifyClient {
     pub async fn pause(&self, device_id: Option<&str>) -> SpotifyResult<serde_json::Value> {
         let mut path = "/me/player/pause".to_string();
         if let Some(did) = device_id {
-            path = format!("{path}?device_id={did}");
+            path = format!("{path}?device_id={}", percent_encode(did));
         }
         self.put_empty(&path).await
     }
@@ -528,7 +551,7 @@ impl SpotifyClient {
     pub async fn skip_next(&self, device_id: Option<&str>) -> SpotifyResult<serde_json::Value> {
         let mut path = "/me/player/next".to_string();
         if let Some(did) = device_id {
-            path = format!("{path}?device_id={did}");
+            path = format!("{path}?device_id={}", percent_encode(did));
         }
         self.post_empty(&path).await
     }
@@ -537,7 +560,7 @@ impl SpotifyClient {
     pub async fn skip_previous(&self, device_id: Option<&str>) -> SpotifyResult<serde_json::Value> {
         let mut path = "/me/player/previous".to_string();
         if let Some(did) = device_id {
-            path = format!("{path}?device_id={did}");
+            path = format!("{path}?device_id={}", percent_encode(did));
         }
         self.post_empty(&path).await
     }
@@ -550,7 +573,7 @@ impl SpotifyClient {
     ) -> SpotifyResult<serde_json::Value> {
         let mut path = format!("/me/player/seek?position_ms={position_ms}");
         if let Some(did) = device_id {
-            path = format!("{path}&device_id={did}");
+            path = format!("{path}&device_id={}", percent_encode(did));
         }
         self.put_empty(&path).await
     }
@@ -563,7 +586,7 @@ impl SpotifyClient {
     ) -> SpotifyResult<serde_json::Value> {
         let mut path = format!("/me/player/volume?volume_percent={volume_percent}");
         if let Some(did) = device_id {
-            path = format!("{path}&device_id={did}");
+            path = format!("{path}&device_id={}", percent_encode(did));
         }
         self.put_empty(&path).await
     }
@@ -576,7 +599,7 @@ impl SpotifyClient {
     ) -> SpotifyResult<serde_json::Value> {
         let mut path = format!("/me/player/shuffle?state={state}");
         if let Some(did) = device_id {
-            path = format!("{path}&device_id={did}");
+            path = format!("{path}&device_id={}", percent_encode(did));
         }
         self.put_empty(&path).await
     }
@@ -587,9 +610,9 @@ impl SpotifyClient {
         state: &str,
         device_id: Option<&str>,
     ) -> SpotifyResult<serde_json::Value> {
-        let mut path = format!("/me/player/repeat?state={state}");
+        let mut path = format!("/me/player/repeat?state={}", percent_encode(state));
         if let Some(did) = device_id {
-            path = format!("{path}&device_id={did}");
+            path = format!("{path}&device_id={}", percent_encode(did));
         }
         self.put_empty(&path).await
     }
@@ -628,7 +651,8 @@ impl SpotifyClient {
     /// Remove tracks from the current user's library.
     pub async fn remove_saved_tracks(&self, ids: &[String]) -> SpotifyResult<serde_json::Value> {
         let body = serde_json::json!({ "ids": ids });
-        self.delete_with_body("/me/tracks", &body).await
+        self.delete_with_body_empty_action("/me/tracks", &body)
+            .await
     }
 
     /// Check if tracks are saved in the current user's library.
@@ -657,7 +681,8 @@ impl SpotifyClient {
     /// Remove albums from the current user's library.
     pub async fn remove_saved_albums(&self, ids: &[String]) -> SpotifyResult<serde_json::Value> {
         let body = serde_json::json!({ "ids": ids });
-        self.delete_with_body("/me/albums", &body).await
+        self.delete_with_body_empty_action("/me/albums", &body)
+            .await
     }
 
     // -- Playlist CRUD --
@@ -754,6 +779,25 @@ fn percent_encode(s: &str) -> String {
         .replace('#', "%23")
 }
 
+fn decode_success_body(
+    status: StatusCode,
+    body: &str,
+    allow_empty_ok: bool,
+) -> SpotifyResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT
+        || (allow_empty_ok && status == StatusCode::OK && body.trim().is_empty())
+    {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(SpotifyError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,6 +883,46 @@ mod tests {
     #[test]
     fn percent_encode_no_change() {
         assert_eq!(percent_encode("simple"), "simple");
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_json_ok() {
+        let err = decode_success_body(StatusCode::OK, "", false).unwrap_err();
+        assert!(matches!(
+            err,
+            SpotifyError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_json_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t", false).unwrap_err();
+        assert!(matches!(
+            err,
+            SpotifyError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "", false).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_ok_for_action() {
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "", true).unwrap(),
+            serde_json::json!({})
+        );
     }
 
     // ── Additional client coverage ───────────────────────────────

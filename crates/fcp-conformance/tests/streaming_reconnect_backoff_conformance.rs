@@ -75,9 +75,7 @@ fn delay_floor_is_min_reconnect_delay_for_normal_configs() {
     let d = cfg.delay_for_attempt(0);
     assert!(
         d >= MIN_RECONNECT_DELAY,
-        "delay MUST NOT collapse below MIN_RECONNECT_DELAY ({:?}); got {:?}",
-        MIN_RECONNECT_DELAY,
-        d
+        "delay MUST NOT collapse below MIN_RECONNECT_DELAY ({MIN_RECONNECT_DELAY:?}); got {d:?}"
     );
 }
 
@@ -168,9 +166,9 @@ fn delay_without_jitter_is_deterministic_exponential() {
     // 200ms × 2^3 = 1600ms.
     let expected = Duration::from_millis(1600);
     let diff = if d1 > expected {
-        d1 - expected
+        d1.checked_sub(expected).unwrap()
     } else {
-        expected - d1
+        expected.checked_sub(d1).unwrap()
     };
     assert!(
         diff <= Duration::from_millis(1),
@@ -352,9 +350,9 @@ fn delay_at_attempt_zero_uses_initial_delay_modulo_jitter() {
     let d = cfg.delay_for_attempt(0);
     let expected = Duration::from_millis(500);
     let diff = if d > expected {
-        d - expected
+        d.checked_sub(expected).unwrap()
     } else {
-        expected - d
+        expected.checked_sub(d).unwrap()
     };
     assert!(
         diff <= Duration::from_millis(1),

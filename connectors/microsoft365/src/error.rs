@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 
 /// Microsoft 365 Graph API error.
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +38,22 @@ impl M365Error {
         match self {
             Self::Http(_) | Self::RateLimit { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, Some(500..=599 | 429)),
+            Self::Serialization(_) | Self::InvalidConfig(_) => false,
+        }
+    }
+
+    /// Whether replaying the request that produced this error cannot duplicate
+    /// a side effect (br-kxd3e).
+    ///
+    /// Distinct from [`Self::is_retryable`]: Graph throttles a request WITHOUT
+    /// performing it, so a 429 is safe to replay; a 5xx means Graph received
+    /// the request and may already have sent the mail or created the event.
+    #[must_use]
+    pub fn replay_is_safe(&self) -> bool {
+        match self {
+            Self::RateLimit { .. } => true,
+            Self::Api { status_code, .. } => *status_code == Some(429),
+            Self::Http(e) => !fcp_sdk::migration::transport_error_reached_service(e),
             Self::Serialization(_) | Self::InvalidConfig(_) => false,
         }
     }

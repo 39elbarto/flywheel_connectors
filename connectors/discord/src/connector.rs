@@ -3,10 +3,10 @@
 //! Implements handler methods for FCP protocol with Discord-specific operations.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -56,6 +56,7 @@ pub struct DiscordConnector {
     zone_dir: Option<PathBuf>,
     bot_user_id: Option<String>,
     inbound_policy: DiscordInboundPolicy,
+    inbound_delivery_state: DiscordInboundDeliveryStateHandle,
     chat_coordination_config: ChatCoordinationConfig,
     thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
     gateway_lease: Option<DiscordGatewayLease>,
@@ -83,6 +84,8 @@ const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const DISCORD_INBOUND_POLICY_MAX_SET_ITEMS: usize = 256;
 const DISCORD_INBOUND_POLICY_ID_MAX_CHARS: usize = 128;
 const DISCORD_DELIVERY_LABEL_MAX_CHARS: usize = 96;
+const DISCORD_INBOUND_DELIVERY_MAX_PENDING: usize = 1024;
+const DISCORD_INBOUND_DELIVERY_SESSION_KEY_MAX_CHARS: usize = 192;
 
 const REQUIRED_GATEWAY_INTENTS: [(&str, u64); 4] = [
     ("GUILDS", INTENT_GUILDS),
@@ -485,6 +488,218 @@ impl DiscordInboundPolicy {
     }
 }
 
+type DiscordInboundDeliveryStateHandle = Arc<Mutex<DiscordInboundDeliveryState>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscordInboundDeliveryMetadata {
+    session_key: String,
+    event_kind: &'static str,
+    channel_id: String,
+    guild_id: Option<String>,
+    message_id: String,
+}
+
+impl DiscordInboundDeliveryMetadata {
+    fn for_message_create(payload: &serde_json::Value) -> Option<Self> {
+        let message_id = payload
+            .get("id")
+            .and_then(serde_json::Value::as_str)?
+            .trim();
+        let channel_id = discord_payload_channel_id(payload)?.trim();
+        if message_id.is_empty() || channel_id.is_empty() {
+            return None;
+        }
+        let guild_id = discord_payload_guild_id(payload)
+            .map(str::trim)
+            .filter(|guild_id| !guild_id.is_empty())
+            .map(str::to_owned);
+        let event_kind = if guild_id.is_some() {
+            "room_event"
+        } else {
+            "direct_message"
+        };
+
+        Some(Self {
+            session_key: format!("discord:{channel_id}:{message_id}"),
+            event_kind,
+            channel_id: channel_id.to_owned(),
+            guild_id,
+            message_id: message_id.to_owned(),
+        })
+    }
+
+    fn from_fcp_delivery_value(value: &serde_json::Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let session_key = object.get("session_key")?.as_str()?.to_owned();
+        let event_kind = match object.get("event_kind")?.as_str()? {
+            "room_event" => "room_event",
+            "direct_message" => "direct_message",
+            _ => return None,
+        };
+        let channel_id = object.get("channel_id")?.as_str()?.to_owned();
+        let message_id = object.get("message_id")?.as_str()?.to_owned();
+        let guild_id = object
+            .get("guild_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+
+        Some(Self {
+            session_key,
+            event_kind,
+            channel_id,
+            guild_id,
+            message_id,
+        })
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let mut value = json!({
+            "session_key": self.session_key,
+            "event_kind": self.event_kind,
+            "channel_id": self.channel_id,
+            "message_id": self.message_id,
+            "retention": "pending_until_outbound_delivery"
+        });
+        if let (Some(object), Some(guild_id)) = (value.as_object_mut(), &self.guild_id) {
+            object.insert("guild_id".into(), json!(guild_id));
+        }
+        value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscordInboundDeliveryRequest {
+    session_key: String,
+}
+
+impl DiscordInboundDeliveryRequest {
+    fn from_delivery_object(
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> FcpResult<Option<Self>> {
+        let Some(value) = object.get("inbound_event").filter(|value| !value.is_null()) else {
+            return Ok(None);
+        };
+        let serde_json::Value::Object(inbound_event) = value else {
+            return Err(invalid_delivery_options(
+                "delivery.inbound_event must be an object when provided",
+            ));
+        };
+        let session_key = inbound_event
+            .get("session_key")
+            .ok_or_else(|| {
+                invalid_delivery_options(
+                    "delivery.inbound_event.session_key is required when inbound_event is provided",
+                )
+            })
+            .and_then(|value| {
+                parse_inbound_delivery_session_key("delivery.inbound_event.session_key", value)
+            })?;
+
+        Ok(Some(Self { session_key }))
+    }
+
+    fn pending_receipt(&self, reason: &'static str) -> serde_json::Value {
+        json!({
+            "status": "pending",
+            "session_key": self.session_key,
+            "reason": reason
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DiscordInboundDeliveryRecord {
+    metadata: DiscordInboundDeliveryMetadata,
+}
+
+#[derive(Debug, Default)]
+struct DiscordInboundDeliveryState {
+    pending: BTreeMap<String, DiscordInboundDeliveryRecord>,
+    insertion_order: VecDeque<String>,
+}
+
+impl DiscordInboundDeliveryState {
+    fn register(&mut self, metadata: DiscordInboundDeliveryMetadata) {
+        if !self.pending.contains_key(&metadata.session_key) {
+            self.insertion_order.push_back(metadata.session_key.clone());
+        }
+        self.pending.insert(
+            metadata.session_key.clone(),
+            DiscordInboundDeliveryRecord { metadata },
+        );
+
+        while self.pending.len() > DISCORD_INBOUND_DELIVERY_MAX_PENDING {
+            let Some(session_key) = self.insertion_order.pop_front() else {
+                break;
+            };
+            self.pending.remove(&session_key);
+        }
+    }
+
+    fn mark_delivered(
+        &mut self,
+        request: &DiscordInboundDeliveryRequest,
+        channel_id: &str,
+        delivered_message_id: &str,
+    ) -> serde_json::Value {
+        let Some(record) = self.pending.get(&request.session_key) else {
+            return json!({
+                "status": "not_found",
+                "session_key": request.session_key,
+                "reason": "inbound_event_not_pending"
+            });
+        };
+        if record.metadata.channel_id != channel_id {
+            return json!({
+                "status": "target_mismatch",
+                "session_key": request.session_key,
+                "expected_channel_id": record.metadata.channel_id,
+                "actual_channel_id": channel_id,
+                "reason": "outbound_channel_does_not_match_inbound_event"
+            });
+        }
+
+        let Some(record) = self.pending.remove(&request.session_key) else {
+            return json!({
+                "status": "not_found",
+                "session_key": request.session_key,
+                "reason": "inbound_event_not_pending"
+            });
+        };
+        self.insertion_order
+            .retain(|session_key| session_key != &request.session_key);
+
+        let mut receipt = json!({
+            "status": "marked_delivered",
+            "session_key": record.metadata.session_key,
+            "event_kind": record.metadata.event_kind,
+            "channel_id": record.metadata.channel_id,
+            "source_message_id": record.metadata.message_id,
+            "delivered_message_id": delivered_message_id
+        });
+        if let (Some(object), Some(guild_id)) = (receipt.as_object_mut(), record.metadata.guild_id)
+        {
+            object.insert("guild_id".into(), json!(guild_id));
+        }
+        receipt
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, session_key: &str) -> bool {
+        self.pending.contains_key(session_key)
+    }
+
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.insertion_order.clear();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiscordDeliveryKind {
     Final,
@@ -574,6 +789,7 @@ struct DiscordDeliveryOptions {
     kind: DiscordDeliveryKind,
     visibility: DiscordDeliveryVisibility,
     label: Option<String>,
+    inbound_event: Option<DiscordInboundDeliveryRequest>,
 }
 
 impl DiscordDeliveryOptions {
@@ -590,10 +806,12 @@ impl DiscordDeliveryOptions {
         let kind = DiscordDeliveryKind::from_value(object.get("kind"))?;
         let visibility = DiscordDeliveryVisibility::from_value(object.get("visibility"))?;
         let label = parse_delivery_label(object.get("label"))?;
+        let inbound_event = DiscordInboundDeliveryRequest::from_delivery_object(object)?;
         let options = Self {
             kind,
             visibility,
             label,
+            inbound_event,
         };
         options.validate()?;
         Ok(options)
@@ -678,6 +896,15 @@ impl DiscordDeliveryOptions {
             object.insert("label".to_string(), json!(label));
         }
     }
+
+    fn add_inbound_event_receipt(
+        receipt: &mut serde_json::Value,
+        inbound_event: serde_json::Value,
+    ) {
+        if let Some(object) = receipt.as_object_mut() {
+            object.insert("inbound_event".to_string(), inbound_event);
+        }
+    }
 }
 
 impl Default for DiscordDeliveryOptions {
@@ -686,6 +913,7 @@ impl Default for DiscordDeliveryOptions {
             kind: DiscordDeliveryKind::Final,
             visibility: DiscordDeliveryVisibility::Visible,
             label: None,
+            inbound_event: None,
         }
     }
 }
@@ -706,6 +934,7 @@ impl DiscordConnector {
             zone_dir: None,
             bot_user_id: None,
             inbound_policy: DiscordInboundPolicy::default(),
+            inbound_delivery_state: Arc::new(Mutex::new(DiscordInboundDeliveryState::default())),
             chat_coordination_config: default_discord_chat_coordination_config(),
             thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
             gateway_lease: None,
@@ -812,6 +1041,7 @@ impl DiscordConnector {
         self.api_client = Some(api_client.clone());
         self.gateway = Some(Arc::new(GatewayConnection::new(config.clone(), api_client)));
         self.inbound_policy = inbound_policy;
+        lock_discord_inbound_delivery_state(&self.inbound_delivery_state).clear();
         self.chat_coordination_config = chat_coordination_config;
         self.config = Some(config);
         self.base.set_configured(true);
@@ -1159,6 +1389,18 @@ impl DiscordConnector {
                         "label": {
                             "type": "string",
                             "description": "Optional operator-facing label copied into the delivery receipt"
+                        },
+                        "inbound_event": {
+                            "type": "object",
+                            "description": "Optional inbound Discord event correlation to retain until this visible outbound delivery succeeds",
+                            "properties": {
+                                "session_key": {
+                                    "type": "string",
+                                    "description": "Opaque fcp_delivery.session_key from a prior discord.message event"
+                                }
+                            },
+                            "required": ["session_key"],
+                            "additionalProperties": false
                         }
                     },
                     "additionalProperties": false
@@ -1192,7 +1434,8 @@ impl DiscordConnector {
                         "delivered_embed_count": { "type": "integer" },
                         "attachment_count": { "type": "integer" },
                         "label": { "type": "string" },
-                        "reason": { "type": "string" }
+                        "reason": { "type": "string" },
+                        "inbound_event": { "type": "object" }
                     }
                 }
             }
@@ -2057,12 +2300,18 @@ impl DiscordConnector {
         if delivery.suppresses_discord_send() {
             self.base.check_ready()?;
             let content_present = content.is_some_and(|content| !content.is_empty());
-            let receipt = delivery.suppressed_receipt(
+            let mut receipt = delivery.suppressed_receipt(
                 channel_id,
                 reply_to,
                 content_present,
                 requested_embed_count,
             );
+            if let Some(inbound_event) = &delivery.inbound_event {
+                DiscordDeliveryOptions::add_inbound_event_receipt(
+                    &mut receipt,
+                    inbound_event.pending_receipt("discord_send_suppressed"),
+                );
+            }
             let response = json!({
                 "id": null,
                 "channel_id": channel_id,
@@ -2074,6 +2323,7 @@ impl DiscordConnector {
                 visibility = delivery.visibility.as_str(),
                 final_reply = delivery.final_reply(),
                 visible = delivery.visible(),
+                inbound_event_requested = delivery.inbound_event.is_some(),
                 reply_to_configured = reply_to.is_some(),
                 content_present,
                 requested_embed_count,
@@ -2110,6 +2360,7 @@ impl DiscordConnector {
                     visibility = delivery.visibility.as_str(),
                     final_reply = delivery.final_reply(),
                     visible = delivery.visible(),
+                    inbound_event_requested = delivery.inbound_event.is_some(),
                     reply_to_configured = reply_to.is_some(),
                     content_present = content.is_some_and(|content| !content.is_empty()),
                     requested_embed_count,
@@ -2119,14 +2370,25 @@ impl DiscordConnector {
             }
         };
 
-        let delivery_receipt =
+        let mut delivery_receipt =
             delivery.delivered_receipt(&message, reply_to, requested_embed_count);
+        if let Some(inbound_event) = &delivery.inbound_event {
+            let inbound_event_receipt = lock_discord_inbound_delivery_state(
+                &self.inbound_delivery_state,
+            )
+            .mark_delivered(inbound_event, channel_id, &message.id);
+            DiscordDeliveryOptions::add_inbound_event_receipt(
+                &mut delivery_receipt,
+                inbound_event_receipt,
+            );
+        }
         tracing::info!(
             message_id = %message.id,
             delivery_kind = delivery.kind.as_str(),
             visibility = delivery.visibility.as_str(),
             final_reply = delivery.final_reply(),
             visible = delivery.visible(),
+            inbound_event_requested = delivery.inbound_event.is_some(),
             reply_to_configured = reply_to.is_some(),
             content_present = !message.content.is_empty(),
             requested_embed_count,
@@ -2566,6 +2828,7 @@ impl DiscordConnector {
         self.zone_dir = None;
         self.bot_user_id = None;
         self.inbound_policy = DiscordInboundPolicy::default();
+        lock_discord_inbound_delivery_state(&self.inbound_delivery_state).clear();
         self.chat_coordination_config = default_discord_chat_coordination_config();
         self.config = None;
         self.base.set_handshaken(false);
@@ -2618,6 +2881,7 @@ impl DiscordConnector {
         let connector_id = self.base.id.clone();
         let instance_id = self.base.instance_id.clone();
         let inbound_policy = self.inbound_policy.clone();
+        let inbound_delivery_state = Arc::clone(&self.inbound_delivery_state);
         let bot_user_id = self.bot_user_id.clone();
         let base = self.base.clone();
         let lease_shutdown_tx = shutdown_tx.clone();
@@ -2688,6 +2952,7 @@ impl DiscordConnector {
                         let connector_id = connector_id.clone();
                         let instance_id = instance_id.clone();
                         let inbound_policy = inbound_policy.clone();
+                        let inbound_delivery_state = Arc::clone(&inbound_delivery_state);
                         let bot_user_id = bot_user_id.clone();
                         let base = base.clone();
                         let shutdown_tx = shutdown_tx.clone();
@@ -2699,6 +2964,10 @@ impl DiscordConnector {
                                 &inbound_policy,
                                 bot_user_id.as_deref(),
                             ) {
+                                register_discord_inbound_delivery_from_event(
+                                    &inbound_delivery_state,
+                                    &event,
+                                );
                                 base.record_event();
                                 if event_tx.send(Ok(event)).is_err() {
                                     tracing::info!(
@@ -2946,6 +3215,39 @@ fn parse_delivery_label(value: Option<&serde_json::Value>) -> FcpResult<Option<S
         )));
     }
     Ok(Some(label.to_string()))
+}
+
+fn parse_inbound_delivery_session_key(field: &str, value: &serde_json::Value) -> FcpResult<String> {
+    let Some(session_key) = value.as_str() else {
+        return Err(invalid_delivery_options(format!(
+            "{field} must be a string"
+        )));
+    };
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return Err(invalid_delivery_options(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if session_key.chars().any(char::is_control) {
+        return Err(invalid_delivery_options(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    if session_key.chars().count() > DISCORD_INBOUND_DELIVERY_SESSION_KEY_MAX_CHARS {
+        return Err(invalid_delivery_options(format!(
+            "{field} must be at most {DISCORD_INBOUND_DELIVERY_SESSION_KEY_MAX_CHARS} characters"
+        )));
+    }
+    Ok(session_key.to_owned())
+}
+
+fn lock_discord_inbound_delivery_state(
+    state: &DiscordInboundDeliveryStateHandle,
+) -> MutexGuard<'_, DiscordInboundDeliveryState> {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn normalize_discord_snowflake_id<'a>(field: &str, value: &'a str) -> FcpResult<&'a str> {
@@ -3227,6 +3529,33 @@ fn discord_gateway_event_name(event: &GatewayEvent) -> &str {
     }
 }
 
+fn attach_discord_inbound_delivery_metadata(payload: &mut serde_json::Value) {
+    let Some(metadata) = DiscordInboundDeliveryMetadata::for_message_create(payload) else {
+        return;
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("fcp_delivery".into(), metadata.to_json());
+    }
+}
+
+fn register_discord_inbound_delivery_from_event(
+    state: &DiscordInboundDeliveryStateHandle,
+    event: &EventEnvelope,
+) {
+    if event.topic != "discord.message" {
+        return;
+    }
+    let Some(metadata) = event
+        .data
+        .payload
+        .get("fcp_delivery")
+        .and_then(DiscordInboundDeliveryMetadata::from_fcp_delivery_value)
+    else {
+        return;
+    };
+    lock_discord_inbound_delivery_state(state).register(metadata);
+}
+
 /// Convert a Discord gateway event to an FCP `EventEnvelope`.
 fn gateway_event_to_fcp(
     event: &GatewayEventFrame,
@@ -3290,9 +3619,11 @@ fn gateway_event_to_fcp_with_policy(
                 .get("author")
                 .and_then(|a| a.get("username"))
                 .and_then(|v| v.as_str());
+            let mut payload = data.clone();
+            attach_discord_inbound_delivery_metadata(&mut payload);
             (
                 "discord.message",
-                data.clone(),
+                payload,
                 (author_name.unwrap_or("unknown").into(), author_id.into()),
                 None,
             )
@@ -3430,11 +3761,11 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder as CapabilityBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
     use uuid::Uuid;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
 
     #[test]
     fn validate_discord_endpoint_url_accepts_discord_https() {
@@ -3555,18 +3886,170 @@ mod tests {
         })
     }
 
-    async fn mock_current_user_ok(mock_server: &MockServer, token: &str) {
-        Mock::given(method("GET"))
-            .and(path("/users/@me"))
-            .and(header("Authorization", format!("Bot {token}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "123456789",
-                "username": "TestBot",
-                "discriminator": "0",
-                "bot": true
-            })))
-            .mount(mock_server)
-            .await;
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: serde_json::Value,
+        required_headers: Vec<(&'static str, String)>,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body,
+                required_headers: Vec::new(),
+            }
+        }
+
+        fn with_required_header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+            self.required_headers.push((name, value.into()));
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, &response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+
+        fn current_user(token: &str) -> Self {
+            Self::respond(vec![
+                TestHttpResponse::json(
+                    "GET",
+                    "/users/@me",
+                    200,
+                    json!({
+                        "id": "123456789",
+                        "username": "TestBot",
+                        "discriminator": "0",
+                        "bot": true
+                    }),
+                )
+                .with_required_header("Authorization", format!("Bot {token}")),
+            ])
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = StdInstant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        StdInstant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: &TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        let mut required_headers_seen = vec![false; response.required_headers.len()];
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap();
+                }
+                for (index, (required_name, required_value)) in
+                    response.required_headers.iter().enumerate()
+                {
+                    if name.eq_ignore_ascii_case(required_name)
+                        && value.trim() == required_value.as_str()
+                    {
+                        required_headers_seen[index] = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            required_headers_seen.into_iter().all(|seen| seen),
+            "required header was not sent"
+        );
+        if content_length > 0 {
+            let mut request_body = vec![0u8; content_length];
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let body = response.body.to_string();
+        write!(
+            stream,
+            "HTTP/1.1 {} OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+            response.status,
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
     }
 
     fn base_config(api_url: String) -> DiscordConfig {
@@ -3669,6 +4152,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn delivery_options_parse_inbound_event_session_key() {
+        let options = DiscordDeliveryOptions::from_input(&json!({
+            "channel_id": "123456789",
+            "content": "reply",
+            "delivery": {
+                "kind": "final",
+                "inbound_event": {
+                    "session_key": "discord:111:222"
+                }
+            }
+        }))
+        .expect("inbound event delivery correlation should parse");
+
+        assert_eq!(
+            options
+                .inbound_event
+                .as_ref()
+                .map(|event| event.session_key.as_str()),
+            Some("discord:111:222")
+        );
+    }
+
+    #[test]
+    fn delivery_options_reject_control_char_inbound_event_session_key() {
+        let err = DiscordDeliveryOptions::from_input(&json!({
+            "channel_id": "123456789",
+            "content": "reply",
+            "delivery": {
+                "kind": "final",
+                "inbound_event": {
+                    "session_key": "discord:111:\n222"
+                }
+            }
+        }))
+        .expect_err("control characters in inbound session keys must be invalid");
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("control"), "unexpected error: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_configure_rejects_missing_required_intents() {
         let mut connector = DiscordConnector::new();
@@ -3718,14 +4246,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_configure_returns_provisioning_readiness() {
-        let mock_server = MockServer::start().await;
-        mock_current_user_ok(&mock_server, "test_token").await;
+        let server = TestHttpServer::current_user("test_token");
 
         let mut connector = DiscordConnector::new();
         let result = connector
             .handle_configure(json!({
                 "bot_credential": "test_token",
-                "api_url": mock_server.uri(),
+                "api_url": server.uri(),
                 "intents": INTENT_GUILDS
                     | INTENT_GUILD_MESSAGES
                     | INTENT_DIRECT_MESSAGES
@@ -3742,14 +4269,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_handshake_requires_zone_dir_for_gateway_state() {
-        let mock_server = MockServer::start().await;
-        mock_current_user_ok(&mock_server, "test_token").await;
+        let server = TestHttpServer::current_user("test_token");
 
         let mut connector = DiscordConnector::new();
         connector
             .handle_configure(json!({
                 "bot_credential": "test_token",
-                "api_url": mock_server.uri(),
+                "api_url": server.uri(),
                 "intents": INTENT_GUILDS
                     | INTENT_GUILD_MESSAGES
                     | INTENT_DIRECT_MESSAGES
@@ -3838,10 +4364,9 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_doctor_configured_and_healthy() {
-        let mock_server = MockServer::start().await;
-        mock_current_user_ok(&mock_server, "test_token").await;
+        let server = TestHttpServer::current_user("test_token");
 
-        let api_config = base_config(mock_server.uri());
+        let api_config = base_config(server.uri().into());
         let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
 
         let mut connector = DiscordConnector::new();
@@ -3867,10 +4392,9 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_doctor_reports_missing_intents() {
-        let mock_server = MockServer::start().await;
-        mock_current_user_ok(&mock_server, "test_token").await;
+        let server = TestHttpServer::current_user("test_token");
 
-        let api_config = base_config(mock_server.uri());
+        let api_config = base_config(server.uri().into());
         let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
 
         let mut connector = DiscordConnector::new();
@@ -3897,10 +4421,9 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_reports_missing_intents() {
-        let mock_server = MockServer::start().await;
-        mock_current_user_ok(&mock_server, "test_token").await;
+        let server = TestHttpServer::current_user("test_token");
 
-        let api_config = base_config(mock_server.uri());
+        let api_config = base_config(server.uri().into());
         let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
 
         let mut connector = DiscordConnector::new();
@@ -3926,10 +4449,9 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_reports_network_constraints_violation() {
-        let mock_server = MockServer::start().await;
-        mock_current_user_ok(&mock_server, "test_token").await;
+        let server = TestHttpServer::current_user("test_token");
 
-        let api_config = base_config(mock_server.uri());
+        let api_config = base_config(server.uri().into());
         let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
 
         let mut connector = DiscordConnector::new();
@@ -4012,14 +4534,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_requires_handshake_once_configured() {
-        let mock_server = MockServer::start().await;
-        mock_current_user_ok(&mock_server, "test_token").await;
+        let server = TestHttpServer::current_user("test_token");
 
         let mut connector = DiscordConnector::new();
         connector
             .handle_configure(json!({
                 "bot_credential": "test_token",
-                "api_url": mock_server.uri(),
+                "api_url": server.uri(),
                 "intents": INTENT_GUILDS
                     | INTENT_GUILD_MESSAGES
                     | INTENT_DIRECT_MESSAGES
@@ -4045,15 +4566,97 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_send_message_marks_inbound_event_delivered_after_rest_success() {
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/channels/111/messages",
+            200,
+            json!({
+                "id": "333",
+                "channel_id": "111",
+                "content": "final answer",
+                "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                "author": {
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0"
+                }
+            }),
+        )]);
+        let api_config = base_config(server.uri().into());
+        let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
+
+        let mut connector = DiscordConnector::new();
+        connector.api_client = Some(api_client);
+        connector.base.set_configured(true);
+        connector.base.set_handshaken(true);
+        let signing_key = Ed25519SigningKey::generate();
+        connector.verifier = Some(CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            ZoneId::work(),
+            connector.base.instance_id.clone(),
+        ));
+
+        let metadata = DiscordInboundDeliveryMetadata {
+            session_key: "discord:111:222".into(),
+            event_kind: "room_event",
+            channel_id: "111".into(),
+            guild_id: Some("999".into()),
+            message_id: "222".into(),
+        };
+        lock_discord_inbound_delivery_state(&connector.inbound_delivery_state)
+            .register(metadata.clone());
+
+        let capability = generate_capability_with_instance(
+            &signing_key,
+            "discord.send",
+            &["discord.send_message"],
+            Some(&connector.base.instance_id),
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.send_message",
+                "input": {
+                    "channel_id": "111",
+                    "content": "final answer",
+                    "delivery": {
+                        "kind": "final",
+                        "visibility": "visible",
+                        "inbound_event": {
+                            "session_key": metadata.session_key
+                        }
+                    }
+                },
+                "capability_token": capability
+            }))
+            .await
+            .expect("visible send should clear matching inbound event");
+
+        assert_eq!(result["delivery"]["status"], "delivered");
+        assert_eq!(
+            result["delivery"]["inbound_event"]["status"],
+            "marked_delivered"
+        );
+        assert_eq!(
+            result["delivery"]["inbound_event"]["source_message_id"],
+            "222"
+        );
+        assert!(
+            !lock_discord_inbound_delivery_state(&connector.inbound_delivery_state)
+                .contains("discord:111:222"),
+            "matching REST success should clear the pending inbound event"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_shutdown_clears_state() {
-        let mock_server = MockServer::start().await;
-        mock_current_user_ok(&mock_server, "test_token").await;
+        let server = TestHttpServer::current_user("test_token");
 
         let mut connector = DiscordConnector::new();
         connector
             .handle_configure(json!({
                 "bot_credential": "test_token",
-                "api_url": mock_server.uri(),
+                "api_url": server.uri(),
                 "intents": INTENT_GUILDS
                     | INTENT_GUILD_MESSAGES
                     | INTENT_DIRECT_MESSAGES
@@ -4066,6 +4669,15 @@ mod tests {
         connector.zone_dir = Some(PathBuf::from(unique_zone_dir("shutdown-state")));
         connector.bot_user_id = Some("123456789".into());
         connector.base.set_handshaken(true);
+        lock_discord_inbound_delivery_state(&connector.inbound_delivery_state).register(
+            DiscordInboundDeliveryMetadata {
+                session_key: "discord:111:222".into(),
+                event_kind: "room_event",
+                channel_id: "111".into(),
+                guild_id: Some("999".into()),
+                message_id: "222".into(),
+            },
+        );
 
         connector
             .handle_shutdown(json!({}))
@@ -4079,6 +4691,10 @@ mod tests {
         assert!(connector.zone_dir.is_none());
         assert!(connector.bot_user_id.is_none());
         assert!(connector.config.is_none());
+        assert_eq!(
+            lock_discord_inbound_delivery_state(&connector.inbound_delivery_state).pending_len(),
+            0
+        );
 
         let health = connector.handle_health().await.expect("health");
         assert_eq!(health["status"], "not_configured");
@@ -4227,6 +4843,112 @@ mod tests {
         assert_eq!(envelope.data.principal.id, "user-1");
         assert_eq!(envelope.data.principal.display.as_deref(), Some("alice"));
         assert!(envelope.data.thread_info.is_none());
+    }
+
+    #[test]
+    fn test_gateway_event_to_fcp_message_create_attaches_and_registers_inbound_delivery() {
+        let connector_id = ConnectorId::from_static("fcp.discord");
+        let instance_id = InstanceId::new();
+        let payload = json!({
+            "id": "222",
+            "channel_id": "111",
+            "guild_id": "999",
+            "content": "<@123456789> hello",
+            "author": {
+                "id": "user-1",
+                "username": "alice"
+            }
+        });
+        let event = GatewayEventFrame {
+            seq: Some(78),
+            event: GatewayEvent::MessageCreate(payload),
+        };
+
+        let envelope = gateway_event_to_fcp_with_policy(
+            &event,
+            &connector_id,
+            &instance_id,
+            &DiscordInboundPolicy::default(),
+            Some("123456789"),
+        )
+        .expect("mentioned guild message should emit event");
+
+        assert_eq!(envelope.topic, "discord.message");
+        assert_eq!(
+            envelope.data.payload["fcp_delivery"]["session_key"],
+            "discord:111:222"
+        );
+        assert_eq!(
+            envelope.data.payload["fcp_delivery"]["event_kind"],
+            "room_event"
+        );
+        assert_eq!(
+            envelope.data.payload["fcp_delivery"]["retention"],
+            "pending_until_outbound_delivery"
+        );
+
+        let state = Arc::new(Mutex::new(DiscordInboundDeliveryState::default()));
+        register_discord_inbound_delivery_from_event(&state, &envelope);
+        let (pending_len, contains_event) = {
+            let state = lock_discord_inbound_delivery_state(&state);
+            (state.pending_len(), state.contains("discord:111:222"))
+        };
+        assert_eq!(pending_len, 1);
+        assert!(contains_event);
+    }
+
+    #[test]
+    fn test_inbound_delivery_state_retains_on_target_mismatch() {
+        let mut state = DiscordInboundDeliveryState::default();
+        state.register(DiscordInboundDeliveryMetadata {
+            session_key: "discord:111:222".into(),
+            event_kind: "room_event",
+            channel_id: "111".into(),
+            guild_id: Some("999".into()),
+            message_id: "222".into(),
+        });
+        let request = DiscordInboundDeliveryRequest {
+            session_key: "discord:111:222".into(),
+        };
+
+        let receipt = state.mark_delivered(&request, "444", "333");
+
+        assert_eq!(receipt["status"], "target_mismatch");
+        assert_eq!(receipt["expected_channel_id"], "111");
+        assert_eq!(receipt["actual_channel_id"], "444");
+        assert!(
+            state.contains("discord:111:222"),
+            "mismatched outbound target must leave inbound event pending"
+        );
+    }
+
+    #[test]
+    fn test_inbound_delivery_state_evicts_oldest_when_bounded() {
+        let mut state = DiscordInboundDeliveryState::default();
+        for idx in 0..=DISCORD_INBOUND_DELIVERY_MAX_PENDING {
+            state.register(DiscordInboundDeliveryMetadata {
+                session_key: format!("discord:111:{idx}"),
+                event_kind: "room_event",
+                channel_id: "111".into(),
+                guild_id: Some("999".into()),
+                message_id: idx.to_string(),
+            });
+        }
+
+        assert_eq!(
+            state.pending_len(),
+            DISCORD_INBOUND_DELIVERY_MAX_PENDING,
+            "inbound delivery state must stay bounded"
+        );
+        assert!(
+            !state.contains("discord:111:0"),
+            "oldest inbound delivery record should be evicted first"
+        );
+        let newest_session_key = format!("discord:111:{DISCORD_INBOUND_DELIVERY_MAX_PENDING}");
+        assert!(
+            state.contains(&newest_session_key),
+            "newest inbound delivery record should be retained"
+        );
     }
 
     #[test]

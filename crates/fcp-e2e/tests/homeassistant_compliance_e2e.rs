@@ -115,7 +115,7 @@ impl FcpConnector for HomeAssistantConnectorAdapter {
             .ok_or_else(|| FcpError::Internal {
                 message: "homeassistant handshake response missing capabilities array".into(),
             })?
-            .into_iter()
+            .iter()
             .filter_map(|value| value.as_str().map(str::to_string))
             .collect();
         let expected_caps = std::collections::BTreeSet::from([

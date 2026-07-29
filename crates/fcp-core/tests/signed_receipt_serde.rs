@@ -1,6 +1,6 @@
 //! Pin `OperationReceipt` JSON shape + skip-when-None semantics +
-//! signable_bytes axis-distinctness — the closest analogue to
-//! "SignedReceipt serde" (flywheel_connectors-v897d).
+//! `signable_bytes` axis-distinctness — the closest analogue to
+//! "`SignedReceipt` serde" (flywheel_connectors-v897d).
 //!
 //! Bead asks for `SignedReceipt` JSON+CBOR roundtrip pinning. No type
 //! literally named `SignedReceipt` exists in fcp-core. The closest
@@ -10,18 +10,18 @@
 //! `signable_bytes()` canonical-bytes function. `DecisionReceipt` is
 //! pinned by `routing_decision_serde_tag.rs`.
 //!
-//! Existing `operation_golden_vectors.rs` covers OperationReceipt CBOR
-//! round-trip + a few signable_bytes axes. This pin adds residual:
+//! Existing `operation_golden_vectors.rs` covers `OperationReceipt` CBOR
+//! round-trip + a few `signable_bytes` axes. This pin adds residual:
 //!   * JSON shape with explicit field-set pinning,
-//!   * skip-when-None for usage_metrics,
-//!   * is_idempotent predicate truth table,
-//!   * total_objects_produced helper truth table,
+//!   * skip-when-None for `usage_metrics`,
+//!   * `is_idempotent` predicate truth table,
+//!   * `total_objects_produced` helper truth table,
 //!   * JSON + CBOR cross-format consistency,
-//!   * signable_bytes axis-distinctness for every payload field
-//!     (request_object_id, idempotency_key presence/value,
-//!     outcome_object_ids, resource_object_ids, executed_at,
-//!     executed_by, usage_metrics presence/value),
-//!   * signable_bytes magic prefix `FCP2-RECEIPT-V1` pinned.
+//!   * `signable_bytes` axis-distinctness for every payload field
+//!     (`request_object_id`, `idempotency_key` presence/value,
+//!     `outcome_object_ids`, `resource_object_ids`, `executed_at`,
+//!     `executed_by`, `usage_metrics` presence/value),
+//!   * `signable_bytes` magic prefix `FCP2-RECEIPT-V1` pinned.
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
@@ -31,7 +31,7 @@ use fcp_core::{
 use semver::Version;
 use serde_json::json;
 
-fn obj(byte: u8) -> ObjectId {
+const fn obj(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
@@ -333,7 +333,7 @@ fn signable_bytes_idempotent_under_signature_field_mutation() {
     let a = populated_receipt();
     let bytes_before = a.signable_bytes();
 
-    let mut b = a.clone();
+    let mut b = a;
     b.signature = NodeSignature::new(NodeId::new("different"), [0xFF; 64], 9_999_999_999);
     let bytes_after = b.signable_bytes();
 

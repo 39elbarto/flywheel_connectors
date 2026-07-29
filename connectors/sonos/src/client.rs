@@ -204,33 +204,7 @@ fn redacted_upstream_error(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use wiremock::matchers::{body_string_contains, header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
     use super::*;
-
-    #[fcp_async_core::runtime::test]
-    async fn play_uses_avtransport_soap_action() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/MediaRenderer/AVTransport/Control"))
-            .and(header(
-                "soapaction",
-                "\"urn:schemas-upnp-org:service:AVTransport:1#Play\"",
-            ))
-            .and(body_string_contains("<u:Play"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("<ok/>"))
-            .mount(&server)
-            .await;
-
-        let config = SonosConfig::from_value(serde_json::json!({
-            "device_url": server.uri()
-        }))
-        .expect("config should parse");
-        let client = SonosClient::from_config(&config).expect("client should build");
-        let result = client.play().await.expect("play should succeed");
-        assert_eq!(result["action"], "play");
-    }
 
     #[test]
     fn capture_extracts_xml_tag_values() {

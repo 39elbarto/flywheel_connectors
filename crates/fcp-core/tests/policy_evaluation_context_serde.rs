@@ -1,5 +1,5 @@
 //! Pin `PolicySimulationInput` serde JSON+CBOR roundtrip — the closest
-//! analogue to "PolicyEvaluationContext serde"
+//! analogue to "`PolicyEvaluationContext` serde"
 //! (flywheel_connectors-usmtd).
 //!
 //! Bead asks for `PolicyEvaluationContext` JSON+CBOR roundtrip pinning. No
@@ -12,18 +12,18 @@
 //!
 //! Coverage:
 //!   * Defaults applied when optional fields are omitted from input
-//!     (transport=Lan, checkpoint_fresh=true, revocation_fresh=true,
-//!     execution_approval_required=false, safety_tier=Safe, plus all the
+//!     (`transport=Lan`, `checkpoint_fresh=true`, `revocation_fresh=true`,
+//!     `execution_approval_required=false`, `safety_tier=Safe`, plus all the
 //!     None/empty-Vec defaults),
 //!   * JSON round-trip preserves a fully-populated input,
 //!   * CBOR round-trip preserves a fully-populated input,
 //!   * JSON shape pinned for the minimum-required input (only required
 //!     fields present), serializes every field including defaults,
 //!   * `request_input_hash: Option<[u8; 32]>` serializes as a 32-element
-//!     array (no hex_or_bytes adapter on this field — pin so adding one
+//!     array (no `hex_or_bytes` adapter on this field — pin so adding one
 //!     later breaks loudly),
 //!   * Distinct flags on the bool axes produce distinct JSON,
-//!   * Distinct transport/safety_tier values produce distinct JSON,
+//!   * Distinct `transport`/`safety_tier` values produce distinct JSON,
 //!   * Cross-format consistency (JSON and CBOR decode to same struct).
 
 use fcp_cbor::SchemaId;

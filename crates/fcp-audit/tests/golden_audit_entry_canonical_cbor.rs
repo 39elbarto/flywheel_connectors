@@ -1,6 +1,6 @@
 //! Frozen-byte golden tests for fcp-audit canonical CBOR encoding.
 //!
-//! AmberLark, 2026-05-02 — testing-golden-artifacts alpha-domain sweep.
+//! `AmberLark`, 2026-05-02 — testing-golden-artifacts alpha-domain sweep.
 //!
 //! Companion to `golden_receipts.rs` (which pins JSON snapshots of
 //! `AuditEntry` / `ChainHead` / `DecisionReceipt`). This file pins
@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use fcp_audit::{AuditEntry, Severity, TraceContext};
+use fcp_audit::{AuditEntry, Severity, TraceContext, audit_entry_hlc_from_occurred_at};
 use fcp_cbor::to_canonical_cbor;
 use serde_json::json;
 
@@ -56,7 +56,7 @@ fn dump(label: &str, bytes: &[u8]) -> String {
     out
 }
 
-/// Build a deterministic AuditEntry shell. Mutate severity per-test
+/// Build a deterministic `AuditEntry` shell. Mutate severity per-test
 /// to exercise the variant matrix without re-stating every field.
 fn fixture_audit_entry_with_severity(severity: Severity, id_suffix: &str) -> AuditEntry {
     let mut metadata = BTreeMap::new();
@@ -74,6 +74,7 @@ fn fixture_audit_entry_with_severity(severity: Severity, id_suffix: &str) -> Aud
         zone_id: "z:work".to_string(),
         seq: 42,
         occurred_at: 1_700_000_000,
+        hlc: audit_entry_hlc_from_occurred_at(1_700_000_000, "user:golden-fixture"),
         prev: Some("audit-fixture-prev".to_string()),
         correlation_id: "corr-golden-fixture".to_string(),
         trace_context: Some(TraceContext::new(
@@ -128,7 +129,7 @@ fn audit_entry_canonical_cbor_severity_critical() {
     ));
 }
 
-/// Pin the signing-transcript bytes for a fully-populated AuditEntry.
+/// Pin the signing-transcript bytes for a fully-populated `AuditEntry`.
 /// `signing_bytes()` is what gets fed to `Ed25519::sign` — a refactor
 /// that reordered fields here would invalidate every existing audit
 /// signature in the workspace without breaking any round-trip serde

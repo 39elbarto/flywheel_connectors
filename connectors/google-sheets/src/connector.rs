@@ -10,9 +10,12 @@ use fcp_prelude::{
 };
 use reqwest::Url;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::SheetsClient;
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn is_local_test_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
@@ -124,6 +127,12 @@ impl SheetsConnector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(
         &mut self,
         params: serde_json::Value,
@@ -187,6 +196,14 @@ impl SheetsConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -210,7 +227,7 @@ impl SheetsConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-sheets-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -652,8 +669,6 @@ fn op_info(
 mod tests {
     use super::*;
     use std::future::Future;
-    use wiremock::matchers::{method, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
     where
@@ -897,30 +912,15 @@ mod tests {
     }
 
     #[test]
-    fn get_spreadsheet_via_mock() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path_regex(r"/v4/spreadsheets/.+"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "spreadsheetId": "test-ss-id",
-                    "properties": { "title": "Test Sheet" },
-                    "sheets": [],
-                    "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/test-ss-id"
-                })))
-                .mount(&server)
-                .await;
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut expected = Sha256::new();
+        expected.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(expected.finalize()));
 
-            let mut connector = SheetsConnector::new();
-            connector
-                .handle_configure(json!({ "access_token": "test-token" }))
-                .await
-                .unwrap();
-
-            // Override base URL to mock server (need to access client internals)
-            // For now, verify that introspect works since we can't easily override base_url
-            let introspect = connector.handle_introspect().await.unwrap();
-            assert!(introspect["operations"].as_array().unwrap().len() >= 5);
-        });
+        assert_eq!(SheetsConnector::manifest_hash(), expected);
+        assert_ne!(
+            SheetsConnector::manifest_hash(),
+            "sha256:google-sheets-connector-v1"
+        );
     }
 }

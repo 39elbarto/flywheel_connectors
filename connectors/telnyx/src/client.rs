@@ -10,8 +10,9 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{
     Client, Response, StatusCode,
     header::{self, HeaderValue},
@@ -193,6 +194,7 @@ impl TelnyxClient {
 
     /// Answer/continue a call.
     pub async fn continue_call(&self, call_control_id: &str) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(call_control_id, "call_control_id")?;
         self.post_data(
             &format!("/calls/{call_control_id}/actions/answer"),
             &serde_json::json!({}),
@@ -202,8 +204,9 @@ impl TelnyxClient {
 
     /// Speak text into a call.
     pub async fn speak_call(&self, request: &SpeakCallRequest<'_>) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(request.call_control_id, "call_control_id")?;
         self.post_data(
-            &format!("/calls/{}/actions/speak", request.call_control_id),
+            &format!("/calls/{call_control_id}/actions/speak"),
             &build_speak_call_payload(request),
         )
         .await
@@ -211,6 +214,7 @@ impl TelnyxClient {
 
     /// End a call.
     pub async fn end_call(&self, call_control_id: &str) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(call_control_id, "call_control_id")?;
         self.post_data(
             &format!("/calls/{call_control_id}/actions/hangup"),
             &serde_json::json!({}),
@@ -220,6 +224,7 @@ impl TelnyxClient {
 
     /// Fetch call status/details.
     pub async fn status_call(&self, call_control_id: &str) -> TelnyxResult<TelnyxCall> {
+        let call_control_id = sanitize_call_control_id(call_control_id, "call_control_id")?;
         self.get_data(&format!("/calls/{call_control_id}")).await
     }
 
@@ -228,8 +233,9 @@ impl TelnyxClient {
         &self,
         request: &TransferCallRequest<'_>,
     ) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(request.call_control_id, "call_control_id")?;
         self.post_data(
-            &format!("/calls/{}/actions/transfer", request.call_control_id),
+            &format!("/calls/{call_control_id}/actions/transfer"),
             &build_transfer_call_payload(request),
         )
         .await
@@ -240,11 +246,9 @@ impl TelnyxClient {
         &self,
         request: &GatherUsingSpeakRequest<'_>,
     ) -> TelnyxResult<TelnyxCommand> {
+        let call_control_id = sanitize_call_control_id(request.call_control_id, "call_control_id")?;
         self.post_data(
-            &format!(
-                "/calls/{}/actions/gather_using_speak",
-                request.call_control_id
-            ),
+            &format!("/calls/{call_control_id}/actions/gather_using_speak"),
             &build_gather_using_speak_payload(request),
         )
         .await
@@ -252,7 +256,8 @@ impl TelnyxClient {
 
     async fn get_data<T: DeserializeOwned>(&self, path: &str) -> TelnyxResult<T> {
         let data = self
-            .execute(|| self.http.get(format!("{}{}", self.base_url, path)))
+            // GET is idempotent.
+            .execute(true, || self.http.get(format!("{}{}", self.base_url, path)))
             .await?;
         unwrap_data(data)
     }
@@ -263,12 +268,26 @@ impl TelnyxClient {
         body: &serde_json::Value,
     ) -> TelnyxResult<T> {
         let url = format!("{}{}", self.base_url, path);
-        let data = self.execute(|| self.http.post(&url).json(body)).await?;
+        // NOT replay-safe: these POSTs send messages and place calls, and
+        // Telnyx offers no idempotency key for them.
+        let data = self
+            .execute(false, || self.http.post(&url).json(body))
+            .await?;
         unwrap_data(data)
     }
 
+    /// Run a request under the retry policy.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a side
+    /// effect. Telnyx has no idempotency-key mechanism on the Messages or Calls
+    /// APIs, so a replayed `POST /messages` sends and bills a second SMS. Only
+    /// a pre-transmission failure may be retried for those.
+    ///
+    /// A 429 stays retryable regardless — Telnyx rejects a rate-limited request
+    /// without performing it. See br-kxd3e.
     async fn execute(
         &self,
+        replay_safe: bool,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> TelnyxResult<serde_json::Value> {
         let ctx = self.runtime.request_context();
@@ -276,11 +295,18 @@ impl TelnyxClient {
 
         RetryLoop::execute(&ctx, &policy, |_attempt| async {
             match build_request().send().await {
-                Ok(response) => Self::response_outcome(response).await,
-                Err(error) => AttemptOutcome::Retryable {
-                    retry_after: None,
-                    error: TelnyxError::Http(error),
-                },
+                Ok(response) => Self::response_outcome(response, replay_safe).await,
+                // Only a connect-phase failure proves the request never left
+                // the client; `is_timeout()` covers the TOTAL request timeout,
+                // which fires after the body was fully sent.
+                Err(error) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&error);
+                    AttemptOutcome::retryable_if_replayable(
+                        TelnyxError::Http(error),
+                        None,
+                        replayable,
+                    )
+                }
             }
         })
         .await
@@ -288,6 +314,7 @@ impl TelnyxClient {
 
     async fn response_outcome(
         response: Response,
+        replay_safe: bool,
     ) -> AttemptOutcome<serde_json::Value, TelnyxError> {
         let status = response.status();
         let retry_after = retry_after_header(&response);
@@ -304,14 +331,18 @@ impl TelnyxClient {
             || matches!(status, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY)
         {
             let body = response.text().await.unwrap_or_default();
-            return AttemptOutcome::Retryable {
-                error: TelnyxError::Api {
+            // All of these mean Telnyx RECEIVED the request. A 5xx can be
+            // returned after the message was already queued, and a 408 can
+            // follow a request the server read in full.
+            return AttemptOutcome::retryable_if_replayable(
+                TelnyxError::Api {
                     message: format!("HTTP {status}: {body}"),
                     status_code: Some(status.as_u16()),
                     retry_after,
                 },
                 retry_after,
-            };
+                replay_safe,
+            );
         }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return AttemptOutcome::Terminal(TelnyxError::Unauthorized);
@@ -343,6 +374,37 @@ impl TelnyxClient {
 fn unwrap_data<T: DeserializeOwned>(value: serde_json::Value) -> TelnyxResult<T> {
     let envelope: TelnyxEnvelope<T> = serde_json::from_value(value)?;
     Ok(envelope.data)
+}
+
+/// Validate a Telnyx `call_control_id` before interpolating it into a request
+/// path.
+///
+/// The identifier is a URL-safe base64 token (`[A-Za-z0-9_=-]` plus `:`), so
+/// this rejects only the characters that would let a caller-supplied value
+/// escape its segment: `/`, `\`, `..`, encoded slashes, and `?`/`#`. Without it,
+/// a `call_control_id` of `REALID/actions/hangup#` turns an `answer` request
+/// into a `hangup`, and a raw `/` reaches sibling `/v2/...` resources.
+fn sanitize_call_control_id<'a>(value: &'a str, field: &str) -> TelnyxResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(TelnyxError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(TelnyxError::InvalidInput(format!(
+            "{field} contains path traversal or URL control characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 fn retry_after_header(response: &Response) -> Option<Duration> {
@@ -524,17 +586,6 @@ fn insert_optional_u32(payload: &mut serde_json::Value, key: &str, value: Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
-
-    fn test_client(base_url: &str) -> TelnyxClient {
-        TelnyxClient::new("test_api_key")
-            .unwrap()
-            .with_base_url(base_url)
-            .with_retry_config(0)
-    }
 
     #[test]
     fn call_create_payload_preserves_webhook_session_and_media_fields() {
@@ -600,90 +651,5 @@ mod tests {
             decode_client_state_token(&encoded).unwrap(),
             "AAAAAAAAAAAAAAAAAAAAAA"
         );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn initiate_call_uses_bearer_auth_and_v2_calls_endpoint() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v2/calls"))
-            .and(header("authorization", "Bearer test_api_key"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "data": {
-                    "call_control_id": "call-control-1",
-                    "call_leg_id": "call-leg-1",
-                    "call_session_id": "call-session-1",
-                    "status": "queued"
-                }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = test_client(&format!("{}/v2", server.uri()));
-        let response = client
-            .initiate_call(&InitiateCallRequest {
-                to: "+15551230000",
-                from: "+15559870000",
-                connection_id: "conn-123",
-                webhook_url: None,
-                client_state: None,
-                timeout_secs: None,
-                stream_url: None,
-                stream_auth_token: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(response.call_control_id.as_deref(), Some("call-control-1"));
-
-        let requests = server.received_requests().await.unwrap_or_default();
-        assert_eq!(requests.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn transient_server_error_retries_then_succeeds() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/calls/call-control-1"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("try later"))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v2/calls/call-control-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": { "call_control_id": "call-control-1", "status": "bridged" }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = TelnyxClient::new("test_api_key")
-            .unwrap()
-            .with_base_url(&format!("{}/v2", server.uri()))
-            .with_retry_config(1);
-        let response = client.status_call("call-control-1").await.unwrap();
-        assert_eq!(response.status.as_deref(), Some("bridged"));
-        assert_eq!(
-            server.received_requests().await.unwrap_or_default().len(),
-            2
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn provider_error_maps_detail_and_rate_limit_retry_after() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/calls/missing"))
-            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
-                "errors": [{ "detail": "call_control_id is invalid" }]
-            })))
-            .mount(&server)
-            .await;
-        let client = test_client(&format!("{}/v2", server.uri()));
-        let error = client.status_call("missing").await.unwrap_err();
-        assert!(format!("{error}").contains("call_control_id is invalid"));
-        assert!(matches!(
-            error.to_fcp_error(),
-            fcp_prelude::FcpError::External { .. }
-        ));
     }
 }

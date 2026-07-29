@@ -1,5 +1,5 @@
 //! Pin `UsageBudgetPolicy` + paired serde shape — the closest
-//! analogue to "RetentionPolicy variant Display + serde tag"
+//! analogue to "`RetentionPolicy` variant Display + serde tag"
 //! (flywheel_connectors-g2up1).
 //!
 //! Bead asks for `RetentionPolicy variant Display + serde tag`. No
@@ -19,9 +19,9 @@
 //! usage-budget cluster:
 //!
 //!  - `UsageBudgetPolicy` (policy.rs:113) — 2-field struct
-//!    (enforcement: BudgetEnforcement + budgets: Vec<UsageBudgetLimit>)
+//!    (enforcement: `BudgetEnforcement` + budgets: `Vec<UsageBudgetLimit>`)
 //!  - `UsageBudgetLimit` (policy.rs:102) — 3-field struct
-//!    (metric / limit / window_seconds)
+//!    (metric / limit / `window_seconds`)
 //!  - `UsageBudgetUsage` (policy.rs:132) — 7-field usage report
 //!  - `UsageBudgetSnapshot` (policy.rs:151) — 4-field zone snapshot
 //!
@@ -32,12 +32,12 @@
 //!   2. **JSON + CBOR round-trip** preserves all fields including
 //!      nested vec.
 //!   3. **`UsageBudgetLimit` 3-field JSON shape** with nested
-//!      `metric: UsageMetricKind` (snake_case) tag.
+//!      `metric: UsageMetricKind` (`snake_case`) tag.
 //!   4. **`UsageBudgetLimit` round-trip** at boundary u64 values.
 //!   5. **`UsageBudgetUsage` 7-field shape** with nested
-//!      BudgetStatus tag.
+//!      `BudgetStatus` tag.
 //!   6. **`UsageBudgetSnapshot` 4-field shape** with nested
-//!      UsageBudgetUsage list ordering preserved.
+//!      `UsageBudgetUsage` list ordering preserved.
 //!   7. **Empty `budgets` Vec** preserved through round-trip
 //!      (NOT omitted — there's no `skip_serializing_if`).
 //!   8. **Distinct metrics produce distinct serializations**.
@@ -47,7 +47,7 @@ use fcp_core::{
     UsageBudgetUsage, UsageMetricKind, ZoneId,
 };
 
-fn sample_limit(metric: UsageMetricKind, limit: u64) -> UsageBudgetLimit {
+const fn sample_limit(metric: UsageMetricKind, limit: u64) -> UsageBudgetLimit {
     UsageBudgetLimit {
         metric,
         limit,
@@ -76,13 +76,13 @@ fn usage_budget_policy_json_shape_pinned() {
     let obj = value.as_object().expect("UsageBudgetPolicy is JSON object");
     assert_eq!(obj.len(), 2, "exactly 2 fields: enforcement + budgets");
     assert_eq!(
-        obj.get("enforcement").and_then(|v| v.as_str()),
+        obj.get("enforcement").and_then(serde_json::Value::as_str),
         Some("deny"),
         "enforcement field MUST serialize as the BudgetEnforcement snake_case token"
     );
     let budgets = obj
         .get("budgets")
-        .and_then(|v| v.as_array())
+        .and_then(serde_json::Value::as_array)
         .expect("budgets array");
     assert_eq!(budgets.len(), 2);
 }
@@ -276,18 +276,21 @@ fn usage_budget_snapshot_4_field_shape_with_nested_usage_list() {
     let value = serde_json::to_value(&snapshot).expect("serialize");
     let obj = value.as_object().expect("object");
     assert_eq!(obj.len(), 4, "exactly 4 fields");
-    assert_eq!(obj.get("zone_id").and_then(|v| v.as_str()), Some("z:work"));
     assert_eq!(
-        obj.get("enforcement").and_then(|v| v.as_str()),
+        obj.get("zone_id").and_then(serde_json::Value::as_str),
+        Some("z:work")
+    );
+    assert_eq!(
+        obj.get("enforcement").and_then(serde_json::Value::as_str),
         Some("warn")
     );
     assert_eq!(
-        obj.get("updated_at").and_then(|v| v.as_u64()),
+        obj.get("updated_at").and_then(serde_json::Value::as_u64),
         Some(1_700_000_500)
     );
     let budgets = obj
         .get("budgets")
-        .and_then(|v| v.as_array())
+        .and_then(serde_json::Value::as_array)
         .expect("budgets array");
     assert_eq!(budgets.len(), 2);
 }
@@ -336,7 +339,7 @@ fn usage_budget_snapshot_preserves_budget_list_order() {
     assert_eq!(back.budgets[2].metric, UsageMetricKind::Requests);
 
     // Reversing the order produces a different serialization.
-    let mut reversed = snapshot.clone();
+    let mut reversed = snapshot;
     reversed.budgets.reverse();
     let reversed_json = serde_json::to_string(&reversed).expect("serialize reversed");
     assert_ne!(json, reversed_json);

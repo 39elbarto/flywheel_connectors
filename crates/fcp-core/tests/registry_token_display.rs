@@ -1,26 +1,26 @@
-//! Pin `SecretAccessToken` Debug-redaction + predicate truth tables + serde
-//! shape — the closest analogue to "RegistryToken Display"
+//! Pin `SecretAccessToken` `Debug`-redaction + predicate truth tables + serde
+//! shape — the closest analogue to "`RegistryToken` Display"
 //! (flywheel_connectors-5bqje).
 //!
-//! Bead asks for `RegistryToken` Display + serde pinning. No type literally
+//! Bead asks for `RegistryToken` `Display` + serde pinning. No type literally
 //! named `RegistryToken` exists in fcp-core. Other tokens already pinned:
 //!   * `LeaseToken` → `lease_token_display.rs` + `lease_token_format_invariants.rs`,
-//!   * `CapabilityToken` → `capability_token_display_roundtrip.rs` (via CapabilityId),
+//!   * `CapabilityToken` → `capability_token_display_roundtrip.rs` (via `CapabilityId`),
 //!   * `ConsentToken` → `consent_token_display_roundtrip.rs`.
 //!
 //! Residual unpinned token: [`SecretAccessToken`] at
 //! `crates/fcp-core/src/secret.rs:413` — the security-critical
 //! short-lived single-use token granting access to a secret. It has NO
-//! Display impl (intentionally — never log a token to stdout); its
-//! "Display" surface is the redacted Debug impl. This test pins:
-//!   * Debug redacts authorization bytes (security-critical: token
-//!     authorization MUST NOT leak via {:?} log scrapes),
-//!   * is_expired / is_exhausted / is_valid predicate truth tables,
-//!   * record_use semantics + remaining_uses with saturating_sub,
+//! `Display` impl (intentionally — never log a token to stdout); its
+//! "`Display`" surface is the redacted `Debug` impl. This test pins:
+//!   * `Debug` redacts authorization bytes (security-critical: token
+//!     authorization MUST NOT leak via `{:?}` log scrapes),
+//!   * `is_expired` / `is_exhausted` / `is_valid` predicate truth tables,
+//!   * `record_use` semantics + `remaining_uses` with `saturating_sub`,
 //!   * JSON+CBOR serde shape preserves all 10 metadata fields +
 //!     authorization,
-//!   * Distinct token_id ensures audit-correlation independence (every
-//!     `new()` produces a fresh Uuid).
+//!   * Distinct `token_id` ensures audit-correlation independence (every
+//!     `new()` produces a fresh `Uuid`).
 
 use fcp_core::{PrincipalId, SecretAccessToken, SecretId, ZoneId};
 use uuid::Uuid;

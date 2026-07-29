@@ -26,7 +26,7 @@ fn bench_object_id(index: usize) -> ObjectId {
     ObjectId::from_bytes(bytes)
 }
 
-fn bench_coverage(object_id: ObjectId) -> CoverageEvaluation {
+const fn bench_coverage(object_id: ObjectId) -> CoverageEvaluation {
     CoverageEvaluation {
         object_id,
         distinct_nodes: 1,

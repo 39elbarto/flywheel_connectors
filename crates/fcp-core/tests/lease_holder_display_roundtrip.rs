@@ -6,14 +6,14 @@
 //! holder" is the `holder: TailscaleNodeId` field carried on
 //! `Lease` (lease.rs:114) and the paired `from_holder` /
 //! `to_holder: TailscaleNodeId` fields on `LeaseHandoff`
-//! (lease.rs:297-299). `TailscaleNodeId` Display + FromStr is
+//! (lease.rs:297-299). `TailscaleNodeId` Display + `FromStr` is
 //! already pinned by `node_id_roundtrip.rs`, so this test focuses
 //! on the LEASE-CONTEXT gaps that surface around the holder field:
 //!
 //!   1. **`Lease` JSON round-trip preserves `holder`** — the holder
 //!      field travels with the lease envelope unchanged.
 //!   2. **`Lease.holder` JSON shape is the bare validating
-//!      TailscaleNodeId string** (via `try_from = "String"` /
+//!      `TailscaleNodeId` string** (via `try_from = "String"` /
 //!      `into = "String"`).
 //!   3. **`LeaseHandoff` JSON+CBOR round-trip preserves both
 //!      `from_holder` and `to_holder`**.
@@ -67,7 +67,7 @@ fn build_lease(holder: TailscaleNodeId, lease_seq: u64) -> Lease {
     }
 }
 
-fn build_handoff(
+const fn build_handoff(
     from: TailscaleNodeId,
     to: TailscaleNodeId,
     previous_seq: u64,
@@ -247,9 +247,7 @@ fn self_transfer_display_format_includes_holder_debug() {
     // Display format pinned by lease.rs:370:
     //   "lease handoff must transfer to a different holder (holder {holder:?})"
     let holder = test_node("loop-back-node");
-    let err = LeaseTransferValidationError::SelfTransfer {
-        holder: holder.clone(),
-    };
+    let err = LeaseTransferValidationError::SelfTransfer { holder };
     let s = err.to_string();
     assert!(
         s.starts_with("lease handoff must transfer to a different holder"),
@@ -297,10 +295,7 @@ fn validate_handoff_rejects_from_holder_mismatch() {
 fn from_holder_mismatch_display_includes_both_holders() {
     let expected = test_node("expected-holder");
     let got = test_node("actual-holder");
-    let err = LeaseTransferValidationError::FromHolderMismatch {
-        expected: expected.clone(),
-        got: got.clone(),
-    };
+    let err = LeaseTransferValidationError::FromHolderMismatch { expected, got };
     let s = err.to_string();
     assert!(
         s.starts_with("handoff source holder mismatch"),

@@ -1,4 +1,6 @@
-use std::{fs::File, io::Write, path::PathBuf, process::Command, time::Instant};
+use std::{
+    collections::BTreeSet, fs::File, io::Write, path::PathBuf, process::Command, time::Instant,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
@@ -8,12 +10,16 @@ use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, OperationId, ZoneId,
 };
-use fcp_telnyx::{client::decode_client_state_token, connector::TelnyxConnector};
+use fcp_telnyx::{
+    client::{InitiateCallRequest, TelnyxClient, decode_client_state_token},
+    connector::TelnyxConnector,
+};
 use fcp_voice_call::stable_redacted_hash;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{header, method, path},
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -68,6 +74,13 @@ async fn configure_connector(
         }))
         .await
         .unwrap();
+}
+
+fn test_client(base_url: &str) -> TelnyxClient {
+    TelnyxClient::new("test_api_key")
+        .unwrap()
+        .with_base_url(base_url)
+        .with_retry_config(0)
 }
 
 async fn setup_handshake(connector: &mut TelnyxConnector) -> Ed25519SigningKey {
@@ -183,7 +196,9 @@ fn open_telnyx_e2e_log() -> (File, PathBuf) {
         std::process::id(),
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     );
-    let dir = std::env::temp_dir().join(unique);
+    let base_dir =
+        std::env::var_os("TELNYX_E2E_LOG_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    let dir = base_dir.join(unique);
     std::fs::create_dir_all(&dir).expect("create telnyx e2e log dir");
     let path = dir.join("telnyx_voice_call_e2e.jsonl");
     let file = File::create(&path).expect("create telnyx e2e log");
@@ -246,14 +261,22 @@ fn manifest_operation<'a>(manifest: &'a ConnectorManifest, id: &str) -> &'a Oper
         .provides
         .operations
         .get(id)
-        .unwrap_or_else(|| panic!("{id} should be declared in the manifest"))
+        .expect("operation should be declared in the manifest")
+}
+
+fn expected_operation_ids() -> BTreeSet<&'static str> {
+    TELNYX_API_EGRESS_OPERATIONS
+        .iter()
+        .chain(NO_CONNECTOR_EGRESS_OPERATIONS.iter())
+        .copied()
+        .collect()
 }
 
 fn assert_telnyx_api_network_constraints(id: &str, operation: &OperationSection) {
     let constraints = operation
         .network_constraints
         .as_ref()
-        .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+        .expect("operation should declare network_constraints");
     assert_eq!(
         constraints.host_allow,
         ["api.telnyx.com"],
@@ -289,7 +312,7 @@ fn assert_no_connector_egress_network_constraints(id: &str, operation: &Operatio
     let constraints = operation
         .network_constraints
         .as_ref()
-        .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+        .expect("operation should declare network_constraints");
     assert_eq!(
         constraints.host_allow,
         ["none.invalid"],
@@ -346,6 +369,140 @@ fn manifest_declares_strict_per_operation_network_constraints() {
             "{id} should declare per-operation network_constraints"
         );
     }
+}
+
+#[test]
+fn manifest_ai_hints_cover_all_operations() {
+    let manifest = telnyx_manifest();
+    let actual = manifest
+        .provides
+        .operations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual,
+        expected_operation_ids(),
+        "Telnyx manifest operation set should stay aligned with ai_hints coverage"
+    );
+
+    for (id, operation) in &manifest.provides.operations {
+        let hints = &operation.ai_hints;
+        assert!(
+            !hints.when_to_use.trim().is_empty(),
+            "{id} should explain when an agent should use it"
+        );
+        assert!(
+            hints.common_mistakes.len() >= 2,
+            "{id} should document at least two concrete common mistakes"
+        );
+        assert!(
+            !hints.examples.is_empty(),
+            "{id} should include at least one synthetic example"
+        );
+
+        for example in &hints.examples {
+            let parsed: Value =
+                serde_json::from_str(example).expect("ai_hints example should be valid JSON");
+            assert!(
+                parsed.is_object(),
+                "{id} example should be a JSON object payload"
+            );
+
+            let lowered = example.to_ascii_lowercase();
+            for forbidden in ["api_key", "bearer", "password", "secret", "token"] {
+                assert!(
+                    !lowered.contains(forbidden),
+                    "{id} example should not contain secret-shaped text: {forbidden}"
+                );
+            }
+        }
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_initiate_call_uses_bearer_auth_and_v2_calls_endpoint() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/calls"))
+        .and(header("authorization", "Bearer test_api_key"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "data": {
+                "call_control_id": "call-control-1",
+                "call_leg_id": "call-leg-1",
+                "call_session_id": "call-session-1",
+                "status": "queued"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&format!("{}/v2", server.uri()));
+    let response = client
+        .initiate_call(&InitiateCallRequest {
+            to: "+15551230000",
+            from: "+15559870000",
+            connection_id: "conn-123",
+            webhook_url: None,
+            client_state: None,
+            timeout_secs: None,
+            stream_url: None,
+            stream_auth_token: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.call_control_id.as_deref(), Some("call-control-1"));
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_transient_server_error_retries_then_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/calls/call-control-1"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("try later"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/calls/call-control-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "call_control_id": "call-control-1", "status": "bridged" }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = TelnyxClient::new("test_api_key")
+        .unwrap()
+        .with_base_url(&format!("{}/v2", server.uri()))
+        .with_retry_config(1);
+    let response = client.status_call("call-control-1").await.unwrap();
+    assert_eq!(response.status.as_deref(), Some("bridged"));
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        2
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_provider_error_maps_detail_and_rate_limit_retry_after() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/calls/missing"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "errors": [{ "detail": "call_control_id is invalid" }]
+        })))
+        .mount(&server)
+        .await;
+    let client = test_client(&format!("{}/v2", server.uri()));
+    let error = client.status_call("missing").await.unwrap_err();
+    assert!(format!("{error}").contains("call_control_id is invalid"));
+    assert!(matches!(
+        error.to_fcp_error(),
+        fcp_prelude::FcpError::External { .. }
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -803,6 +960,12 @@ async fn telnyx_loopback_e2e_jsonl_covers_provider_edges() {
     logs.flush().unwrap();
 
     let contents = std::fs::read_to_string(&log_path).unwrap();
+    let log_hash = Sha256::digest(contents.as_bytes());
+    println!("telnyx_voice_call_e2e_sha256={}", hex::encode(log_hash));
+    println!(
+        "telnyx_voice_call_e2e_record_count={}",
+        contents.lines().count()
+    );
     for scenario in [
         "signed_webhook_acceptance",
         "invalid_signature_denial",

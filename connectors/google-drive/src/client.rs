@@ -14,9 +14,8 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, Url, header};
 use tracing::debug;
 
@@ -207,7 +206,7 @@ impl DriveClient {
             urlencoding::encode(file_id),
         );
         let response = self
-            .execute_with_retry("GET", &url, None, GoogleResponseMode::Binary)
+            .execute_with_retry("GET", &url, None, GoogleResponseMode::Binary, true)
             .await?;
         match response.body {
             GoogleResponseBody::Binary(bytes) => Ok(base64_encode(&bytes)),
@@ -265,7 +264,7 @@ impl DriveClient {
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> DriveResult<T> {
         let response = self
-            .execute_with_retry("GET", url, None, GoogleResponseMode::Json)
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Json, true)
             .await?;
         decode_json_response(response)
     }
@@ -276,7 +275,7 @@ impl DriveClient {
         body: &serde_json::Value,
     ) -> DriveResult<T> {
         let response = self
-            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json)
+            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json, false)
             .await?;
         decode_json_response(response)
     }
@@ -287,17 +286,24 @@ impl DriveClient {
         body: &serde_json::Value,
     ) -> DriveResult<T> {
         let response = self
-            .execute_with_retry("PATCH", url, Some(body), GoogleResponseMode::Json)
+            .execute_with_retry("PATCH", url, Some(body), GoogleResponseMode::Json, true)
             .await?;
         decode_json_response(response)
     }
 
+    /// Execute with retry.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a
+    /// side effect (br-kxd3e). It is a parameter rather than a function of
+    /// `http_method` because Google models several state changes — and some
+    /// pure reads — as POSTs, so the verb alone decides nothing.
     async fn execute_with_retry(
         &self,
         http_method: &'static str,
         url: &str,
         body: Option<&serde_json::Value>,
         response_mode: GoogleResponseMode,
+        replay_safe: bool,
     ) -> DriveResult<GoogleExecuteResponse> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         let ctx = self.runtime.request_context();
@@ -311,10 +317,14 @@ impl DriveClient {
                 .await
             {
                 Ok(response) => AttemptOutcome::Success(response),
-                Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
-                    retry_after: error.retry_after(),
-                    error,
-                },
+                Err(error) if error.is_retryable() => {
+                    // A rate limit was refused WITHOUT performing the work, so
+                    // it stays retryable; a 5xx means Google received the
+                    // request and may already have done it.
+                    let replayable = replay_safe || error.replay_is_safe();
+                    let retry_after = error.retry_after();
+                    AttemptOutcome::retryable_if_replayable(error, retry_after, replayable)
+                }
                 Err(error) => AttemptOutcome::Terminal(error),
             }
         })
@@ -486,11 +496,13 @@ pub mod __fuzz {
     use super::sanitize_path_segment;
 
     /// Validate an arbitrary Drive URL path segment candidate.
+    #[must_use]
     pub fn sanitize_path_segment_candidate(value: &str) -> bool {
         sanitize_path_segment(value, "file_id").is_ok()
     }
 }
 
+#[must_use]
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);

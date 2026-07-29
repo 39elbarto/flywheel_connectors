@@ -1,7 +1,7 @@
 //! Pin the policy-decision serde tag matrix across JSON and CBOR
 //! (flywheel_connectors-qyq9l).
 //!
-//! Bead asks for "PolicyDecision serde tag matrix (allow/deny/skip)".
+//! Bead asks for "`PolicyDecision` serde tag matrix (allow/deny/skip)".
 //! `PolicyDecision` itself is NOT a serde-derived enum — it's a
 //! struct (policy.rs:2173) without Serialize/Deserialize. The two
 //! decision-shaped enums in fcp-core that DO derive serde are:
@@ -11,7 +11,7 @@
 //!    = "snake_case"` (enforcement.rs:144). Three variants:
 //!    - `Allow`              → `{"outcome":"allow"}`
 //!    - `Deny{reason_code, explanation}`
-//!                           → `{"outcome":"deny","reason_code":...,"explanation":...}`
+//!      → `{"outcome":"deny","reason_code":...,"explanation":...}`
 //!    - `Skip{reason}`       → `{"outcome":"skip","reason":...}`
 //!
 //! 2. `audit::Decision` (allow/deny only — no Skip) —
@@ -19,7 +19,7 @@
 //!    - `Allow` → `"allow"`
 //!    - `Deny`  → `"deny"`
 //!
-//! Tests pin both: the three-variant CheckOutcome (which matches the
+//! Tests pin both: the three-variant `CheckOutcome` (which matches the
 //! bead's allow/deny/skip framing) AND the two-variant Decision (since
 //! it's literally called "Decision"). Both go through JSON + CBOR
 //! round-trip.

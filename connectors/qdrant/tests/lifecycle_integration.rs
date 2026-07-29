@@ -11,7 +11,7 @@
 //!
 //! # Architecture
 //!
-//! Unlike the PostgREST connector — which required an HTTP shim because
+//! Unlike the `PostgREST` connector — which required an HTTP shim because
 //! the connector speaks a bespoke RPC contract — `QdrantClient` speaks
 //! Qdrant's native REST API directly. So the test boots `qdrant/qdrant`,
 //! grabs the mapped host port, and points the client at
@@ -35,7 +35,7 @@
 //! # Running
 //!
 //!   cargo test -p fcp-qdrant --features integration-testcontainer \
-//!       --test lifecycle_integration
+//!       --test `lifecycle_integration`
 //!
 //! Requires a running Docker daemon. The Qdrant container boot takes
 //! ~5-10s on first run (image pull) and ~1-2s on subsequent runs.
@@ -111,12 +111,11 @@ async fn wait_for_exact_count(client: &QdrantClient, name: &str, expected: u64) 
         if count.count == expected {
             return;
         }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for exact count to reach {expected}; last observed {}",
-                count.count
-            );
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for exact count to reach {expected}; last observed {}",
+            count.count
+        );
         fcp_async_core::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
@@ -317,7 +316,7 @@ async fn scroll_paginates_with_advancing_offset() {
     // non-null next_page_offset.
     let points: Vec<serde_json::Value> = (1..=5)
         .map(|i| {
-            let f = i as f64 / 10.0;
+            let f = f64::from(i) / 10.0;
             json!({ "id": i, "vector": [f, f, f], "payload": {"seq": i} })
         })
         .collect();
@@ -351,12 +350,12 @@ async fn scroll_paginates_with_advancing_offset() {
     let ids_first: std::collections::HashSet<i64> = first
         .points
         .iter()
-        .filter_map(|p| p.get("id").and_then(|v| v.as_i64()))
+        .filter_map(|p| p.get("id").and_then(serde_json::Value::as_i64))
         .collect();
     let ids_second: std::collections::HashSet<i64> = second
         .points
         .iter()
-        .filter_map(|p| p.get("id").and_then(|v| v.as_i64()))
+        .filter_map(|p| p.get("id").and_then(serde_json::Value::as_i64))
         .collect();
     assert!(
         ids_first.is_disjoint(&ids_second),

@@ -1,0 +1,19 @@
+name = "packet_drop_1pct"
+blast_radius = 1
+recovery_objective_secs = 30
+
+[[rollback_steps]]
+name = "clear_packet_drop"
+action = "clear_tc_netem"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+loss_pct = "1"
+
+[[rollback_steps]]
+name = "verify_packet_loss_normalized"
+action = "wait_for_packet_loss_below_threshold"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+threshold_pct = "0.1"

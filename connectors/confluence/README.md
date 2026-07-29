@@ -147,6 +147,18 @@ These are excluded on purpose:
 - `doctor()` and `self_check()` should report tenant host validity, `/wiki` path expectations, unsupported auth modes, and token-expiry rotation expectations clearly.
 - Tests should cover path sanitization, Basic auth construction, `401` unauthorized, `429 Retry-After`, pagination, version-conflict handling, and delete behavior.
 
+## Live Sandbox Verification
+
+Verification script: `scripts/e2e/confluence_connector_verification.sh`
+
+The gated live suite uses `FCP_LIVE_SANDBOX=1` plus `CONFLUENCE_SANDBOX_BASE_URL`, `CONFLUENCE_SANDBOX_EMAIL`, `CONFLUENCE_SANDBOX_API_TOKEN`, `CONFLUENCE_SANDBOX_SPACE_KEY`, and `FCP_SANDBOX_RUN_NAMESPACE`. It performs read-only space and page listings and emits redaction-safe `CONFLUENCE_LIVE_SANDBOX_JSONL` evidence.
+
+Focused rerun command:
+
+```bash
+rch exec -- cargo test -p fcp-confluence --test live_verification -- --nocapture
+```
+
 ## Source Notes
 
 This contract is grounded in Atlassian's current official documentation:

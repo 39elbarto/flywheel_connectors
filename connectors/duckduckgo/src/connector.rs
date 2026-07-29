@@ -1,9 +1,12 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_manifest::ConnectorManifest;
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::{
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+};
 use reqwest::header::{
     ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, REFERER, USER_AGENT,
 };
@@ -584,7 +587,7 @@ impl DuckDuckGoConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": operations_info(),
+            "operations": introspect_operations(),
             "events": [],
             "resource_types": []
         }))
@@ -655,7 +658,7 @@ impl Default for DuckDuckGoConnector {
     }
 }
 
-fn operations_info() -> Vec<Value> {
+fn ordered_manifest_operations() -> Vec<(String, fcp_manifest::OperationSection)> {
     let manifest = ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
         .expect("embedded DuckDuckGo manifest should parse before hash validation");
     let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
@@ -665,9 +668,21 @@ fn operations_info() -> Vec<Value> {
         left_index.cmp(&right_index).then_with(|| left.cmp(right))
     });
     operations
-        .into_iter()
-        .map(|(id, operation)| operation_json_from_manifest(&id, operation))
-        .collect()
+}
+
+fn introspect_operations() -> Vec<Value> {
+    static OPERATIONS: OnceLock<Vec<Value>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| {
+                    let operation_info = operation_info_from_manifest(id, &operation);
+                    introspect_operation_from_manifest(operation_info, &operation)
+                })
+                .collect()
+        })
+        .clone()
 }
 
 fn operation_order(operation_id: &str) -> usize {
@@ -677,26 +692,48 @@ fn operation_order(operation_id: &str) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn operation_json_from_manifest(id: &str, operation: fcp_manifest::OperationSection) -> Value {
-    let description = operation.description;
-    let mut metadata = json!({
-        "id": id,
-        "summary": description,
-        "description": description,
-        "capability": operation.capability.as_str(),
-        "risk_level": operation.risk_level,
-        "safety_tier": operation.safety_tier,
-        "requires_approval": operation.requires_approval,
-        "idempotency": operation.idempotency,
-        "input_schema": operation.input_schema,
-        "output_schema": operation.output_schema,
-        "network_constraints": operation.network_constraints,
-        "ai_hints": operation.ai_hints
-    });
-    if let Some(rate_limit) = operation.rate_limit {
-        metadata["rate_limit"] = json!(rate_limit.0);
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
+}
+
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata = serde_json::to_value(operation_info)
+        .expect("DuckDuckGo operation metadata should serialize");
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
     metadata
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 const fn health_status(configured: bool, handshaken: bool) -> &'static str {
@@ -1206,12 +1243,12 @@ mod tests {
     #[test]
     fn manifest_declares_all_runtime_operations_in_stable_order() {
         let manifest = duckduckgo_manifest_unchecked();
-        let ids: Vec<_> = operations_info()
+        let ids: Vec<_> = ordered_manifest_operations()
             .into_iter()
-            .map(|operation| {
-                operation["id"]
+            .map(|(id, operation)| {
+                operation_info_from_manifest(id, &operation)
+                    .id
                     .as_str()
-                    .expect("operation id should be a string")
                     .to_string()
             })
             .collect();

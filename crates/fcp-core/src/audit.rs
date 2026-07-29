@@ -3,12 +3,15 @@
 //! This module implements audit chain primitives and explainability receipts as
 //! described in `FCP_Specification_V3.md` §6.3 (Audit Chain).
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ConnectorId, CorrelationId, EpochId, NodeSignature, ObjectHeader, ObjectId, OperationId,
-    PrincipalId, SignatureSet, ZoneId,
+    ConnectorId, CorrelationId, EpochId, NodeId, NodeSignature, ObjectHeader, ObjectId,
+    OperationId, PrincipalId, SignatureSet, ZoneId,
 };
 
 /// Required audit event types (NORMATIVE).
@@ -235,6 +238,19 @@ impl AuditEvent {
     }
 }
 
+/// Hybrid signed audit-event envelope.
+pub type HybridSignedAuditEvent = SignedEnvelope<AuditEvent>;
+
+impl HybridSignable for AuditEvent {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::AuditEvent;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature = normalized_node_signature(&self.signature);
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
 /// Audit head checkpoint (NORMATIVE).
 ///
 /// Quorum-signed checkpoint of the audit chain head. Enables fast sync
@@ -309,6 +325,19 @@ impl ZoneCheckpoint {
     }
 }
 
+/// Hybrid signed zone-checkpoint envelope.
+pub type HybridSignedZoneCheckpoint = SignedEnvelope<ZoneCheckpoint>;
+
+impl HybridSignable for ZoneCheckpoint {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::ZoneCheckpoint;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.quorum_signatures = SignatureSet::new();
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
 /// Decision receipt for explainable allow/deny (NORMATIVE).
 ///
 /// Content-addressed "why allowed/denied" record with stable `reason_code` and
@@ -349,6 +378,10 @@ impl DecisionReceipt {
     pub const fn is_deny(&self) -> bool {
         matches!(self.decision, Decision::Deny)
     }
+}
+
+fn normalized_node_signature(signature: &NodeSignature) -> NodeSignature {
+    NodeSignature::new(NodeId::new(signature.node_id.as_str()), [0_u8; 64], 0)
 }
 
 /// Decision outcome (NORMATIVE).
@@ -1732,7 +1765,7 @@ mod tests {
         assert!(!event.event_type.is_empty());
         assert!(event.seq > 0 || event.prev.is_none()); // Genesis can have seq=0
         assert!(event.occurred_at > 0);
-        assert!(event.correlation_id.0.as_bytes().len() == 16);
+        assert_eq!(event.correlation_id.0.as_bytes().len(), 16);
     }
 
     #[test]

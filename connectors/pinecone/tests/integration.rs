@@ -12,7 +12,7 @@
 
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError, InstanceId};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -34,7 +34,11 @@ fn capability_for_operation(operation: &str) -> &'static str {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    operation: &str,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -50,9 +54,11 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> Cap
         .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
-        .unwrap();
+        .expect("capability token should sign");
     CapabilityToken::from_raw(cose)
 }
 
@@ -528,6 +534,219 @@ async fn error_data_plane_not_configured() {
     assert!(matches!(err, PineconeError::InvalidConfig(..)));
 }
 
+/// 429 responses from the HTTP boundary preserve provider retry timing.
+#[fcp_async_core::runtime::test]
+async fn http_429_retry_after_maps_to_rate_limit() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/indexes"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
+        .mount(&mock)
+        .await;
+
+    let client = PineconeClient::new("test-key")
+        .unwrap()
+        .with_control_plane_url(&mock.uri())
+        .with_retry_config(0);
+
+    let err = client.list_indexes().await.unwrap_err();
+    assert!(matches!(
+        err,
+        PineconeError::RateLimit {
+            retry_after_ms: 1000
+        }
+    ));
+}
+
+/// Retried 5xx responses keep provider status in the terminal error.
+#[fcp_async_core::runtime::test]
+async fn http_500_retries_then_returns_api_error() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/indexes"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+        .expect(2)
+        .mount(&mock)
+        .await;
+
+    let client = PineconeClient::new("test-key")
+        .unwrap()
+        .with_control_plane_url(&mock.uri())
+        .with_retry_config(1);
+
+    let err = client.list_indexes().await.unwrap_err();
+    assert!(matches!(
+        err,
+        PineconeError::Api {
+            status_code: Some(500),
+            ..
+        }
+    ));
+}
+
+/// Structured provider errors preserve the nested message.
+#[fcp_async_core::runtime::test]
+async fn bad_request_nested_error_message_is_preserved() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/indexes"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {
+                "code": "INVALID_ARGUMENT",
+                "message": "Dimension must be positive"
+            }
+        })))
+        .mount(&mock)
+        .await;
+
+    let client = PineconeClient::new("test-key")
+        .unwrap()
+        .with_control_plane_url(&mock.uri())
+        .with_retry_config(0);
+
+    let err = client
+        .create_index("bad", 0, "cosine", None)
+        .await
+        .unwrap_err();
+    match err {
+        PineconeError::Api {
+            status_code,
+            message,
+        } => {
+            assert_eq!(status_code, Some(400));
+            assert!(message.contains("Dimension must be positive"));
+        }
+        other => panic!("expected API error, got {other:?}"),
+    }
+}
+
+/// Data-plane stats accept provider filter payloads.
+#[fcp_async_core::runtime::test]
+async fn describe_index_stats_accepts_filter() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/describe_index_stats"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "namespaces": {},
+            "dimension": 128,
+            "index_fullness": 0.0,
+            "total_vector_count": 0
+        })))
+        .mount(&mock)
+        .await;
+
+    let client = PineconeClient::new("test-key")
+        .unwrap()
+        .with_data_plane_url(&mock.uri());
+
+    let filter = json!({"genre": {"$eq": "sci-fi"}});
+    let stats = client.describe_index_stats(Some(&filter)).await.unwrap();
+    assert_eq!(stats.dimension, Some(128));
+}
+
+/// Query-by-id responses retain provider namespace metadata.
+#[fcp_async_core::runtime::test]
+async fn query_by_id_retains_namespace() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "matches": [{ "id": "similar-1", "score": 0.88 }],
+            "namespace": "ns1"
+        })))
+        .mount(&mock)
+        .await;
+
+    let client = PineconeClient::new("test-key")
+        .unwrap()
+        .with_data_plane_url(&mock.uri());
+
+    let result = client
+        .query(None, Some("vec-ref"), 5, Some("ns1"), None, true, true)
+        .await
+        .unwrap();
+    assert_eq!(result.matches.len(), 1);
+    assert_eq!(result.namespace.as_deref(), Some("ns1"));
+}
+
+/// Namespace-specific fetches parse the provider namespace field.
+#[fcp_async_core::runtime::test]
+async fn fetch_with_namespace_parses_response() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/vectors/fetch"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "vectors": {
+                "v1": { "id": "v1", "values": [0.5] }
+            },
+            "namespace": "ns2"
+        })))
+        .mount(&mock)
+        .await;
+
+    let client = PineconeClient::new("test-key")
+        .unwrap()
+        .with_data_plane_url(&mock.uri());
+
+    let ids = vec!["v1".to_string()];
+    let result = client.fetch(&ids, Some("ns2")).await.unwrap();
+    assert_eq!(result.namespace.as_deref(), Some("ns2"));
+    assert_eq!(result.vectors.len(), 1);
+}
+
+/// Namespace-specific upserts preserve the provider count.
+#[fcp_async_core::runtime::test]
+async fn upsert_with_namespace_parses_count() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/vectors/upsert"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "upserted_count": 1
+        })))
+        .mount(&mock)
+        .await;
+
+    let client = PineconeClient::new("test-key")
+        .unwrap()
+        .with_data_plane_url(&mock.uri());
+
+    let vectors = vec![fcp_pinecone::types::Vector {
+        id: "ns-v1".into(),
+        values: Some(vec![0.1]),
+        metadata: None,
+        sparse_values: None,
+    }];
+    let result = client.upsert(&vectors, Some("my-ns")).await.unwrap();
+    assert_eq!(result.upserted_count, 1);
+}
+
+/// Vector deletes accept filter-only delete requests.
+#[fcp_async_core::runtime::test]
+async fn delete_with_filter_accepts_empty_provider_body() {
+    let mock = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/vectors/delete"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&mock)
+        .await;
+
+    let client = PineconeClient::new("test-key")
+        .unwrap()
+        .with_data_plane_url(&mock.uri());
+
+    let filter = json!({"genre": {"$eq": "horror"}});
+    let result = client.delete(None, false, None, Some(&filter)).await;
+    assert!(result.is_ok());
+}
+
 // ============================================================================
 // Redaction tests
 // ============================================================================
@@ -591,7 +810,7 @@ async fn redaction_api_key_not_in_invoke_error() {
         .unwrap();
 
     let signing_key = setup_handshake(&mut connector, &["pinecone.query"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.query");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "pinecone.query");
 
     let result = connector
         .handle_invoke(json!({
@@ -662,7 +881,7 @@ async fn invoke_query_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.query"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.query");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "pinecone.query");
 
     let result = connector
         .handle_invoke(json!({
@@ -697,7 +916,7 @@ async fn invoke_upsert_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.upsert"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.upsert");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "pinecone.upsert");
 
     let result = connector
         .handle_invoke(json!({
@@ -738,7 +957,11 @@ async fn invoke_create_index_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.create_index"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.create_index");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "pinecone.create_index",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -773,7 +996,11 @@ async fn invoke_delete_index_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.delete_index"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.delete_index");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "pinecone.delete_index",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -798,7 +1025,11 @@ async fn invoke_create_index_wrong_cap_rejected() {
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.list_indexes"]).await;
     // Token is for list_indexes, not create_index
-    let token = generate_valid_token(&signing_key, "pinecone.list_indexes");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "pinecone.list_indexes",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -830,7 +1061,11 @@ async fn invoke_list_indexes_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.list_indexes"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.list_indexes");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "pinecone.list_indexes",
+    );
 
     let result = connector
         .handle_invoke(json!({

@@ -2,7 +2,7 @@
 //!
 //! `fcp_core::QuorumPolicy` and the free function
 //! `fcp_core::required_quorum` are the BFT primitives that drive
-//! AuditHead / ZoneCheckpoint signature verification, zone lease
+//! `AuditHead` / `ZoneCheckpoint` signature verification, zone lease
 //! grants, and degraded-mode admission. Zero conformance coverage
 //! today even though the quorum thresholds are NORMATIVE and any
 //! drift would silently weaken Byzantine resilience.
@@ -23,7 +23,7 @@
 //!    `risk_tier == Safe`. ALL three must hold; any one false
 //!    rejects.
 //! 5. **`required_quorum` is monotone in tier**: Safe ≤ Risky ≤
-//!    Dangerous = CriticalWrite. The lattice is what makes the
+//!    Dangerous = `CriticalWrite`. The lattice is what makes the
 //!    risk classification meaningful.
 
 use fcp_prelude::{QuorumPolicy, RiskTier, ZoneId, required_quorum};

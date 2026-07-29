@@ -198,3 +198,89 @@ pub struct ApiErrorDetail {
 fn default_model() -> String {
     "whisper-1".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn transcribe_request_default_uses_whisper_model() {
+        let request = TranscribeRequest::default();
+
+        assert_eq!(request.model, "whisper-1");
+        assert!(request.audio_base64.is_none());
+        assert!(request.audio_url.is_none());
+        assert!(request.language.is_none());
+        assert!(request.response_format.is_none());
+        assert!(request.temperature.is_none());
+    }
+
+    #[test]
+    fn transcribe_request_serializes_only_present_optional_fields() {
+        let value = serde_json::to_value(TranscribeRequest {
+            audio_base64: None,
+            audio_url: Some("https://audio.example/input.wav".into()),
+            model: "whisper-1".into(),
+            language: Some("en".into()),
+            response_format: None,
+            temperature: Some(0.2),
+        })
+        .expect("transcribe request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "audio_url": "https://audio.example/input.wav",
+                "model": "whisper-1",
+                "language": "en",
+                "temperature": 0.2
+            })
+        );
+    }
+
+    #[test]
+    fn translate_request_deserializes_default_model() {
+        let request: TranslateRequest = serde_json::from_value(json!({
+            "audio_base64": "UklGRg==",
+            "temperature": 0.0
+        }))
+        .expect("translate request should deserialize");
+
+        assert_eq!(request.model, "whisper-1");
+        assert_eq!(request.audio_base64.as_deref(), Some("UklGRg=="));
+        assert_eq!(request.temperature, Some(0.0));
+        assert!(request.audio_url.is_none());
+    }
+
+    #[test]
+    fn transcription_result_defaults_missing_segments() {
+        let result: TranscriptionResult = serde_json::from_value(json!({
+            "text": "hello",
+            "language": "en"
+        }))
+        .expect("transcription result should deserialize");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(result.language.as_deref(), Some("en"));
+        assert!(result.segments.is_empty());
+        assert!(result.duration_seconds.is_none());
+    }
+
+    #[test]
+    fn api_error_response_decodes_nested_detail() {
+        let response: ApiErrorResponse = serde_json::from_value(json!({
+            "error": {
+                "message": "unsupported format",
+                "type": "invalid_request_error",
+                "code": "bad_audio"
+            }
+        }))
+        .expect("api error response should deserialize");
+        let detail = response.error.expect("error detail should be present");
+
+        assert_eq!(detail.message.as_deref(), Some("unsupported format"));
+        assert_eq!(detail.error_type.as_deref(), Some("invalid_request_error"));
+        assert_eq!(detail.code.as_deref(), Some("bad_audio"));
+    }
+}

@@ -28,6 +28,14 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.timeline_home.ai_hints]
+when_to_use = "Use when the agent needs recent posts from accounts the authenticated user follows."
+common_mistakes = [
+  "Calling the home timeline before user authentication is configured; this endpoint requires the user's account context.",
+  "Assuming it includes public federated posts; use timeline_public for public instance or federated discovery.",
+]
+examples = ['{"limit":20}']
+
 [provides.operations.timeline_home.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
 port_allow = [80, 443]
@@ -86,6 +94,14 @@ capability = "mastodon.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.timeline_public.ai_hints]
+when_to_use = "Use when the agent needs public posts from the configured instance or its federated public timeline."
+common_mistakes = [
+  "Using the public timeline when the user asked for followed accounts; timeline_home is the authenticated feed.",
+  "Forgetting the local flag when the task is limited to the configured instance rather than federation.",
+]
+examples = ['{"local":true,"limit":20}']
 
 [provides.operations.timeline_public.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
@@ -150,6 +166,14 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.statuses_get.ai_hints]
+when_to_use = "Use when the agent already has a Mastodon status ID and needs the current status body, author, and counters."
+common_mistakes = [
+  "Passing a URL or ActivityPub URI instead of the instance-local status ID expected by the API.",
+  "Assuming deleted or private statuses are readable just because the ID is known.",
+]
+examples = ['{"id":"status-123"}']
+
 [provides.operations.statuses_get.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
 port_allow = [80, 443]
@@ -206,6 +230,14 @@ capability = "mastodon.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
+
+[provides.operations.statuses_post.ai_hints]
+when_to_use = "Use when the user explicitly asks the agent to publish a new Mastodon status."
+common_mistakes = [
+  "Posting without confirming the requested visibility; public, unlisted, private, and direct have different audiences.",
+  "Exceeding the instance status length or omitting spoiler_text when sensitive is true.",
+]
+examples = ['{"status":"Release notes are live","visibility":"unlisted","sensitive":false}']
 
 [provides.operations.statuses_post.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
@@ -283,6 +315,14 @@ risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
 
+[provides.operations.statuses_delete.ai_hints]
+when_to_use = "Use only when the user intentionally wants to delete one of their own Mastodon statuses."
+common_mistakes = [
+  "Attempting to delete someone else's status; Mastodon only allows deleting statuses owned by the authenticated account.",
+  "Treating deletion as reversible; a deleted status should be considered permanently removed from the account.",
+]
+examples = ['{"id":"status-123"}']
+
 [provides.operations.statuses_delete.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
 port_allow = [80, 443]
@@ -339,6 +379,14 @@ capability = "mastodon.write"
 risk = "low"
 safety_tier = "risky"
 idempotency = "best_effort"
+
+[provides.operations.statuses_favourite.ai_hints]
+when_to_use = "Use when the user asks the agent to favourite or like a specific Mastodon status."
+common_mistakes = [
+  "Using favourite for sharing; boosting is the operation that republishes a status to followers.",
+  "Assuming the operation is a strict toggle; repeated requests may be treated as already-favourited by the instance.",
+]
+examples = ['{"id":"status-123"}']
 
 [provides.operations.statuses_favourite.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
@@ -397,6 +445,14 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
 
+[provides.operations.statuses_boost.ai_hints]
+when_to_use = "Use when the user asks the agent to boost or reblog a specific Mastodon status."
+common_mistakes = [
+  "Trying to boost private or otherwise non-boostable statuses; the instance may reject them.",
+  "Using boost when the user only asked to mark appreciation; favourite is the lower-visibility action.",
+]
+examples = ['{"id":"status-123"}']
+
 [provides.operations.statuses_boost.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
 port_allow = [80, 443]
@@ -454,6 +510,14 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.accounts_get.ai_hints]
+when_to_use = "Use when the agent has a Mastodon account ID and needs public profile details for that account."
+common_mistakes = [
+  "Passing an @username handle instead of the account ID expected by this endpoint.",
+  "Assuming the returned profile proves a follow relationship or authentication state.",
+]
+examples = ['{"id":"account-123"}']
+
 [provides.operations.accounts_get.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
 port_allow = [80, 443]
@@ -500,6 +564,14 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 
+[provides.operations.accounts_verify.ai_hints]
+when_to_use = "Use when the agent needs to confirm which Mastodon account is currently authenticated."
+common_mistakes = [
+  "Using account lookup to infer the active account; verify returns the actual authenticated identity.",
+  "Calling this as a general health check; health is cheaper when identity is irrelevant.",
+]
+examples = ['{}']
+
 [provides.operations.accounts_verify.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
 port_allow = [80, 443]
@@ -540,6 +612,14 @@ capability = "mastodon.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.notifications_list.ai_hints]
+when_to_use = "Use when the user asks the agent to review recent Mastodon mentions, favourites, boosts, follows, or other notifications."
+common_mistakes = [
+  "Using notifications as a timeline substitute; it only returns events involving the authenticated account.",
+  "Assuming notification status payloads are always present; some notification types do not include a status.",
+]
+examples = ['{"limit":20}']
 
 [provides.operations.notifications_list.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
@@ -606,6 +686,14 @@ capability = "mastodon.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.search.ai_hints]
+when_to_use = "Use when the agent needs to search the configured Mastodon instance for accounts, statuses, or hashtags."
+common_mistakes = [
+  "Expecting global ActivityPub search parity across instances; search results depend on the configured instance.",
+  "Leaving type unset when the task needs only accounts, statuses, or hashtags.",
+]
+examples = ['{"q":"rust async","type":"statuses","limit":10}']
 
 [provides.operations.search.network_constraints]
 host_allow = ["${mastodon_instance_host}"]
@@ -709,6 +797,14 @@ capability = "mastodon.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.health.ai_hints]
+when_to_use = "Use when the agent needs to verify the configured Mastodon instance is reachable and returning instance metadata."
+common_mistakes = [
+  "Using health to check user identity; accounts_verify is the authenticated identity check.",
+  "Treating a healthy instance as proof that write operations will succeed for the configured account.",
+]
+examples = ['{}']
 
 [provides.operations.health.network_constraints]
 host_allow = ["${mastodon_instance_host}"]

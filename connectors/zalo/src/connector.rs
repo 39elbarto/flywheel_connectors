@@ -2,12 +2,16 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     hash::{Hash, Hasher},
     net::{IpAddr, ToSocketAddrs},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::error::ZaloError;
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult, ZoneId};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::{
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+    ZoneId,
+};
 use fcp_sdk::{
     AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
     ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
@@ -20,6 +24,7 @@ use url::{Host, Url};
 
 const CONNECTOR_ID: &str = "fcp.zalo";
 const CONNECTOR_VERSION: &str = "0.1.0";
+const ZALO_MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const BOUNDARY: &str = "This experimental slice covers bot identity, outbound sends, long-poll update normalization, host-forwarded webhook ingest, replay/rate guards, default-deny sender policy, media bounds, webhook setup, and webhook token verification.";
 const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
 const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
@@ -58,6 +63,17 @@ const LIVE_CAPABILITIES: [&str; 5] = [
     "zalo.webhook",
     "zalo.events",
     "zalo.media",
+];
+const OPERATION_ORDER: [&str; 9] = [
+    GET_ME_OPERATION_ID,
+    SEND_MESSAGE_OPERATION_ID,
+    SEND_PHOTO_OPERATION_ID,
+    POLL_UPDATES_OPERATION_ID,
+    SET_WEBHOOK_OPERATION_ID,
+    DELETE_WEBHOOK_OPERATION_ID,
+    WEBHOOK_INFO_OPERATION_ID,
+    WEBHOOK_INGEST_OPERATION_ID,
+    WEBHOOK_VERIFY_OPERATION_ID,
 ];
 
 pub struct ZaloConnector {
@@ -507,7 +523,7 @@ impl ZaloConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": zalo_operation_catalog(),
+            "operations": zalo_operation_catalog()?,
             "surface_status": "experimental",
             "surface_status_rationale": "Runtime path performs live Bot API-shaped requests plus host-forwarded inbound event normalization with bounded HTTP, public-URL policy, replay/rate guards, and default-deny sender policy.",
             "events": [
@@ -1094,278 +1110,86 @@ impl ZaloConnector {
     }
 }
 
-fn zalo_operation_catalog() -> Vec<Value> {
-    let mut operations = message_operation_catalog();
-    operations.extend(webhook_management_operation_catalog());
-    operations.extend(webhook_ingest_operation_catalog());
-    operations
+fn zalo_operation_catalog() -> FcpResult<Vec<Value>> {
+    static OPERATIONS: OnceLock<FcpResult<Vec<Value>>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            Ok(ordered_manifest_operations()?
+                .into_iter()
+                .map(|(id, operation)| {
+                    let operation_info = operation_info_from_manifest(id, &operation);
+                    introspect_operation_from_manifest(operation_info, &operation)
+                })
+                .collect())
+        })
+        .clone()
 }
 
-fn message_operation_catalog() -> Vec<Value> {
-    vec![
-        operation_info(
-            GET_ME_OPERATION_ID,
-            "Get Zalo bot identity",
-            "zalo.messages",
-            "low",
-            "safe",
-            "strict",
-            object_schema(json!({}), &[]),
-            object_schema(json!({ "bot_id": { "type": "string" } }), &[]),
-            "When you need to confirm which Zalo bot account is active.",
-            &[],
-        ),
-        operation_info(
-            SEND_MESSAGE_OPERATION_ID,
-            "Send a Zalo text message",
-            "zalo.messages",
-            "medium",
-            "safe",
-            "best_effort",
-            object_schema(
-                json!({
-                    "recipient_id": {
-                        "description": "Zalo user ID of the recipient",
-                        "type": "string"
-                    },
-                    "message": {
-                        "description": "Message text to send",
-                        "type": "string"
-                    }
-                }),
-                &["recipient_id", "message"],
-            ),
-            object_schema(
-                json!({
-                    "ok": { "type": "boolean" },
-                    "result": { "type": "object" },
-                    "coordination": {
-                        "type": "array",
-                        "description": "Redaction-safe chat thread ownership audit records",
-                        "items": { "type": "object" }
-                    }
-                }),
-                &[],
-            ),
-            "When you need to send a text message to a Zalo user through the bot.",
-            &[],
-        ),
-        operation_info(
-            SEND_PHOTO_OPERATION_ID,
-            "Send a Zalo photo message",
-            "zalo.messages",
-            "medium",
-            "safe",
-            "best_effort",
-            object_schema(
-                json!({
-                    "recipient_id": {
-                        "description": "Zalo user ID of the recipient",
-                        "type": "string"
-                    },
-                    "photo_url": {
-                        "description": "HTTPS URL of the photo to send",
-                        "type": "string"
-                    }
-                }),
-                &["recipient_id", "photo_url"],
-            ),
-            object_schema(
-                json!({
-                    "ok": { "type": "boolean" },
-                    "result": { "type": "object" },
-                    "coordination": {
-                        "type": "array",
-                        "description": "Redaction-safe chat thread ownership audit records",
-                        "items": { "type": "object" }
-                    }
-                }),
-                &[],
-            ),
-            "When you need to send a photo message through the Zalo bot.",
-            &["Passing a non-HTTPS photo URL."],
-        ),
-        operation_info(
-            POLL_UPDATES_OPERATION_ID,
-            "Long-poll one Zalo update",
-            "zalo.updates",
-            "low",
-            "safe",
-            "none",
-            object_schema(json!({}), &[]),
-            object_schema(
-                json!({
-                    "events": { "type": "array" },
-                    "update_id": { "type": "string" }
-                }),
-                &[],
-            ),
-            "When you need to consume Zalo updates through polling and get explicit policy-gated event objects plus a cursor.",
-            &[
-                "Forgetting that inbound events default-deny until sender/chat/group allow policy is configured.",
-            ],
-        ),
-    ]
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
+    let manifest =
+        ConnectorManifest::parse_str(ZALO_MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Zalo manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
 }
 
-fn webhook_management_operation_catalog() -> Vec<Value> {
-    vec![
-        operation_info(
-            SET_WEBHOOK_OPERATION_ID,
-            "Set the Zalo webhook URL",
-            "zalo.webhook",
-            "medium",
-            "safe",
-            "best_effort",
-            object_schema(
-                json!({
-                    "url": {
-                        "description": "HTTPS webhook URL to register",
-                        "type": "string"
-                    }
-                }),
-                &["url"],
-            ),
-            object_schema(json!({ "ok": { "type": "boolean" } }), &[]),
-            "When you need to configure webhook delivery for the Zalo bot.",
-            &["Using a non-HTTPS webhook URL."],
-        ),
-        operation_info(
-            DELETE_WEBHOOK_OPERATION_ID,
-            "Delete the Zalo webhook",
-            "zalo.webhook",
-            "medium",
-            "safe",
-            "best_effort",
-            object_schema(json!({}), &[]),
-            object_schema(json!({ "ok": { "type": "boolean" } }), &[]),
-            "When you need to remove the Zalo webhook configuration.",
-            &[],
-        ),
-        operation_info(
-            WEBHOOK_INFO_OPERATION_ID,
-            "Get Zalo webhook info",
-            "zalo.webhook",
-            "low",
-            "safe",
-            "strict",
-            object_schema(json!({}), &[]),
-            object_schema(json!({ "url": { "type": "string" } }), &[]),
-            "When you need to inspect the current Zalo webhook target.",
-            &[],
-        ),
-    ]
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
 }
 
-fn webhook_ingest_operation_catalog() -> Vec<Value> {
-    vec![
-        operation_info(
-            WEBHOOK_INGEST_OPERATION_ID,
-            "Validate and normalize a host-forwarded Zalo webhook request",
-            "zalo.events",
-            "low",
-            "safe",
-            "strict",
-            object_schema(
-                json!({
-                    "method": {
-                        "description": "Forwarded HTTP method; must be POST",
-                        "type": "string"
-                    },
-                    "path": {
-                        "description": "Forwarded request path; must match configured webhook_path",
-                        "type": "string"
-                    },
-                    "headers": {
-                        "description": "Forwarded HTTP headers; x-bot-api-secret-token is required",
-                        "type": "object"
-                    },
-                    "body": {
-                        "description": "Raw JSON webhook body forwarded by the host/gateway",
-                        "type": "string"
-                    }
-                }),
-                &["method", "path", "headers", "body"],
-            ),
-            object_schema(
-                json!({
-                    "events": { "type": "array" },
-                    "ingest_log": { "type": "object" }
-                }),
-                &[],
-            ),
-            "When fcp-host or another trusted gateway has accepted a Zalo webhook HTTP request and needs the connector to verify method/path/secret/content-type/body/replay/rate policy and normalize events.",
-            &[
-                "Expecting the connector to open its own network listener.",
-                "Forgetting that sender/chat/group policy defaults to deny.",
-            ],
-        ),
-        operation_info(
-            WEBHOOK_VERIFY_OPERATION_ID,
-            "Verify a webhook secret token against local config",
-            "zalo.webhook",
-            "low",
-            "safe",
-            "strict",
-            object_schema(
-                json!({
-                    "token": {
-                        "description": "Webhook verification token to compare",
-                        "type": "string"
-                    }
-                }),
-                &["token"],
-            ),
-            object_schema(json!({ "verified": { "type": "boolean" } }), &[]),
-            "When you need to verify an inbound webhook token against configured expectations.",
-            &[],
-        ),
-    ]
-}
-
-#[allow(clippy::too_many_arguments)]
-fn operation_info(
-    id: &str,
-    summary: &str,
-    capability: &str,
-    risk_level: &str,
-    safety_tier: &str,
-    idempotency: &str,
-    input_schema: Value,
-    output_schema: Value,
-    when_to_use: &str,
-    common_mistakes: &[&str],
-) -> Value {
-    let mut info = serde_json::Map::new();
-    info.insert("id".to_string(), json!(id));
-    info.insert("summary".to_string(), json!(summary));
-    info.insert("capability".to_string(), json!(capability));
-    info.insert("risk_level".to_string(), json!(risk_level));
-    info.insert("safety_tier".to_string(), json!(safety_tier));
-    info.insert("idempotency".to_string(), json!(idempotency));
-    info.insert("input_schema".to_string(), input_schema);
-    info.insert("output_schema".to_string(), output_schema);
-    info.insert(
-        "ai_hints".to_string(),
-        json!({
-            "when_to_use": when_to_use,
-            "common_mistakes": common_mistakes,
-            "examples": [],
-            "related": [],
-        }),
-    );
-    info.insert("implemented".to_string(), Value::Bool(true));
-    Value::Object(info)
-}
-
-fn object_schema(properties: Value, required: &[&str]) -> Value {
-    let mut schema = serde_json::Map::new();
-    schema.insert("type".to_string(), Value::String("object".to_string()));
-    schema.insert("properties".to_string(), properties);
-    if !required.is_empty() {
-        schema.insert("required".to_string(), json!(required));
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
-    Value::Object(schema)
+}
+
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata =
+        serde_json::to_value(operation_info).expect("Zalo operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata["implemented"] = Value::Bool(true);
+    metadata
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 fn optional_trimmed_string(params: &Value, key: &str) -> FcpResult<Option<String>> {
@@ -2353,7 +2177,7 @@ mod tests {
 
     use super::*;
     use fcp_manifest::{ConnectorManifest, ConnectorStatus};
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 

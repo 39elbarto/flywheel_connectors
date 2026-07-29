@@ -9,8 +9,9 @@ use std::time::Duration;
 use base64::Engine;
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, header};
 
 use crate::error::{ZendeskError, ZendeskResult};
@@ -147,6 +148,7 @@ impl ZendeskClient {
             .build()
             .map_err(ZendeskError::Http)?;
 
+        validate_subdomain(auth.subdomain())?;
         let base_url = format!("https://{}.zendesk.com/api/v2", auth.subdomain());
 
         let request_timeout = Duration::from_secs(30);
@@ -200,7 +202,8 @@ impl ZendeskClient {
     ) -> ZendeskResult<serde_json::Value> {
         let url = format!("{}/tickets.json", self.base_url);
         let body = serde_json::json!({ "ticket": ticket_data });
-        let data = self.post_json(&url, &body).await?;
+        // NOT replay-safe: a duplicate is a second support ticket.
+        let data = self.post_json(&url, &body, false).await?;
         Ok(data)
     }
 
@@ -401,15 +404,25 @@ impl ZendeskClient {
     // ── HTTP helpers ──────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> ZendeskResult<serde_json::Value> {
-        self.execute(|| self.http.get(url)).await
+        self.execute(|| self.http.get(url), true).await
     }
 
+    /// POST with retry.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a
+    /// side effect (br-kxd3e). Zendesk documents an `Idempotency-Key` header
+    /// on some POST endpoints; threading it would make these retries genuinely
+    /// safe rather than refused, and is recorded as a follow-up on the bead
+    /// rather than done blind, because claiming dedup on an endpoint that does
+    /// not honour the header would be false assurance.
     async fn post_json(
         &self,
         url: &str,
         body: &serde_json::Value,
+        replay_safe: bool,
     ) -> ZendeskResult<serde_json::Value> {
-        self.execute(|| self.http.post(url).json(body)).await
+        self.execute(|| self.http.post(url).json(body), replay_safe)
+            .await
     }
 
     async fn put_json(
@@ -417,16 +430,19 @@ impl ZendeskClient {
         url: &str,
         body: &serde_json::Value,
     ) -> ZendeskResult<serde_json::Value> {
-        self.execute(|| self.http.put(url).json(body)).await
+        // PUT is idempotent per HTTP semantics: Zendesk's updates set named
+        // fields to named values, so a replay converges.
+        self.execute(|| self.http.put(url).json(body), true).await
     }
 
     async fn delete(&self, url: &str) -> ZendeskResult<serde_json::Value> {
-        self.execute(|| self.http.delete(url)).await
+        self.execute(|| self.http.delete(url), true).await
     }
 
     async fn execute(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
+        replay_safe: bool,
     ) -> ZendeskResult<serde_json::Value> {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -477,10 +493,10 @@ impl ZendeskClient {
                                 message: format!("Server error {status}: {body}"),
                                 status_code: Some(status.as_u16()),
                             };
-                            return AttemptOutcome::Retryable {
-                                retry_after: None,
-                                error: err,
-                            };
+                            // br-kxd3e: a 5xx means Zendesk received the
+                            // request and may already have created the ticket.
+                            // The 429 arm above stays ahead of this gate.
+                            return AttemptOutcome::retryable_if_replayable(err, None, replay_safe);
                         }
 
                         if !status.is_success() {
@@ -516,21 +532,47 @@ impl ZendeskClient {
                         }
                     }
                     Err(e) => {
-                        let err = ZendeskError::Http(e);
-                        if err.is_retryable() {
-                            AttemptOutcome::Retryable {
-                                retry_after: None,
-                                error: err,
-                            }
-                        } else {
-                            AttemptOutcome::Terminal(err)
-                        }
+                        // Only a connect-phase failure proves the request never
+                        // left the client.
+                        let replayable = replay_safe || !transport_error_reached_service(&e);
+                        AttemptOutcome::retryable_if_replayable(
+                            ZendeskError::Http(e),
+                            None,
+                            replayable,
+                        )
                     }
                 }
             }
         })
         .await
     }
+}
+
+/// Validate a Zendesk subdomain before interpolating it into the API host.
+///
+/// The subdomain becomes the leftmost label of `https://{subdomain}.zendesk.com`,
+/// and the client carries the account's Basic-auth credentials as a default
+/// header. Without validation, a value such as `attacker.example.com/` or
+/// `evil.com#` reparses the URL host to an attacker-controlled domain, so the
+/// `Authorization` header (email + API token) is exfiltrated on every request.
+/// A real Zendesk subdomain is a single DNS label: ASCII alphanumeric with
+/// optional internal hyphens, 1-63 characters.
+fn validate_subdomain(subdomain: &str) -> ZendeskResult<()> {
+    let value = subdomain.trim();
+    let valid = !value.is_empty()
+        && value.len() <= 63
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if !valid {
+        return Err(ZendeskError::InvalidConfig(format!(
+            "invalid Zendesk subdomain `{subdomain}`: must be a single DNS label \
+             (ASCII alphanumeric and hyphens, 1-63 characters)"
+        )));
+    }
+    Ok(())
 }
 
 /// Reject query-parameter values that contain URL-breaking characters.
@@ -576,274 +618,440 @@ fn percent_encode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        thread::{self, JoinHandle},
+        time::Duration,
     };
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Option<serde_json::Value>,
+        request_count: usize,
+    }
+
+    impl TestHttpResponse {
+        #[must_use]
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: Some(body),
+                request_count: 1,
+            }
+        }
+
+        #[must_use]
+        const fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: None,
+                request_count: 1,
+            }
+        }
+    }
+
+    struct TestApiServer {
+        base_url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestApiServer {
+        #[must_use]
+        fn respond(response: TestHttpResponse) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let handle = thread::spawn(move || {
+                for _ in 0..response.request_count {
+                    let (stream, _) = listener.accept().expect("accept Zendesk client request");
+                    handle_test_request(stream, &response);
+                }
+            });
+
+            Self {
+                base_url,
+                handle: Some(handle),
+            }
+        }
+
+        #[must_use]
+        fn api_base_url(&self) -> String {
+            format!("{}/api/v2", self.base_url)
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test server thread panicked");
+            }
+        }
+    }
+
+    fn handle_test_request(mut stream: TcpStream, response: &TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let request_method = parts.next().expect("request method");
+        let raw_path = parts.next().expect("request path");
+        let request_path = raw_path.split('?').next().expect("path before query");
+        assert_eq!(request_method, response.method);
+        assert_eq!(request_path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().expect("content-length parses");
+            }
+        }
+
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        let body = response
+            .body
+            .as_ref()
+            .map_or_else(String::new, serde_json::Value::to_string);
+        let status_text = match response.status {
+            200 => "OK",
+            201 => "Created",
+            204 => "No Content",
+            401 => "Unauthorized",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            _ => "OK",
+        };
+
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response.status,
+            status_text,
+            body.len(),
+            body
+        )
+        .expect("write response");
+        stream.flush().expect("flush response");
+    }
+
+    #[test]
+    fn subdomain_validation_blocks_host_injection() {
+        // Attacker-controlled subdomains that would reparse the URL host to a
+        // foreign domain (and exfiltrate the Basic-auth credential) must be
+        // rejected at construction time.
+        for bad in [
+            "attacker.example.com/",
+            "evil.com#",
+            "evil.com:8443",
+            "a@evil.com",
+            "sub.zendesk.com",
+            "has space",
+            "-leading",
+            "trailing-",
+            "",
+        ] {
+            assert!(
+                ZendeskClient::new(bad, "user@example.com", "token123").is_err(),
+                "expected subdomain `{bad}` to be rejected"
+            );
+        }
+        // Legitimate single-label subdomains still build.
+        assert!(ZendeskClient::new("mycompany", "user@example.com", "token123").is_ok());
+        assert!(ZendeskClient::new("my-company-1", "user@example.com", "token123").is_ok());
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_create_ticket() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/api/v2/tickets.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "POST",
+            "/api/v2/tickets.json",
+            201,
+            serde_json::json!({
                 "ticket": {
                     "id": 1,
                     "subject": "Test ticket",
                     "status": "new",
                     "priority": "normal"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let ticket_data = serde_json::json!({
             "subject": "Test ticket",
             "priority": "normal"
         });
         let result = client.create_ticket(&ticket_data).await.unwrap();
+        server.finish();
         assert_eq!(result["ticket"]["id"], 1);
         assert_eq!(result["ticket"]["subject"], "Test ticket");
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_ticket() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/tickets/123.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/tickets/123.json",
+            200,
+            serde_json::json!({
                 "ticket": {
                     "id": 123,
                     "subject": "Existing ticket",
                     "status": "open"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.get_ticket(123).await.unwrap();
+        server.finish();
         assert_eq!(result["ticket"]["id"], 123);
         assert_eq!(result["ticket"]["status"], "open");
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_update_ticket() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("PUT"))
-            .and(path("/api/v2/tickets/123.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "PUT",
+            "/api/v2/tickets/123.json",
+            200,
+            serde_json::json!({
                 "ticket": {
                     "id": 123,
                     "subject": "Updated ticket",
                     "status": "solved"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let update = serde_json::json!({ "status": "solved" });
         let result = client.update_ticket(123, &update).await.unwrap();
+        server.finish();
         assert_eq!(result["ticket"]["status"], "solved");
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_delete_ticket() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("DELETE"))
-            .and(path("/api/v2/tickets/123.json"))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::respond(TestHttpResponse::empty(
+            "DELETE",
+            "/api/v2/tickets/123.json",
+            204,
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.delete_ticket(123).await.unwrap();
+        server.finish();
         assert_eq!(result["deleted"], true);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_search_tickets() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/search.json",
+            200,
+            serde_json::json!({
                 "results": [
                     { "id": 1, "subject": "Ticket A" },
                     { "id": 2, "subject": "Ticket B" }
                 ],
                 "count": 2,
                 "next_page": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client
             .search_tickets("status:open", Some("created_at"), Some("desc"), None, None)
             .await
             .unwrap();
+        server.finish();
         assert_eq!(result["count"], 2);
         assert_eq!(result["results"].as_array().unwrap().len(), 2);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_list_ticket_comments() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/tickets/123/comments.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/tickets/123/comments.json",
+            200,
+            serde_json::json!({
                 "comments": [
                     { "id": 1, "body": "First comment", "public": true },
                     { "id": 2, "body": "Second comment", "public": false }
                 ]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.list_ticket_comments(123, None).await.unwrap();
+        server.finish();
         assert_eq!(result["comments"].as_array().unwrap().len(), 2);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_search_articles() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/help_center/articles/search.json",
+            200,
+            serde_json::json!({
                 "results": [
                     { "id": 100, "title": "How to reset password" }
                 ],
                 "count": 1
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client
             .search_articles("password reset", Some("en-us"), None, None)
             .await
             .unwrap();
+        server.finish();
         assert_eq!(result["count"], 1);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_article() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/help_center/articles/100.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/help_center/articles/100.json",
+            200,
+            serde_json::json!({
                 "article": {
                     "id": 100,
                     "title": "Password Reset Guide",
                     "body": "<p>To reset your password...</p>"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.get_article(100, None).await.unwrap();
+        server.finish();
         assert_eq!(result["article"]["id"], 100);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_search_users() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/users/search.json",
+            200,
+            serde_json::json!({
                 "users": [
                     { "id": 1, "name": "John Doe", "email": "john@example.com" }
                 ],
                 "count": 1
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.search_users("john@example.com").await.unwrap();
+        server.finish();
         assert_eq!(result["count"], 1);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_apply_macro() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/tickets/123/macros/456/apply.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/tickets/123/macros/456/apply.json",
+            200,
+            serde_json::json!({
                 "result": {
                     "ticket": {
                         "id": 123,
                         "status": "solved"
                     }
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.apply_macro(123, 456).await.unwrap();
+        server.finish();
         assert!(result["result"].is_object());
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/tickets/1.json"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/tickets/1.json",
+            401,
+            serde_json::json!({
                 "error": "Couldn't authenticate you"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "bad@example.com", "bad_token")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()))
+            .with_base_url(&server.api_base_url())
             .with_retry_config(0);
 
         let result = client.get_ticket(1).await;
+        server.finish();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
@@ -857,23 +1065,23 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/tickets/999.json"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/tickets/999.json",
+            404,
+            serde_json::json!({
                 "error": "RecordNotFound",
                 "description": "Not found"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()))
+            .with_base_url(&server.api_base_url())
             .with_retry_config(0);
 
         let result = client.get_ticket(999).await;
+        server.finish();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
@@ -887,20 +1095,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/tickets/1.json"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::respond(TestHttpResponse::empty(
+            "GET",
+            "/api/v2/tickets/1.json",
+            429,
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()))
+            .with_base_url(&server.api_base_url())
             .with_retry_config(0);
 
         let result = client.get_ticket(1).await;
+        server.finish();
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -1209,11 +1416,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_sla_policies() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/slas/policies.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/slas/policies.json",
+            200,
+            serde_json::json!({
                 "sla_policies": [
                     {
                         "id": 1,
@@ -1233,26 +1440,26 @@ mod tests {
                     }
                 ],
                 "count": 2
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.list_sla_policies().await.unwrap();
+        server.finish();
         assert_eq!(result["sla_policies"].as_array().unwrap().len(), 2);
         assert_eq!(result["sla_policies"][0]["title"], "Urgent SLA");
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_ticket_sla() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v2/tickets/123/metrics.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/tickets/123/metrics.json",
+            200,
+            serde_json::json!({
                 "ticket_metric": {
                     "id": 9001,
                     "ticket_id": 123,
@@ -1261,15 +1468,15 @@ mod tests {
                     "full_resolution_time_in_minutes": { "calendar": 240, "business": 120 },
                     "agent_wait_time_in_minutes": { "calendar": 5, "business": 3 }
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.get_ticket_sla(123).await.unwrap();
+        server.finish();
         assert_eq!(result["ticket_metric"]["ticket_id"], 123);
         assert_eq!(
             result["ticket_metric"]["reply_time_in_minutes"]["calendar"],
@@ -1279,92 +1486,96 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_ticket_metrics() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/ticket_metrics.json",
+            200,
+            serde_json::json!({
                 "ticket_metrics": [
                     { "id": 1, "ticket_id": 100, "reply_time_in_minutes": { "calendar": 30 } },
                     { "id": 2, "ticket_id": 101, "reply_time_in_minutes": { "calendar": 45 } }
                 ],
                 "count": 2
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.list_ticket_metrics(Some(100)).await.unwrap();
+        server.finish();
         assert_eq!(result["ticket_metrics"].as_array().unwrap().len(), 2);
         assert_eq!(result["count"], 2);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_list_ticket_metrics_no_page_size() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/ticket_metrics.json",
+            200,
+            serde_json::json!({
                 "ticket_metrics": [],
                 "count": 0
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.list_ticket_metrics(None).await.unwrap();
+        server.finish();
         assert_eq!(result["count"], 0);
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_list_satisfaction_ratings() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/satisfaction_ratings.json",
+            200,
+            serde_json::json!({
                 "satisfaction_ratings": [
                     { "id": 1, "score": "good", "comment": "Great support!", "ticket_id": 100 },
                     { "id": 2, "score": "good", "comment": "Quick resolution", "ticket_id": 101 }
                 ],
                 "count": 2
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client
             .list_satisfaction_ratings(Some("good"), Some(100))
             .await
             .unwrap();
+        server.finish();
         assert_eq!(result["satisfaction_ratings"].as_array().unwrap().len(), 2);
         assert_eq!(result["satisfaction_ratings"][0]["score"], "good");
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_list_satisfaction_ratings_no_params() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::respond(TestHttpResponse::json(
+            "GET",
+            "/api/v2/satisfaction_ratings.json",
+            200,
+            serde_json::json!({
                 "satisfaction_ratings": [],
                 "count": 0
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = ZendeskClient::new("test", "user@example.com", "token123")
             .unwrap()
-            .with_base_url(&format!("{}/api/v2", mock_server.uri()));
+            .with_base_url(&server.api_base_url());
 
         let result = client.list_satisfaction_ratings(None, None).await.unwrap();
+        server.finish();
         assert_eq!(result["count"], 0);
     }
 

@@ -73,6 +73,157 @@ impl fmt::Debug for DiscordClient {
 mod tests {
     use super::*;
     use crate::config::DiscordConfig;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: serde_json::Value,
+        required_headers: Vec<(&'static str, &'static str)>,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body,
+                required_headers: Vec::new(),
+            }
+        }
+
+        fn with_required_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.required_headers.push((name, value));
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, &response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = StdInstant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        StdInstant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: &TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        let mut required_headers_seen = vec![false; response.required_headers.len()];
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap();
+                }
+                for (index, (required_name, required_value)) in
+                    response.required_headers.iter().enumerate()
+                {
+                    if name.eq_ignore_ascii_case(required_name) && value.trim() == *required_value {
+                        required_headers_seen[index] = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            required_headers_seen.into_iter().all(|seen| seen),
+            "required header was not sent"
+        );
+        if content_length > 0 {
+            let mut request_body = vec![0u8; content_length];
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let body = response.body.to_string();
+        write!(
+            stream,
+            "HTTP/1.1 {} OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+            response.status,
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    }
 
     fn test_config_with_url(url: &str) -> DiscordConfig {
         DiscordConfig {
@@ -193,32 +344,29 @@ mod tests {
         assert!(!dbg2.contains("token_beta"));
     }
 
-    // ── Integration: wiremock round-trip via Deref ────────────────
+    // ── Integration: HTTP round-trip via Deref ───────────────────
 
     #[fcp_async_core::runtime::test]
     async fn deref_allows_api_calls() {
-        use wiremock::{
-            Mock, MockServer, ResponseTemplate,
-            matchers::{header, method, path},
-        };
-
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/users/@me"))
-            .and(header("Authorization", "Bot test_deref_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "GET",
+                "/users/@me",
+                200,
+                serde_json::json!({
                 "id": "999",
                 "username": "DerefBot",
                 "bot": true
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_required_header("Authorization", "Bot test_deref_token"),
+        ]);
 
         let config = DiscordConfig {
             bot_credential: "test_deref_token".into(),
-            api_url: mock_server.uri(),
+            api_url: server.uri().into(),
             retry: crate::config::RetryConfig {
-                max_attempts: 1,
+                max_attempts: 0,
                 initial_delay_ms: 10,
                 max_delay_ms: 100,
                 jitter: 0.0,
@@ -236,28 +384,25 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn into_api_client_preserves_functionality() {
-        use wiremock::{
-            Mock, MockServer, ResponseTemplate,
-            matchers::{header, method, path},
-        };
-
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/users/@me"))
-            .and(header("Authorization", "Bot arc_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "GET",
+                "/users/@me",
+                200,
+                serde_json::json!({
                 "id": "888",
                 "username": "ArcBot",
                 "bot": true
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_required_header("Authorization", "Bot arc_token"),
+        ]);
 
         let config = DiscordConfig {
             bot_credential: "arc_token".into(),
-            api_url: mock_server.uri(),
+            api_url: server.uri().into(),
             retry: crate::config::RetryConfig {
-                max_attempts: 1,
+                max_attempts: 0,
                 initial_delay_ms: 10,
                 max_delay_ms: 100,
                 jitter: 0.0,

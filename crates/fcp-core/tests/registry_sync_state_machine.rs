@@ -1,5 +1,5 @@
 //! Pin `LifecycleState` + `LifecycleRecord::transition` state-machine truth
-//! table — the closest analogue to "RegistrySync state machine"
+//! table — the closest analogue to "`RegistrySync` state machine"
 //! (flywheel_connectors-gbsko).
 //!
 //! Bead asks for `RegistrySync` state-machine pinning per the documented state
@@ -8,7 +8,7 @@
 //! [`LifecycleRecord::transition`] at `crates/fcp-core/src/lifecycle.rs:44+322`,
 //! whose `validate_transition` enumerates the legal `(from, to)` cells. This
 //! test pins:
-//!   * 7-variant `LifecycleState` snake_case serde rename + Display,
+//!   * 7-variant `LifecycleState` `snake_case` serde rename + Display,
 //!   * Predicate truth tables: `is_active`, `can_start_canary`, `can_promote`,
 //!     `can_rollback` — each exhaustive over all 7 states,
 //!   * Full 7×7 transition truth table (49 cells, each Allow/Deny pinned),
@@ -16,7 +16,7 @@
 //!   * `transition()` mutates `state` + pushes to `transitions` on success,
 //!   * `transition()` leaves both untouched on `InvalidTransition`,
 //!   * `LifecycleError::InvalidTransition` Display contains both states,
-//!   * `TransitionReason` internally-tagged snake_case serde matrix.
+//!   * `TransitionReason` internally-tagged `snake_case` serde matrix.
 
 use chrono::Utc;
 use fcp_core::{
@@ -79,7 +79,7 @@ fn record_in_state(state: LifecycleState) -> LifecycleRecord {
 /// Documented allow-list for `(from, to)` transitions. This must match
 /// `lifecycle.rs:338 validate_transition` — drift on either side fails this
 /// test loudly.
-fn is_documented_legal(from: LifecycleState, to: LifecycleState) -> bool {
+const fn is_documented_legal(from: LifecycleState, to: LifecycleState) -> bool {
     use LifecycleState::*;
     matches!(
         (from, to),
@@ -354,6 +354,6 @@ fn fresh_record_starts_in_pending_with_default_health_and_canary_policy() {
     assert!(r.transitions.is_empty());
     assert!(r.previous_version.is_none());
     // Sanity: defaults match LifecycleRecord::new() contract.
-    let _: HealthMetrics = r.health.clone();
-    let _: CanaryPolicy = r.canary_policy;
+    let _: &HealthMetrics = &r.health;
+    let _: &CanaryPolicy = &r.canary_policy;
 }

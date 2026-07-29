@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/feishu_connector/${RUN_ID}}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -40,12 +41,19 @@ run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local previous_pwd
+  local rc
 
   echo "[feishu-verification] ${name}: $*"
-  (
-    cd "${REPO_ROOT}"
-    "$@"
-  ) >"${log_path}" 2>&1
+  previous_pwd="$(pwd)"
+  cd "${REPO_ROOT}" || return
+  "$@" >"${log_path}" 2>&1
+  rc="$?"
+  cd "${previous_pwd}" || return
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}" "$@"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 run_capture_stdout() {
@@ -53,12 +61,19 @@ run_capture_stdout() {
   local stdout_path="$2"
   shift 2
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local previous_pwd
+  local rc
 
   echo "[feishu-verification] ${name}: $*"
-  (
-    cd "${REPO_ROOT}"
-    "$@"
-  ) >"${stdout_path}" 2>"${log_path}"
+  previous_pwd="$(pwd)"
+  cd "${REPO_ROOT}" || return
+  "$@" >"${stdout_path}" 2>"${log_path}"
+  rc="$?"
+  cd "${previous_pwd}" || return
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}" "$@"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 promote_overall_status() {
@@ -77,23 +92,131 @@ promote_overall_status() {
   esac
 }
 
+log_has_remote_proof_failure() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == *"rch command did not produce remote proof"* ]]; then
+      return 0
+    fi
+  done < "${log_path}"
+  return 1
+}
+
+log_has_dbus_blocker() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    case "${line}" in
+      *"missing worker system package dbus-1.pc"*|*"The system library \`dbus-1\` required"*|*"pkg-config --libs --cflags dbus-1"*)
+        return 0
+        ;;
+    esac
+  done < "${log_path}"
+  return 1
+}
+
+log_has_infra_blocker() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    case "${line}" in
+      *"RCH-E"*|*"remote required; refusing local fallback"*|*"rch command did not produce remote proof"*|*"No space left on device"*|*"connection reset by peer"*|*"Backend unavailable"*|*"unable to update registry"*|*"spurious network error"*|*"failed to get successful HTTP response"*|*"missing worker system package"*|*"timeout: failed to execute process"*)
+        return 0
+        ;;
+    esac
+  done < "${log_path}"
+  return 1
+}
+
 classify_manifest_failure() {
   local log_path="$1"
-  if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+
+  if log_has_infra_blocker "${log_path}" || log_has_dbus_blocker "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
   fi
 }
 
+classify_step_failure() {
+  local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+
+  if log_has_infra_blocker "${log_path}"; then
+    echo "infra_blocked"
+  else
+    echo "failed"
+  fi
+}
+
+command_uses_rch_exec() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "rch" && "${arg}" == "exec" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
+rch_remote_summary_present() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == *"[RCH] remote"* ]]; then
+      return 0
+    fi
+  done < "${log_path}"
+  return 1
+}
+
+command_is_source_state_step() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "cargo" && "${arg}" == "fmt" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+  shift 2
+
+  if command_is_source_state_step "$@"; then
+    return 0
+  fi
+
+  if command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
+    echo "[feishu-verification] ${name}: rch command did not produce remote proof" >&2
+    echo "rch command did not produce remote proof" >>"${log_path}"
+    return 1
+  fi
+}
+
+require_cmd jq
 require_cmd rch
-require_cmd cargo
 
 manifest_check_cmd=(
+  env
+  RCH_VISIBILITY=verbose
   rch
   exec
   --
   env
+  "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}"
   CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fwc"
   cargo
   run
@@ -118,198 +241,227 @@ then
 else
   manifest_status="$(classify_manifest_failure "${OUT_ROOT}/logs/manifest_check.log")"
   if [[ "${manifest_status}" == "infra_blocked" ]]; then
-    manifest_note="rch worker image missing dbus-1.pc while building fwc for manifest validation"
+    if log_has_remote_proof_failure "${OUT_ROOT}/logs/manifest_check.log"; then
+      manifest_note="rch command did not produce remote proof for fallback manifest validation"
+    elif log_has_dbus_blocker "${OUT_ROOT}/logs/manifest_check.log"; then
+      manifest_note="rch worker image missing dbus-1.pc while building fwc for manifest validation"
+    else
+      manifest_note="infrastructure blocked manifest validation; inspect logs/manifest_check.log"
+    fi
   else
     manifest_note="manifest validation command failed; inspect logs/manifest_check.log"
   fi
-  cat > "${OUT_ROOT}/evidence/manifest_check.json" <<EOF
-{
-  "status": "${manifest_status}",
-  "note": "${manifest_note}",
-  "runner": "rch:cargo-run",
-  "command_output": "${manifest_stdout_path}",
-  "log": "${OUT_ROOT}/logs/manifest_check.log"
-}
-EOF
+  jq -n \
+    --arg status "${manifest_status}" \
+    --arg note "${manifest_note}" \
+    --arg runner "rch:cargo-run" \
+    --arg command_output "${manifest_stdout_path}" \
+    --arg log "${OUT_ROOT}/logs/manifest_check.log" \
+    '{status:$status,note:$note,runner:$runner,command_output:$command_output,log:$log}' \
+    > "${OUT_ROOT}/evidence/manifest_check.json"
   promote_overall_status "${manifest_status}"
 fi
 
 if run_logged \
   cargo_check \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-check" cargo check -p fcp-feishu --all-targets
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-check" cargo check -p fcp-feishu --all-targets
 then
   cargo_check_status="passed"
 else
-  cargo_check_status="failed"
-  promote_overall_status failed
+  cargo_check_status="$(classify_step_failure "${OUT_ROOT}/logs/cargo_check.log")"
+  promote_overall_status "${cargo_check_status}"
 fi
 
 if run_logged \
   format_check \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/feishu/Cargo.toml --check
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/feishu/Cargo.toml --check
 then
   format_check_status="passed"
 else
-  format_check_status="failed"
-  promote_overall_status failed
+  format_check_status="$(classify_step_failure "${OUT_ROOT}/logs/format_check.log")"
+  promote_overall_status "${format_check_status}"
 fi
 
 if run_logged \
   health_guidance_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration health_unconfigured_includes_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration health_unconfigured_includes_guidance -- --nocapture
 then
   health_guidance_status="passed"
 else
-  health_guidance_status="failed"
-  promote_overall_status failed
+  health_guidance_status="$(classify_step_failure "${OUT_ROOT}/logs/health_guidance_evidence.log")"
+  promote_overall_status "${health_guidance_status}"
 fi
 
 if run_logged \
   doctor_guidance_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
 then
   doctor_guidance_status="passed"
 else
-  doctor_guidance_status="failed"
-  promote_overall_status failed
+  doctor_guidance_status="$(classify_step_failure "${OUT_ROOT}/logs/doctor_guidance_evidence.log")"
+  promote_overall_status "${doctor_guidance_status}"
 fi
 
 if run_logged \
   self_check_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration self_check_ready_with_mock_feishu_api_and_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration self_check_ready_with_mock_feishu_api_and_evidence -- --nocapture
 then
   self_check_status="passed"
 else
-  self_check_status="failed"
-  promote_overall_status failed
+  self_check_status="$(classify_step_failure "${OUT_ROOT}/logs/self_check_evidence.log")"
+  promote_overall_status "${self_check_status}"
 fi
 
 if run_logged \
   retryable_self_check_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration self_check_retryable_feishu_failure_reports_degraded -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration self_check_retryable_feishu_failure_reports_degraded -- --nocapture
 then
   retryable_self_check_status="passed"
 else
-  retryable_self_check_status="failed"
-  promote_overall_status failed
+  retryable_self_check_status="$(classify_step_failure "${OUT_ROOT}/logs/retryable_self_check_evidence.log")"
+  promote_overall_status "${retryable_self_check_status}"
 fi
 
 if run_logged \
   pagination_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration invoke_chats_list_preserves_pagination_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration invoke_chats_list_preserves_pagination_evidence -- --nocapture
 then
   pagination_evidence_status="passed"
 else
-  pagination_evidence_status="failed"
-  promote_overall_status failed
+  pagination_evidence_status="$(classify_step_failure "${OUT_ROOT}/logs/pagination_evidence.log")"
+  promote_overall_status "${pagination_evidence_status}"
 fi
 
 if run_logged \
   mutation_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration invoke_messages_send_emits_mutation_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration invoke_messages_send_emits_mutation_evidence -- --nocapture
 then
   mutation_evidence_status="passed"
 else
-  mutation_evidence_status="failed"
-  promote_overall_status failed
+  mutation_evidence_status="$(classify_step_failure "${OUT_ROOT}/logs/mutation_evidence.log")"
+  promote_overall_status "${mutation_evidence_status}"
 fi
 
 if run_logged \
   compliance_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 then
   compliance_status="passed"
 else
-  compliance_status="failed"
-  promote_overall_status failed
+  compliance_status="$(classify_step_failure "${OUT_ROOT}/logs/compliance_evidence.log")"
+  promote_overall_status "${compliance_status}"
 fi
 
 if run_logged \
   integration_suite \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration -- --nocapture
 then
   integration_suite_status="passed"
 else
-  integration_suite_status="failed"
-  promote_overall_status failed
+  integration_suite_status="$(classify_step_failure "${OUT_ROOT}/logs/integration_suite.log")"
+  promote_overall_status "${integration_suite_status}"
 fi
 
 if run_logged \
   crate_suite \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-crate" cargo test -p fcp-feishu -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-crate" cargo test -p fcp-feishu -- --nocapture
 then
   crate_suite_status="passed"
 else
-  crate_suite_status="failed"
-  promote_overall_status failed
+  crate_suite_status="$(classify_step_failure "${OUT_ROOT}/logs/crate_suite.log")"
+  promote_overall_status "${crate_suite_status}"
 fi
 
 if run_logged \
   clippy \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-clippy" cargo clippy -p fcp-feishu --all-targets -- -D warnings
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-clippy" cargo clippy -p fcp-feishu --all-targets -- -D warnings
 then
   clippy_status="passed"
 else
-  clippy_status="failed"
-  promote_overall_status failed
+  clippy_status="$(classify_step_failure "${OUT_ROOT}/logs/clippy.log")"
+  promote_overall_status "${clippy_status}"
 fi
 
-cat > "${OUT_ROOT}/environment.json" <<EOF
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg connector "fcp-feishu" \
+  --arg repo_root "${REPO_ROOT}" \
+  --arg verification_script "scripts/e2e/feishu_connector_verification.sh" \
+  --arg artifact_root "${OUT_ROOT}" \
+  --arg manifest_check_runner "rch:cargo-run" \
+  --arg toolchain "${REPO_TOOLCHAIN}" \
+  --arg scope_note "first-slice Feishu/Lark tenant-app readiness, mutation evidence, pagination evidence, and operator guidance" \
+  '{
+    run_id: $run_id,
+    connector: $connector,
+    repo_root: $repo_root,
+    verification_script: $verification_script,
+    artifact_root: $artifact_root,
+    manifest_check_runner: $manifest_check_runner,
+    toolchain: $toolchain,
+    scope_note: $scope_note
+  }' > "${OUT_ROOT}/environment.json"
+
 {
-  "run_id": "${RUN_ID}",
-  "connector": "fcp-feishu",
-  "repo_root": "${REPO_ROOT}",
-  "verification_script": "scripts/e2e/feishu_connector_verification.sh",
-  "artifact_root": "${OUT_ROOT}",
-  "manifest_check_runner": "rch:cargo-run",
-  "scope_note": "first-slice Feishu/Lark tenant-app readiness, mutation evidence, pagination evidence, and operator guidance"
-}
-EOF
-
-cat > "${OUT_ROOT}/replay.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-REMOTE_TARGET_BASE="/tmp/rch-fcp-feishu-${RUN_ID}"
-export RCH_FORCE_REMOTE=1
-
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fwc" cargo run -q -p fwc -- manifest fix connectors/feishu/manifest.toml --check --json
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/feishu/Cargo.toml --check
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-check" cargo check -p fcp-feishu --all-targets
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration health_unconfigured_includes_guidance -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration self_check_ready_with_mock_feishu_api_and_evidence -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration self_check_retryable_feishu_failure_reports_degraded -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration invoke_chats_list_preserves_pagination_evidence -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration invoke_messages_send_emits_mutation_evidence -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration introspection_emits_v3_compliance_evidence -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-feishu --test integration -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-crate" cargo test -p fcp-feishu -- --nocapture
-rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-clippy" cargo clippy -p fcp-feishu --all-targets -- -D warnings
-EOF
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf '%s\n' ''
+  printf '%s\n' "RUN_ID=\"\${RUN_ID:-\$(date -u +%Y%m%dT%H%M%SZ)}\""
+  printf '%s\n' "REPO_TOOLCHAIN=\"\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}\""
+  printf '%s\n' "REMOTE_TARGET_BASE=\"/tmp/rch-fcp-feishu-\${RUN_ID}\""
+  printf '%s\n' 'export RCH_FORCE_REMOTE=1'
+  printf '%s\n' ''
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-fwc\" cargo run -q -p fwc -- manifest fix connectors/feishu/manifest.toml --check --json"
+  printf '%s\n' "env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-fmt\" cargo fmt --manifest-path connectors/feishu/Cargo.toml --check"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-check\" cargo check -p fcp-feishu --all-targets"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration health_unconfigured_includes_guidance -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration self_check_ready_with_mock_feishu_api_and_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration self_check_retryable_feishu_failure_reports_degraded -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration invoke_chats_list_preserves_pagination_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration invoke_messages_send_emits_mutation_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration introspection_emits_v3_compliance_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-integration\" cargo test -p fcp-feishu --test integration -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-crate\" cargo test -p fcp-feishu -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" CARGO_TARGET_DIR=\"\${REMOTE_TARGET_BASE}-clippy\" cargo clippy -p fcp-feishu --all-targets -- -D warnings"
+} > "${OUT_ROOT}/replay.sh"
 chmod +x "${OUT_ROOT}/replay.sh"
 
-cat > "${OUT_ROOT}/evidence/summary.json" <<EOF
-{
-  "status": "${OVERALL_STATUS}",
-  "manifest_check_runner": "rch:cargo-run",
-  "manifest_check": "${manifest_status}",
-  "manifest_note": "${manifest_note}",
-  "cargo_check": "${cargo_check_status}",
-  "format_check": "${format_check_status}",
-  "health_guidance": "${health_guidance_status}",
-  "doctor_guidance": "${doctor_guidance_status}",
-  "self_check": "${self_check_status}",
-  "retryable_self_check": "${retryable_self_check_status}",
-  "pagination_evidence": "${pagination_evidence_status}",
-  "mutation_evidence": "${mutation_evidence_status}",
-  "compliance_evidence": "${compliance_status}",
-  "integration_suite": "${integration_suite_status}",
-  "crate_suite": "${crate_suite_status}",
-  "clippy": "${clippy_status}"
-}
-EOF
+jq -n \
+  --arg status "${OVERALL_STATUS}" \
+  --arg manifest_check_runner "rch:cargo-run" \
+  --arg manifest_check "${manifest_status}" \
+  --arg manifest_note "${manifest_note}" \
+  --arg cargo_check "${cargo_check_status}" \
+  --arg format_check "${format_check_status}" \
+  --arg health_guidance "${health_guidance_status}" \
+  --arg doctor_guidance "${doctor_guidance_status}" \
+  --arg self_check "${self_check_status}" \
+  --arg retryable_self_check "${retryable_self_check_status}" \
+  --arg pagination_evidence "${pagination_evidence_status}" \
+  --arg mutation_evidence "${mutation_evidence_status}" \
+  --arg compliance_evidence "${compliance_status}" \
+  --arg integration_suite "${integration_suite_status}" \
+  --arg crate_suite "${crate_suite_status}" \
+  --arg clippy "${clippy_status}" \
+  '{
+    status: $status,
+    manifest_check_runner: $manifest_check_runner,
+    manifest_check: $manifest_check,
+    manifest_note: $manifest_note,
+    cargo_check: $cargo_check,
+    format_check: $format_check,
+    health_guidance: $health_guidance,
+    doctor_guidance: $doctor_guidance,
+    self_check: $self_check,
+    retryable_self_check: $retryable_self_check,
+    pagination_evidence: $pagination_evidence,
+    mutation_evidence: $mutation_evidence,
+    compliance_evidence: $compliance_evidence,
+    integration_suite: $integration_suite,
+    crate_suite: $crate_suite,
+    clippy: $clippy
+  }' > "${OUT_ROOT}/evidence/summary.json"
 
 echo "feishu verification artifacts written to ${OUT_ROOT}"
 exit "${EXIT_CODE}"

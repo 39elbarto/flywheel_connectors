@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// S3-specific errors.
@@ -883,8 +883,8 @@ mod tests {
     }
 
     // ---- From<reqwest::Error> via #[from] ----
-    // (We can't easily unit-test this without a real reqwest error,
-    //  but the client.rs integration tests cover it via wiremock.)
+    // (We can't easily unit-test this without a real reqwest error, but the
+    // client integration tests cover it through the HTTP contract harness.)
 
     // ---- S3Result alias with question mark ----
 

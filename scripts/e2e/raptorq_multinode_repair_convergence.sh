@@ -5,6 +5,10 @@ SCRIPT_NAME="e2e_raptorq_multinode_repair_convergence"
 SEED="0xME5HREP"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR="${RAPTORQ_MULTINODE_TARGET_DIR:-/tmp/fcp-raptorq-multinode-repair}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 STEP_CONTEXT="null"
 
 require_cmd() {
@@ -15,19 +19,30 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+    "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local log_path="$1"
+  local summary
+  summary="$(grep -aE '\[RCH\][[:space:]]+(remote|local|failed)' "${log_path}" | tail -n 1 || true)"
+  [[ "${summary}" =~ \[RCH\][[:space:]]+remote ]]
+}
+
+run_cargo_logged() {
+  local log_path="$1"
+  shift
+  local rc
+
+  run_cargo "$@" > "${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! rch_remote_summary_present "${log_path}"; then
+    echo "${SCRIPT_NAME}: rch command did not produce remote proof; see ${log_path}" >&2
+    echo "rch command did not produce remote proof" >> "${log_path}"
+    return 2
   fi
-  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- "$@"
+  return "${rc}"
 }
 
 now_ms() {
@@ -138,7 +153,7 @@ step_multinode_symbol_distribution() {
   local metrics_jsonl="${OUT_DIR}/multinode_distribution.metrics.jsonl"
   local distinct_nodes max_node_fraction_bps
 
-  run_cargo test -p fcp-store --test store_repair_integration multi_node_symbol_distribution -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration multi_node_symbol_distribution -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   distinct_nodes="$(metric_for_test "${metrics_jsonl}" "multi_node_symbol_distribution" '.details.distinct_nodes // empty')"
@@ -165,7 +180,7 @@ step_multinode_symbol_distribution() {
 step_mesh_multinode_transfer() {
   local execution_log="${OUT_DIR}/mesh_multinode_transfer.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_multi_node_symbol_transfer -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-mesh --test mesh_integration meshnode_multi_node_symbol_transfer -- --nocapture || return
   grep -q "meshnode_multi_node_symbol_transfer ... ok" "${execution_log}" || {
     echo "Multi-node symbol transfer did not pass in ${execution_log}" >&2
     exit 1
@@ -178,7 +193,7 @@ step_mesh_multinode_transfer() {
 step_mesh_multinode_control_plane() {
   local execution_log="${OUT_DIR}/mesh_multinode_control_plane.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_multi_node_control_plane_roundtrip -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-mesh --test mesh_integration meshnode_multi_node_control_plane_roundtrip -- --nocapture || return
   grep -q "meshnode_multi_node_control_plane_roundtrip ... ok" "${execution_log}" || {
     echo "Multi-node control plane roundtrip did not pass in ${execution_log}" >&2
     exit 1
@@ -193,7 +208,7 @@ step_repair_controller_convergence() {
   local metrics_jsonl="${OUT_DIR}/repair_controller.metrics.jsonl"
   local coverage_bps repairs_succeeded symbols_added
 
-  run_cargo test -p fcp-store --test store_repair_integration repair_controller_drives_convergence -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration repair_controller_drives_convergence -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   coverage_bps="$(metric_for_test "${metrics_jsonl}" "repair_controller_drives_convergence" '.coverage_bps // empty')"
@@ -217,7 +232,7 @@ step_repair_controller_convergence() {
 step_store_coherence() {
   local execution_log="${OUT_DIR}/store_coherence.execution.log"
 
-  run_cargo test -p fcp-store --test store_repair_integration object_and_symbol_stores_coherent -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration object_and_symbol_stores_coherent -- --nocapture || return
   grep -q "object_and_symbol_stores_coherent ... ok" "${execution_log}" || {
     echo "Store coherence test did not pass in ${execution_log}" >&2
     exit 1
@@ -230,7 +245,7 @@ step_store_coherence() {
 step_gossip_routing_integration() {
   local execution_log="${OUT_DIR}/gossip_routing.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration test_gossip_routing_integration -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-mesh --test mesh_integration test_gossip_routing_integration -- --nocapture || return
   grep -q "test_gossip_routing_integration ... ok" "${execution_log}" || {
     echo "Gossip routing integration did not pass in ${execution_log}" >&2
     exit 1
@@ -239,7 +254,7 @@ step_gossip_routing_integration() {
   STEP_CONTEXT='{"category":"gossip_routing","outcome":"gossip_repair_discovery_validated"}'
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -276,6 +291,6 @@ run_step \
   "[\"${OUT_DIR}/gossip_routing.execution.log\"]" \
   step_gossip_routing_integration
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

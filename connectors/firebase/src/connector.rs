@@ -280,7 +280,7 @@ fn operator_guidance() -> OperatorGuidance {
             "Use a disposable Firebase project plus a non-production Firestore database and Realtime Database namespace.",
             "Provision a Google credential that can read Firestore database metadata and, if you will test writes, mutate only synthetic staging fixtures.",
             "Seed deterministic Firestore documents and Realtime Database paths before running destructive verification flows.",
-            "Use localhost override endpoints when you need deterministic wiremock-style verification without touching live Firebase infrastructure.",
+            "Use localhost override endpoints when you need deterministic local HTTP verification without touching live Firebase infrastructure.",
         ],
         dedicated_environment: "Run verification only against staging Firebase data or localhost verification stubs. Firestore delete and Realtime Database delete operations are destructive and should never target production documents or JSON subtrees.",
         redaction_rules: vec![

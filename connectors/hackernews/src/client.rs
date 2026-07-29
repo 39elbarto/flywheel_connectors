@@ -1,9 +1,8 @@
 //! Hacker News API client.
 
 use fcp_prelude::log_redaction::redact_url;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
-};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
 use reqwest::Client;
 use std::time::Duration;
@@ -325,9 +324,6 @@ pub mod __fuzz {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_sdk::migration::ConnectorRuntimeConfig;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -362,137 +358,5 @@ mod tests {
         assert!(HackerNewsClient::sanitize_path_segment("../etc/passwd").is_err());
         assert!(HackerNewsClient::sanitize_path_segment("foo/bar").is_err());
         assert!(HackerNewsClient::sanitize_path_segment("").is_err());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v0/topstories.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([1, 2, 3])))
-            .mount(&mock_server)
-            .await;
-
-        let client = HackerNewsClient::new(
-            Some(&format!("{}/v0", mock_server.uri())),
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let result = client.health_check().await;
-        assert!(result.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_failure() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v0/topstories.json"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&mock_server)
-            .await;
-
-        let client = HackerNewsClient::new(
-            Some(&format!("{}/v0", mock_server.uri())),
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let result = client.health_check().await;
-        assert!(result.is_err());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn get_item_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v0/item/8863.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": 8863,
-                "type": "story",
-                "by": "dhouston",
-                "time": 1175714200,
-                "title": "My YC app: Dropbox",
-                "url": "http://www.getdropbox.com",
-                "score": 111,
-                "descendants": 71,
-                "kids": [8952, 9224]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = HackerNewsClient::new(
-            Some(&format!("{}/v0", mock_server.uri())),
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let item = client.get_item(&runtime, 8863).await.unwrap();
-        assert_eq!(item.id, 8863);
-        assert_eq!(item.title.as_deref(), Some("My YC app: Dropbox"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn get_item_null_returns_not_found() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v0/item/99999999.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("null"))
-            .mount(&mock_server)
-            .await;
-
-        let client = HackerNewsClient::new(
-            Some(&format!("{}/v0", mock_server.uri())),
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let result = client.get_item(&runtime, 99_999_999).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), HackerNewsError::NotFound(_)));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn get_user_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v0/user/jl.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "jl",
-                "created": 1173923446,
-                "karma": 2937,
-                "about": "Test user"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = HackerNewsClient::new(
-            Some(&format!("{}/v0", mock_server.uri())),
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let user = client.get_user(&runtime, "jl").await.unwrap();
-        assert_eq!(user.id, "jl");
-        assert_eq!(user.karma, 2937);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn top_stories_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v0/topstories.json"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!([100, 200, 300])),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = HackerNewsClient::new(
-            Some(&format!("{}/v0", mock_server.uri())),
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let ids = client.top_stories(&runtime).await.unwrap();
-        assert_eq!(ids, vec![100, 200, 300]);
     }
 }

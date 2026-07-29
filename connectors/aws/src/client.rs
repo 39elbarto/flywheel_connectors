@@ -1,16 +1,59 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use quick_xml::de::from_str as from_xml_str;
 use reqwest::{Client, RequestBuilder};
+use serde::Deserialize;
 use tracing::debug;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
+};
 use fcp_sdk::sigv4::{
     AwsCredentials, EMPTY_PAYLOAD_HASH, SigV4Signer, SignableRequest, SigningScope,
 };
 
 use crate::error::{AwsError, AwsResult};
 use crate::types::*;
+
+#[derive(Debug, Default, Deserialize)]
+struct S3ListBucketResultXml {
+    #[serde(rename = "Contents", default)]
+    contents: Vec<S3ObjectXml>,
+}
+
+impl S3ListBucketResultXml {
+    fn into_objects(self) -> Vec<S3Object> {
+        self.contents.into_iter().map(S3Object::from).collect()
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct S3ObjectXml {
+    #[serde(rename = "Key", default)]
+    key: Option<String>,
+    #[serde(rename = "LastModified", default)]
+    last_modified: Option<String>,
+    #[serde(rename = "ETag", default)]
+    etag: Option<String>,
+    #[serde(rename = "Size", default)]
+    size: Option<u64>,
+    #[serde(rename = "StorageClass", default)]
+    storage_class: Option<String>,
+}
+
+impl From<S3ObjectXml> for S3Object {
+    fn from(value: S3ObjectXml) -> Self {
+        Self {
+            key: value.key.unwrap_or_default(),
+            size: value.size,
+            last_modified: value.last_modified,
+            etag: value.etag,
+            storage_class: value.storage_class,
+        }
+    }
+}
 
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
@@ -41,6 +84,18 @@ fn sanitize_object_key<'a>(value: &'a str, field: &str) -> AwsResult<&'a str> {
     if value.contains('\\') || value.contains("..") || lower.contains("%5c") {
         return Err(AwsError::InvalidInput(format!(
             "{field} contains path traversal characters"
+        )));
+    }
+    // Reject URL-structure delimiters. `sign_request` parses the assembled URL
+    // with `url::Url`, which treats `?`/`#` as the start of the query/fragment.
+    // A key like `reports/Q?x.pdf` would be silently truncated to `reports/Q`,
+    // so the request (and, for `s3_delete_object`, the deletion) would target a
+    // DIFFERENT object than the caller named. Fail closed rather than act on the
+    // wrong key. (`&` is intentionally allowed: with no `?` it is an ordinary
+    // path byte and the SigV4 canonicalizer percent-encodes it consistently.)
+    if value.contains('?') || value.contains('#') {
+        return Err(AwsError::InvalidInput(format!(
+            "{field} contains URL control characters ('?' or '#')"
         )));
     }
     Ok(value)
@@ -164,7 +219,7 @@ impl AwsClient {
             async move {
                 debug!(attempt, "S3 list buckets");
                 let req = sign_request(client.get(&url), &auth, &region, "s3", "GET", &url, &[]);
-                handle_json_response::<Vec<S3Bucket>>(req, attempt).await
+                handle_json_response::<Vec<S3Bucket>>(req, attempt, true).await
             }
         })
         .await
@@ -195,7 +250,7 @@ impl AwsClient {
             async move {
                 debug!(attempt, bucket, "S3 list objects");
                 let req = sign_request(client.get(&url), &auth, &region, "s3", "GET", &url, &[]);
-                handle_json_response::<Vec<S3Object>>(req, attempt).await
+                handle_s3_list_objects_response(req, attempt).await
             }
         })
         .await
@@ -319,7 +374,7 @@ impl AwsClient {
                 )
                 .header("Content-Type", ct)
                 .body(body);
-                handle_json_response::<S3PutObjectResponse>(req, attempt).await
+                handle_s3_put_object_response(req, attempt).await
             }
         })
         .await
@@ -353,7 +408,7 @@ impl AwsClient {
                     &url,
                     &[],
                 );
-                handle_json_response::<S3DeleteObjectResponse>(req, attempt).await
+                handle_s3_delete_object_response(req, attempt).await
             }
         })
         .await
@@ -380,7 +435,7 @@ impl AwsClient {
             async move {
                 debug!(attempt, "EC2 describe instances");
                 let req = sign_request(client.get(&url), &auth, &region, "ec2", "GET", &url, &[]);
-                handle_json_response::<Vec<Ec2Instance>>(req, attempt).await
+                handle_json_response::<Vec<Ec2Instance>>(req, attempt, true).await
             }
         })
         .await
@@ -410,7 +465,7 @@ impl AwsClient {
             async move {
                 debug!(attempt, instance_id, "EC2 start instance");
                 let req = sign_request(client.post(&url), &auth, &region, "ec2", "POST", &url, &[]);
-                handle_json_response::<Ec2StateChange>(req, attempt).await
+                handle_json_response::<Ec2StateChange>(req, attempt, true).await
             }
         })
         .await
@@ -440,7 +495,7 @@ impl AwsClient {
             async move {
                 debug!(attempt, instance_id, "EC2 stop instance");
                 let req = sign_request(client.post(&url), &auth, &region, "ec2", "POST", &url, &[]);
-                handle_json_response::<Ec2StateChange>(req, attempt).await
+                handle_json_response::<Ec2StateChange>(req, attempt, true).await
             }
         })
         .await
@@ -470,7 +525,7 @@ impl AwsClient {
             async move {
                 debug!(attempt, instance_id, "EC2 terminate instance");
                 let req = sign_request(client.post(&url), &auth, &region, "ec2", "POST", &url, &[]);
-                handle_json_response::<Ec2StateChange>(req, attempt).await
+                handle_json_response::<Ec2StateChange>(req, attempt, true).await
             }
         })
         .await
@@ -495,7 +550,7 @@ impl AwsClient {
                 debug!(attempt, "Lambda list functions");
                 let req =
                     sign_request(client.get(&url), &auth, &region, "lambda", "GET", &url, &[]);
-                handle_json_response::<Vec<LambdaFunction>>(req, attempt).await
+                handle_json_response::<Vec<LambdaFunction>>(req, attempt, true).await
             }
         })
         .await
@@ -535,7 +590,11 @@ impl AwsClient {
                     &payload_bytes,
                 )
                 .json(&payload);
-                handle_json_response::<LambdaInvokeResponse>(req, attempt).await
+                // NOT replay-safe: a replay runs the function a SECOND time,
+                // with whatever side effects it has. Lambda's Invoke API has
+                // no idempotency token — AWS's own guidance is to make the
+                // FUNCTION idempotent, which this connector cannot verify.
+                handle_json_response::<LambdaInvokeResponse>(req, attempt, false).await
             }
         })
         .await
@@ -562,7 +621,7 @@ impl AwsClient {
             async move {
                 debug!(attempt, "STS get caller identity");
                 let req = sign_request(client.post(&url), &auth, &region, "sts", "POST", &url, &[]);
-                handle_json_response::<CallerIdentity>(req, attempt).await
+                handle_json_response::<CallerIdentity>(req, attempt, true).await
             }
         })
         .await
@@ -680,17 +739,26 @@ fn check_error_status<T>(status: u16) -> Option<AttemptOutcome<T, AwsError>> {
     None
 }
 
+/// Classify an AWS JSON response.
+///
+/// `replay_safe` states whether repeating this request can duplicate a side
+/// effect (br-kxd3e). Note the 503 handling below: this client maps 503 to a
+/// rate limit, which is right for S3 (`SlowDown`) but NOT for Lambda, where a
+/// 503 `ServiceException` means the request DID reach the service. So 503 is
+/// only treated as a safe throttle when the caller is replay-safe anyway; a
+/// non-replay-safe caller gets it as terminal. A 429 is a throttle everywhere
+/// and stays retryable unconditionally.
 async fn handle_json_response<T: serde::de::DeserializeOwned>(
     req: RequestBuilder,
     _attempt: u32,
+    replay_safe: bool,
 ) -> AttemptOutcome<T, AwsError> {
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            return AttemptOutcome::Retryable {
-                error: AwsError::Http(e),
-                retry_after: None,
-            };
+            // Only a connect-phase failure proves the request never left us.
+            let replayable = replay_safe || !transport_error_reached_service(&e);
+            return AttemptOutcome::retryable_if_replayable(AwsError::Http(e), None, replayable);
         }
     };
 
@@ -700,7 +768,7 @@ async fn handle_json_response<T: serde::de::DeserializeOwned>(
         return outcome;
     }
 
-    if status == 429 || status == 503 {
+    if status == 429 || (status == 503 && replay_safe) {
         let retry_after = resp
             .headers()
             .get("retry-after")
@@ -722,10 +790,9 @@ async fn handle_json_response<T: serde::de::DeserializeOwned>(
             message: text,
         };
         if status >= 500 {
-            return AttemptOutcome::Retryable {
-                error: err,
-                retry_after: None,
-            };
+            // A 5xx means AWS received the request; for lambda_invoke that
+            // means the function may already have run.
+            return AttemptOutcome::retryable_if_replayable(err, None, replay_safe);
         }
         return AttemptOutcome::Terminal(err);
     }
@@ -742,6 +809,205 @@ async fn handle_json_response<T: serde::de::DeserializeOwned>(
             debug!("Failed to parse AWS response: {e}");
             AttemptOutcome::Terminal(AwsError::Json(e))
         }
+    }
+}
+
+async fn handle_s3_list_objects_response(
+    req: RequestBuilder,
+    _attempt: u32,
+) -> AttemptOutcome<Vec<S3Object>, AwsError> {
+    let resp = match req.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return AttemptOutcome::Retryable {
+                error: AwsError::Http(error),
+                retry_after: None,
+            };
+        }
+    };
+
+    let status = resp.status().as_u16();
+    let retry_after = retry_after(&resp);
+
+    if let Some(outcome) = check_error_status::<Vec<S3Object>>(status) {
+        return outcome;
+    }
+
+    if status == 429 || status == 503 {
+        return AttemptOutcome::Retryable {
+            error: AwsError::RateLimited {
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
+            },
+            retry_after,
+        };
+    }
+
+    let text = match resp.text().await {
+        Ok(body) => body,
+        Err(error) => return AttemptOutcome::Terminal(AwsError::Http(error)),
+    };
+
+    if !(200..300).contains(&status) {
+        return api_error_outcome(status, text);
+    }
+
+    if text.trim().is_empty() {
+        return AttemptOutcome::Success(Vec::new());
+    }
+
+    if let Ok(value) = serde_json::from_str::<Vec<S3Object>>(&text) {
+        return AttemptOutcome::Success(value);
+    }
+
+    match from_xml_str::<S3ListBucketResultXml>(&text) {
+        Ok(value) => AttemptOutcome::Success(value.into_objects()),
+        Err(error) => AttemptOutcome::Terminal(AwsError::ServiceError {
+            service: "aws_s3".into(),
+            message: format!("failed to parse S3 list objects XML response: {error}"),
+        }),
+    }
+}
+
+async fn handle_s3_put_object_response(
+    req: RequestBuilder,
+    _attempt: u32,
+) -> AttemptOutcome<S3PutObjectResponse, AwsError> {
+    let resp = match req.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return AttemptOutcome::Retryable {
+                error: AwsError::Http(error),
+                retry_after: None,
+            };
+        }
+    };
+
+    let status = resp.status().as_u16();
+    let retry_after = retry_after(&resp);
+    let etag = response_header(&resp, "etag");
+    let version_id = response_header(&resp, "x-amz-version-id");
+
+    if let Some(outcome) = check_error_status::<S3PutObjectResponse>(status) {
+        return outcome;
+    }
+
+    if status == 429 || status == 503 {
+        return AttemptOutcome::Retryable {
+            error: AwsError::RateLimited {
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
+            },
+            retry_after,
+        };
+    }
+
+    let text = match resp.text().await {
+        Ok(body) => body,
+        Err(error) => return AttemptOutcome::Terminal(AwsError::Http(error)),
+    };
+
+    if !(200..300).contains(&status) {
+        return api_error_outcome(status, text);
+    }
+
+    if !text.trim().is_empty() {
+        match serde_json::from_str::<S3PutObjectResponse>(&text) {
+            Ok(value) => return AttemptOutcome::Success(value),
+            Err(error) => {
+                debug!("Failed to parse AWS S3 put JSON response: {error}");
+            }
+        }
+    }
+
+    AttemptOutcome::Success(S3PutObjectResponse { etag, version_id })
+}
+
+async fn handle_s3_delete_object_response(
+    req: RequestBuilder,
+    _attempt: u32,
+) -> AttemptOutcome<S3DeleteObjectResponse, AwsError> {
+    let resp = match req.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return AttemptOutcome::Retryable {
+                error: AwsError::Http(error),
+                retry_after: None,
+            };
+        }
+    };
+
+    let status = resp.status().as_u16();
+    let retry_after = retry_after(&resp);
+    let delete_marker = response_header(&resp, "x-amz-delete-marker")
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let version_id = response_header(&resp, "x-amz-version-id");
+
+    if let Some(outcome) = check_error_status::<S3DeleteObjectResponse>(status) {
+        return outcome;
+    }
+
+    if status == 429 || status == 503 {
+        return AttemptOutcome::Retryable {
+            error: AwsError::RateLimited {
+                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
+            },
+            retry_after,
+        };
+    }
+
+    let text = match resp.text().await {
+        Ok(body) => body,
+        Err(error) => return AttemptOutcome::Terminal(AwsError::Http(error)),
+    };
+
+    if !(200..300).contains(&status) {
+        return api_error_outcome(status, text);
+    }
+
+    if !text.trim().is_empty() {
+        match serde_json::from_str::<S3DeleteObjectResponse>(&text) {
+            Ok(value) => return AttemptOutcome::Success(value),
+            Err(error) => {
+                debug!("Failed to parse AWS S3 delete JSON response: {error}");
+            }
+        }
+    }
+
+    AttemptOutcome::Success(S3DeleteObjectResponse {
+        delete_marker,
+        version_id,
+    })
+}
+
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn response_header(response: &reqwest::Response, header: &str) -> Option<String> {
+    response
+        .headers()
+        .get(header)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+}
+
+fn api_error_outcome<T>(status: u16, text: String) -> AttemptOutcome<T, AwsError> {
+    let error = AwsError::Api {
+        code: u32::from(status),
+        message: text,
+    };
+    if status >= 500 {
+        AttemptOutcome::Retryable {
+            error,
+            retry_after: None,
+        }
+    } else {
+        AttemptOutcome::Terminal(error)
     }
 }
 
@@ -980,6 +1246,13 @@ mod tests {
         assert!(sanitize_object_key("path/to/file.txt", "test").is_ok());
         assert!(sanitize_object_key("../etc/passwd", "test").is_err());
         assert!(sanitize_object_key("path\\to\\file", "test").is_err());
+        // `?`/`#` would be split off as query/fragment by the URL parser in
+        // `sign_request`, retargeting the operation at the wrong S3 object.
+        assert!(sanitize_object_key("reports/Q?x.pdf", "test").is_err());
+        assert!(sanitize_object_key("reports/Q#x.pdf", "test").is_err());
+        // `&` stays valid: without a `?` it is an ordinary path byte and the
+        // SigV4 canonical URI encodes it the same way AWS does.
+        assert!(sanitize_object_key("reports/Q&A.pdf", "test").is_ok());
     }
 
     #[test]

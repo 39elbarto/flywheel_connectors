@@ -14,9 +14,8 @@ use fcp_confluence::client::ConfluenceClient;
 use fcp_confluence::connector::operations_info;
 use fcp_confluence::error::Error;
 use fcp_prelude::{ApprovalMode, FcpConnector, FcpError, IdempotencyClass, RiskLevel, SafetyTier};
-use fcp_sdk::migration::{
-    ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig,
-};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -675,6 +674,46 @@ async fn auth_rate_limit_malformed_json_and_invalid_input_are_typed() {
     ));
 }
 
+#[fcp_async_core::runtime::test]
+async fn health_check_status_errors_are_typed() {
+    let unauthorized_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .and(query_param("limit", "1"))
+        .and(header("Authorization", expected_auth_header()))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&unauthorized_server)
+        .await;
+
+    let unauthorized = client(&unauthorized_server)
+        .health_check()
+        .await
+        .expect_err("401 health check should map to unauthorized");
+    assert!(matches!(unauthorized, Error::Unauthorized(_)));
+
+    let rate_limit_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .and(query_param("limit", "1"))
+        .and(header("Authorization", expected_auth_header()))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
+        .expect(1)
+        .mount(&rate_limit_server)
+        .await;
+
+    let rate_limited = client(&rate_limit_server)
+        .health_check()
+        .await
+        .expect_err("429 health check should map to rate limit");
+    assert!(matches!(
+        rate_limited,
+        Error::RateLimited {
+            retry_after_ms: 60_000
+        }
+    ));
+}
+
 #[test]
 fn async_timeout_and_cancellation_mapping_is_bounded() {
     let timeout = Error::from_async_error(AsyncError::Timeout { timeout_ms: 250 });
@@ -762,4 +801,80 @@ fn manifest_capability_section() -> &'static str {
         .split_once("[provides.operations.")
         .expect("Confluence manifest should separate capabilities from operations");
     capability_section
+}
+
+// ── Replay safety on retry (br-kxd3e) ────────────────────────────────
+//
+// Confluence has no idempotency key, so a 5xx retry on create_page publishes
+// a second page. The assertion is the REQUEST COUNT.
+
+fn retrying_client(server: &MockServer) -> ConfluenceClient {
+    ConfluenceClient::new(
+        &server.uri(),
+        TEST_EMAIL,
+        TEST_TOKEN,
+        HttpRetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            max_delay_ms: 5,
+            jitter_enabled: false,
+        },
+    )
+    .expect("wiremock URI should build a Confluence client")
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_page_is_not_retried_after_a_5xx() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/content"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let result = retrying_client(&server)
+        .create_page(&test_runtime(), &json!({ "title": "Page" }))
+        .await;
+    assert!(result.is_err());
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "a 503 means Confluence received the create — retrying publishes a \
+         SECOND page"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_page_still_retries_a_429() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/content"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rest/api/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1",
+            "type": "page",
+            "status": "current",
+            "title": "Page"
+        })))
+        .mount(&server)
+        .await;
+
+    retrying_client(&server)
+        .create_page(&test_runtime(), &json!({ "title": "Page" }))
+        .await
+        .expect("a rate-limited create was refused without publishing anything");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "429 means Confluence did NOT create the page, so backoff is preserved"
+    );
 }

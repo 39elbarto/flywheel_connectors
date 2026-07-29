@@ -18,9 +18,10 @@ use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 #[cfg(feature = "otlp")]
 use opentelemetry_sdk::{
     Resource,
-    logs::SdkLoggerProvider,
-    metrics::SdkMeterProvider,
-    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
+    error::{OTelSdkError, OTelSdkResult},
+    logs::{LogBatch, LogExporter, SdkLoggerProvider},
+    metrics::{SdkMeterProvider, data::ResourceMetrics, exporter::PushMetricExporter},
+    trace::{RandomIdGenerator, Sampler, SdkTracerProvider, SpanData, SpanExporter},
 };
 
 use crate::{
@@ -35,6 +36,62 @@ static OTLP_TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static OTLP_METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 #[cfg(feature = "otlp")]
 static OTLP_LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
+
+/// Explicit OTLP retry/backoff policy for transient collector export failures.
+///
+/// The OpenTelemetry SDK delegates retry behavior to exporters, so the default
+/// fcp-telemetry init path keeps one-attempt behavior unless callers select one
+/// of the `*_and_retry` initializers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpRetryPolicy {
+    /// Total export attempts, including the first attempt.
+    pub max_attempts: u8,
+
+    /// Backoff before the first retry attempt.
+    pub initial_backoff: Duration,
+
+    /// Maximum backoff between retry attempts.
+    pub max_backoff: Duration,
+}
+
+impl OtlpRetryPolicy {
+    /// Disable retry behavior while still documenting the one-attempt policy.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            max_attempts: 1,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        }
+    }
+
+    /// Build a bounded retry policy.
+    #[must_use]
+    pub const fn new(max_attempts: u8, initial_backoff: Duration, max_backoff: Duration) -> Self {
+        Self {
+            max_attempts,
+            initial_backoff,
+            max_backoff,
+        }
+    }
+
+    const fn is_enabled(self) -> bool {
+        self.max_attempts > 1
+    }
+}
+
+#[cfg(feature = "otlp")]
+impl OtlpRetryPolicy {
+    fn should_retry(self, attempt: u8, error: &OTelSdkError) -> bool {
+        self.is_enabled()
+            && attempt < self.max_attempts
+            && classify_retryable_otlp_error(error).is_some()
+    }
+
+    fn next_backoff(self, current: Duration) -> Duration {
+        current.saturating_mul(2).min(self.max_backoff)
+    }
+}
 
 /// Initialize the Prometheus metrics exporter.
 ///
@@ -166,6 +223,7 @@ pub fn init_otlp_tracer_with_sample_rate_options_and_timeout(
     validate_otlp_headers(headers)?;
     validate_otlp_resource_attributes(resource_attributes)?;
     validate_otlp_export_timeout(export_timeout)?;
+    validate_otlp_retry_policy(OtlpRetryPolicy::disabled())?;
     init_otlp_tracer_with_sample_rate_impl(
         service_name,
         endpoint,
@@ -173,6 +231,42 @@ pub fn init_otlp_tracer_with_sample_rate_options_and_timeout(
         headers,
         resource_attributes,
         export_timeout,
+        OtlpRetryPolicy::disabled(),
+    )
+}
+
+/// Initialize the OTLP trace exporter with an explicit retry/backoff policy.
+///
+/// This keeps the default SDK one-attempt behavior opt-in stable while allowing
+/// host integrations and e2e probes to prove bounded retry behavior for
+/// transient collector failures.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings or retry
+/// policy, or [`TelemetryError::TracingInit`] if the exporter cannot be
+/// initialized.
+pub fn init_otlp_tracer_with_sample_rate_options_timeout_and_retry(
+    service_name: &str,
+    endpoint: &str,
+    sample_rate: f64,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
+    retry_policy: OtlpRetryPolicy,
+) -> Result<(), TelemetryError> {
+    validate_otlp_endpoint(endpoint)?;
+    validate_otlp_headers(headers)?;
+    validate_otlp_resource_attributes(resource_attributes)?;
+    validate_otlp_export_timeout(export_timeout)?;
+    validate_otlp_retry_policy(retry_policy)?;
+    init_otlp_tracer_with_sample_rate_impl(
+        service_name,
+        endpoint,
+        sample_rate,
+        headers,
+        resource_attributes,
+        export_timeout,
+        retry_policy,
     )
 }
 
@@ -219,12 +313,43 @@ pub fn init_otlp_metrics_with_options_and_timeout(
     validate_otlp_headers(headers)?;
     validate_otlp_resource_attributes(resource_attributes)?;
     validate_otlp_export_timeout(export_timeout)?;
+    validate_otlp_retry_policy(OtlpRetryPolicy::disabled())?;
     init_otlp_metrics_with_options_impl(
         service_name,
         endpoint,
         headers,
         resource_attributes,
         export_timeout,
+        OtlpRetryPolicy::disabled(),
+    )
+}
+
+/// Initialize the OTLP metrics exporter with an explicit retry/backoff policy.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings or retry
+/// policy, or [`TelemetryError::MetricsInit`] if the exporter cannot be
+/// initialized.
+pub fn init_otlp_metrics_with_options_timeout_and_retry(
+    service_name: &str,
+    endpoint: &str,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
+    retry_policy: OtlpRetryPolicy,
+) -> Result<(), TelemetryError> {
+    validate_otlp_endpoint(endpoint)?;
+    validate_otlp_headers(headers)?;
+    validate_otlp_resource_attributes(resource_attributes)?;
+    validate_otlp_export_timeout(export_timeout)?;
+    validate_otlp_retry_policy(retry_policy)?;
+    init_otlp_metrics_with_options_impl(
+        service_name,
+        endpoint,
+        headers,
+        resource_attributes,
+        export_timeout,
+        retry_policy,
     )
 }
 
@@ -272,12 +397,43 @@ pub fn init_otlp_logs_with_options_and_timeout(
     validate_otlp_headers(headers)?;
     validate_otlp_resource_attributes(resource_attributes)?;
     validate_otlp_export_timeout(export_timeout)?;
+    validate_otlp_retry_policy(OtlpRetryPolicy::disabled())?;
     init_otlp_logs_with_options_impl(
         service_name,
         endpoint,
         headers,
         resource_attributes,
         export_timeout,
+        OtlpRetryPolicy::disabled(),
+    )
+}
+
+/// Initialize the OTLP logs exporter with an explicit retry/backoff policy.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings or retry
+/// policy, or [`TelemetryError::LoggingInit`] if the exporter cannot be
+/// initialized.
+pub fn init_otlp_logs_with_options_timeout_and_retry(
+    service_name: &str,
+    endpoint: &str,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
+    retry_policy: OtlpRetryPolicy,
+) -> Result<(), TelemetryError> {
+    validate_otlp_endpoint(endpoint)?;
+    validate_otlp_headers(headers)?;
+    validate_otlp_resource_attributes(resource_attributes)?;
+    validate_otlp_export_timeout(export_timeout)?;
+    validate_otlp_retry_policy(retry_policy)?;
+    init_otlp_logs_with_options_impl(
+        service_name,
+        endpoint,
+        headers,
+        resource_attributes,
+        export_timeout,
+        retry_policy,
     )
 }
 
@@ -285,6 +441,31 @@ fn validate_otlp_export_timeout(export_timeout: Option<Duration>) -> Result<(), 
     if export_timeout.is_some_and(|timeout| timeout.is_zero()) {
         return Err(TelemetryError::Config(
             "OTLP export timeout must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_otlp_retry_policy(retry_policy: OtlpRetryPolicy) -> Result<(), TelemetryError> {
+    if retry_policy.max_attempts == 0 {
+        return Err(TelemetryError::Config(
+            "OTLP retry max_attempts must be greater than zero".to_string(),
+        ));
+    }
+    if retry_policy.max_attempts > 8 {
+        return Err(TelemetryError::Config(
+            "OTLP retry max_attempts must be 8 or less".to_string(),
+        ));
+    }
+    if retry_policy.is_enabled() && retry_policy.initial_backoff.is_zero() {
+        return Err(TelemetryError::Config(
+            "OTLP retry initial_backoff must be greater than zero when retries are enabled"
+                .to_string(),
+        ));
+    }
+    if retry_policy.max_backoff < retry_policy.initial_backoff {
+        return Err(TelemetryError::Config(
+            "OTLP retry max_backoff must be greater than or equal to initial_backoff".to_string(),
         ));
     }
     Ok(())
@@ -303,6 +484,7 @@ fn init_otlp_tracer_with_sample_rate_impl(
     headers: &[OtlpHeader],
     resource_attributes: &[OtlpResourceAttribute],
     export_timeout: Option<Duration>,
+    retry_policy: OtlpRetryPolicy,
 ) -> Result<(), TelemetryError> {
     let mut exporter_builder = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
@@ -319,6 +501,7 @@ fn init_otlp_tracer_with_sample_rate_impl(
     let exporter = exporter_builder
         .build()
         .map_err(|e| TelemetryError::TracingInit(e.to_string()))?;
+    let exporter = RetryingSpanExporter::new(exporter, retry_policy);
 
     let resource = otlp_resource(service_name, resource_attributes);
 
@@ -367,6 +550,7 @@ fn init_otlp_logs_with_options_impl(
     headers: &[OtlpHeader],
     resource_attributes: &[OtlpResourceAttribute],
     export_timeout: Option<Duration>,
+    retry_policy: OtlpRetryPolicy,
 ) -> Result<(), TelemetryError> {
     let mut exporter_builder = opentelemetry_otlp::LogExporter::builder()
         .with_tonic()
@@ -383,6 +567,7 @@ fn init_otlp_logs_with_options_impl(
     let exporter = exporter_builder
         .build()
         .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?;
+    let exporter = RetryingLogExporter::new(exporter, retry_policy);
     let provider = SdkLoggerProvider::builder()
         .with_batch_exporter(exporter)
         .with_resource(otlp_resource(service_name, resource_attributes))
@@ -408,6 +593,7 @@ fn init_otlp_metrics_with_options_impl(
     headers: &[OtlpHeader],
     resource_attributes: &[OtlpResourceAttribute],
     export_timeout: Option<Duration>,
+    retry_policy: OtlpRetryPolicy,
 ) -> Result<(), TelemetryError> {
     let mut exporter_builder = opentelemetry_otlp::MetricExporter::builder()
         .with_tonic()
@@ -424,6 +610,7 @@ fn init_otlp_metrics_with_options_impl(
     let exporter = exporter_builder
         .build()
         .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
+    let exporter = RetryingMetricExporter::new(exporter, retry_policy);
     let provider = SdkMeterProvider::builder()
         .with_periodic_exporter(exporter)
         .with_resource(otlp_resource(service_name, resource_attributes))
@@ -441,6 +628,190 @@ fn init_otlp_metrics_with_options_impl(
     );
 
     Ok(())
+}
+
+#[cfg(feature = "otlp")]
+#[derive(Debug)]
+struct RetryingSpanExporter {
+    inner: opentelemetry_otlp::SpanExporter,
+    retry_policy: OtlpRetryPolicy,
+}
+
+#[cfg(feature = "otlp")]
+impl RetryingSpanExporter {
+    const fn new(inner: opentelemetry_otlp::SpanExporter, retry_policy: OtlpRetryPolicy) -> Self {
+        Self {
+            inner,
+            retry_policy,
+        }
+    }
+}
+
+#[cfg(feature = "otlp")]
+impl SpanExporter for RetryingSpanExporter {
+    async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+        let mut attempt = 1;
+        let mut backoff = self.retry_policy.initial_backoff;
+        loop {
+            let result = self.inner.export(batch.clone()).await;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) if self.retry_policy.should_retry(attempt, &error) => {
+                    let error_kind = classify_retryable_otlp_error(&error).unwrap_or("unknown");
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = self.retry_policy.max_attempts,
+                        backoff_ms = backoff.as_millis(),
+                        error_kind,
+                        "Retrying OTLP trace export after transient collector failure"
+                    );
+                    fcp_async_core::time::sleep(backoff).await;
+                    attempt = attempt.saturating_add(1);
+                    backoff = self.retry_policy.next_backoff(backoff);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        self.inner.set_resource(resource);
+    }
+}
+
+#[cfg(feature = "otlp")]
+#[derive(Debug)]
+struct RetryingMetricExporter {
+    inner: opentelemetry_otlp::MetricExporter,
+    retry_policy: OtlpRetryPolicy,
+}
+
+#[cfg(feature = "otlp")]
+impl RetryingMetricExporter {
+    const fn new(inner: opentelemetry_otlp::MetricExporter, retry_policy: OtlpRetryPolicy) -> Self {
+        Self {
+            inner,
+            retry_policy,
+        }
+    }
+}
+
+#[cfg(feature = "otlp")]
+impl PushMetricExporter for RetryingMetricExporter {
+    async fn export(&self, metrics: &ResourceMetrics) -> OTelSdkResult {
+        let mut attempt = 1;
+        let mut backoff = self.retry_policy.initial_backoff;
+        loop {
+            let result = self.inner.export(metrics).await;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) if self.retry_policy.should_retry(attempt, &error) => {
+                    let error_kind = classify_retryable_otlp_error(&error).unwrap_or("unknown");
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = self.retry_policy.max_attempts,
+                        backoff_ms = backoff.as_millis(),
+                        error_kind,
+                        "Retrying OTLP metric export after transient collector failure"
+                    );
+                    fcp_async_core::time::sleep(backoff).await;
+                    attempt = attempt.saturating_add(1);
+                    backoff = self.retry_policy.next_backoff(backoff);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.inner.force_flush()
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.inner.shutdown_with_timeout(timeout)
+    }
+
+    fn temporality(&self) -> opentelemetry_sdk::metrics::Temporality {
+        self.inner.temporality()
+    }
+}
+
+#[cfg(feature = "otlp")]
+#[derive(Debug)]
+struct RetryingLogExporter {
+    inner: opentelemetry_otlp::LogExporter,
+    retry_policy: OtlpRetryPolicy,
+}
+
+#[cfg(feature = "otlp")]
+impl RetryingLogExporter {
+    const fn new(inner: opentelemetry_otlp::LogExporter, retry_policy: OtlpRetryPolicy) -> Self {
+        Self {
+            inner,
+            retry_policy,
+        }
+    }
+}
+
+#[cfg(feature = "otlp")]
+impl LogExporter for RetryingLogExporter {
+    async fn export(&self, batch: LogBatch<'_>) -> OTelSdkResult {
+        let records: Vec<_> = batch.iter().collect();
+        let mut attempt = 1;
+        let mut backoff = self.retry_policy.initial_backoff;
+        loop {
+            let result = self.inner.export(LogBatch::new(&records)).await;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) if self.retry_policy.should_retry(attempt, &error) => {
+                    let error_kind = classify_retryable_otlp_error(&error).unwrap_or("unknown");
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = self.retry_policy.max_attempts,
+                        backoff_ms = backoff.as_millis(),
+                        error_kind,
+                        "Retrying OTLP log export after transient collector failure"
+                    );
+                    fcp_async_core::time::sleep(backoff).await;
+                    attempt = attempt.saturating_add(1);
+                    backoff = self.retry_policy.next_backoff(backoff);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.inner.shutdown_with_timeout(timeout)
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        self.inner.set_resource(resource);
+    }
+}
+
+#[cfg(feature = "otlp")]
+fn classify_retryable_otlp_error(error: &OTelSdkError) -> Option<&'static str> {
+    match error {
+        OTelSdkError::Timeout(_) => Some("timeout"),
+        OTelSdkError::InternalFailure(message) => {
+            let message = message.to_ascii_lowercase();
+            if message.contains("unavailable") {
+                Some("unavailable")
+            } else if message.contains("resource exhausted")
+                || message.contains("resource_exhausted")
+                || message.contains("resource has been exhausted")
+            {
+                Some("resource_exhausted")
+            } else if message.contains("deadline exceeded") || message.contains("deadline_exceeded")
+            {
+                Some("deadline_exceeded")
+            } else {
+                None
+            }
+        }
+        OTelSdkError::AlreadyShutdown => None,
+    }
 }
 
 /// Force-flush the installed OTLP logger provider, if one has been installed.
@@ -601,6 +972,7 @@ fn init_otlp_tracer_with_sample_rate_impl(
     _headers: &[OtlpHeader],
     _resource_attributes: &[OtlpResourceAttribute],
     _export_timeout: Option<Duration>,
+    _retry_policy: OtlpRetryPolicy,
 ) -> Result<(), TelemetryError> {
     Err(TelemetryError::Config(
         "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),
@@ -614,6 +986,7 @@ fn init_otlp_metrics_with_options_impl(
     _headers: &[OtlpHeader],
     _resource_attributes: &[OtlpResourceAttribute],
     _export_timeout: Option<Duration>,
+    _retry_policy: OtlpRetryPolicy,
 ) -> Result<(), TelemetryError> {
     Err(TelemetryError::Config(
         "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),
@@ -627,6 +1000,7 @@ fn init_otlp_logs_with_options_impl(
     _headers: &[OtlpHeader],
     _resource_attributes: &[OtlpResourceAttribute],
     _export_timeout: Option<Duration>,
+    _retry_policy: OtlpRetryPolicy,
 ) -> Result<(), TelemetryError> {
     Err(TelemetryError::Config(
         "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),
@@ -721,7 +1095,33 @@ fn render_prometheus_handle(handle: &PrometheusHandle) -> String {
 /// to serve `/metrics`.
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 
-fn serve_prometheus_connection(mut stream: TcpStream, handle: &PrometheusHandle) -> io::Result<()> {
+/// Per-connection socket deadline for the Prometheus scrape server.
+///
+/// The accept loop in [`init_prometheus_exporter`] handles connections
+/// serially on a single thread, so without a deadline one peer that opens a
+/// connection and then sends nothing (or streams bytes without a terminating
+/// `\n`, or never drains the response) parks the handler in `read_until` /
+/// `write` forever and blackouts every subsequent scrape. The `MAX_REQUEST_
+/// LINE_BYTES` cap (br-87yi2) bounds heap growth but not blocking time; this
+/// timeout bounds the time. A legitimate scrape sends a <32-byte request line
+/// and drains a small response well within this window, so any peer that
+/// exceeds it is a stall we want to drop.
+const PROMETHEUS_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn serve_prometheus_connection(stream: TcpStream, handle: &PrometheusHandle) -> io::Result<()> {
+    serve_prometheus_connection_with_timeout(stream, handle, PROMETHEUS_CONNECTION_TIMEOUT)
+}
+
+fn serve_prometheus_connection_with_timeout(
+    mut stream: TcpStream,
+    handle: &PrometheusHandle,
+    timeout: Duration,
+) -> io::Result<()> {
+    // Fail closed on a slow/idle peer instead of blocking the single-threaded
+    // accept loop indefinitely.
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+
     let request_line_result = {
         let mut reader = BufReader::new(stream.try_clone()?);
         // Read at most MAX_REQUEST_LINE_BYTES + 1 — the +1 lets us
@@ -1279,6 +1679,43 @@ mod tests {
         assert!(
             response.contains("HTTP/1.1 414 URI Too Long"),
             "oversized request line must yield 414, got: {response}"
+        );
+    }
+
+    /// A peer that opens a connection and sends nothing (a slowloris /
+    /// idle-connection stall) must NOT park the single-threaded accept loop
+    /// forever: the per-connection read timeout makes the handler return
+    /// promptly with a timeout error instead. Without the fix this test would
+    /// hang until the harness kills it.
+    #[test]
+    fn test_prometheus_idle_connection_times_out_instead_of_hanging() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            // Short timeout keeps the test fast while exercising the exact
+            // deadline path the production wrapper uses.
+            serve_prometheus_connection_with_timeout(stream, &handle, Duration::from_millis(200))
+        });
+
+        // Connect but never send a request line and never close the write
+        // half — the classic idle-peer stall.
+        let _client = TcpStream::connect(addr).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = server.join().unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "an idle peer must surface a timeout error, not a served response"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "handler must return promptly on an idle peer (took {elapsed:?})"
         );
     }
 

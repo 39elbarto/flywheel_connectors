@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = ["streaming"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:xai-oai-responses"
+interface_hash = "blake3-256:fcp.interface.v2:3d818ec34809f438dbf33b689ae12f73a6249593d44fb9e519aab8da16cf3565"
 
 [connector]
 id = "fcp.xai"
 name = "xAI"
 version = "0.1.0"
 description = "xAI Grok connector using OpenAI-compatible chat/model endpoints plus Responses API web search and structured citation extraction"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]

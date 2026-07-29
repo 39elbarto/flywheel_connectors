@@ -2,7 +2,7 @@
 //!
 //! This runner is intentionally conservative: it emits real-transport evidence
 //! only when an operator supplies a tailnet-reachable `/rpc/invoke` endpoint,
-//! the request succeeds, and LocalAPI route telemetry proves the requested
+//! the request succeeds, and live Tailscale route telemetry proves the requested
 //! direct-LAN or DERP/fallback path. Otherwise it emits a structured skip record
 //! instead of treating host-first or synthetic RTT measurements as tailnet proof.
 
@@ -21,6 +21,7 @@ use fcp_host::{
     TailnetInvokeAttemptEvidence, TailnetInvokeAttemptOutcome, TailnetInvokeEvidenceRecord,
     TailnetInvokeHarnessObservation, TailnetInvokeLatencySummary, TailnetInvokeNodeEvidence,
     TailnetInvokePrerequisite, TailnetInvokeRealTransportInput, TailnetInvokeRouteMode,
+    TailnetInvokeStructuredSkipInput,
 };
 use fcp_sandbox::is_tailnet_range;
 use fcp_tailscale::TailscaleStatus;
@@ -33,7 +34,8 @@ Usage: fcp-tailnet-invoke-evidence [OPTIONS]
 Options:
   --route <direct-lan|derp-fallback|all>   Requested route mode (default: direct-lan)
   --topology <label>                       Redaction-safe topology label
-  --localapi-url <url>                     HTTP-exposed Tailscale LocalAPI base URL
+  --localapi-url <url>                     HTTP-exposed Tailscale LocalAPI base URL;
+                                           omitted value falls back to `tailscale status --json`
   --invoke-url <url>                       Tailnet-reachable fcp-host /rpc/invoke URL
   --invoke-request-json <json>             InvokeRequest JSON body to POST
   --invoke-request-file <path>             File containing InvokeRequest JSON body
@@ -115,6 +117,31 @@ impl TailnetInvokeRouteSelection {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TailnetStatusSource {
+    HttpLocalApi(String),
+    TailscaleCli,
+    #[cfg(test)]
+    Unavailable,
+}
+
+impl TailnetStatusSource {
+    fn from_localapi_url(localapi_url: Option<&str>) -> Self {
+        localapi_url.map_or(Self::TailscaleCli, |url| {
+            Self::HttpLocalApi(url.trim_end_matches('/').to_string())
+        })
+    }
+
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::HttpLocalApi(_) => "localapi",
+            Self::TailscaleCli => "tailscale-cli",
+            #[cfg(test)]
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let command_line = env::args().collect::<Vec<_>>();
     let cli = match parse_cli(&command_line) {
@@ -140,6 +167,7 @@ fn main() -> ExitCode {
         .localapi_url
         .clone()
         .or_else(|| env::var("FCP_TAILSCALE_LOCALAPI_URL").ok());
+    let tailnet_status_source = TailnetStatusSource::from_localapi_url(localapi_url.as_deref());
     let git_revision = cli
         .git_revision
         .clone()
@@ -150,7 +178,7 @@ fn main() -> ExitCode {
             .as_ref()
             .map(|config| &config.route_peer_identity);
         let mut observation =
-            observe_tailnet(localapi_url.as_deref(), route_mode, route_peer_identity);
+            observe_tailnet(&tailnet_status_source, route_mode, route_peer_identity);
         let record = if let Some(config) = &invoke_probe_config {
             observation.production_mesh_invoke_transport_available = true;
             observation.production_mesh_invoke_transport_detail =
@@ -589,25 +617,28 @@ fn normalize_tailnet_identity(value: &str) -> String {
 }
 
 fn observe_tailnet(
-    localapi_url: Option<&str>,
+    status_source: &TailnetStatusSource,
     route_mode: TailnetInvokeRouteMode,
     route_peer_identity: Option<&TailnetInvokeRoutePeerIdentity>,
 ) -> TailnetInvokeHarnessObservation {
-    let Some(localapi_url) = localapi_url else {
-        return TailnetInvokeHarnessObservation::localapi_not_configured();
-    };
+    #[cfg(test)]
+    if matches!(status_source, TailnetStatusSource::Unavailable) {
+        return TailnetInvokeHarnessObservation::tailscale_status_unavailable(
+            "status_source=unavailable",
+        );
+    }
 
     let status =
-        fcp_async_core::runtime::block_on_sync(async { read_tailnet_status(localapi_url).await });
+        fcp_async_core::runtime::block_on_sync(async { read_tailnet_status(status_source).await });
 
     match status {
-        Ok(Ok((status, status_json))) => {
+        Ok(Ok((status, status_json, source_label))) => {
             let online_peer_count = status.peer.values().filter(|peer| peer.online).count();
             let tailscale_connected = status.backend_state == "Running" && status.self_node.online;
             let route_telemetry =
                 observe_route_telemetry(&status_json, route_mode, route_peer_identity);
             TailnetInvokeHarnessObservation {
-                localapi_configured: true,
+                tailscale_status_available: true,
                 tailscale_connected,
                 online_peer_count,
                 route_telemetry_available: route_telemetry.available,
@@ -615,39 +646,45 @@ fn observe_tailnet(
                 production_mesh_invoke_transport_available: false,
                 production_mesh_invoke_transport_detail:
                     "no production tailnet invoke endpoint configured".to_string(),
-                localapi_detail: format!("backend_state={}", status.backend_state),
+                tailscale_status_detail: format!(
+                    "status_source={source_label},backend_state={}",
+                    status.backend_state
+                ),
             }
         }
-        Ok(Err(error)) => TailnetInvokeHarnessObservation {
-            localapi_configured: true,
-            tailscale_connected: false,
-            online_peer_count: 0,
-            route_telemetry_available: false,
-            route_telemetry_detail: "LocalAPI status unavailable".to_string(),
-            production_mesh_invoke_transport_available: false,
-            production_mesh_invoke_transport_detail:
-                "no production tailnet invoke endpoint configured".to_string(),
-            localapi_detail: format!("localapi_error:{}", redact_sensitive_text(&error)),
-        },
+        Ok(Err(error)) => TailnetInvokeHarnessObservation::tailscale_status_unavailable(format!(
+            "status_source={},status_error:{}",
+            status_source.label(),
+            redact_sensitive_text(&error)
+        )),
         Err(error) => {
             let error = error.to_string();
-            TailnetInvokeHarnessObservation {
-                localapi_configured: true,
-                tailscale_connected: false,
-                online_peer_count: 0,
-                route_telemetry_available: false,
-                route_telemetry_detail: "LocalAPI status unavailable".to_string(),
-                production_mesh_invoke_transport_available: false,
-                production_mesh_invoke_transport_detail:
-                    "no production tailnet invoke endpoint configured".to_string(),
-                localapi_detail: format!("runtime_error:{}", redact_sensitive_text(&error)),
-            }
+            TailnetInvokeHarnessObservation::tailscale_status_unavailable(format!(
+                "status_source={},runtime_error:{}",
+                status_source.label(),
+                redact_sensitive_text(&error)
+            ))
         }
     }
 }
 
-async fn read_tailnet_status(base_url: &str) -> Result<(TailscaleStatus, Value), String> {
-    let base_url = base_url.trim_end_matches('/');
+async fn read_tailnet_status(
+    status_source: &TailnetStatusSource,
+) -> Result<(TailscaleStatus, Value, &'static str), String> {
+    match status_source {
+        TailnetStatusSource::HttpLocalApi(base_url) => read_tailnet_status_from_localapi(base_url)
+            .await
+            .map(|(status, status_json)| (status, status_json, status_source.label())),
+        TailnetStatusSource::TailscaleCli => read_tailnet_status_from_cli()
+            .map(|(status, status_json)| (status, status_json, status_source.label())),
+        #[cfg(test)]
+        TailnetStatusSource::Unavailable => Err("status_source_unavailable".to_string()),
+    }
+}
+
+async fn read_tailnet_status_from_localapi(
+    base_url: &str,
+) -> Result<(TailscaleStatus, Value), String> {
     let url = format!("{base_url}/localapi/v0/status");
     let cx = compatibility_cx();
     let client = HttpClientBuilder::new()
@@ -670,12 +707,44 @@ async fn read_tailnet_status(base_url: &str) -> Result<(TailscaleStatus, Value),
         return Err(format!("http_status:{status}"));
     }
 
-    let status_json: Value = response
-        .json()
-        .map_err(|error| format!("parse_json:{error}"))?;
+    decode_tailnet_status_json(&response.body)
+}
+
+fn read_tailnet_status_from_cli() -> Result<(TailscaleStatus, Value), String> {
+    let output = Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .map_err(|error| format!("tailscale_cli_spawn:{error}"))?;
+
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_string(), |code| code.to_string());
+        let detail = if output.stderr.is_empty() {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        } else {
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        };
+        return Err(format!(
+            "tailscale_cli_exit:{code}:{}",
+            truncate_diagnostic(&detail)
+        ));
+    }
+
+    decode_tailnet_status_json(&output.stdout)
+}
+
+fn decode_tailnet_status_json(raw: &[u8]) -> Result<(TailscaleStatus, Value), String> {
+    let status_json: Value =
+        serde_json::from_slice(raw).map_err(|error| format!("parse_json:{error}"))?;
     let status = serde_json::from_value(status_json.clone())
         .map_err(|error| format!("parse_status:{error}"))?;
     Ok((status, status_json))
+}
+
+fn truncate_diagnostic(detail: &str) -> String {
+    detail.trim().chars().take(240).collect::<String>()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -822,6 +891,10 @@ fn evidence_record_from_probe(
         .iter()
         .all(|prerequisite| prerequisite.satisfied);
     let latency = TailnetInvokeLatencySummary::from_successful_attempts(&run.attempts);
+    let nodes = vec![
+        TailnetInvokeNodeEvidence::new("caller", &config.caller_node_id),
+        TailnetInvokeNodeEvidence::new("responder", &config.responder_node_id),
+    ];
 
     if prerequisites_satisfied && let Some(latency) = latency {
         return TailnetInvokeEvidenceRecord::real_transport(TailnetInvokeRealTransportInput {
@@ -829,10 +902,7 @@ fn evidence_record_from_probe(
             command_line,
             git_revision,
             topology,
-            nodes: vec![
-                TailnetInvokeNodeEvidence::new("caller", &config.caller_node_id),
-                TailnetInvokeNodeEvidence::new("responder", &config.responder_node_id),
-            ],
+            nodes,
             auth_result: run.auth_result(),
             retries: run.retries(),
             latency,
@@ -842,16 +912,18 @@ fn evidence_record_from_probe(
 
     let auth_result = run.auth_result();
     let retries = run.retries();
-    TailnetInvokeEvidenceRecord::structured_skip_with_attempts(
+    TailnetInvokeEvidenceRecord::structured_skip_with_probe(TailnetInvokeStructuredSkipInput {
         route_mode,
         command_line,
         git_revision,
         topology,
         prerequisites,
+        nodes,
         auth_result,
         retries,
-        run.attempts,
-    )
+        latency,
+        attempts: run.attempts,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -969,7 +1041,7 @@ mod tests {
 
     fn satisfied_observation(route_telemetry_available: bool) -> TailnetInvokeHarnessObservation {
         TailnetInvokeHarnessObservation {
-            localapi_configured: true,
+            tailscale_status_available: true,
             tailscale_connected: true,
             online_peer_count: 1,
             route_telemetry_available,
@@ -979,7 +1051,7 @@ mod tests {
             production_mesh_invoke_transport_available: true,
             production_mesh_invoke_transport_detail:
                 "configured tailnet-reachable fcp-host /rpc/invoke endpoint".to_string(),
-            localapi_detail: "backend_state=Running".to_string(),
+            tailscale_status_detail: "status_source=localapi,backend_state=Running".to_string(),
         }
     }
 
@@ -1010,6 +1082,18 @@ mod tests {
         );
         assert_eq!(cli.topology, "tailnet invoke prerequisite probe");
         assert!(cli.localapi_url.is_none());
+    }
+
+    #[test]
+    fn status_source_defaults_to_tailscale_cli_when_localapi_is_absent() {
+        assert_eq!(
+            TailnetStatusSource::from_localapi_url(None),
+            TailnetStatusSource::TailscaleCli
+        );
+        assert_eq!(
+            TailnetStatusSource::from_localapi_url(Some("http://127.0.0.1:41112/")),
+            TailnetStatusSource::HttpLocalApi("http://127.0.0.1:41112".to_string())
+        );
     }
 
     #[test]
@@ -1167,8 +1251,12 @@ mod tests {
     }
 
     #[test]
-    fn observe_tailnet_without_localapi_is_conservative() {
-        let observation = observe_tailnet(None, TailnetInvokeRouteMode::DirectLan, None);
+    fn observe_tailnet_without_status_source_is_conservative() {
+        let observation = observe_tailnet(
+            &TailnetStatusSource::Unavailable,
+            TailnetInvokeRouteMode::DirectLan,
+            None,
+        );
         let record = observation.structured_skip_record(
             TailnetInvokeRouteMode::DirectLan,
             args(&["fcp-tailnet-invoke-evidence"]),
@@ -1179,13 +1267,57 @@ mod tests {
         assert!(
             record
                 .missing_prerequisites
-                .contains(&"tailscale-localapi-url".to_string())
+                .contains(&"tailscale-status-source".to_string())
         );
         assert!(
             record
                 .missing_prerequisites
                 .contains(&"production-mesh-invoke-transport".to_string())
         );
+    }
+
+    #[test]
+    fn decode_tailnet_status_json_preserves_route_telemetry_shape() {
+        let raw = br#"{
+            "BackendState": "Running",
+            "Self": {
+                "ID": "node-caller",
+                "PublicKey": "nodekey:caller",
+                "HostName": "caller",
+                "DNSName": "caller.tailnet.ts.net.",
+                "TailscaleIPs": ["100.64.0.1"],
+                "Online": true
+            },
+            "Peer": {
+                "node-responder": {
+                    "ID": "node-responder",
+                    "PublicKey": "nodekey:responder",
+                    "HostName": "responder",
+                    "DNSName": "responder.tailnet.ts.net.",
+                    "TailscaleIPs": ["100.64.0.2"],
+                    "Online": true,
+                    "Active": true,
+                    "CurAddr": "203.0.113.10:41641"
+                }
+            }
+        }"#;
+
+        let (status, status_json) = decode_tailnet_status_json(raw).expect("decode status");
+        assert_eq!(status.backend_state, "Running");
+        assert_eq!(status.peer.len(), 1);
+
+        let identity = TailnetInvokeRoutePeerIdentity::new(
+            "http://100.64.0.2:8080/rpc/invoke",
+            "node-responder",
+        )
+        .expect("route identity");
+        let observation = observe_route_telemetry(
+            &status_json,
+            TailnetInvokeRouteMode::DirectLan,
+            Some(&identity),
+        );
+        assert!(observation.available);
+        assert!(observation.detail.contains("matched_active_peers=1"));
     }
 
     #[test]
@@ -1258,6 +1390,14 @@ mod tests {
         assert_eq!(record.auth_result, "capability_verified");
         assert_eq!(record.retries, 0);
         assert_eq!(record.attempts.len(), 1);
+        assert_eq!(record.nodes.len(), 2);
+        assert_eq!(record.latency.expect("latency").p99_ns, 100);
+        assert!(
+            record
+                .nodes
+                .iter()
+                .all(|node| node.redacted_node_id.starts_with("blake3:"))
+        );
         assert!(
             record
                 .missing_prerequisites
@@ -1309,6 +1449,7 @@ mod tests {
         assert_eq!(record.retries, 1);
         assert!(record.latency.is_none());
         assert_eq!(record.attempts.len(), 2);
+        assert_eq!(record.nodes.len(), 2);
         assert!(
             record
                 .missing_prerequisites

@@ -1,6 +1,5 @@
 ---
 source: crates/fcp-audit/tests/golden_receipts.rs
-assertion_line: 398
 expression: "json!({ \"head\": head, \"report\": report, })"
 ---
 {

@@ -1,12 +1,14 @@
 //! FCP `ClickUp` Connector implementation.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, OperationId,
+    OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId,
+    SelfCheckReport, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -18,8 +20,20 @@ use crate::{
     error::ClickUpError,
 };
 
-#[cfg(test)]
-use fcp_manifest::ConnectorManifest;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+const OP_SPACES_LIST: &str = "clickup.spaces.list";
+const OP_LISTS_LIST: &str = "clickup.lists.list";
+const OP_TASKS_LIST: &str = "clickup.tasks.list";
+const OP_TASKS_CREATE: &str = "clickup.tasks.create";
+const OP_TASKS_DELETE: &str = "clickup.tasks.delete";
+const OPERATION_ORDER: [&str; 5] = [
+    OP_SPACES_LIST,
+    OP_LISTS_LIST,
+    OP_TASKS_LIST,
+    OP_TASKS_CREATE,
+    OP_TASKS_DELETE,
+];
 
 /// Parsed and validated `ClickUp` connector configuration.
 #[derive(Debug, Clone)]
@@ -428,11 +442,11 @@ impl ClickUpConnector {
         })?;
 
         let result = match operation {
-            "clickup.spaces.list" => self.invoke_spaces_list(client, &input).await,
-            "clickup.lists.list" => self.invoke_lists_list(client, &input).await,
-            "clickup.tasks.list" => self.invoke_tasks_list(client, &input).await,
-            "clickup.tasks.create" => self.invoke_tasks_create(client, &input).await,
-            "clickup.tasks.delete" => self.invoke_tasks_delete(client, &input).await,
+            OP_SPACES_LIST => self.invoke_spaces_list(client, &input).await,
+            OP_LISTS_LIST => self.invoke_lists_list(client, &input).await,
+            OP_TASKS_LIST => self.invoke_tasks_list(client, &input).await,
+            OP_TASKS_CREATE => self.invoke_tasks_create(client, &input).await,
+            OP_TASKS_DELETE => self.invoke_tasks_delete(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -634,185 +648,81 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| ClickUpError::InvalidInput(format!("Missing required field: {field}")))
 }
 
-/// Build a single typed `OperationInfo`.
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
+/// Build typed operations info for introspection from the embedded manifest.
+fn typed_operations_info() -> Vec<OperationInfo> {
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded ClickUp manifest should parse");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
 }
 
-/// Build typed operations info for introspection.
-fn typed_operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "clickup.spaces.list",
-            "List spaces in a workspace",
-            json!({"type": "object", "required": ["team_id"], "properties": {"team_id": {"type": "string", "description": "ClickUp team (workspace) identifier"}}}),
-            json!({"type": "object", "required": ["spaces"], "properties": {"spaces": {"type": "array"}}}),
-            "clickup.spaces.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List all spaces in a ClickUp workspace/team.".into(),
-                common_mistakes: vec!["Using the workspace name instead of the numeric team_id; retrieve the team_id from the ClickUp workspace settings or API first.".into()],
-                examples: vec!["{\"team_id\": \"9012345\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("clickup.lists.list"),
-                    CapabilityId::from_static("clickup.tasks.list"),
-                ],
-            },
-        ),
-        op_info(
-            "clickup.lists.list",
-            "List lists in a space",
-            json!({"type": "object", "required": ["space_id"], "properties": {"space_id": {"type": "string", "description": "ClickUp space identifier"}}}),
-            json!({"type": "object", "required": ["lists"], "properties": {"lists": {"type": "array"}}}),
-            "clickup.lists.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List all lists within a ClickUp space.".into(),
-                common_mistakes: vec!["Passing a team_id instead of a space_id; lists belong to spaces, not directly to teams.".into()],
-                examples: vec!["{\"space_id\": \"12345678\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("clickup.spaces.list"),
-                    CapabilityId::from_static("clickup.tasks.list"),
-                ],
-            },
-        ),
-        op_info(
-            "clickup.tasks.list",
-            "List tasks in a list",
-            json!({"type": "object", "required": ["list_id"], "properties": {"list_id": {"type": "string", "description": "ClickUp list identifier"}}}),
-            json!({"type": "object", "required": ["tasks"], "properties": {"tasks": {"type": "array"}}}),
-            "clickup.tasks.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "List all tasks within a ClickUp list.".into(),
-                common_mistakes: vec!["Not accounting for pagination; the API returns a limited page of tasks by default and additional pages must be fetched separately.".into()],
-                examples: vec!["{\"list_id\": \"900100200300\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("clickup.lists.list"),
-                    CapabilityId::from_static("clickup.tasks.create"),
-                ],
-            },
-        ),
-        op_info(
-            "clickup.tasks.create",
-            "Create a new task in a list",
-            json!({"type": "object", "required": ["list_id", "name"], "properties": {"list_id": {"type": "string", "description": "ClickUp list identifier"}, "name": {"type": "string", "description": "Name of the task to create"}}}),
-            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}),
-            "clickup.tasks.write",
-            RiskLevel::Medium,
-            SafetyTier::Risky,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Create a new task in a ClickUp list.".into(),
-                common_mistakes: vec!["Omitting the list_id and trying to create a task directly under a space or folder; tasks must be created within a specific list.".into()],
-                examples: vec!["{\"list_id\": \"900100200300\", \"name\": \"Implement login page\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("clickup.tasks.list"),
-                    CapabilityId::from_static("clickup.tasks.delete"),
-                ],
-            },
-        ),
-        op_info(
-            "clickup.tasks.delete",
-            "Delete a task",
-            json!({"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string", "description": "ClickUp task identifier to delete"}}}),
-            json!({"type": "object"}),
-            "clickup.tasks.delete",
-            RiskLevel::High,
-            SafetyTier::Dangerous,
-            IdempotencyClass::None,
-            AgentHint {
-                when_to_use: "Permanently delete a task from ClickUp.".into(),
-                common_mistakes: vec!["Confusing delete with closing a task; deletion is permanent and cannot be undone, whereas setting status to closed preserves the task.".into()],
-                examples: vec!["{\"task_id\": \"abc123xyz\"}".into()],
-                related: vec![
-                    CapabilityId::from_static("clickup.tasks.list"),
-                    CapabilityId::from_static("clickup.tasks.create"),
-                ],
-            },
-        ),
-    ]
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 /// Build the operations info for introspection (JSON format, used by simulate).
 fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "clickup.spaces.list",
-            "summary": "List spaces in a workspace",
-            "capability": "clickup.spaces.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "clickup.lists.list",
-            "summary": "List lists in a space",
-            "capability": "clickup.lists.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "clickup.tasks.list",
-            "summary": "List tasks in a list",
-            "capability": "clickup.tasks.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "clickup.tasks.create",
-            "summary": "Create a new task in a list",
-            "capability": "clickup.tasks.write",
-            "risk_level": "medium",
-            "safety_tier": "risky",
-            "idempotency": "none",
-        },
-        {
-            "id": "clickup.tasks.delete",
-            "summary": "Delete a task",
-            "capability": "clickup.tasks.delete",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "none",
-        },
-    ])
+    static OPERATIONS: OnceLock<serde_json::Value> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| serde_json::to_value(typed_operations_info()).unwrap_or_default())
+        .clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strict_clickup_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
 
     #[test]
     fn config_from_api_token() {
@@ -928,6 +838,86 @@ mod tests {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
         assert_eq!(arr.len(), 5);
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_clickup_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).expect("serialize runtime hints"),
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .expect("serialize manifest hints")
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn operations_info_json_exposes_manifest_approval_modes() {
+        let ops = operations_info();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_TASKS_CREATE))
+            .unwrap();
+        let delete_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_TASKS_DELETE))
+            .unwrap();
+
+        assert_eq!(create_op["requires_approval"], "policy");
+        assert_eq!(delete_op["requires_approval"], "interactive");
     }
 
     #[test]
@@ -1261,8 +1251,7 @@ mod tests {
 
     #[test]
     fn manifest_tasks_delete_requires_dedicated_capability() {
-        let manifest = ConnectorManifest::parse_str(include_str!("../manifest.toml"))
-            .expect("manifest should validate");
+        let manifest = strict_clickup_manifest().expect("manifest should validate");
 
         let delete_op = manifest
             .provides
@@ -1284,9 +1273,12 @@ mod tests {
                 .iter()
                 .any(|cap| cap.as_str() == "clickup.tasks.delete")
         );
+        let rate_limits = manifest
+            .rate_limits
+            .as_ref()
+            .expect("manifest should declare rate limits");
         assert_eq!(
-            manifest
-                .rate_limits
+            rate_limits
                 .operation_pools
                 .get("clickup.tasks.delete")
                 .map(|pools| pools.iter().map(|pool| pool.as_str()).collect::<Vec<_>>()),
@@ -1588,7 +1580,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "clickup.api_token");
-        assert!(v["steps"].as_array().unwrap().len() == 3);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     }
 
     #[test]

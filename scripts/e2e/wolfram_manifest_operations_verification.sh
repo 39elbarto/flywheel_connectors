@@ -4,9 +4,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 LOG_JSONL="${1:-/tmp/fcp-wolfram-manifest-ops-$(date -u +%Y%m%dT%H%M%SZ).jsonl}"
-TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-wolfram-manifest-ops-target}"
-GIT_REVISION="$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD)"
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/rch-fcp-wolfram-manifest-ops-${RUN_ID}-target}"
+LOG_DIR="${LOG_DIR:-$(dirname "${LOG_JSONL}")/wolfram-manifest-ops-logs}"
+RCH_BIN="${RCH_BIN:-rch}"
+GIT_REVISION="$(git -C "${REPO_ROOT}" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export RCH_FORCE_REMOTE=1
+
+mkdir -p "$(dirname "${LOG_JSONL}")" "${LOG_DIR}"
 
 cd "${REPO_ROOT}"
 
@@ -14,42 +21,104 @@ echo "[wolfram-manifest] repo=${REPO_ROOT}"
 echo "[wolfram-manifest] git_revision=${GIT_REVISION}"
 echo "[wolfram-manifest] target_dir=${TARGET_DIR}"
 echo "[wolfram-manifest] log_jsonl=${LOG_JSONL}"
+echo "[wolfram-manifest] log_dir=${LOG_DIR}"
 
-run_cargo() {
-  if [[ "${FCP_WOLFRAM_USE_RCH:-0}" == "1" ]]; then
-    rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo "$@"
-  else
-    CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo "$@"
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 2
   fi
 }
 
+log_has_infra_blocker() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    case "${line}" in
+      *"RCH-E"*|*"remote required; refusing local fallback"*|*"rch command did not produce remote proof"*|*"No space left on device"*|*"connection reset by peer"*|*"Backend unavailable"*|*"unable to update registry"*|*"spurious network error"*|*"failed to get successful HTTP response"*|*"timeout: failed to execute process"*|*"missing worker system package"*)
+        return 0
+        ;;
+    esac
+  done <"${log_path}"
+  return 1
+}
+
+classify_failure() {
+  local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+  elif log_has_infra_blocker "${log_path}"; then
+    echo "infra_blocked"
+  else
+    echo "failed"
+  fi
+}
+
+rch_remote_summary_present() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == *"[RCH] remote"* ]]; then
+      return 0
+    fi
+  done <"${log_path}"
+  return 1
+}
+
+run_cargo() {
+  local name="$1"
+  shift
+  local log_path="${LOG_DIR}/${name}.log"
+  local status
+
+  echo "[wolfram-manifest] ${name}: cargo $*"
+  if ! env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
+    "CARGO_TARGET_DIR=${TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    cargo "$@" >"${log_path}" 2>&1
+  then
+    status="$(classify_failure "${log_path}")"
+    echo "[wolfram-manifest] ${name}: ${status}; see ${log_path}" >&2
+    exit "$([[ "${status}" == "infra_blocked" ]] && echo 2 || echo 1)"
+  fi
+
+  if ! rch_remote_summary_present "${log_path}"; then
+    echo "[wolfram-manifest] ${name}: rch command did not produce remote proof; see ${log_path}" >&2
+    printf '%s\n' "rch command did not produce remote proof" >>"${log_path}"
+    exit 2
+  fi
+}
+
+require_cmd rg
+require_cmd "${RCH_BIN}"
+
 echo "[wolfram-manifest] running focused formatting check"
-run_cargo fmt --check -p fcp-wolfram
+run_cargo fmt_check fmt --check -p fcp-wolfram
 
 echo "[wolfram-manifest] running focused compiler check"
-run_cargo check -p fcp-wolfram --all-targets
+run_cargo compiler_check check -p fcp-wolfram --all-targets
 
 echo "[wolfram-manifest] running focused clippy check"
-run_cargo clippy -p fcp-wolfram --all-targets --no-deps -- -D warnings
+run_cargo clippy_check clippy -p fcp-wolfram --all-targets --no-deps -- -D warnings
 
 echo "[wolfram-manifest] running inline unit tests"
-run_cargo test -p fcp-wolfram --lib -- --nocapture
+run_cargo unit_tests test -p fcp-wolfram --lib -- --nocapture
 
 echo "[wolfram-manifest] running manifest/runtime/schema contract tests"
-run_cargo test -p fcp-wolfram --test provider_contract -- --nocapture
+run_cargo provider_contract test -p fcp-wolfram --test provider_contract -- --nocapture
 
 echo "[wolfram-manifest] running deterministic no-live-provider connector suite"
-run_cargo test -p fcp-wolfram --test connector_suite_happy_path -- --nocapture
+run_cargo loopback_connector_suite test -p fcp-wolfram --test connector_suite_happy_path -- --nocapture
 
 echo "[wolfram-manifest] checking manifest interface hash with fwc"
-run_cargo run -p fwc -- manifest fix connectors/wolfram/manifest.toml --check --json
+run_cargo manifest_hash_check run -p fwc -- manifest fix connectors/wolfram/manifest.toml --check --json
 
 echo "[wolfram-manifest] running redaction-safe cross-connector audit JSONL lane"
-CARGO_TARGET_DIR="${TARGET_DIR}" CARGO_INCREMENTAL=0 \
-  cargo run -p fcp-conformance --bin fcp-manifest-ops-audit -- \
-    --repo-root . \
-    --allow-findings \
-    --log-jsonl "${LOG_JSONL}"
+run_cargo manifest_ops_audit run -p fcp-conformance --bin fcp-manifest-ops-audit -- \
+  --repo-root . \
+  --allow-findings \
+  --log-jsonl "${LOG_JSONL}"
 
 if ! rg -q '"connector_id":"fcp.wolfram".*"result":"pass"' "${LOG_JSONL}"; then
   echo "[wolfram-manifest] ERROR: fcp.wolfram did not produce a passing connector_scan log entry" >&2
@@ -57,7 +126,7 @@ if ! rg -q '"connector_id":"fcp.wolfram".*"result":"pass"' "${LOG_JSONL}"; then
 fi
 
 cat >>"${LOG_JSONL}" <<EOF
-{"log_version":"v1","script":"scripts/e2e/wolfram_manifest_operations_verification.sh","step":"wolfram_manifest_runtime_contract","result":"pass","timestamp":"${TIMESTAMP}","details":{"command_line":["scripts/e2e/wolfram_manifest_operations_verification.sh","${LOG_JSONL}"],"git_revision":"${GIT_REVISION}","connector_id":"fcp.wolfram","manifest_path":"connectors/wolfram/manifest.toml","operation_count_before":0,"operation_count_after":3,"manifest_operation_count":3,"runtime_introspection_operation_count":3,"introspect_count":3,"fmt_check_result":"pass","compiler_check_result":"pass","clippy_result":"pass","unit_test_result":"pass","manifest_hash_check_result":"pass","cross_connector_audit_result":"pass","provider_fixture_mode":"deterministic no-live-provider HTTP loopback fixture covered by connector_suite_happy_path","live_provider_mode":"not required","skip_reason":null,"cleanup_result":"no cleanup required; read-only no-live-provider lane with ephemeral loopback listener","redaction_decision":"redaction-safe: no AppIDs, raw prompts, request bodies, provider payloads, result contents, or provider error bodies logged","operations":[{"operation_id":"wolfram.query","capability":"wolfram.query","network_host_class":"public_tls:api.wolframalpha.com","schema_validation_result":"pass"},{"operation_id":"wolfram.short_answer","capability":"wolfram.query","network_host_class":"public_tls:api.wolframalpha.com","schema_validation_result":"pass"},{"operation_id":"wolfram.spoken_result","capability":"wolfram.query","network_host_class":"public_tls:api.wolframalpha.com","schema_validation_result":"pass"}]}}
+{"log_version":"v1","script":"scripts/e2e/wolfram_manifest_operations_verification.sh","step":"wolfram_manifest_runtime_contract","result":"pass","timestamp":"${TIMESTAMP}","details":{"command_line":["scripts/e2e/wolfram_manifest_operations_verification.sh","${LOG_JSONL}"],"git_revision":"${GIT_REVISION}","connector_id":"fcp.wolfram","manifest_path":"connectors/wolfram/manifest.toml","operation_count_before":0,"operation_count_after":3,"manifest_operation_count":3,"runtime_introspection_operation_count":3,"introspect_count":3,"fmt_check_result":"pass","compiler_check_result":"pass","clippy_result":"pass","unit_test_result":"pass","manifest_hash_check_result":"pass","cross_connector_audit_result":"pass","provider_fixture_mode":"deterministic no-live-provider HTTP loopback fixture covered by connector_suite_happy_path","live_provider_mode":"not required","skip_reason":null,"cleanup_result":"no cleanup required; read-only no-live-provider lane with ephemeral loopback listener","redaction_decision":"redaction-safe: no AppIDs, raw prompts, request bodies, provider payloads, result contents, or provider error bodies logged","toolchain":"${REPO_TOOLCHAIN}","target_dir":"${TARGET_DIR}","log_dir":"${LOG_DIR}","runner":"rch:remote-required","operations":[{"operation_id":"wolfram.query","capability":"wolfram.query","network_host_class":"public_tls:api.wolframalpha.com","schema_validation_result":"pass"},{"operation_id":"wolfram.short_answer","capability":"wolfram.query","network_host_class":"public_tls:api.wolframalpha.com","schema_validation_result":"pass"},{"operation_id":"wolfram.spoken_result","capability":"wolfram.query","network_host_class":"public_tls:api.wolframalpha.com","schema_validation_result":"pass"}]}}
 EOF
 
 echo "[wolfram-manifest] wrote redaction-safe JSONL proof to ${LOG_JSONL}"

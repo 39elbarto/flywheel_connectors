@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Figma-specific errors.
@@ -41,6 +41,11 @@ pub enum FigmaError {
     /// Webhook not found
     #[error("Webhook not found: {webhook_id}")]
     WebhookNotFound { webhook_id: String },
+
+    /// Caller-supplied input rejected before any request was sent
+    /// (e.g. an id carrying path-traversal characters).
+    #[error("Invalid input: {message}")]
+    InvalidInput { message: String },
 }
 
 impl FigmaError {
@@ -124,6 +129,10 @@ impl FigmaError {
             },
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
+            },
+            Self::InvalidInput { message } => FcpError::InvalidRequest {
+                code: 2002,
+                message: message.clone(),
             },
         }
     }

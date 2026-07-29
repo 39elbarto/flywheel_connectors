@@ -15,8 +15,10 @@
 //!
 //! # Modules
 //!
+//! - [`bls`] - BLS12-381 threshold-aggregate quorum signatures with proof-of-possession rogue-key defense
 //! - [`ed25519`] - Ed25519 signing and verification
 //! - [`frost`] - FROST threshold signing and distributed key generation
+//! - [`hybrid`] - Ed25519 + ML-DSA-65 signed envelopes
 //! - [`x25519`] - X25519 ECDH key exchange
 //! - [`hkdf`] - HKDF-SHA256 key derivation
 //! - [`aead`] - ChaCha20-Poly1305 and XChaCha20-Poly1305 AEAD
@@ -89,6 +91,7 @@
 #![warn(missing_docs)]
 
 pub mod aead;
+pub mod bls;
 pub mod canonicalize;
 pub mod cose;
 pub mod ed25519;
@@ -96,12 +99,14 @@ pub mod error;
 pub mod frost;
 pub mod hkdf;
 pub mod hpke_seal;
+pub mod hybrid;
 pub mod kid;
 pub mod mac;
 pub mod ml_dsa;
 pub mod owner_key;
 pub mod secret_fetch;
 pub mod shamir;
+pub mod vector_commit;
 pub mod x25519;
 pub mod xwing;
 
@@ -109,6 +114,10 @@ pub mod xwing;
 pub use aead::{
     AeadKey, ChaCha20Nonce, ChaCha20Poly1305Cipher, XChaCha20Nonce, XChaCha20Poly1305Cipher,
     chacha20_decrypt, chacha20_encrypt, xchacha20_decrypt, xchacha20_encrypt,
+};
+pub use bls::{
+    AggregateSignature, BlsError, BlsPublicKey, BlsSecretKey, BlsSignature, PopRegistry,
+    ProofOfPossession,
 };
 pub use canonicalize::{Signable, canonical_signing_bytes, schema_hash};
 pub use cose::{CapabilityTokenBuilder, CoseToken, CwtClaims};
@@ -126,6 +135,13 @@ pub use hkdf::{
     hkdf_sha256_array,
 };
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
+pub use hybrid::{
+    EVENT_PQ_POLICY_DOWNGRADE, HYBRID_SIGNING_CONTEXT, HybridSignable, HybridSignedObjectKind,
+    HybridVerifyReport, HybridVerifyWarning, PqPolicyDowngradeAudit, PqPolicyDowngradeAuthorizer,
+    PqSigningPolicy, SignatureStatus, SignedEnvelope, downgrade_policy_to_either_ok,
+    signing_bytes_for_canonical_payload, signing_bytes_for_payload, verify_signable,
+    verify_signable_with_policy,
+};
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};
 pub use ml_dsa::{ML_DSA_65_SEED_SIZE, MlDsa65SigningKey, MlDsa65VerifyingKey};

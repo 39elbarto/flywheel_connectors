@@ -11,7 +11,7 @@ struct SafeUriCase {
     query: Option<&'static str>,
 }
 
-fn safe_uri_cases() -> [SafeUriCase; 4] {
+const fn safe_uri_cases() -> [SafeUriCase; 4] {
     [
         SafeUriCase {
             raw: "https://api.example.com/v1/messages?limit=50&cursor=abc",

@@ -1,6 +1,6 @@
 # Terraform Connector V3 Contract
 
-> **Status**: runtime contract documented; HCP Terraform API and safety drift documented
+> **Status**: manifest-derived runtime metadata aligned; HCP Terraform API and safety drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -61,6 +61,7 @@ Important runtime truths the contract preserves:
 - Runtime `invoke` uses the JSON field `operation_id`, not `operation`.
 - Runtime `invoke` does not require or verify a capability token.
 - Runtime `invoke` does not verify approval tokens.
+- Runtime `OperationInfo` metadata is derived from `manifest.toml` for capability, risk, safety, idempotency, schemas, approval mode, and AI hints.
 - Runtime `simulate` only checks whether the `operation_id` is known.
 - Runtime `simulate` does not check configuration, handshake, input shape, authorization, approval policy, provider permissions, or capability tokens.
 - Runtime `shutdown()` shuts down the client runtime, clears config and client state, and clears base configured/handshaken flags.
@@ -111,8 +112,7 @@ This README documents runtime truth and keeps current drift visible:
 - HCP Terraform plan API states that a plan ID is discovered through a run object's `relationships.plan`. Runtime returns a fabricated `plan_hash` of `blake3:{run_id}` and uses the run ID as `plan_file`.
 - Runtime `blake3:{run_id}` is not a cryptographic hash of plan JSON or Terraform plan content.
 - Manifest schemas are materially out of sync with runtime inputs for most operations, especially `working_dir`, `plan_file`, `plan_hash`, `address`, and `id`.
-- Manifest marks `terraform.apply` and `terraform.destroy` as interactive-approval dangerous operations. Runtime dispatch does not enforce approval tokens.
-- Runtime introspection reports no `requires_approval` metadata for any operation.
+- Manifest marks `terraform.apply` and `terraform.destroy` as interactive-approval dangerous operations and `terraform.import` as policy-approval risky state-write. Runtime introspection reports those manifest-derived approval modes, but runtime dispatch does not enforce approval tokens.
 - Runtime `invoke` does not require capability tokens and does not install a `CapabilityVerifier` during handshake.
 - Runtime `simulate` is only a known-operation check.
 - The crate contains richer `plan`, `apply`, `import`, and `safety` modules with plan parsing, approval-token, destroy-denial, and policy-enforcement concepts. The main `TerraformConnector::handle_invoke` path does not call those modules.

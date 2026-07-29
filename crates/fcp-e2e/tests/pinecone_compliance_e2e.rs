@@ -209,6 +209,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -228,7 +229,10 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -327,6 +331,7 @@ async fn pinecone_default_deny_compliance_suite_passes() {
         &signing_key,
         "pinecone.indexes.read",
         &["pinecone.indexes.read"],
+        connector.connector.instance_id().as_str(),
     );
     let invoke = invoke_request(
         "pinecone.query",
@@ -385,7 +390,12 @@ async fn pinecone_allow_valid_token_connector_suite_passes() {
     let mut connector = PineconeConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["pinecone.query"]);
-    let token = build_token(&signing_key, "pinecone.query", &["pinecone.query"]);
+    let token = build_token(
+        &signing_key,
+        "pinecone.query",
+        &["pinecone.query"],
+        connector.connector.instance_id().as_str(),
+    );
     let invoke = invoke_request(
         "pinecone.query",
         json!({

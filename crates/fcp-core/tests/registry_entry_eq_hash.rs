@@ -11,7 +11,7 @@ fn hash_value<T: Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
-fn object_id(byte: u8) -> ObjectId {
+const fn object_id(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
@@ -139,7 +139,7 @@ fn registry_entry_hash_collections_deduplicate_equal_entries() {
 fn registry_entry_hashmap_lookup_survives_reconstruction() {
     let base = base_entry();
     let mut map = HashMap::new();
-    map.insert(base.clone(), "mirrored");
+    map.insert(base, "mirrored");
 
     assert_eq!(map.get(&base_entry()), Some(&"mirrored"));
     assert_eq!(

@@ -14,8 +14,9 @@
 //!
 //! Absent optional fields and empty collections are OMITTED from the
 //! encoded map. Round-trip through `to_canonical_cbor` →
-//! `from_canonical_cbor` is lossless for typed fields; free-form
-//! `extra` claims preserve whatever CBOR value they were decoded from.
+//! `from_canonical_cbor` is lossless for typed fields. Unknown labels are
+//! ignored on decode for forward compatibility; callers that need a new claim
+//! must first add it to this typed schema.
 
 use crate::labels::{cwt_claims, fcp2_claims};
 use chrono::{DateTime, TimeZone, Utc};
@@ -928,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn schema_version_zero_is_not_valid_as_current() {
         // Sanity: CURRENT_SCHEMA_VERSION must be > 0 so that a
         // claim-set constructed with ::default() (which leaves

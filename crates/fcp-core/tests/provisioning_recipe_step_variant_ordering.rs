@@ -9,26 +9,25 @@
 //!   - Carries `#[serde(tag = "type", rename_all = "snake_case")]`.
 //!   - Has a hand-written `pub const fn as_str(&self) -> &'static str`
 //!     at provisioning.rs:345 that returns the canonical
-//!     snake_case token per variant.
+//!     `snake_case` token per variant.
 //!   - Implements `fmt::Display` (provisioning.rs:357) by delegating
 //!     to `as_str()`.
 //!
 //! Existing `connector_plan_step_ordering.rs` (flywheel_connectors-6tcjg)
 //! covered Vec INSERTION ordering of `ProvisioningStep` items through
 //! serde + per-kind JSON tag form. This bead is a complementary pin
-//! on the VARIANT declaration order + the Display ↔ as_str ↔ serde
+//! on the VARIANT declaration order + the Display ↔ `as_str` ↔ serde
 //! tag triple-agreement at the type level:
 //!
-//!   1. **`as_str()` per variant** returns the documented snake_case
+//!   1. **`as_str()` per variant** returns the documented `snake_case`
 //!      token at compile time (`&'static str`).
 //!   2. **`Display` byte-for-byte agrees with `as_str()`** for every
 //!      variant.
 //!   3. **`Display` byte-for-byte agrees with the serde JSON tag**
 //!      for every variant.
-//!   4. **Variant declaration order** preserved through a fixed-order
-//!      Vec — pinning the canonical sequence
-//!      [prompt_user, prompt_secret, open_url, store_secret, oauth,
-//!       webhook].
+//!   4. **Variant declaration order** preserved through a fixed-order Vec,
+//!      pinning the canonical sequence [`prompt_user`, `prompt_secret`,
+//!      `open_url`, `store_secret`, `oauth`, `webhook`].
 //!   5. **All 6 variants enumerated** — count + label sentinel
 //!      against silent additions or reorderings.
 //!   6. **Display tokens pairwise distinct** so each variant can be
@@ -41,7 +40,7 @@
 //!      pin those side-by-side since they fall under the same
 //!      "step kinds" surface.
 
-use fcp_core::{OAuthRecipe, ProvisioningStepType, WebhookVerification};
+use fcp_core::{OAuthRecipe, ProvisioningStepType, RetryConfig, WebhookVerification};
 
 fn step_kind_in_declaration_order() -> Vec<ProvisioningStepType> {
     // The exact order in provisioning.rs:187-222.
@@ -73,7 +72,7 @@ fn step_kind_in_declaration_order() -> Vec<ProvisioningStepType> {
                 verification: WebhookVerification::ChallengeResponse {
                     challenge_param: "challenge".into(),
                 },
-                retry_policy: Default::default(),
+                retry_policy: RetryConfig::default(),
             },
         },
     ]
@@ -125,7 +124,7 @@ fn as_str_returns_static_str_compile_time_known() {
             verification: WebhookVerification::ChallengeResponse {
                 challenge_param: String::new(),
             },
-            retry_policy: Default::default(),
+            retry_policy: RetryConfig::default(),
         },
     }
     .as_str();

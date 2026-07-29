@@ -3,7 +3,7 @@
 > **Status**: manifest/runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/ollama_connector_verification.sh`
 > **Primary upstream**: https://docs.ollama.com/api/openai-compatibility
 
 ## Purpose
@@ -46,6 +46,7 @@ Important runtime truths the contract preserves:
 - `ollama.models.list` uses `GET /v1/models` and supports `{"refresh": true}` to invalidate the in-memory cache.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `ollama.chat.completions_stream`.
 - The connector never calls `/api/pull`, `/api/tags`, `/api/generate`, `/api/chat`, or any other Ollama-native endpoint.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 
@@ -170,7 +171,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/ollama_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The closeout bundle is anchored on `scripts/e2e/ollama_connector_verification.sh`. It runs Cargo proof through `rch exec`, writes a summary plus redaction-checked JSONL artifacts, and should use `CARGO_TARGET_PREFIX` on a spacious volume when the local checkout is disk constrained.
 
 The verification surface captures:
 
@@ -178,7 +179,8 @@ The verification surface captures:
 - deterministic WireMock integration coverage
 - optional local Ollama smoke with structured skip if the server is not listening or the model is not installed
 - base URL, auth, tailnet-only, allowed-host, chat, streaming, embeddings, model-list, health, rate-limit, cancellation, and redaction tests
-- formatting, check, and clippy proof through `rch`
+- manifest schema/hash validation, formatting, check, conformance, and clippy proof through `rch`
+- local non-mock raw TCP loopback acceptance with JSONL validation
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -218,3 +220,4 @@ The verification surface captures:
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-ollama-e2e cargo check -p fcp-ollama --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-ollama-e2e cargo test -p fcp-ollama --test integration -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-ollama-e2e cargo clippy -p fcp-ollama --all-targets --no-deps -- -D warnings`
+- `RUN_ID=manual-ollama OUT_ROOT=/Volumes/trj-data/fcp-artifacts/ollama/manual-ollama CARGO_TARGET_PREFIX=/Volumes/trj-data/tmp/fcp-ollama-manual scripts/e2e/ollama_connector_verification.sh`

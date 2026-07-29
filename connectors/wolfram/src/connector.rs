@@ -8,8 +8,9 @@ use fcp_prelude::{
     EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, Introspection,
     OperationId, OperationInfo, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::client::WolframClient;
@@ -79,6 +80,12 @@ impl WolframConnector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(WOLFRAM_MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -146,7 +153,7 @@ impl WolframConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:wolfram-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -468,7 +475,7 @@ impl WolframConnector {
         match operation {
             OP_QUERY => {
                 let qr = client.query(query, app_id).await.map_err(|e| {
-                    use fcp_sdk::migration::ConnectorErrorMapping;
+                    use fcp_sdk::ConnectorErrorMapping;
                     e.to_fcp_error()
                 })?;
                 serde_json::to_value(qr).map_err(|e| FcpError::Internal {
@@ -476,11 +483,11 @@ impl WolframConnector {
                 })
             }
             OP_SHORT_ANSWER => client.short_answer(query, app_id).await.map_err(|e| {
-                use fcp_sdk::migration::ConnectorErrorMapping;
+                use fcp_sdk::ConnectorErrorMapping;
                 e.to_fcp_error()
             }),
             OP_SPOKEN_RESULT => client.spoken_result(query, app_id).await.map_err(|e| {
-                use fcp_sdk::migration::ConnectorErrorMapping;
+                use fcp_sdk::ConnectorErrorMapping;
                 e.to_fcp_error()
             }),
             _ => Err(FcpError::InvalidRequest {
@@ -640,8 +647,12 @@ mod tests {
     use fcp_prelude::{
         CapabilityConstraints, IdempotencyClass, InstanceId, RiskLevel, SafetyTier, ZoneId,
     };
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        thread::{self, JoinHandle},
+        time::Duration as StdDuration,
+    };
 
     fn generate_token(
         signing_key: &Ed25519SigningKey,
@@ -675,6 +686,114 @@ mod tests {
 
     fn fixture_app_id() -> String {
         ["fixture", "app"].join("-")
+    }
+
+    struct TestHttpResponse {
+        path: &'static str,
+        status: u16,
+        body: String,
+        content_type: &'static str,
+    }
+
+    impl TestHttpResponse {
+        fn json(path: &'static str, status: u16, body: &serde_json::Value) -> Self {
+            Self {
+                path,
+                status,
+                body: body.to_string(),
+                content_type: "application/json",
+            }
+        }
+
+        fn text(path: &'static str, status: u16, body: impl Into<String>) -> Self {
+            Self {
+                path,
+                status,
+                body: body.into(),
+                content_type: "text/plain; charset=utf-8",
+            }
+        }
+    }
+
+    struct TestHttpServer {
+        base_url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpServer {
+        fn respond(response: TestHttpResponse) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let handle = thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept Wolfram client request");
+                handle_test_request(stream, &response);
+            });
+
+            Self {
+                base_url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test server thread panicked");
+            }
+        }
+    }
+
+    fn handle_test_request(mut stream: TcpStream, response: &TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let request_method = parts.next().expect("request method");
+        let raw_path = parts.next().expect("request target");
+        let request_path = raw_path.split('?').next().expect("request path");
+        assert_eq!(request_method, "GET");
+        assert_eq!(request_path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().expect("content-length parses");
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        let status_text = "OK";
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response.status,
+            status_text,
+            response.content_type,
+            response.body.len(),
+            response.body
+        )
+        .expect("write response");
+        stream.flush().expect("flush response");
     }
 
     fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
@@ -1005,7 +1124,6 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn invoke_query() {
-        let server = MockServer::start().await;
         let body = json!({
             "queryresult": {
                 "success": true,
@@ -1019,17 +1137,9 @@ mod tests {
                 "assumptions": []
             }
         });
-        Mock::given(method("GET"))
-            .and(path("/v2/query"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(TestHttpResponse::json("/v2/query", 200, &body));
+        let (connector, signing_key) = setup_connector(&server.uri(), &["wolfram.query"]).await;
 
-        // Use the server URI without the protocol for configure
-        let base_url = server.uri();
-        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
-
-        // Override the client to use the mock server with protocol
         let capability = generate_token(
             &signing_key,
             &connector.base.instance_id,
@@ -1044,20 +1154,14 @@ mod tests {
             }))
             .await
             .expect("invoke");
+        server.finish();
         assert_eq!(result["success"], true);
     }
 
     #[fcp_async_core::runtime::test]
     async fn invoke_short_answer() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/result"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("42"))
-            .mount(&server)
-            .await;
-
-        let base_url = server.uri();
-        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
+        let server = TestHttpServer::respond(TestHttpResponse::text("/v1/result", 200, "42"));
+        let (connector, signing_key) = setup_connector(&server.uri(), &["wolfram.query"]).await;
         let capability = generate_token(
             &signing_key,
             &connector.base.instance_id,
@@ -1072,20 +1176,15 @@ mod tests {
             }))
             .await
             .expect("invoke");
+        server.finish();
         assert_eq!(result["answer"], "42");
     }
 
     #[fcp_async_core::runtime::test]
     async fn invoke_spoken_result() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/spoken"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("The answer is 4"))
-            .mount(&server)
-            .await;
-
-        let base_url = server.uri();
-        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
+        let server =
+            TestHttpServer::respond(TestHttpResponse::text("/v1/spoken", 200, "The answer is 4"));
+        let (connector, signing_key) = setup_connector(&server.uri(), &["wolfram.query"]).await;
         let capability = generate_token(
             &signing_key,
             &connector.base.instance_id,
@@ -1100,6 +1199,7 @@ mod tests {
             }))
             .await
             .expect("invoke");
+        server.finish();
         assert_eq!(result["spoken"], "The answer is 4");
     }
 
@@ -1315,5 +1415,17 @@ mod tests {
                 op.id
             );
         }
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(WOLFRAM_MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = WolframConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:wolfram-connector-v1");
     }
 }

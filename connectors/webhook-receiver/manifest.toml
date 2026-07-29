@@ -577,7 +577,7 @@ id = "webhook.events.write"
 requests = 120
 window_ms = 60000
 burst = 8
-scope = "client"
+scope = "credential"
 
 [rate_limits.operation_pools]
 "webhook.endpoints.rotate_secret" = ["webhook.endpoints.write"]

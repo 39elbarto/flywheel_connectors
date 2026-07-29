@@ -44,6 +44,10 @@ use chrono::Utc;
 use fcp_async_core::time;
 use fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION;
 use fcp_crypto::ed25519::Ed25519VerifyingKey;
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope,
+    signing_bytes_for_canonical_payload,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
@@ -517,8 +521,8 @@ impl ZoneId {
         let suffix = raw
             .strip_prefix("z:project:")
             .map_or_else(
-                || raw.strip_prefix("z:").unwrap_or(raw).replace('_', "-"),
-                |project| format!("proj-{}", project.replace('_', "-")),
+                || raw.strip_prefix("z:").unwrap_or(raw).to_owned(),
+                |project| format!("proj-{project}"),
             )
             .replace(':', "-");
         format!("tag:fcp-{suffix}")
@@ -579,8 +583,7 @@ impl ZoneId {
         }
 
         for (index, ch) in zone_id.char_indices() {
-            let ok =
-                ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, ':' | '_' | '-');
+            let ok = ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, ':' | '-');
             if !ok {
                 return Err(ZoneIdError::InvalidChar { ch, index });
             }
@@ -1125,6 +1128,456 @@ impl AnyVerified for BoundVerified {}
 impl AnyVerified for UnboundVerified {}
 impl AnyVerified for ConstraintsEnforced {}
 
+/// TLA+ invariant clause names mirrored by
+/// `specs/tla/capability_lifecycle.tla`.
+pub const CAPABILITY_LIFECYCLE_TLA_INVARIANT_CLAUSES: &[&str] = &[
+    "RevokeBeforeUse",
+    "NoDoubleSpend",
+    "RevocationPropagationSLO",
+];
+
+/// Abstract capability-token lifecycle states mirrored by the TLA+ model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CapabilityLifecycleState {
+    Pending,
+    Approved,
+    Used,
+    Revoked,
+    Expired,
+}
+
+impl CapabilityLifecycleState {
+    pub const ALL: [Self; 5] = [
+        Self::Pending,
+        Self::Approved,
+        Self::Used,
+        Self::Revoked,
+        Self::Expired,
+    ];
+
+    #[must_use]
+    pub const fn tla_name(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Approved => "Approved",
+            Self::Used => "Used",
+            Self::Revoked => "Revoked",
+            Self::Expired => "Expired",
+        }
+    }
+}
+
+impl fmt::Display for CapabilityLifecycleState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.tla_name())
+    }
+}
+
+impl TryFrom<&str> for CapabilityLifecycleState {
+    type Error = CapabilityLifecycleParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Approved" => Ok(Self::Approved),
+            "Used" => Ok(Self::Used),
+            "Revoked" => Ok(Self::Revoked),
+            "Expired" => Ok(Self::Expired),
+            _ => Err(CapabilityLifecycleParseError::UnknownState {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Abstract lifecycle transitions mirrored by the TLA+ action set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CapabilityLifecycleTransition {
+    Approve,
+    UseAndEmitReceipt,
+    RevokePending,
+    RevokeApproved,
+    ExpirePending,
+    ExpireApproved,
+    PushRevocation,
+    AdvanceRevocationClock,
+}
+
+impl CapabilityLifecycleTransition {
+    pub const ALL: [Self; 8] = [
+        Self::Approve,
+        Self::UseAndEmitReceipt,
+        Self::RevokePending,
+        Self::RevokeApproved,
+        Self::ExpirePending,
+        Self::ExpireApproved,
+        Self::PushRevocation,
+        Self::AdvanceRevocationClock,
+    ];
+
+    #[must_use]
+    pub const fn tla_name(self) -> &'static str {
+        match self {
+            Self::Approve => "Approve",
+            Self::UseAndEmitReceipt => "UseAndEmitReceipt",
+            Self::RevokePending => "RevokePending",
+            Self::RevokeApproved => "RevokeApproved",
+            Self::ExpirePending => "ExpirePending",
+            Self::ExpireApproved => "ExpireApproved",
+            Self::PushRevocation => "PushRevocation",
+            Self::AdvanceRevocationClock => "AdvanceRevocationClock",
+        }
+    }
+
+    #[must_use]
+    pub const fn from_state(self) -> CapabilityLifecycleState {
+        match self {
+            Self::Approve | Self::RevokePending | Self::ExpirePending => {
+                CapabilityLifecycleState::Pending
+            }
+            Self::UseAndEmitReceipt | Self::RevokeApproved | Self::ExpireApproved => {
+                CapabilityLifecycleState::Approved
+            }
+            Self::PushRevocation | Self::AdvanceRevocationClock => {
+                CapabilityLifecycleState::Revoked
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn to_state(self) -> CapabilityLifecycleState {
+        match self {
+            Self::Approve => CapabilityLifecycleState::Approved,
+            Self::UseAndEmitReceipt => CapabilityLifecycleState::Used,
+            Self::RevokePending | Self::RevokeApproved => CapabilityLifecycleState::Revoked,
+            Self::ExpirePending | Self::ExpireApproved => CapabilityLifecycleState::Expired,
+            Self::PushRevocation | Self::AdvanceRevocationClock => {
+                CapabilityLifecycleState::Revoked
+            }
+        }
+    }
+}
+
+impl fmt::Display for CapabilityLifecycleTransition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.tla_name())
+    }
+}
+
+impl TryFrom<&str> for CapabilityLifecycleTransition {
+    type Error = CapabilityLifecycleParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Approve" => Ok(Self::Approve),
+            "UseAndEmitReceipt" => Ok(Self::UseAndEmitReceipt),
+            "RevokePending" => Ok(Self::RevokePending),
+            "RevokeApproved" => Ok(Self::RevokeApproved),
+            "ExpirePending" => Ok(Self::ExpirePending),
+            "ExpireApproved" => Ok(Self::ExpireApproved),
+            "PushRevocation" => Ok(Self::PushRevocation),
+            "AdvanceRevocationClock" => Ok(Self::AdvanceRevocationClock),
+            _ => Err(CapabilityLifecycleParseError::UnknownTransition {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Unique abstract state edges in `CapabilityLifecycleTransition::ALL`.
+pub const CAPABILITY_LIFECYCLE_TRANSITIONS: &[(
+    CapabilityLifecycleState,
+    CapabilityLifecycleState,
+)] = &[
+    (
+        CapabilityLifecycleState::Pending,
+        CapabilityLifecycleState::Approved,
+    ),
+    (
+        CapabilityLifecycleState::Approved,
+        CapabilityLifecycleState::Used,
+    ),
+    (
+        CapabilityLifecycleState::Pending,
+        CapabilityLifecycleState::Revoked,
+    ),
+    (
+        CapabilityLifecycleState::Approved,
+        CapabilityLifecycleState::Revoked,
+    ),
+    (
+        CapabilityLifecycleState::Pending,
+        CapabilityLifecycleState::Expired,
+    ),
+    (
+        CapabilityLifecycleState::Approved,
+        CapabilityLifecycleState::Expired,
+    ),
+    (
+        CapabilityLifecycleState::Revoked,
+        CapabilityLifecycleState::Revoked,
+    ),
+];
+
+/// Error returned when parsing model labels from TLA+ fixtures.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CapabilityLifecycleParseError {
+    #[error("unknown capability lifecycle state {value}")]
+    UnknownState { value: String },
+    #[error("unknown capability lifecycle transition {value}")]
+    UnknownTransition { value: String },
+}
+
+/// Runtime lifecycle violation that corresponds to the TLA+ state machine.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CapabilityLifecycleError {
+    #[error("invalid capability lifecycle transition {transition} from {state}")]
+    InvalidTransition {
+        state: CapabilityLifecycleState,
+        transition: CapabilityLifecycleTransition,
+    },
+    #[error("capability token was already spent")]
+    AlreadyUsed,
+    #[error("capability token was revoked before use")]
+    RevokedBeforeUse,
+    #[error("capability token is expired")]
+    Expired,
+    #[error("revocation propagation exceeded bound ({age_steps} steps > {bound_steps} steps)")]
+    RevocationPropagationSloBreached { age_steps: u32, bound_steps: u32 },
+}
+
+/// Snapshot consumed by runtime assertions that mirror the TLA+ invariants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityLifecycleSnapshot {
+    pub state: CapabilityLifecycleState,
+    pub used_receipts: u8,
+    pub revoked_seen: bool,
+    pub revocation_pending: bool,
+    pub revocation_age_steps: u32,
+    pub revocation_propagation_bound: u32,
+}
+
+/// Assert runtime invariants mirrored by
+/// `specs/tla/capability_lifecycle.tla`.
+///
+/// # Panics
+/// Panics when a runtime state violates one of the named TLA+ invariants.
+pub fn assert_capability_lifecycle_invariants(snapshot: &CapabilityLifecycleSnapshot) {
+    assert!(
+        !(snapshot.revoked_seen && snapshot.used_receipts > 0),
+        "TLA_INVARIANT:RevokeBeforeUse revoked tokens cannot emit receipts"
+    );
+    assert!(
+        snapshot.used_receipts <= 1,
+        "TLA_INVARIANT:NoDoubleSpend capability tokens emit at most one receipt"
+    );
+    assert!(
+        !snapshot.revocation_pending
+            || snapshot.revocation_age_steps <= snapshot.revocation_propagation_bound,
+        "TLA_INVARIANT:RevocationPropagationSLO revocation push exceeded propagation bound"
+    );
+}
+
+/// Small runtime mirror for the capability lifecycle TLA+ model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityLifecycle {
+    state: CapabilityLifecycleState,
+    used_receipt_id: Option<ObjectId>,
+    revoked_seen: bool,
+    revocation_pending: bool,
+    revocation_age_steps: u32,
+    revocation_propagation_bound: u32,
+}
+
+impl CapabilityLifecycle {
+    #[must_use]
+    pub const fn pending(revocation_propagation_bound: u32) -> Self {
+        Self {
+            state: CapabilityLifecycleState::Pending,
+            used_receipt_id: None,
+            revoked_seen: false,
+            revocation_pending: false,
+            revocation_age_steps: 0,
+            revocation_propagation_bound,
+        }
+    }
+
+    #[must_use]
+    pub const fn approved(revocation_propagation_bound: u32) -> Self {
+        Self {
+            state: CapabilityLifecycleState::Approved,
+            used_receipt_id: None,
+            revoked_seen: false,
+            revocation_pending: false,
+            revocation_age_steps: 0,
+            revocation_propagation_bound,
+        }
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> CapabilityLifecycleState {
+        self.state
+    }
+
+    #[must_use]
+    pub const fn used_receipt_id(&self) -> Option<ObjectId> {
+        self.used_receipt_id
+    }
+
+    #[must_use]
+    pub const fn snapshot(&self) -> CapabilityLifecycleSnapshot {
+        CapabilityLifecycleSnapshot {
+            state: self.state,
+            used_receipts: if self.used_receipt_id.is_some() { 1 } else { 0 },
+            revoked_seen: self.revoked_seen,
+            revocation_pending: self.revocation_pending,
+            revocation_age_steps: self.revocation_age_steps,
+            revocation_propagation_bound: self.revocation_propagation_bound,
+        }
+    }
+
+    /// Move a pending token into the approved state.
+    ///
+    /// # Errors
+    /// Returns an error if the token is not pending.
+    pub fn approve(&mut self) -> Result<(), CapabilityLifecycleError> {
+        self.require_transition(CapabilityLifecycleTransition::Approve)?;
+        self.state = CapabilityLifecycleState::Approved;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    /// Spend an approved token and bind it to the emitted operation receipt.
+    ///
+    /// # Errors
+    /// Returns an error when the token is not approved, has already been used,
+    /// was revoked, or has expired.
+    pub fn mark_used(&mut self, receipt_id: ObjectId) -> Result<(), CapabilityLifecycleError> {
+        match self.state {
+            CapabilityLifecycleState::Approved => {
+                self.state = CapabilityLifecycleState::Used;
+                self.used_receipt_id = Some(receipt_id);
+                self.assert_invariants();
+                Ok(())
+            }
+            CapabilityLifecycleState::Used => Err(CapabilityLifecycleError::AlreadyUsed),
+            CapabilityLifecycleState::Revoked => Err(CapabilityLifecycleError::RevokedBeforeUse),
+            CapabilityLifecycleState::Expired => Err(CapabilityLifecycleError::Expired),
+            CapabilityLifecycleState::Pending => Err(CapabilityLifecycleError::InvalidTransition {
+                state: self.state,
+                transition: CapabilityLifecycleTransition::UseAndEmitReceipt,
+            }),
+        }
+    }
+
+    /// Revoke a pending or approved token before it can emit a receipt.
+    ///
+    /// # Errors
+    /// Returns an error if the token has already reached a terminal state.
+    pub fn revoke(&mut self) -> Result<(), CapabilityLifecycleError> {
+        let transition = match self.state {
+            CapabilityLifecycleState::Pending => CapabilityLifecycleTransition::RevokePending,
+            CapabilityLifecycleState::Approved => CapabilityLifecycleTransition::RevokeApproved,
+            CapabilityLifecycleState::Used => return Err(CapabilityLifecycleError::AlreadyUsed),
+            CapabilityLifecycleState::Revoked | CapabilityLifecycleState::Expired => {
+                return Err(CapabilityLifecycleError::InvalidTransition {
+                    state: self.state,
+                    transition: CapabilityLifecycleTransition::RevokeApproved,
+                });
+            }
+        };
+        self.require_transition(transition)?;
+        self.state = CapabilityLifecycleState::Revoked;
+        self.revoked_seen = true;
+        self.revocation_pending = true;
+        self.revocation_age_steps = 0;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    /// Expire a pending or approved token.
+    ///
+    /// # Errors
+    /// Returns an error if the token has already reached a terminal state.
+    pub fn expire(&mut self) -> Result<(), CapabilityLifecycleError> {
+        let transition = match self.state {
+            CapabilityLifecycleState::Pending => CapabilityLifecycleTransition::ExpirePending,
+            CapabilityLifecycleState::Approved => CapabilityLifecycleTransition::ExpireApproved,
+            CapabilityLifecycleState::Used => return Err(CapabilityLifecycleError::AlreadyUsed),
+            CapabilityLifecycleState::Revoked => {
+                return Err(CapabilityLifecycleError::RevokedBeforeUse);
+            }
+            CapabilityLifecycleState::Expired => return Err(CapabilityLifecycleError::Expired),
+        };
+        self.require_transition(transition)?;
+        self.state = CapabilityLifecycleState::Expired;
+        self.revocation_pending = false;
+        self.revocation_age_steps = 0;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    /// Mark that revocation propagation reached the local executor.
+    ///
+    /// # Errors
+    /// Returns an error if there is no pending revocation push.
+    pub fn push_revocation(&mut self) -> Result<(), CapabilityLifecycleError> {
+        self.require_transition(CapabilityLifecycleTransition::PushRevocation)?;
+        if !self.revocation_pending {
+            return Err(CapabilityLifecycleError::InvalidTransition {
+                state: self.state,
+                transition: CapabilityLifecycleTransition::PushRevocation,
+            });
+        }
+        self.revocation_pending = false;
+        self.revocation_age_steps = 0;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    /// Advance the abstract revocation propagation clock by one step.
+    ///
+    /// # Errors
+    /// Returns an error when advancing would breach the propagation SLO.
+    pub fn advance_revocation_clock(&mut self) -> Result<(), CapabilityLifecycleError> {
+        self.require_transition(CapabilityLifecycleTransition::AdvanceRevocationClock)?;
+        if !self.revocation_pending {
+            return Err(CapabilityLifecycleError::InvalidTransition {
+                state: self.state,
+                transition: CapabilityLifecycleTransition::AdvanceRevocationClock,
+            });
+        }
+        let next_age = self.revocation_age_steps.saturating_add(1);
+        if next_age > self.revocation_propagation_bound {
+            return Err(CapabilityLifecycleError::RevocationPropagationSloBreached {
+                age_steps: next_age,
+                bound_steps: self.revocation_propagation_bound,
+            });
+        }
+        self.revocation_age_steps = next_age;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    fn require_transition(
+        &self,
+        transition: CapabilityLifecycleTransition,
+    ) -> Result<(), CapabilityLifecycleError> {
+        if transition.from_state() == self.state {
+            Ok(())
+        } else {
+            Err(CapabilityLifecycleError::InvalidTransition {
+                state: self.state,
+                transition,
+            })
+        }
+    }
+
+    fn assert_invariants(&self) {
+        assert_capability_lifecycle_invariants(&self.snapshot());
+    }
+}
+
 /// Bridge trait for promoting a bound token after request-level constraint
 /// evaluation.
 ///
@@ -1202,6 +1655,21 @@ impl<S> Clone for CapabilityToken<S> {
 impl<S> From<&Self> for CapabilityToken<S> {
     fn from(token: &Self) -> Self {
         token.clone()
+    }
+}
+
+/// Hybrid signed capability-token envelope.
+pub type HybridSignedCapabilityToken<S = Unverified> = SignedEnvelope<CapabilityToken<S>>;
+
+impl<S> HybridSignable for CapabilityToken<S> {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::CapabilityToken;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let token_cbor = self.raw.to_cbor()?;
+        Ok(signing_bytes_for_canonical_payload(
+            Self::OBJECT_KIND,
+            &token_cbor,
+        ))
     }
 }
 
@@ -1646,7 +2114,8 @@ impl CapabilityConstraints {
     /// # Errors
     ///
     /// Returns `CredentialValidationError::NotInCredentialAllow` if the credential
-    /// is not in `credential_allow` and `credential_allow` is non-empty.
+    /// is not in `credential_allow`. An empty `credential_allow` denies every
+    /// credential (default deny, C3.4).
     pub fn validate_credential(
         &self,
         credential_id: &CredentialId,
@@ -2324,7 +2793,7 @@ impl CapabilityVerifier {
             // loop iterates zero times and the allow-list silently
             // passes — a resource-scoped token ends up usable for
             // arbitrary resources. All ~76 connector call sites
-            // currently invoke `verifier.verify(.., &[])` regardless of
+            // currently invoke `verifier.verify_bound(.., &[])` regardless of
             // whether the operation targets a specific resource, so a
             // host that issues `resource_allow = ["notion://page/123"]`
             // cannot rely on the scope being enforced downstream. A
@@ -2945,7 +3414,7 @@ pub enum TaintLevel {
 /// A step in the provenance chain.
 ///
 /// Per FCP Specification Section 7.2.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceStep {
     /// Timestamp in milliseconds since epoch
     pub timestamp_ms: u64,
@@ -2971,7 +3440,7 @@ pub struct ProvenanceStep {
 /// - `taint`: Highest taint severity observed in the chain
 /// - `elevated`: Whether explicit elevation has been granted
 /// - `elevation_token`: Token proving elevation (if elevated)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     /// The zone where the request/data originated
     pub origin_zone: ZoneId,
@@ -3136,7 +3605,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, expires)
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .expect("Failed to sign token");
 
@@ -3171,7 +3641,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3202,7 +3673,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3233,7 +3705,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3252,7 +3725,7 @@ mod tests {
         // resource_allow pattern must not silently pass when the caller
         // provides no resource URIs. Historically the allow-list loop
         // iterated zero times, so a scoped token was usable for arbitrary
-        // resources — the ~76 `verifier.verify(.., &[])` call sites in
+        // resources — the ~76 `verifier.verify_bound(.., &[])` call sites in
         // the connector tree would all benefit from this guard.
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -3266,9 +3739,10 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
-                "notion://page/123".into(),
+            .try_constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
+                "notion://page/123".to_string(),
             ]))
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3301,9 +3775,10 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
-                "notion://page/*".into(),
+            .try_constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
+                "notion://page/*".to_string(),
             ]))
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3335,7 +3810,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3363,7 +3839,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3392,7 +3869,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3422,7 +3900,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3458,7 +3937,8 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor())
+                .expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3494,7 +3974,8 @@ mod tests {
                 now - Duration::hours(2),
                 now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1),
             )
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3525,7 +4006,8 @@ mod tests {
                 now - Duration::hours(1),
                 now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS - 1),
             )
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3557,7 +4039,8 @@ mod tests {
                 now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS - 1),
                 now + Duration::hours(1),
             )
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3589,7 +4072,8 @@ mod tests {
                 now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1),
                 now + Duration::hours(1),
             )
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3626,7 +4110,8 @@ mod tests {
             .not_before(now)
             .expiration(now + Duration::hours(1))
             .operations(&["op.test"])
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             // Set INSTANCE_ID as an Integer instead of Text — pre-fix this
             // would let any verifier accept the token regardless of its
             // configured instance_id.
@@ -3671,7 +4156,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .target_instance(instance_id.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -3708,7 +4194,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .target_instance(token_instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -3742,7 +4229,8 @@ mod tests {
             .not_before(now)
             .expiration(now + Duration::hours(1))
             .operations(&["op.test"])
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .custom(
                 fcp_crypto::cose::fcp2_claims::INSTANCE_ID,
                 ciborium::Value::Integer(0_i64.into()),
@@ -3779,7 +4267,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3815,7 +4304,8 @@ mod tests {
             .operations(&["op.test"]) // legacy-only shape
             .issued_at(now)
             .expiration(now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor());
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints");
         let cose_token = fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).unwrap();
         let token = CapabilityToken::from_raw(cose_token);
 
@@ -3852,7 +4342,8 @@ mod tests {
             .zone_id("z:work")
             .issued_at(now)
             .expiration(now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .custom(fcp2_claims::GRANTS, grants)
             .custom(
                 fcp2_claims::SCHEMA_VERSION,
@@ -3899,7 +4390,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .target_instance(instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -4015,7 +4507,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose);
@@ -4046,7 +4539,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose);
@@ -4087,7 +4581,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .target_instance(instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -5453,9 +5948,18 @@ mod tests {
     }
 
     #[test]
-    fn zone_id_with_hyphens_and_underscores() {
-        let z: ZoneId = "z:my-custom_zone".parse().unwrap();
-        assert_eq!(z.as_str(), "z:my-custom_zone");
+    fn zone_id_with_hyphens_allowed_underscores_rejected() {
+        // Hyphens are valid zone-id characters; underscores were removed
+        // from the charset (4728b8918) so zone ids stay representable as
+        // Tailscale ACL tags, which forbid `_`.
+        let z: ZoneId = "z:my-custom-zone".parse().unwrap();
+        assert_eq!(z.as_str(), "z:my-custom-zone");
+
+        let err = "z:my-custom_zone".parse::<ZoneId>().unwrap_err();
+        assert!(
+            matches!(err, ZoneIdError::InvalidChar { ch: '_', .. }),
+            "underscore should be rejected, got {err:?}"
+        );
     }
 
     #[test]
@@ -6329,7 +6833,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6416,7 +6921,8 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6447,7 +6953,8 @@ mod tests {
             .operations(&["op.read"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6468,14 +6975,17 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.raw")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.raw"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6483,12 +6993,12 @@ mod tests {
         let unverified = CapabilityToken::from_raw(cose_token);
         let _raw_unverified = unverified.raw().to_cbor().unwrap();
 
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.raw").unwrap();
         let cap = CapabilityId::new("cap.raw").unwrap();
 
         // raw() also works on CryptographicallyVerified (verify consumes the unverified token)
-        let result = verifier.verify(unverified, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(unverified, &cap, &op, &[]).unwrap();
         let _raw_verified = result.raw().to_cbor().unwrap();
     }
 
@@ -6506,7 +7016,8 @@ mod tests {
             .operations(&["op.down"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6537,7 +7048,8 @@ mod tests {
             .operations(&["op.ref"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6567,23 +7079,26 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.clone")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.clone"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.clone").unwrap();
         let cap = CapabilityId::new("cap.clone").unwrap();
 
-        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
 
         // Clone a verified token - clone preserves CryptographicallyVerified state
         let cloned = result;
@@ -6610,7 +7125,8 @@ mod tests {
             .operations(&["op.raw"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6628,24 +7144,27 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.consume")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.consume"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.consume").unwrap();
         let cap = CapabilityId::new("cap.consume").unwrap();
 
         // verify() takes ownership — `token` is moved here
-        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
 
         // `token` cannot be used after this point (compiler enforces)
         // CryptographicallyVerified token works:
@@ -6661,19 +7180,22 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.noncon")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.noncon"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.noncon").unwrap();
         let cap = CapabilityId::new("cap.noncon").unwrap();
 
@@ -6683,7 +7205,7 @@ mod tests {
 
         // Token is still usable — can call raw() or verify() again
         let _raw = token.raw().to_cbor().unwrap();
-        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
         assert_eq!(result.claims().get_zone_id(), Some("z:work"));
     }
 
@@ -6695,24 +7217,27 @@ mod tests {
         let pub_bytes = verifying_key.to_bytes();
         let now = Utc::now();
 
+        let instance = InstanceId::new();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.serde")
             .zone_id("z:work")
             .principal("user:test")
             .operations(&["op.serde"])
             .issuer("node:primary")
+            .target_instance(instance.as_str())
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let op = OperationId::new("op.serde").unwrap();
         let cap = CapabilityId::new("cap.serde").unwrap();
 
         // Verify first, then serialize the verified token
-        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
         let bytes = result.raw().to_cbor().unwrap();
 
         // Deserialize produces Unverified, not CryptographicallyVerified
@@ -6720,7 +7245,7 @@ mod tests {
         let deserialized: CapabilityToken<Unverified> = CapabilityToken::from_raw(raw);
 
         // Must verify again to access claims
-        let re_verified = verifier.verify(deserialized, &cap, &op, &[]).unwrap();
+        let re_verified = verifier.verify_bound(deserialized, &cap, &op, &[]).unwrap();
         assert_eq!(re_verified.claims().get_capability_id(), Some("cap.serde"));
     }
 
@@ -6740,7 +7265,8 @@ mod tests {
             .operations(&["op.expired"])
             .issuer("node:primary")
             .validity(now - Duration::hours(2), now - Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6749,7 +7275,7 @@ mod tests {
         let op = OperationId::new("op.expired").unwrap();
         let cap = CapabilityId::new("cap.expired").unwrap();
 
-        let result = verifier.verify(token, &cap, &op, &[]);
+        let result = verifier.verify_bound(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::TokenExpired)));
     }
 
@@ -6768,7 +7294,8 @@ mod tests {
             .operations(&["op.zone"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6778,7 +7305,7 @@ mod tests {
         let op = OperationId::new("op.zone").unwrap();
         let cap = CapabilityId::new("cap.zone").unwrap();
 
-        let result = verifier.verify(token, &cap, &op, &[]);
+        let result = verifier.verify_bound(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::ZoneViolation { .. })));
     }
 
@@ -6797,7 +7324,8 @@ mod tests {
             .operations(&["op.sig"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6807,7 +7335,7 @@ mod tests {
         let op = OperationId::new("op.sig").unwrap();
         let cap = CapabilityId::new("cap.sig").unwrap();
 
-        let result = verifier.verify(token, &cap, &op, &[]);
+        let result = verifier.verify_bound(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::InvalidSignature)));
     }
 

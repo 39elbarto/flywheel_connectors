@@ -25,7 +25,7 @@ fn promoted_wrapped_zone_key_v4_derives_same_effective_zone_key_bytes() {
     let promoted_v4 = v3_wrap.to_v4();
     assert_eq!(promoted_v4.sealed.kem(), ZoneKemAlgorithm::HpkeX25519);
 
-    let WrappedKey::HpkeX25519 { sealed } = promoted_v4.sealed.clone() else {
+    let WrappedKey::HpkeX25519 { sealed } = promoted_v4.sealed else {
         panic!("promoted V4 wrap must retain HPKE sealed box");
     };
     let v4_as_legacy = WrappedZoneKey {

@@ -461,7 +461,7 @@ impl BridgeManager {
     pub async fn sync_groups(
         &self,
         client: &SignalClient,
-        runtime: &fcp_sdk::migration::ConnectorRuntime,
+        runtime: &fcp_sdk::ConnectorRuntime,
     ) -> SignalResult<Vec<GroupInfo>> {
         debug!("Synchronizing Signal groups");
         let groups = client.list_groups(runtime).await?;
@@ -571,6 +571,109 @@ pub struct BridgeDiagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    struct LoopbackHttpServer {
+        uri: String,
+        handle: thread::JoinHandle<()>,
+    }
+
+    struct LoopbackHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: String,
+    }
+
+    impl LoopbackHttpServer {
+        fn start(responses: Vec<LoopbackHttpResponse>) -> Self {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind Signal loopback HTTP listener");
+            let address = listener.local_addr().expect("Signal listener address");
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (mut stream, _) = listener
+                        .accept()
+                        .expect("accept Signal loopback HTTP client");
+                    let request = read_http_request(&mut stream);
+                    let first_line = request.lines().next().unwrap_or_default();
+                    let expected_prefix = format!("{} {}", response.method, response.path);
+                    assert!(
+                        first_line.starts_with(&expected_prefix),
+                        "unexpected Signal HTTP request line: {first_line:?}",
+                    );
+                    write_http_response(&mut stream, &response);
+                }
+            });
+
+            Self {
+                uri: format!("http://{address}"),
+                handle,
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn join(self) {
+            self.handle
+                .join()
+                .expect("Signal loopback HTTP thread should finish");
+        }
+    }
+
+    impl LoopbackHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: &serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: serde_json::to_string(body).expect("Signal JSON response should serialize"),
+            }
+        }
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 512];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream
+                .read(&mut buf)
+                .expect("read Signal loopback HTTP request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn write_http_response(stream: &mut TcpStream, response: &LoopbackHttpResponse) {
+        let reason = "OK";
+        let message = format!(
+            "HTTP/1.1 {} {reason}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            response.status,
+            response.body.len(),
+            response.body,
+        );
+        stream
+            .write_all(message.as_bytes())
+            .expect("write Signal loopback HTTP response");
+        stream.flush().expect("flush Signal loopback HTTP response");
+    }
 
     // -- BridgeConfig tests --
 
@@ -1000,24 +1103,22 @@ mod tests {
         assert_eq!(decoded, original);
     }
 
-    // -- Health check integration tests (with wiremock) --
+    // -- Health check integration tests --
 
     #[fcp_async_core::runtime::test]
     async fn manager_health_check_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/about"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "versions": ["v1", "v2"],
-                    "build": 1
-                })),
-            )
-            .mount(&mock_server)
-            .await;
+        let server = LoopbackHttpServer::start(vec![LoopbackHttpResponse::json(
+            "GET",
+            "/v1/about",
+            200,
+            &serde_json::json!({
+                "versions": ["v1", "v2"],
+                "build": 1
+            }),
+        )]);
 
         let config = crate::types::SignalConfig::from_value(serde_json::json!({
-            "daemon_url": mock_server.uri(),
+            "daemon_url": server.uri(),
             "phone_number": "+15551234567"
         }))
         .unwrap();
@@ -1029,6 +1130,7 @@ mod tests {
         manager.health_check(&client).await.unwrap();
         assert!(manager.is_connected());
         assert_eq!(manager.consecutive_failures(), 0);
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
@@ -1056,19 +1158,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn manager_health_check_recovery() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/about"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "versions": ["v1", "v2"]
-                })),
-            )
-            .mount(&mock_server)
-            .await;
+        let server = LoopbackHttpServer::start(vec![LoopbackHttpResponse::json(
+            "GET",
+            "/v1/about",
+            200,
+            &serde_json::json!({
+                "versions": ["v1", "v2"]
+            }),
+        )]);
 
         let config = crate::types::SignalConfig::from_value(serde_json::json!({
-            "daemon_url": mock_server.uri(),
+            "daemon_url": server.uri(),
             "phone_number": "+15551234567"
         }))
         .unwrap();
@@ -1086,42 +1186,39 @@ mod tests {
         assert!(manager.is_connected());
         assert_eq!(manager.consecutive_failures(), 0);
         assert_eq!(manager.current_backoff_ms(), 0);
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
     async fn manager_sync_groups_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/groups/%2B15551234567"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+        let server = LoopbackHttpServer::start(vec![LoopbackHttpResponse::json(
+            "GET",
+            "/v1/groups/%2B15551234567",
+            200,
+            &serde_json::json!([
                     {
                         "id": "Z3JvdXBfMQ==",
                         "name": "Engineers",
-                        "members": ["+15551111111"],
-                        "admins": ["+15551111111"]
-                    },
-                    {
-                        "id": "Z3JvdXBfMg==",
-                        "name": "Design",
-                        "members": ["+15552222222"],
-                        "admins": []
-                    }
-                ])),
-            )
-            .mount(&mock_server)
-            .await;
+                    "members": ["+15551111111"],
+                    "admins": ["+15551111111"]
+                },
+                {
+                    "id": "Z3JvdXBfMg==",
+                    "name": "Design",
+                    "members": ["+15552222222"],
+                    "admins": []
+                }
+            ]),
+        )]);
 
         let config = crate::types::SignalConfig::from_value(serde_json::json!({
-            "daemon_url": mock_server.uri(),
+            "daemon_url": server.uri(),
             "phone_number": "+15551234567"
         }))
         .unwrap();
 
         let client = SignalClient::new(&config).unwrap();
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
+        let runtime = fcp_sdk::ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let manager = BridgeManager::with_defaults();
 
         let groups = manager.sync_groups(&client, &runtime).await.unwrap();
@@ -1129,6 +1226,7 @@ mod tests {
         assert_eq!(manager.cached_groups().len(), 2);
         assert_eq!(manager.cached_groups()[0].name, Some("Engineers".into()));
         assert!(!manager.group_sync_due()); // just synced
+        server.join();
     }
 
     #[test]

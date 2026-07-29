@@ -1,0 +1,19 @@
+name = "latency_spike_100x"
+blast_radius = 3
+recovery_objective_secs = 90
+
+[[rollback_steps]]
+name = "clear_latency_spike"
+action = "clear_tc_netem"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+rtt_multiplier = "100"
+
+[[rollback_steps]]
+name = "verify_latency_normalized"
+action = "wait_for_rtt_below_multiplier"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+max_multiplier = "2"

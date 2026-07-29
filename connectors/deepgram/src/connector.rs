@@ -1,12 +1,15 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_async_core::time;
-use fcp_manifest::ConnectorManifest;
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::{
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+};
 use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
 use reqwest::{
     Client, Method, RequestBuilder, StatusCode,
@@ -881,6 +884,21 @@ impl Default for DeepgramConnector {
 }
 
 fn operations_info() -> FcpResult<Vec<Value>> {
+    static OPERATIONS: OnceLock<FcpResult<Vec<Value>>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            Ok(ordered_manifest_operations()?
+                .into_iter()
+                .map(|(id, operation)| {
+                    let operation_info = operation_info_from_manifest(id, &operation);
+                    introspect_operation_from_manifest(operation_info, &operation)
+                })
+                .collect())
+        })
+        .clone()
+}
+
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
     let manifest = ConnectorManifest::parse_str(DEEPGRAM_MANIFEST_TOML).map_err(|error| {
         FcpError::Internal {
             message: format!("Embedded Deepgram manifest is invalid: {error}"),
@@ -892,10 +910,7 @@ fn operations_info() -> FcpResult<Vec<Value>> {
         let right_index = operation_order(right);
         left_index.cmp(&right_index).then_with(|| left.cmp(right))
     });
-    Ok(operations
-        .into_iter()
-        .map(|(id, operation)| operation_info_from_manifest(id, operation))
-        .collect())
+    Ok(operations)
 }
 
 fn operation_order(operation_id: &str) -> usize {
@@ -905,39 +920,49 @@ fn operation_order(operation_id: &str) -> usize {
         .unwrap_or(OPERATION_ORDER.len())
 }
 
-fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
-    let mut entry = serde_json::Map::new();
-    entry.insert("id".into(), Value::String(id));
-    entry.insert(
-        "summary".into(),
-        Value::String(operation.description.clone()),
-    );
-    entry.insert("description".into(), Value::String(operation.description));
-    entry.insert(
-        "capability".into(),
-        Value::String(operation.capability.as_str().to_string()),
-    );
-    entry.insert("risk_level".into(), json!(operation.risk_level));
-    entry.insert("safety_tier".into(), json!(operation.safety_tier));
-    entry.insert("idempotency".into(), json!(operation.idempotency));
-    entry.insert(
-        "requires_approval".into(),
-        json!(operation.requires_approval),
-    );
-    entry.insert(
-        "revocation_freshness".into(),
-        json!(operation.revocation_freshness),
-    );
-    entry.insert("input_schema".into(), operation.input_schema);
-    entry.insert("output_schema".into(), operation.output_schema);
-    entry.insert("ai_hints".into(), json!(operation.ai_hints));
-    if let Some(rate_limit) = operation.rate_limit {
-        entry.insert("rate_limit".into(), json!(rate_limit));
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
-    if let Some(network_constraints) = operation.network_constraints {
-        entry.insert("network_constraints".into(), json!(network_constraints));
+}
+
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata =
+        serde_json::to_value(operation_info).expect("Deepgram operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
     }
-    Value::Object(entry)
+    metadata
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 fn deferred_operations_info() -> Vec<Value> {
@@ -1417,8 +1442,6 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, header, method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn config_requires_exactly_one_auth_source() {
@@ -1528,33 +1551,6 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn self_check_performs_authenticated_project_probe() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/projects"))
-            .and(header("authorization", "Token test-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "projects": [] })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let mut connector = DeepgramConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "test-key",
-                "base_url": server.uri()
-            }))
-            .await
-            .expect("expected configure to succeed");
-
-        let self_check = connector
-            .handle_self_check()
-            .await
-            .expect("expected self-check result");
-        assert_eq!(self_check["status"], "ok");
-    }
-
-    #[fcp_async_core::runtime::test]
     async fn doctor_requires_handshake_before_reporting_healthy() {
         let mut connector = DeepgramConnector::new();
         connector
@@ -1570,126 +1566,10 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn upstream_retry_after_hint_is_preserved() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/projects"))
-            .and(header("authorization", "Token test-key"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("Retry-After", "7")
-                    .set_body_string("{\"error\":\"slow down\"}"),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let config = DeepgramConfig::from_params(&json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("expected valid config");
-        let client = DeepgramClient::new(&config).expect("expected client");
-        let error = client
-            .get_json("/v1/projects")
-            .await
-            .expect_err("expected rate-limited error");
-
-        assert!(
-            matches!(error, FcpError::External { .. }),
-            "expected external error, got {error:?}"
-        );
-        if let FcpError::External {
-            status_code,
-            retry_after,
-            retryable,
-            ..
-        } = error
-        {
-            assert_eq!(status_code, Some(429));
-            assert_eq!(retry_after, Some(Duration::from_secs(7)));
-            assert!(retryable);
-        }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn transcribe_uses_openclaw_aligned_default_model_when_omitted() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/listen"))
-            .and(query_param("model", DEFAULT_TRANSCRIPTION_MODEL))
-            .and(header("authorization", "Token test-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "results": {
-                    "channels": [{
-                        "alternatives": [{
-                            "transcript": "hello with default model"
-                        }]
-                    }]
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let config = DeepgramConfig::from_params(&json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("expected valid config");
-        let client = DeepgramClient::new(&config).expect("expected client");
-        client
-            .transcribe(&json!({
-                "audio_url": "https://example.test/audio.wav"
-            }))
-            .await
-            .expect("default model transcription should succeed");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn transcribe_strips_audio_url_credentials_and_fragment() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/listen"))
-            .and(query_param("model", DEFAULT_TRANSCRIPTION_MODEL))
-            .and(header("authorization", "Token test-key"))
-            .and(body_json(json!({
-                "url": "https://media.example.test/audio.wav?download=1"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "results": {
-                    "channels": [{
-                        "alternatives": [{
-                            "transcript": "sanitized"
-                        }]
-                    }]
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let config = DeepgramConfig::from_params(&json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("expected valid config");
-        let client = DeepgramClient::new(&config).expect("expected client");
-        client
-            .transcribe(&json!({
-                "audio_url": "https://user:secret@media.example.test/audio.wav?download=1#secret-fragment",
-                "media_byte_count": 12_u64
-            }))
-            .await
-            .expect("sanitized transcription should succeed");
-    }
-
-    #[fcp_async_core::runtime::test]
     async fn transcribe_rejects_insecure_audio_url_before_network_io() {
-        let server = MockServer::start().await;
         let config = DeepgramConfig::from_params(&json!({
             "api_key": "test-key",
-            "base_url": server.uri()
+            "base_url": "http://127.0.0.1:1"
         }))
         .expect("expected valid config");
         let client = DeepgramClient::new(&config).expect("expected client");
@@ -1706,10 +1586,9 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn transcribe_rejects_declared_oversized_media_before_network_io() {
-        let server = MockServer::start().await;
         let config = DeepgramConfig::from_params(&json!({
             "api_key": "test-key",
-            "base_url": server.uri()
+            "base_url": "http://127.0.0.1:1"
         }))
         .expect("expected valid config");
         let client = DeepgramClient::new(&config).expect("expected client");

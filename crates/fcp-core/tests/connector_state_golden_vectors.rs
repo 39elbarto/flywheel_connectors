@@ -19,6 +19,11 @@ use fcp_core::{
     ZoneId, validate_singleton_writer_fencing,
 };
 use semver::Version;
+use sha2::{Digest, Sha256};
+
+const SNAPSHOT_GOLDEN_SEQ_100_SHA256: &str =
+    "dd6fb52043bc2d6bac665a90299c69c0aac69c7b975a45b1345500ade6368950";
+const SNAPSHOT_GOLDEN_SEQ_100_LEN: usize = 404;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test Helpers
@@ -101,6 +106,7 @@ fn create_test_state_object(
         updated_at: 1000_u64.saturating_add(seq.saturating_mul(100)),
         lease_seq,
         lease_object_id,
+        writer_public_key: [0u8; 32],
         signature: test_signature(),
     }
 }
@@ -123,7 +129,11 @@ fn connector_state_snapshot_golden_path(connector_id: &ConnectorId, seq: u64) ->
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("golden")
         .join("connector_state_snapshot")
-        .join(connector_id.as_str())
+        // Sanitize the connector id for the on-disk path: a ConnectorId's canonical
+        // `name:archetype:version` form contains colons, which are illegal in Windows
+        // (NTFS) filenames and abort `git checkout` on Windows runners (exit 128). The
+        // golden's *content* still serializes the real (colon-bearing) id.
+        .join(connector_id.as_str().replace(':', "_"))
         .join(format!("{seq}.cbor"))
 }
 
@@ -181,6 +191,7 @@ mod cbor_golden_vectors {
         assert_eq!(obj.state_cbor, restored.state_cbor);
         assert_eq!(obj.lease_seq, restored.lease_seq);
         assert_eq!(obj.lease_object_id, restored.lease_object_id);
+        assert_eq!(obj.writer_public_key, restored.writer_public_key);
     }
 
     #[test]
@@ -208,13 +219,18 @@ mod cbor_golden_vectors {
 
         let path =
             connector_state_snapshot_golden_path(&snapshot.connector_id, snapshot.covers_seq);
-        fs::create_dir_all(path.parent().expect("golden vector should have parent"))
-            .expect("golden vector directory should be created");
-        if !path.exists() {
-            fs::write(&path, &cbor).expect("golden vector should be written");
-        }
+        assert!(
+            path.is_file(),
+            "connector-state snapshot golden vector is missing: {}",
+            path.display()
+        );
 
         let stored = fs::read(&path).expect("golden vector should be readable");
+        assert_eq!(stored.len(), SNAPSHOT_GOLDEN_SEQ_100_LEN);
+        assert_eq!(
+            hex::encode(Sha256::digest(&stored)),
+            SNAPSHOT_GOLDEN_SEQ_100_SHA256
+        );
         assert_eq!(
             stored,
             cbor,
@@ -575,6 +591,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 42,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -601,6 +618,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 42,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -634,6 +652,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 42, // State object has old lease_seq
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -667,6 +686,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 42,
             lease_object_id: lease_id, // References lease_id but it's not in refs
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -699,6 +719,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 100,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -725,6 +746,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 200, // Higher than current_known_seq
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -780,6 +802,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 50, // Old lease
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -1224,7 +1247,8 @@ mod adversarial_tests {
             updated_at: 1000,
             lease_seq: 999,                 // Claims high lease_seq
             lease_object_id: fake_lease_id, // But lease not in refs
-            signature: Signature::zero(),   // Invalid signature
+            writer_public_key: [0u8; 32],
+            signature: Signature::zero(), // Invalid signature
         };
 
         // Fencing check fails: lease not in refs
@@ -1300,6 +1324,7 @@ mod adversarial_tests {
             updated_at: 1999, // Just before expiry
             lease_seq: 42,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 

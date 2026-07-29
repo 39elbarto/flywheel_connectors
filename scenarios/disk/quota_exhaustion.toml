@@ -1,0 +1,19 @@
+name = "quota_exhaustion"
+blast_radius = 1
+recovery_objective_secs = 30
+
+[[rollback_steps]]
+name = "restore_zone_write_quota"
+action = "restore_synthetic_zone_quota"
+target = "z:project:chaos"
+
+[rollback_steps.args]
+quota_profile = "baseline"
+
+[[rollback_steps]]
+name = "verify_write_budget_released"
+action = "verify_write_budget_available"
+target = "audit_write_path"
+
+[rollback_steps.args]
+timeout_secs = "30"

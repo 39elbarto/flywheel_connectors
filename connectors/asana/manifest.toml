@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:09ce98d5942ab8eede6aee19dfead6b707a3e070299deb0055e3cd65c3006593"
+interface_hash = "blake3-256:fcp.interface.v2:ba198b829faf33057ee13238a05202bd9013ff30c0b1c8f386ca89ad9a038da5"
 
 [connector]
 id = "fcp.asana"
@@ -163,6 +163,62 @@ examples = ['{"workspace": "1234567890", "name": "Fix login timeout", "notes": "
 related = [
     "asana.tasks.list",
     "asana.tasks.delete",
+]
+
+[provides.operations."asana.tasks.update"]
+description = "Update an existing task"
+capability = "asana.tasks.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."asana.tasks.update".input_schema]
+required = ["task_gid"]
+type = "object"
+
+[provides.operations."asana.tasks.update".input_schema.properties.name]
+type = "string"
+
+[provides.operations."asana.tasks.update".input_schema.properties.notes]
+type = "string"
+
+[provides.operations."asana.tasks.update".input_schema.properties.task_gid]
+description = "Task GID"
+type = "string"
+
+[provides.operations."asana.tasks.update".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."asana.tasks.update".output_schema.properties.data]
+type = "object"
+
+[provides.operations."asana.tasks.update".network_constraints]
+host_allow = ["app.asana.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."asana.tasks.update".ai_hints]
+when_to_use = "Update fields on an existing Asana task."
+common_mistakes = ["Omitting task_gid; it is required to identify which task to update."]
+examples = ['{"task_gid": "1234567890", "name": "Updated task name"}']
+related = [
+    "asana.tasks.get",
+    "asana.tasks.list",
 ]
 
 [provides.operations."asana.tasks.delete"]
@@ -353,5 +409,6 @@ scope = "instance"
 "asana.tasks.list" = ["asana.tasks.read"]
 "asana.workspaces.list" = ["asana.workspaces.read"]
 "asana.tasks.create" = ["asana.tasks.write"]
+"asana.tasks.update" = ["asana.tasks.write"]
 "asana.tasks.delete" = ["asana.tasks.delete"]
 "asana.projects.list" = ["asana.projects.read"]

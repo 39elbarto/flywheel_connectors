@@ -1650,11 +1650,11 @@ async fn recommendations_unwraps_tracks() {
 }
 
 // ============================================================
-// Empty response body from API (200 with empty body)
+// Empty response body from JSON API (200 with empty body)
 // ============================================================
 
 #[fcp_async_core::runtime::test]
-async fn empty_200_response() {
+async fn empty_200_profile_response_fails_closed() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/me"))
@@ -1668,10 +1668,9 @@ async fn empty_200_response() {
             "operation_id": "spotify.profile.get",
             "input": {}
         }))
-        .await
-        .unwrap();
-    // Empty body returns {} which wraps into {"profile": {}}
-    assert!(result["profile"].is_object());
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("empty response body"), "{err}");
 }
 
 // ============================================================

@@ -1,8 +1,10 @@
 //! Feishu/Lark API client.
 
 use fcp_prelude::log_redaction::redact_url;
+use fcp_sdk::ConnectorRuntime;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status,
+    transport_error_reached_service,
 };
 use fcp_sdk::retry::RetryDecision;
 use reqwest::{Client, Url};
@@ -12,6 +14,56 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, warn};
+use uuid::Uuid;
+
+/// Body field Feishu deduplicates messaging requests on.
+///
+/// Unlike Stripe's or Mastodon's header-based keys, Feishu takes the dedup
+/// value as a request-body field. Requests carrying the same value succeed at
+/// most once within an hour.
+const FEISHU_DEDUP_FIELD: &str = "uuid";
+
+/// Why replaying a Feishu POST cannot duplicate a side effect.
+///
+/// A 5xx or a timeout can both be reported after Feishu already acted, so
+/// retrying a POST needs one of these to hold (br-kxd3e).
+#[derive(Debug, Clone)]
+enum PostReplaySafety {
+    /// Feishu deduplicates on [`FEISHU_DEDUP_FIELD`]. Honoured by the message
+    /// send and reply endpoints.
+    DedupUuid(String),
+    /// Nothing to duplicate: either a read-only POST (Feishu models several
+    /// queries as `*_batch_query` POSTs) or an operation that converges on the
+    /// same state.
+    NothingToDuplicate,
+    /// No dedup mechanism, and a replay creates a second object.
+    NotSafe,
+}
+
+impl PostReplaySafety {
+    /// Mint a fresh dedup value for one logical send.
+    fn dedup_uuid() -> Self {
+        Self::DedupUuid(Uuid::new_v4().to_string())
+    }
+
+    /// Stamp the dedup value into the request body, if this endpoint takes one.
+    fn apply_to_body(&self, mut body: serde_json::Value) -> serde_json::Value {
+        if let Self::DedupUuid(value) = self
+            && let Some(object) = body.as_object_mut()
+        {
+            object.insert(
+                FEISHU_DEDUP_FIELD.to_owned(),
+                serde_json::Value::String(value.clone()),
+            );
+        }
+        body
+    }
+
+    /// Whether a request that reached Feishu may be sent again.
+    const fn is_replay_safe(&self) -> bool {
+        matches!(self, Self::DedupUuid(_) | Self::NothingToDuplicate)
+    }
+}
 
 use crate::error::{FeishuError, FeishuResult};
 use crate::types::{
@@ -191,7 +243,8 @@ impl FeishuClient {
         url.query_pairs_mut()
             .append_pair("receive_id_type", receive_id_type);
         let body = serde_json::to_value(req).map_err(FeishuError::Json)?;
-        self.post_api(runtime, &url, &body).await
+        self.post_api(runtime, &url, &body, PostReplaySafety::dedup_uuid())
+            .await
     }
 
     /// Reply to a message.
@@ -204,7 +257,8 @@ impl FeishuClient {
         let message_id = Self::sanitize_path_segment(message_id)?;
         let url = self.build_url(&["open-apis", "im", "v1", "messages", message_id, "reply"])?;
         let body = serde_json::to_value(req).map_err(FeishuError::Json)?;
-        self.post_api(runtime, &url, &body).await
+        self.post_api(runtime, &url, &body, PostReplaySafety::dedup_uuid())
+            .await
     }
 
     /// Get a message by ID.
@@ -339,8 +393,15 @@ impl FeishuClient {
             }],
             "with_url": true,
         });
-        let meta: DriveMetaBatchQueryResponse =
-            self.post_api(runtime, &meta_url, &meta_body).await?;
+        // Feishu models this lookup as a POST, but it only reads.
+        let meta: DriveMetaBatchQueryResponse = self
+            .post_api(
+                runtime,
+                &meta_url,
+                &meta_body,
+                PostReplaySafety::NothingToDuplicate,
+            )
+            .await?;
         let document = meta.metas.first().cloned().unwrap_or(DriveDocumentMeta {
             doc_token: Some(file_token.to_owned()),
             doc_type: Some(file_type.to_owned()),
@@ -362,11 +423,13 @@ impl FeishuClient {
             query.append_pair("file_type", file_type);
             query.append_pair("user_id_type", "open_id");
         }
+        // Also a read-only POST.
         let comment_batch: DriveCommentBatchQueryResponse = self
             .post_api(
                 runtime,
                 &comment_url,
                 &serde_json::json!({ "comment_ids": [comment_id] }),
+                PostReplaySafety::NothingToDuplicate,
             )
             .await?;
         let comment = comment_batch.items.first().cloned();
@@ -446,7 +509,9 @@ impl FeishuClient {
                 }],
             },
         });
-        self.post_api(runtime, &url, &body).await
+        // Drive comments take no dedup key, so a replay posts a second reply.
+        self.post_api(runtime, &url, &body, PostReplaySafety::NotSafe)
+            .await
     }
 
     /// Add a whole-document Feishu Drive comment.
@@ -473,7 +538,9 @@ impl FeishuClient {
                 "text": Self::escape_comment_text(text),
             }],
         });
-        self.post_api(runtime, &url, &body).await
+        // Same: a replay creates a SECOND comment on the document.
+        self.post_api(runtime, &url, &body, PostReplaySafety::NotSafe)
+            .await
     }
 
     /// Add or delete a Feishu Drive comment reaction.
@@ -503,7 +570,10 @@ impl FeishuClient {
             "reply_id": reply_id,
             "reaction_type": reaction_type,
         });
-        self.post_api(runtime, &url, &body).await
+        // The body names the target state (`action` is add or delete), so
+        // applying it twice converges rather than stacking.
+        self.post_api(runtime, &url, &body, PostReplaySafety::NothingToDuplicate)
+            .await
     }
 
     /// Health check: verify the Feishu API is reachable via token request.
@@ -607,17 +677,27 @@ impl FeishuClient {
     }
 
     /// Generic POST with API response extraction and retry.
+    ///
+    /// `replay_safety` states WHY replaying this POST cannot duplicate a side
+    /// effect — see [`PostReplaySafety`]. Every caller must supply one, so a
+    /// POST added later cannot inherit this retry loop without its author
+    /// deciding the question (br-kxd3e).
     async fn post_api<T: DeserializeOwned>(
         &self,
         runtime: &ConnectorRuntime,
         url: &Url,
         body: &serde_json::Value,
+        replay_safety: PostReplaySafety,
     ) -> FeishuResult<T> {
         let auth = format!("Bearer {}", self.ensure_tenant_access_token().await?);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let url = url.to_string();
-        let body_clone = body.clone();
+        // The dedup key is stamped into the body ONCE, before the retry loop,
+        // so every attempt sends the same value. A per-attempt uuid would look
+        // like protection while providing exactly zero.
+        let body_clone = replay_safety.apply_to_body(body.clone());
+        let replay_safe = replay_safety.is_replay_safe();
         let client = self.client.clone();
         let token_cache = Arc::clone(&self.tenant_access_token);
 
@@ -634,10 +714,14 @@ impl FeishuClient {
                 let resp = match request.send().await {
                     Ok(r) => r,
                     Err(e) => {
-                        return AttemptOutcome::Retryable {
-                            error: FeishuError::Http(e),
-                            retry_after: None,
-                        };
+                        // Only a connect-phase failure proves the request never
+                        // reached Feishu.
+                        let replayable = replay_safe || !transport_error_reached_service(&e);
+                        return AttemptOutcome::retryable_if_replayable(
+                            FeishuError::Http(e),
+                            None,
+                            replayable,
+                        );
                     }
                 };
 
@@ -677,10 +761,10 @@ impl FeishuClient {
                         message: text,
                     };
                     if !matches!(decision, RetryDecision::Terminal) {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
+                        // A 5xx means Feishu RECEIVED the request and may have
+                        // acted on it. 429 is handled above, before this gate,
+                        // because it was refused without being performed.
+                        return AttemptOutcome::retryable_if_replayable(err, None, replay_safe);
                     }
                     return AttemptOutcome::Terminal(err);
                 }
@@ -696,10 +780,9 @@ impl FeishuClient {
                         message: api_resp.msg,
                     };
                     if err.is_retryable() {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
+                        // Feishu's own retryable application codes are returned
+                        // with HTTP 200, so the request definitely arrived.
+                        return AttemptOutcome::retryable_if_replayable(err, None, replay_safe);
                     }
                     return AttemptOutcome::Terminal(err);
                 }
@@ -827,9 +910,123 @@ impl FeishuClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_sdk::migration::ConnectorRuntimeConfig;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use fcp_sdk::ConnectorRuntimeConfig;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Option<serde_json::Value>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: Some(body),
+            }
+        }
+
+        fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: None,
+            }
+        }
+    }
+
+    struct TestApiServer {
+        uri: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestApiServer {
+        fn start(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().unwrap();
+                    serve_response(stream, response);
+                }
+            });
+            Self {
+                uri: format!("http://{addr}"),
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test API server thread finished");
+            }
+        }
+    }
+
+    fn serve_response(mut stream: TcpStream, response: TestHttpResponse) {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default();
+        let target = parts.next().unwrap_or_default();
+        assert_eq!(method, response.method);
+        assert_eq!(target.split('?').next().unwrap_or(target), response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            let trimmed = header.trim_end();
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some(value) = trimmed.strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap();
+            } else if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+        }
+
+        let body = response
+            .body
+            .map(|body| body.to_string())
+            .unwrap_or_default();
+        let reason = match response.status {
+            200 => "OK",
+            500 => "Internal Server Error",
+            _ => "Test Status",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response.status,
+            reason,
+            body.len(),
+            body
+        )
+        .unwrap();
+    }
 
     #[test]
     fn client_creation() {
@@ -944,20 +1141,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/open-apis/auth/v3/tenant_access_token/internal",
+            200,
+            serde_json::json!({
                 "code": 0,
                 "msg": "ok",
                 "tenant_access_token": "t-test",
                 "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = FeishuClient::new(
-            &mock_server.uri(),
+            server.uri(),
             "cli_test",
             "secret",
             HttpRetryConfig::default(),
@@ -965,24 +1162,25 @@ mod tests {
         )
         .unwrap();
         assert!(client.health_check().await.is_ok());
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn obtain_tenant_token() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/open-apis/auth/v3/tenant_access_token/internal",
+            200,
+            serde_json::json!({
                 "code": 0,
                 "msg": "ok",
                 "tenant_access_token": "t-obtained",
                 "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = FeishuClient::new(
-            &mock_server.uri(),
+            server.uri(),
             "cli_test",
             "secret",
             HttpRetryConfig::default(),
@@ -992,19 +1190,19 @@ mod tests {
         let token = client.obtain_tenant_access_token().await.unwrap();
         assert_eq!(token, "t-obtained");
         assert!(client.auth_header().is_ok());
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_check_server_error() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::start(vec![TestHttpResponse::empty(
+            "POST",
+            "/open-apis/auth/v3/tenant_access_token/internal",
+            500,
+        )]);
 
         let client = FeishuClient::new(
-            &mock_server.uri(),
+            server.uri(),
             "cli_test",
             "secret",
             HttpRetryConfig::default(),
@@ -1012,24 +1210,28 @@ mod tests {
         )
         .unwrap();
         assert!(client.health_check().await.is_err());
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn list_chats_bootstraps_token_on_first_request() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                200,
+                serde_json::json!({
                 "code": 0,
                 "msg": "ok",
                 "tenant_access_token": "t-lazy",
                 "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/open-apis/im/v1/chats"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                }),
+            ),
+            TestHttpResponse::json(
+                "GET",
+                "/open-apis/im/v1/chats",
+                200,
+                serde_json::json!({
                 "code": 0,
                 "msg": "ok",
                 "data": {
@@ -1037,12 +1239,12 @@ mod tests {
                     "page_token": null,
                     "has_more": false
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            ),
+        ]);
 
         let client = FeishuClient::new(
-            &mock_server.uri(),
+            server.uri(),
             "cli_test",
             "secret",
             HttpRetryConfig::default(),
@@ -1055,6 +1257,7 @@ mod tests {
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].chat_id, "oc_123");
         assert_eq!(client.auth_header().unwrap(), "Bearer t-lazy");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]

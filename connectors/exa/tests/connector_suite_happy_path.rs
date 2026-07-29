@@ -214,7 +214,7 @@ fn search_invoke(id: &'static str) -> InvokeRequest {
 }
 
 fn suite_with_base_url(
-    base_url: String,
+    base_url: &str,
     test_name: &'static str,
     expect_error: bool,
     invoke: InvokeRequest,
@@ -236,7 +236,7 @@ fn suite_with_base_url(
 
 fn suite(server: &MockServer, test_name: &'static str, expect_error: bool) -> ConnectorSuite {
     suite_with_base_url(
-        server.uri(),
+        &server.uri(),
         test_name,
         expect_error,
         search_invoke(test_name),
@@ -308,7 +308,7 @@ async fn connector_suite_search_suffix_base_url_uses_single_search_path_and_clam
         .run_connector_suite(
             &mut connector,
             suite_with_base_url(
-                format!("{}/search/", server.uri()),
+                &format!("{}/search/", server.uri()),
                 "exa_search_connector_suite_base_url_suffix",
                 false,
                 search_invoke_with_input(

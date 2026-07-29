@@ -156,6 +156,7 @@ impl GooglePlacesClient {
             "place_details field mask",
         )?;
         let place = input.place.trim_start_matches('/');
+        validate_place_resource(place)?;
         let url = format!("{}/v1/{}", self.base_url, place);
         let mut request = self
             .client
@@ -169,172 +170,47 @@ impl GooglePlacesClient {
     }
 }
 
+/// Validate a Places resource name before interpolating it into the request
+/// path (`{base}/v1/{place}`).
+///
+/// A valid place resource is `places/{PLACE_ID}`, so the single structural `/`
+/// is allowed, but a literal `?` or `#` would inject a query string or fragment
+/// against the allowlisted Google host, and `..` / encoded slashes would
+/// traverse to a sibling endpoint. Mirrors the resource-name guard used by the
+/// google-chat / google-docs connectors.
+fn validate_place_resource(place: &str) -> GooglePlacesResult<()> {
+    let lower = place.to_ascii_lowercase();
+    if place.is_empty()
+        || place.contains("..")
+        || place.contains('?')
+        || place.contains('#')
+        || place.contains('\\')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(GooglePlacesError::Config(format!(
+            "place resource name contains invalid characters: {place:?}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
     use super::*;
 
-    #[fcp_async_core::runtime::test]
-    async fn text_search_uses_expected_endpoint_and_headers() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "places": [
-                    {
-                        "id": "abc",
-                        "displayName": { "text": "Coffee Shop" },
-                        "formattedAddress": "123 Main St"
-                    }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let config = GooglePlacesConfig::from_value(json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("config should parse");
-        let client = GooglePlacesClient::from_config(&config).expect("client should build");
-        let input = SearchTextInput::from_value(json!({
-            "query": "coffee",
-            "max_result_count": 3,
-            "open_now": true
-        }))
-        .expect("input should parse");
-        let result = client
-            .search_text(&input)
-            .await
-            .expect("search should succeed");
-        let requests = server
-            .received_requests()
-            .await
-            .expect("request recording should be enabled");
-        assert_eq!(requests.len(), 1);
-        let request = &requests[0];
-        assert_eq!(request.method, reqwest::Method::POST);
-        assert_eq!(request.url.path(), "/v1/places:searchText");
-        assert_eq!(
-            request
-                .headers
-                .get("x-goog-api-key")
-                .and_then(|value| value.to_str().ok()),
-            Some("test-key")
-        );
-        assert_eq!(
-            request
-                .headers
-                .get("x-goog-fieldmask")
-                .and_then(|value| value.to_str().ok()),
-            Some(config.search_text_field_mask.as_str())
-        );
-        assert_eq!(
-            request
-                .body_json::<serde_json::Value>()
-                .expect("request body should be valid JSON"),
-            json!({
-                "textQuery": "coffee",
-                "maxResultCount": 3,
-                "openNow": true
-            })
-        );
-        assert_eq!(result.places[0].id.as_deref(), Some("abc"));
+    #[test]
+    fn validate_place_resource_accepts_resource_name() {
+        assert!(validate_place_resource("places/ChIJN1t_tDeuEmsRUsoyG83frY4").is_ok());
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn get_place_uses_trimmed_resource_path() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/places/abc123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "abc123",
-                "displayName": { "text": "Cafe" }
-            })))
-            .mount(&server)
-            .await;
-
-        let config = GooglePlacesConfig::from_value(json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("config should parse");
-        let client = GooglePlacesClient::from_config(&config).expect("client should build");
-        let input = GetPlaceInput::from_value(json!({
-            "place": "/places/abc123",
-            "language_code": "en"
-        }))
-        .expect("input should parse");
-        let result = client
-            .get_place(&input)
-            .await
-            .expect("details should succeed");
-        assert_eq!(result.id.as_deref(), Some("abc123"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn autocomplete_uses_session_token_and_default_mask() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/places:autocomplete"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "suggestions": [
-                    {
-                        "placePrediction": {
-                            "place": "places/abc123",
-                            "placeId": "abc123",
-                            "text": { "text": "Coffee Shop" }
-                        }
-                    }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let config = GooglePlacesConfig::from_value(json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("config should parse");
-        let client = GooglePlacesClient::from_config(&config).expect("client should build");
-        let input = AutocompleteInput::from_value(json!({
-            "input": "coffee sh",
-            "session_token": "session-123"
-        }))
-        .expect("input should parse");
-        let result = client
-            .autocomplete(&input)
-            .await
-            .expect("autocomplete should succeed");
-        let requests = server
-            .received_requests()
-            .await
-            .expect("request recording should be enabled");
-        assert_eq!(requests.len(), 1);
-        let request = &requests[0];
-        assert_eq!(
-            request
-                .headers
-                .get("x-goog-fieldmask")
-                .and_then(|value| value.to_str().ok()),
-            Some(config.autocomplete_field_mask.as_str())
-        );
-        assert_eq!(
-            request
-                .body_json::<serde_json::Value>()
-                .expect("request body should be valid JSON"),
-            json!({
-                "input": "coffee sh",
-                "sessionToken": "session-123"
-            })
-        );
-        assert_eq!(
-            result.suggestions[0]
-                .place_prediction
-                .as_ref()
-                .and_then(|prediction| prediction.place.as_deref()),
-            Some("places/abc123")
-        );
+    #[test]
+    fn validate_place_resource_rejects_injection() {
+        assert!(validate_place_resource("").is_err());
+        assert!(validate_place_resource("places/abc?key=evil").is_err());
+        assert!(validate_place_resource("places/abc#frag").is_err());
+        assert!(validate_place_resource("places/../v1/other").is_err());
+        assert!(validate_place_resource("places\\abc").is_err());
+        assert!(validate_place_resource("places/abc%2f..").is_err());
     }
 }

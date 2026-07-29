@@ -28,6 +28,7 @@ use fcp_gitlab::connector::GitLabConnector;
 struct TestConnector {
     connector: GitLabConnector,
     signing_key: Ed25519SigningKey,
+    instance_id: String,
 }
 
 impl Deref for TestConnector {
@@ -72,6 +73,7 @@ impl TestConnector {
             "capability_token".into(),
             serde_json::to_value(generate_token_with_cap(
                 &self.signing_key,
+                &self.instance_id,
                 capability,
                 &[operation],
             ))
@@ -103,6 +105,7 @@ fn input_for_operation(operation: &str) -> Value {
 
 fn generate_token_with_cap(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -119,6 +122,7 @@ fn generate_token_with_cap(
         .principal("user:test")
         .operations(operations)
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .unwrap()
@@ -142,12 +146,15 @@ async fn setup_connector(mock_url: &str) -> TestConnector {
         .await
         .unwrap();
     let signing_key = Ed25519SigningKey::generate();
-    c.handle_handshake(handshake_params(&signing_key, "test"))
+    let handshake = c
+        .handle_handshake(handshake_params(&signing_key, "test"))
         .await
         .unwrap();
+    let instance_id = handshake["instance_id"].as_str().unwrap().to_string();
     TestConnector {
         connector: c,
         signing_key,
+        instance_id,
     }
 }
 
@@ -444,6 +451,7 @@ async fn invoke_wrong_capability_is_rejected() {
     let c = setup_connector(&server.uri()).await;
     let token = generate_token_with_cap(
         &c.signing_key,
+        &c.instance_id,
         "gitlab.projects.read",
         &["gitlab.issues.create"],
     );
@@ -494,6 +502,7 @@ async fn simulate_wrong_capability_is_denied() {
     let c = setup_connector(&server.uri()).await;
     let token = generate_token_with_cap(
         &c.signing_key,
+        &c.instance_id,
         "gitlab.projects.read",
         &["gitlab.issues.create"],
     );
@@ -929,6 +938,23 @@ async fn error_429_issues_create() {
         }))
         .await
         .is_err()
+    );
+}
+
+#[fcp_async_core::test]
+async fn error_200_empty_body_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/projects.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({"operation_id": "gitlab.projects.list", "input": {}}))
+            .await
+            .is_ok()
     );
 }
 

@@ -470,81 +470,98 @@ fn credential_pool_boundary_exercises_sdk_host_and_structured_skip() {
     )]));
     let client =
         RegistryBackedCredentialLeaseClient::new(key.clone(), registry, Arc::clone(&records));
-    let cx = fcp_async_core::Cx::for_testing();
-
-    let rate_limited = fcp_async_core::runtime::block_on_sync(
-        cx.get_credential_lease_with(
-            &client,
-            CredentialLeaseRequest::new(pool_reference_id())
-                .with_provider("groq")
-                .with_operation("chat.completions"),
-        ),
-    )
-    .unwrap()
-    .unwrap();
-    fcp_async_core::runtime::block_on_sync(
-        cx.report_credential_error(
-            &client,
-            CredentialErrorReport::new(
-                rate_limited.credential_id,
-                rate_limited.lease_token.clone(),
-                SdkCredentialErrorKind::RateLimited,
+    // asupersync 0.3.2 gates `Cx::for_testing` out of non-test builds; obtain
+    // the ambient runtime context inside each `block_on_sync` future (where it
+    // is installed) via `compatibility_cx()` rather than eagerly outside it.
+    let rate_limited = fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .get_credential_lease_with(
+                &client,
+                CredentialLeaseRequest::new(pool_reference_id())
+                    .with_provider("groq")
+                    .with_operation("chat.completions"),
             )
-            .with_retry_after_seconds(2),
-        ),
-    )
+            .await
+    })
+    .unwrap()
+    .unwrap();
+    fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .report_credential_error(
+                &client,
+                CredentialErrorReport::new(
+                    rate_limited.credential_id,
+                    rate_limited.lease_token.clone(),
+                    SdkCredentialErrorKind::RateLimited,
+                )
+                .with_retry_after_seconds(2),
+            )
+            .await
+    })
     .unwrap()
     .unwrap();
 
-    let rerouted = fcp_async_core::runtime::block_on_sync(
-        cx.get_credential_lease_with(
-            &client,
-            CredentialLeaseRequest::new(pool_reference_id())
-                .with_provider("groq")
-                .with_operation("chat.completions"),
-        ),
-    )
+    let rerouted = fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .get_credential_lease_with(
+                &client,
+                CredentialLeaseRequest::new(pool_reference_id())
+                    .with_provider("groq")
+                    .with_operation("chat.completions"),
+            )
+            .await
+    })
     .unwrap()
     .unwrap();
     assert_ne!(
         rerouted.credential_id, rate_limited.credential_id,
         "SDK-backed host client must route around a rate-limited credential"
     );
-    fcp_async_core::runtime::block_on_sync(
-        cx.release_credential_lease(&client, rerouted.release_request()),
-    )
+    fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .release_credential_lease(&client, rerouted.release_request())
+            .await
+    })
     .unwrap()
     .unwrap();
 
-    let auth_failed = fcp_async_core::runtime::block_on_sync(
-        cx.get_credential_lease_with(
-            &client,
-            CredentialLeaseRequest::new(pool_reference_id())
-                .with_provider("groq")
-                .with_operation("chat.completions"),
-        ),
-    )
+    let auth_failed = fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .get_credential_lease_with(
+                &client,
+                CredentialLeaseRequest::new(pool_reference_id())
+                    .with_provider("groq")
+                    .with_operation("chat.completions"),
+            )
+            .await
+    })
     .unwrap()
     .unwrap();
-    fcp_async_core::runtime::block_on_sync(cx.report_credential_error(
-        &client,
-        CredentialErrorReport::new(
-            auth_failed.credential_id,
-            auth_failed.lease_token.clone(),
-            SdkCredentialErrorKind::AuthFailed,
-        ),
-    ))
+    fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .report_credential_error(
+                &client,
+                CredentialErrorReport::new(
+                    auth_failed.credential_id,
+                    auth_failed.lease_token.clone(),
+                    SdkCredentialErrorKind::AuthFailed,
+                ),
+            )
+            .await
+    })
     .unwrap()
     .unwrap();
 
-    let denied = fcp_async_core::runtime::block_on_sync(
-        cx.get_credential_lease_with(
-            &client,
-            CredentialLeaseRequest::new(pool_reference_id())
-                .with_provider("forbidden-provider")
-                .with_operation("chat.completions"),
-        ),
-    )
+    let denied = fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .get_credential_lease_with(
+                &client,
+                CredentialLeaseRequest::new(pool_reference_id())
+                    .with_provider("forbidden-provider")
+                    .with_operation("chat.completions"),
+            )
+            .await
+    })
     .unwrap();
     assert!(matches!(
         denied,
@@ -553,14 +570,16 @@ fn credential_pool_boundary_exercises_sdk_host_and_structured_skip() {
 
     let exhausted_until = Utc::now() + ChronoDuration::seconds(5);
     client.set_all_cooldowns(exhausted_until).unwrap();
-    let exhausted = fcp_async_core::runtime::block_on_sync(
-        cx.get_credential_lease_with(
-            &client,
-            CredentialLeaseRequest::new(pool_reference_id())
-                .with_provider("groq")
-                .with_operation("chat.completions"),
-        ),
-    )
+    let exhausted = fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .get_credential_lease_with(
+                &client,
+                CredentialLeaseRequest::new(pool_reference_id())
+                    .with_provider("groq")
+                    .with_operation("chat.completions"),
+            )
+            .await
+    })
     .unwrap();
     assert!(matches!(
         exhausted,
@@ -568,14 +587,16 @@ fn credential_pool_boundary_exercises_sdk_host_and_structured_skip() {
     ));
 
     client.clear_all_cooldowns().unwrap();
-    let leaked_for_cleanup = fcp_async_core::runtime::block_on_sync(
-        cx.get_credential_lease_with(
-            &client,
-            CredentialLeaseRequest::new(pool_reference_id())
-                .with_provider("groq")
-                .with_operation("chat.completions"),
-        ),
-    )
+    let leaked_for_cleanup = fcp_async_core::runtime::block_on_sync(async {
+        fcp_async_core::compatibility_cx()
+            .get_credential_lease_with(
+                &client,
+                CredentialLeaseRequest::new(pool_reference_id())
+                    .with_provider("groq")
+                    .with_operation("chat.completions"),
+            )
+            .await
+    })
     .unwrap()
     .unwrap();
     assert!(credential_id_hash(leaked_for_cleanup.credential_id).starts_with("blake3:"));

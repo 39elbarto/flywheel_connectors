@@ -1,6 +1,7 @@
-//! Pin `HandshakeRequest` + `HandshakeResponse` + `HostInfo` + `TransportCaps`
-//! + `EventCaps` + `AuthCaps` + `OAuthConfig` JSON+CBOR roundtrip — the
-//! closest analogue to "MeshDiscovery serde" (flywheel_connectors-3drj0).
+//! Pin `HandshakeRequest`, `HandshakeResponse`, `HostInfo`, `TransportCaps`,
+//! `EventCaps`, `AuthCaps`, and `OAuthConfig` JSON+CBOR roundtrip.
+//! This is the closest analogue to "`MeshDiscovery` serde"
+//! (flywheel_connectors-3drj0).
 //!
 //! Bead asks for `MeshDiscovery` JSON+CBOR roundtrip pinning. No type
 //! literally named `MeshDiscovery` exists in fcp-core; the closest mesh
@@ -15,18 +16,18 @@
 //!   * `HostInfo`, `TransportCaps`, `EventCaps`, `AuthCaps`, `OAuthConfig`
 //!     — discovery payload sub-shapes.
 //!
-//! No existing test pins these — `grep` for HandshakeRequest in
+//! No existing test pins these — `grep` for `HandshakeRequest` in
 //! `crates/fcp-core/tests/` returns empty.
 //!
 //! Coverage:
-//!   * HandshakeRequest field-set + skip-when-None Option semantics,
-//!   * HandshakeResponse field-set + nonce-as-32-element-array (no
-//!     hex_or_bytes adapter — pin so future addition trips loudly),
-//!   * Vec<CapabilityId> capabilities_requested defaults to empty list,
-//!   * HostInfo skip-when-None for version + build,
-//!   * TransportCaps default state (empty Vec, None max_frame_size),
-//!   * EventCaps default state via #[serde(default)] on each bool/u32,
-//!   * AuthCaps + OAuthConfig nested round-trip,
+//!   * `HandshakeRequest` field-set + skip-when-`None` `Option` semantics,
+//!   * `HandshakeResponse` field-set + nonce-as-32-element-array (no
+//!     `hex_or_bytes` adapter — pin so future addition trips loudly),
+//!   * `Vec<CapabilityId>` `capabilities_requested` defaults to empty list,
+//!   * `HostInfo` skip-when-`None` for version + build,
+//!   * `TransportCaps` default state (empty `Vec`, `None` `max_frame_size`),
+//!   * `EventCaps` default state via `#[serde(default)]` on each `bool`/`u32`,
+//!   * `AuthCaps` + `OAuthConfig` nested round-trip,
 //!   * JSON ↔ CBOR cross-format equality on populated handshake,
 //!   * Distinct nonces produce distinct JSON (handshake binding sentinel).
 
@@ -296,10 +297,10 @@ fn event_caps_default_state_via_serde_default_per_field() {
     // Empty JSON → all defaults.
     let bare = json!({});
     let back: EventCaps = serde_json::from_value(bare).unwrap();
-    assert_eq!(back.streaming, false);
-    assert_eq!(back.replay, false);
+    assert!(!back.streaming);
+    assert!(!back.replay);
     assert_eq!(back.min_buffer_events, 0);
-    assert_eq!(back.requires_ack, false);
+    assert!(!back.requires_ack);
 
     // Distinct event-cap config produces distinct JSON.
     let on = EventCaps {

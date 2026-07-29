@@ -14,6 +14,8 @@ use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use chrono::{Duration, Utc};
 use serde_json::json;
 
+const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
+
 // ============================================================================
 // Skip guard
 // ============================================================================
@@ -24,8 +26,27 @@ fn stripe_secret_key() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn skip_without_live_gate() -> bool {
+    if live_gate_enabled() {
+        return false;
+    }
+
+    eprintln!(
+        "SKIP: {LIVE_GATE_ENV} is not enabled; set {LIVE_GATE_ENV}=1 before running live Stripe sandbox verification."
+    );
+    true
+}
+
 macro_rules! skip_without_token {
     ($var:ident) => {
+        if skip_without_live_gate() {
+            return;
+        }
         let Some($var) = stripe_secret_key() else {
             eprintln!(
                 "SKIP: STRIPE_SECRET_KEY not set — skipping live Stripe connector verification. \
@@ -40,7 +61,11 @@ macro_rules! skip_without_token {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> CapabilityToken {
     let cap = match op {
         "stripe.create_customer" | "stripe.update_customer" | "stripe.delete_customer" => {
             "stripe.write"
@@ -69,6 +94,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .principal("user:live-test")
         .operations(&[op])
         .issuer("node:live-test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
@@ -117,7 +143,11 @@ async fn live_customers_list() {
 
     let mut connector = fcp_stripe::connector::StripeConnector::new();
     let signing_key = setup_live_connector(&mut connector, &key).await;
-    let capability = generate_read_token(&signing_key, "stripe.list_customers");
+    let capability = generate_read_token(
+        &signing_key,
+        connector.instance_id(),
+        "stripe.list_customers",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -150,6 +180,10 @@ async fn live_customers_list() {
 
 #[fcp_async_core::test]
 async fn live_error_mapping_invalid_key() {
+    if skip_without_live_gate() {
+        return;
+    }
+
     // Test with a deliberately invalid key to verify ConnectorErrorMapping
     // works correctly: should get a structured FCP auth error, not a raw HTTP 401.
     let mut connector = fcp_stripe::connector::StripeConnector::new();
@@ -176,7 +210,11 @@ async fn live_error_mapping_invalid_key() {
         .await
         .expect("handshake should succeed");
 
-    let capability = generate_read_token(&signing_key, "stripe.list_customers");
+    let capability = generate_read_token(
+        &signing_key,
+        connector.instance_id(),
+        "stripe.list_customers",
+    );
 
     let err = connector
         .handle_invoke(json!({

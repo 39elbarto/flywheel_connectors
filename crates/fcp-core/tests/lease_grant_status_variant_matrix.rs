@@ -1,5 +1,5 @@
 //! Pin `ResumeCause` + `DuplicateDeliveryClass` resume-grant variant matrix
-//! — the closest analogue to "LeaseGrantStatus variant matrix"
+//! — the closest analogue to "`LeaseGrantStatus` variant matrix"
 //! (flywheel_connectors-0axe1).
 //!
 //! Bead asks for `LeaseGrantStatus` Display + serde tag pinning. No type
@@ -7,28 +7,28 @@
 //! grant-shaped status enums in the lease/resume protocol are:
 //!   * [`ResumeCause`] at `crates/fcp-core/src/connector_state.rs:1069` —
 //!     4-variant: under WHAT condition was a lease/computation granted
-//!     resumption (PlannedHandoff / Failover / CrashRecovery / OperatorRepair),
+//!     resumption (`PlannedHandoff` / `Failover` / `CrashRecovery` / `OperatorRepair`),
 //!   * [`DuplicateDeliveryClass`] at `crates/fcp-core/src/connector_state.rs:1096`
 //!     — 5-variant: HOW the resume grant interacts with prior partial work
-//!     (Fresh / DuplicateCommitted / ReplaySafeRetry / AmbiguousExternal /
-//!     EvidenceConflict).
+//!     (`Fresh` / `DuplicateCommitted` / `ReplaySafeRetry` / `AmbiguousExternal` /
+//!     `EvidenceConflict`).
 //!
 //! `LeaseResponse` (the immediate grant verdict) is pinned by
-//! `lease_grant_display_serde.rs`. ResumeOutcome / ResumeDisposition /
-//! ResumeReasonCode are pinned by `registry_acceptance_variants.rs` +
-//! `zone_event_serde_tag_matrix.rs`. ResumeCause + DuplicateDeliveryClass
+//! `lease_grant_display_serde.rs`. `ResumeOutcome` / `ResumeDisposition` /
+//! `ResumeReasonCode` are pinned by `registry_acceptance_variants.rs` +
+//! `zone_event_serde_tag_matrix.rs`. `ResumeCause` + `DuplicateDeliveryClass`
 //! are residual — `grep ResumeCause` + `grep DuplicateDeliveryClass` in
 //! `crates/fcp-core/tests/` returns empty.
 //!
 //! Coverage:
-//!   * 4-variant ResumeCause snake_case serde + label() pinning,
-//!   * 5-variant DuplicateDeliveryClass snake_case serde + label() pinning,
-//!   * Cross-enum disjoint-token-space sentinel: ResumeCause and
-//!     DuplicateDeliveryClass tokens MUST NOT alias (operator dashboards
+//!   * 4-variant `ResumeCause` `snake_case` serde + `label()` pinning,
+//!   * 5-variant `DuplicateDeliveryClass` `snake_case` serde + `label()` pinning,
+//!   * Cross-enum disjoint-token-space sentinel: `ResumeCause` and
+//!     `DuplicateDeliveryClass` tokens MUST NOT alias (operator dashboards
 //!     filter on both),
 //!   * JSON + CBOR Text-scalar round-trip per variant,
-//!   * PascalCase rejection sentinel,
-//!   * label() == serde wire form (audit-log/wire alignment),
+//!   * `PascalCase` rejection sentinel,
+//!   * `label()` == serde wire form (audit-log/wire alignment),
 //!   * HashMap-key behavior for status grouping.
 
 use ciborium::Value as CborValue;

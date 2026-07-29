@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn render_null_value() {
         let text = render(json!(null), OutputFormat::Json).unwrap();
-        assert!(text.trim() == "null");
+        assert_eq!(text.trim(), "null");
     }
 
     #[test]
@@ -865,7 +865,10 @@ mod tests {
         let reparsed: Value = serde_json::from_str(json_text.trim()).unwrap();
         assert_eq!(reparsed["error"]["type"], "validation");
         assert_eq!(reparsed["error"]["recoverable"], true);
-        assert!(reparsed["error"]["did_you_mean"].as_array().unwrap().len() == 2);
+        assert_eq!(
+            reparsed["error"]["did_you_mean"].as_array().unwrap().len(),
+            2
+        );
 
         // JSONL: same data, compact
         let compact_text = render(error_payload.clone(), OutputFormat::Jsonl).unwrap();

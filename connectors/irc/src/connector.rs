@@ -277,7 +277,8 @@ impl IrcConnector {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn operations() -> Vec<OperationInfo> {
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
         vec![
             operation(
                 OP_SEND_MESSAGE,
@@ -638,7 +639,7 @@ impl FcpConnector for IrcConnector {
 
     fn introspect(&self) -> Introspection {
         Introspection {
-            operations: Self::operations(),
+            operations: Self::operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -1120,13 +1121,13 @@ mod tests {
 
     #[test]
     fn operations_count() {
-        let ops = IrcConnector::operations();
+        let ops = IrcConnector::operations_info();
         assert_eq!(ops.len(), 4);
     }
 
     #[test]
     fn operations_contain_expected_ids() {
-        let ops = IrcConnector::operations();
+        let ops = IrcConnector::operations_info();
         let ids: Vec<&str> = ops.iter().map(|op| op.id.as_str()).collect();
         assert!(ids.contains(&OP_SEND_MESSAGE));
         assert!(ids.contains(&OP_JOIN_CHANNEL));
@@ -1577,7 +1578,7 @@ mod tests {
 
     #[test]
     fn transcript_sample_schema_advertises_normalized_events() {
-        let op = IrcConnector::operations()
+        let op = IrcConnector::operations_info()
             .into_iter()
             .find(|op| op.id.as_str() == OP_SAMPLE_TRANSCRIPT)
             .expect("sample op should exist");

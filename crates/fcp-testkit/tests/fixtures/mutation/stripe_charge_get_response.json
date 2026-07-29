@@ -1,0 +1,9 @@
+{
+  "id": "pi_mutation_fixture",
+  "object": "payment_intent",
+  "amount": 4242,
+  "currency": "usd",
+  "status": "succeeded",
+  "customer": "cus_mutation_fixture",
+  "created": 1778930000
+}

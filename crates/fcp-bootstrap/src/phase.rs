@@ -6,6 +6,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
+use std::io::Write as _;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
@@ -268,7 +269,6 @@ pub fn write_phase_lock(data_dir: &Path, phase: &BootstrapPhase) -> std::io::Res
     options.mode(0o600);
 
     let mut file = options.open(&lock_file)?;
-    use std::io::Write as _;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     #[cfg(unix)]

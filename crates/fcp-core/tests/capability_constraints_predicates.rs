@@ -1,7 +1,7 @@
 //! Pin `CapabilityConstraints` predicate matrix + validation Display
 //! formatting (flywheel_connectors-u34oi).
 //!
-//! Bead asks for "CapabilityConstraint Display formatting". No
+//! Bead asks for "`CapabilityConstraint` Display formatting". No
 //! singular `CapabilityConstraint` type exists in fcp-core — only
 //! the plural `CapabilityConstraints` set type (capability.rs:1439).
 //! `CapabilityConstraints` itself does NOT implement `Display`; the
@@ -20,11 +20,11 @@
 //!   3. **`is_credential_allowed()` semantics** — true only when the
 //!      credential is explicitly listed; empty allow-list rejects
 //!      everything (default-deny).
-//!   4. **`validate_credential()` Ok ⇔ is_credential_allowed**.
+//!   4. **`validate_credential()` Ok ⇔ `is_credential_allowed`**.
 //!   5. **`CredentialValidationError::NotInCredentialAllow` Display
 //!      format** — exact `"credential {uuid} not in capability's
 //!      credential_allow"` shape that operators see.
-//!   6. **Error carries the offending CredentialId verbatim**.
+//!   6. **Error carries the offending `CredentialId` verbatim**.
 //!   7. **Serde JSON round-trip** preserves all fields including
 //!      empty Vec<>/None defaults.
 

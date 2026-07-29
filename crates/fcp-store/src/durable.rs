@@ -298,11 +298,18 @@ impl DurableObjectState {
             // binding on every snapshot entry. A forged snapshot
             // (restored-from-tampered-backup, malicious import) must
             // NOT survive load — the forged record is refused here and
-            // surfaces as a hard `ContentIdMismatch` to the caller of
-            // `DurableObjectStore::open_with_verifier`.
+            // effectively dropped from the recovered state.
             if let Some(verifier) = verifier {
                 verifier.verify(&object)?;
             }
+
+            // `insert_loaded` is the sole `used_bytes` accounting site (it is
+            // also what WAL replay uses via `apply_loaded_mutation`), so it
+            // already charges this object's size. Adding it here as well
+            // double-counted every snapshot-recovered object, inflating
+            // `used_bytes` to 2× actual on restart and silently halving the
+            // store's usable quota. `DurableSymbolState::from_snapshot` counts
+            // once via `load_entry`; this now matches it.
             state.insert_loaded(object);
         }
         Ok(state)
@@ -834,6 +841,10 @@ impl DurableObjectStore {
 
 #[async_trait]
 impl ObjectStore for DurableObjectStore {
+    fn has_object_id_verifier(&self) -> bool {
+        self.verifier.is_some()
+    }
+
     async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
         self.record_mutation(ObjectWalOp::Put(Box::new(object)))
             .await
@@ -1930,6 +1941,39 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn durable_object_store_snapshot_reload_does_not_double_count_used_bytes() {
+        // Regression: `from_snapshot` charged each object's size once manually
+        // AND again via `insert_loaded`, so `used_bytes` recovered as 2× actual
+        // after a restart that went through a checkpoint — silently halving the
+        // usable quota. `checkpoint_after_ops = 1` forces the snapshot recovery
+        // path (from_snapshot) rather than WAL replay.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut config = DurableObjectStoreConfig::new(temp_dir.path().join("objects"));
+        config.checkpoint_after_ops = 1;
+
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        store.put(test_object(1)).await.expect("put object 1");
+        store.put(test_object(2)).await.expect("put object 2");
+        let used_before = store.storage_used().await;
+        assert!(used_before > 0, "sanity: stored objects consume bytes");
+        drop(store);
+
+        // Recovery must go through the snapshot, not WAL replay.
+        let snapshot_path = config.root_dir.join("objects.snapshot.json");
+        assert!(
+            snapshot_path.exists(),
+            "snapshot should exist so recovery uses from_snapshot"
+        );
+
+        let reopened = DurableObjectStore::open(config).expect("reopen store");
+        assert_eq!(
+            reopened.storage_used().await,
+            used_before,
+            "snapshot recovery must not double-count used_bytes"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn durable_object_store_counts_canonical_header_in_quota() {
         // Durable quota accounting must mirror MemoryObjectStore. The old
         // body-plus-512 estimate let tiny-body objects with large ref lists
@@ -2560,7 +2604,7 @@ mod tests {
     /// corrupt (size-mismatched) symbol. If the in-flight WAL op is
     /// `DeleteSymbol{esi}` for that exact corrupt symbol, the WAL entry is
     /// already on disk; `apply_delete_symbol` MUST converge on the
-    /// requested post-condition (esi absent) instead of returning NotFound,
+    /// requested post-condition (esi absent) instead of returning `NotFound`,
     /// otherwise the WAL replay path also fails on every restart.
     #[test]
     fn apply_delete_symbol_tolerates_already_scrubbed_target() {

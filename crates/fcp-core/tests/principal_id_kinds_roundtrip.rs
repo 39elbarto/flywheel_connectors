@@ -15,7 +15,7 @@
 //! validation rules only require ASCII-lower / dot / `-` / `_` /
 //! `:`), so the test pins:
 //!
-//!   1. Display ↔ FromStr round-trip is byte-stable across all
+//!   1. Display ↔ `FromStr` round-trip is byte-stable across all
 //!      three documented kinds (and a few real-world variants).
 //!   2. Equality + Hash hold across construction paths
 //!      (`new` / `try_from` / `parse` / `clone`).
@@ -23,7 +23,7 @@
 //!      principals (i.e. the `:` in `user:alice` vs `agent:alice`
 //!      is preserved through the round-trip and contributes to
 //!      identity).
-//!   4. AsRef<str> agrees with `as_str()` and `Display`.
+//!   4. `AsRef<str>` agrees with `as_str()` and `Display`.
 //!   5. The empty principal and invalid kinds are rejected.
 
 use std::collections::hash_map::DefaultHasher;
@@ -116,7 +116,7 @@ fn equality_and_hash_across_construction_paths() {
         let via_try_from = PrincipalId::try_from((*canonical).to_string()).expect("try_from");
         let via_parse = canonical.parse::<PrincipalId>().expect("FromStr");
         let via_clone = via_new.clone();
-        let via_display_rt = PrincipalId::from_str(&via_new.to_string()).expect("Display rt");
+        let via_display_rt = PrincipalId::from_str(via_new.as_ref()).expect("Display rt");
 
         // Equality.
         assert_eq!(via_new, via_try_from, "{canonical}: new vs try_from");

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fs, process::Command, time::Instant};
+use std::{borrow::Cow, fs, path::PathBuf, process::Command, time::Instant};
 
 use serde::Serialize;
 
@@ -519,41 +519,76 @@ fn git_revision() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn write_jsonl_artifact(lines: &[String]) {
-    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
+fn artifact_write_path(relative_path: &str) -> PathBuf {
+    std::env::var("FCP_LATTICE_EVIDENCE_ROOT")
+        .ok()
+        .map(|root| root.trim().to_owned())
+        .filter(|root| !root.is_empty())
+        .map_or_else(
+            || PathBuf::from(relative_path),
+            |root| {
+                let root = PathBuf::from(root);
+                let root = if root.is_absolute() {
+                    root
+                } else {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../..")
+                        .join(root)
+                };
+
+                root.join(
+                    relative_path
+                        .strip_prefix("target/")
+                        .unwrap_or(relative_path),
+                )
+            },
+        )
+}
+
+fn write_jsonl_artifact_to(relative_path: &str, lines: &[String], context: &str) {
+    let path = artifact_write_path(relative_path);
+    let parent_message = format!("{context} artifact directory is writable");
+    fs::create_dir_all(path.parent().expect("evidence artifact path has parent"))
+        .expect(&parent_message);
     let mut jsonl = lines.join("\n");
     jsonl.push('\n');
-    fs::write(ARTIFACT_PATH, jsonl).expect("evidence artifact writes");
+    let write_message = format!("{context} artifact writes");
+    fs::write(&path, jsonl).expect(&write_message);
+}
+
+fn artifact_len(relative_path: &str, context: &str) -> u64 {
+    let exists_message = format!("{context} artifact exists");
+    fs::metadata(artifact_write_path(relative_path))
+        .expect(&exists_message)
+        .len()
+}
+
+fn write_jsonl_artifact(lines: &[String]) {
+    write_jsonl_artifact_to(ARTIFACT_PATH, lines, "evidence");
 }
 
 fn write_route_jsonl_artifact(lines: &[String]) {
-    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
-    let mut jsonl = lines.join("\n");
-    jsonl.push('\n');
-    fs::write(ROUTE_ARTIFACT_PATH, jsonl).expect("route evidence artifact writes");
+    write_jsonl_artifact_to(ROUTE_ARTIFACT_PATH, lines, "route evidence");
 }
 
 fn write_public_matrix_jsonl_artifact(lines: &[String]) {
-    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
-    let mut jsonl = lines.join("\n");
-    jsonl.push('\n');
-    fs::write(PUBLIC_MATRIX_ARTIFACT_PATH, jsonl).expect("public matrix evidence artifact writes");
+    write_jsonl_artifact_to(PUBLIC_MATRIX_ARTIFACT_PATH, lines, "public matrix evidence");
 }
 
 fn write_sample_pre_verify_jsonl_artifact(lines: &[String]) {
-    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
-    let mut jsonl = lines.join("\n");
-    jsonl.push('\n');
-    fs::write(SAMPLE_PRE_VERIFY_ARTIFACT_PATH, jsonl)
-        .expect("SamplePre/Verify evidence artifact writes");
+    write_jsonl_artifact_to(
+        SAMPLE_PRE_VERIFY_ARTIFACT_PATH,
+        lines,
+        "SamplePre/Verify evidence",
+    );
 }
 
 fn write_formal_correspondence_jsonl_artifact(lines: &[String]) {
-    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
-    let mut jsonl = lines.join("\n");
-    jsonl.push('\n');
-    fs::write(FORMAL_CORRESPONDENCE_ARTIFACT_PATH, jsonl)
-        .expect("formal correspondence evidence artifact writes");
+    write_jsonl_artifact_to(
+        FORMAL_CORRESPONDENCE_ARTIFACT_PATH,
+        lines,
+        "formal correspondence evidence",
+    );
 }
 
 fn formal_theorem_names() -> Vec<&'static str> {
@@ -785,10 +820,10 @@ fn lean_sis_assumption_boundary_correspondence_fixture_jsonl_is_secret_free() {
     }
     write_formal_correspondence_jsonl_artifact(&lines);
     assert!(
-        fs::metadata(FORMAL_CORRESPONDENCE_ARTIFACT_PATH)
-            .expect("formal correspondence evidence artifact exists")
-            .len()
-            > 0,
+        artifact_len(
+            FORMAL_CORRESPONDENCE_ARTIFACT_PATH,
+            "formal correspondence evidence"
+        ) > 0,
         "formal correspondence evidence artifact must be non-empty"
     );
 }
@@ -861,10 +896,7 @@ fn representation_profile_evidence_jsonl_is_secret_free() {
     }
     write_jsonl_artifact(&lines);
     assert!(
-        fs::metadata(ARTIFACT_PATH)
-            .expect("evidence artifact exists")
-            .len()
-            > 0,
+        artifact_len(ARTIFACT_PATH, "evidence") > 0,
         "evidence artifact must be non-empty"
     );
 }
@@ -1491,10 +1523,7 @@ fn public_matrix_reconstruction_evidence_jsonl_is_secret_free() {
     }
     write_public_matrix_jsonl_artifact(&lines);
     assert!(
-        fs::metadata(PUBLIC_MATRIX_ARTIFACT_PATH)
-            .expect("public matrix evidence artifact exists")
-            .len()
-            > 0,
+        artifact_len(PUBLIC_MATRIX_ARTIFACT_PATH, "public matrix evidence") > 0,
         "public matrix evidence artifact must be non-empty"
     );
 }
@@ -1821,10 +1850,7 @@ fn sample_pre_verify_evidence_jsonl_is_secret_free() {
     }
     write_sample_pre_verify_jsonl_artifact(&lines);
     assert!(
-        fs::metadata(SAMPLE_PRE_VERIFY_ARTIFACT_PATH)
-            .expect("SamplePre/Verify evidence artifact exists")
-            .len()
-            > 0,
+        artifact_len(SAMPLE_PRE_VERIFY_ARTIFACT_PATH, "SamplePre/Verify evidence") > 0,
         "SamplePre/Verify evidence artifact must be non-empty"
     );
 }
@@ -2139,10 +2165,7 @@ fn trapgen_delegate_route_evidence_jsonl_is_secret_free() {
     }
     write_route_jsonl_artifact(&lines);
     assert!(
-        fs::metadata(ROUTE_ARTIFACT_PATH)
-            .expect("route evidence artifact exists")
-            .len()
-            > 0,
+        artifact_len(ROUTE_ARTIFACT_PATH, "route evidence") > 0,
         "route evidence artifact must be non-empty"
     );
 }

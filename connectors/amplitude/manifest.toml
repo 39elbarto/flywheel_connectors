@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:e8f654e0956672044f5809e31992b9a23348adb066d6a044537928eb0384b7eb"
 
 [connector]
 id = "fcp.amplitude"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Amplitude product analytics (events, cohorts, charts)"
 archetypes = ["knowledge"]
 format = "wasi"
+status = "proven"
 
 [connector.state]
 model = "singleton_writer"
@@ -150,6 +151,63 @@ when_to_use = "List all cohorts in Amplitude."
 common_mistakes = ["Expecting cohort member details in the list response — this returns cohort metadata only; use a separate cohort membership export for user-level data."]
 examples = ["{}"]
 related = ["amplitude.events.export"]
+
+[provides.operations."amplitude.health"]
+description = "Check Amplitude API reachability"
+capability = "amplitude.cohorts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."amplitude.health".input_schema]
+required = []
+type = "object"
+
+[provides.operations."amplitude.health".output_schema]
+required = [
+    "healthy",
+    "probe",
+    "cohorts_count",
+]
+type = "object"
+
+[provides.operations."amplitude.health".output_schema.properties.cohorts_count]
+minimum = 0
+type = "integer"
+
+[provides.operations."amplitude.health".output_schema.properties.healthy]
+type = "boolean"
+
+[provides.operations."amplitude.health".output_schema.properties.probe]
+type = "string"
+
+[provides.operations."amplitude.health".network_constraints]
+host_allow = [
+    "amplitude.com",
+    "*.amplitude.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."amplitude.health".ai_hints]
+when_to_use = "Verify Amplitude credentials and provider reachability without mutating the analytics project."
+common_mistakes = []
+examples = ["{}"]
+related = ["amplitude.cohorts.list"]
 
 [provides.operations."amplitude.events.export"]
 description = "Export events for a date range"

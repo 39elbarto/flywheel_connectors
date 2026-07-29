@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use fcp_core::{BackoffPolicy, RetryConfig};
 
-fn capped_policy(max_retries: u32) -> BackoffPolicy {
+const fn capped_policy(max_retries: u32) -> BackoffPolicy {
     BackoffPolicy::new(
         max_retries,
         Duration::from_millis(100),

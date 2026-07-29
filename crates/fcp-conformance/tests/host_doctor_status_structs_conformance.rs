@@ -18,8 +18,8 @@
 //!    - `name` (required)
 //!    - `connector_id` (optional, skip-when-None, default-when-absent)
 //!    - `code` (optional, skip-when-None, default-when-absent)
-//!    - `status` (required, embeds CheckStatus UPPERCASE)
-//!    - `severity` (required, embeds CheckSeverity lowercase)
+//!    - `status` (required, embeds `CheckStatus` UPPERCASE)
+//!    - `severity` (required, embeds `CheckSeverity` lowercase)
 //!    - `message` (required)
 //!    - `repair_hints` (Vec<String>, skip-when-empty,
 //!      default-when-absent)

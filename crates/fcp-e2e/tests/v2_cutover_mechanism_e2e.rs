@@ -6,8 +6,8 @@
 //!
 //! 1. `TruthPrecedencePolicy::default()` returns `V2MeshNative` (br-4la3k).
 //! 2. The canonical enforcement pipeline includes
-//!    `EnforcementCheckId::DeploymentTier` at index 3 — right after
-//!    `CapabilityVerify`, before `HolderProof` (br-nsrx3).
+//!    `EnforcementCheckId::DeploymentTier` at index 4 — right after
+//!    `RevocationCascade`, before `HolderProof` (br-nsrx3 + br-yowdy).
 //! 3. A `Risky` request in `DeploymentMode::Evaluation` is **denied at
 //!    `DeploymentTier`** with `TIER_REQUIRES_MESH_ACTIVE`. This is the
 //!    bead's marquee end-to-end behaviour.
@@ -115,41 +115,51 @@ fn ctx_with_tier_and_mode(
 
 // ─────────────────────────────────────────────────────────────────────
 // Scenario 3: canonical enforcement pipeline includes DeploymentTier
-// at index 3 (br-nsrx3 slot lock).
+// at index 4, after RevocationCascade and before HolderProof.
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn v2_cutover_mechanism_deployment_tier_at_canonical_index_3() {
+fn v2_cutover_mechanism_deployment_tier_at_canonical_index_4() {
     let scenario = "ksiz8.canonical_slot";
     log_event(scenario, "setup", "started", None);
 
     let order = EnforcementCheckOrder::canonical_order();
     assert_eq!(
         order.len(),
-        13,
-        "canonical order MUST be 13 checks post-nsrx3"
+        EnforcementCheckOrder::COUNT,
+        "canonical order length must match the shared enforcement contract"
     );
     assert_eq!(order[2], EnforcementCheckId::CapabilityVerify);
     assert_eq!(
         order[3],
-        EnforcementCheckId::DeploymentTier,
-        "DeploymentTier MUST sit at index 3 (right after CapabilityVerify)"
+        EnforcementCheckId::RevocationCascade,
+        "RevocationCascade MUST sit at index 3 (right after CapabilityVerify)"
     );
-    assert_eq!(order[4], EnforcementCheckId::HolderProof);
+    assert_eq!(
+        order[4],
+        EnforcementCheckId::DeploymentTier,
+        "DeploymentTier MUST sit at index 4 (after RevocationCascade)"
+    );
+    assert_eq!(order[5], EnforcementCheckId::HolderProof);
 
     let pipeline = EnforcementPipeline::default();
     let names = pipeline.check_names();
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), EnforcementCheckOrder::COUNT);
     assert_eq!(
-        names[3], "deployment_tier",
-        "the live pipeline MUST include the deployment_tier check at index 3"
+        names[3], "revocation_cascade",
+        "the live pipeline MUST include revocation_cascade at index 3"
     );
+    assert_eq!(
+        names[4], "deployment_tier",
+        "the live pipeline MUST include the deployment_tier check at index 4"
+    );
+    assert_eq!(names[5], "holder_proof");
 
     log_event(
         scenario,
         "verify_canonical_slot",
         "passed",
-        Some("deployment_tier @ index 3"),
+        Some("deployment_tier @ index 4"),
     );
 }
 
@@ -159,7 +169,7 @@ fn v2_cutover_mechanism_deployment_tier_at_canonical_index_3() {
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn v2_cutover_mechanism_risky_in_evaluation_denied_at_deployment_tier() {
+fn v2_cutover_mechanism_risky_in_evaluation_denied_at_deployment_tier() -> Result<(), String> {
     let scenario = "ksiz8.risky_in_evaluation_denied";
     log_event(scenario, "setup", "started", None);
 
@@ -178,7 +188,7 @@ fn v2_cutover_mechanism_risky_in_evaluation_denied_at_deployment_tier() {
             assert_eq!(check_name, "deployment_tier");
             assert_eq!(reason_code, "TIER_REQUIRES_MESH_ACTIVE");
         }
-        other => panic!("expected Deny at deployment_tier, got {other:?}"),
+        other => return Err(format!("expected Deny at deployment_tier, got {other:?}")),
     }
 
     log_event(
@@ -187,6 +197,7 @@ fn v2_cutover_mechanism_risky_in_evaluation_denied_at_deployment_tier() {
         "denied",
         Some("deployment_tier=TIER_REQUIRES_MESH_ACTIVE"),
     );
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -264,27 +275,34 @@ fn v2_cutover_mechanism_admit_safety_tier_agrees_with_pipeline_outcome() {
 
 // ─────────────────────────────────────────────────────────────────────
 // Scenario 7: deferred — full mesh-availability proof against a
-// multi-node fixture. Stubbed under #[ignore] until C.1–C.4 land.
+// multi-node fixture. Stubbed under #[ignore] until the live fwc
+// mesh-availability path can consume per-zone mesh inventory and return
+// mesh-backed truth for at least one placed connector. The local A.4
+// deterministic failover harness has landed in multi_node_failover.rs, but
+// it is not the same proof as this operator-facing fwc availability gate.
 // ─────────────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "requires multi-node mesh fixture from hr0rr-track-C C.1-C.4 (mesh-backed cutover gates, ConnectorState externalization, HRW lease coordination, multi-node failover proof). Re-enable when crates/fcp-e2e/tests/multi_node_failover.rs lands."]
-fn v2_cutover_mechanism_fwc_mesh_explain_availability_returns_mesh_backed() {
+#[ignore = "requires live fwc mesh explain-availability to consume per-zone mesh inventory and return mesh-backed truth for a placed connector; the local A.4 multi_node_failover.rs harness has landed but is not this operator-facing gate."]
+fn v2_cutover_mechanism_fwc_mesh_explain_availability_returns_mesh_backed() -> Result<(), String> {
     // Acceptance lifted from hr0rr epic body:
     //   "fwc mesh explain-availability returns mesh-backed for ≥1
     //    connector in test harness".
     //
-    // To implement: spin up a 3-node mesh test harness (per C.4
-    // multi-node failover proof spec — deterministic 3-node fixture,
-    // seeded partition+heal cycles via fixed RNG), publish a
-    // connector with placement evidence to ≥2 nodes, then drive
+    // To implement: publish a connector with placement evidence to ≥2 nodes
+    // through the live host/fwc mesh-availability boundary, then drive
     // `fwc mesh explain-availability <connector>` and assert the
     // returned envelope carries `availability=LiveRuntime` AND the
     // payload's `truth_source` is `mesh-backed` (NOT `host-backed`).
+    //
+    // The local C.4/A.4 deterministic failover substrate lives in
+    // `crates/fcp-e2e/tests/multi_node_failover.rs`. It proves seeded
+    // local failover and replay contracts, but it does not publish live
+    // per-zone inventory through fwc.
     //
     // The mesh-availability surface in fwc/src/main.rs already exists
     // (see `mesh_availability_dispatch`); it currently returns
     // host-backed because per-zone mesh inventory is not yet exposed
     // on the live host API. C.1 and C.5 close that gap.
-    panic!("deferred — mesh fixture not yet available; see ignore message");
+    Err("deferred: mesh fixture not yet available; see ignore message".to_owned())
 }

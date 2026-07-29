@@ -642,6 +642,21 @@ impl WeComMessageRequest {
     }
 
     #[must_use]
+    pub fn coordination_channel_id(&self) -> String {
+        let mut parts = Vec::with_capacity(3);
+        if !self.targets.touser().is_empty() {
+            parts.push(format!("touser:{}", self.targets.touser()));
+        }
+        if !self.targets.toparty().is_empty() {
+            parts.push(format!("toparty:{}", self.targets.toparty()));
+        }
+        if !self.targets.totag().is_empty() {
+            parts.push(format!("totag:{}", self.targets.totag()));
+        }
+        format!("wecom:{}", parts.join("|"))
+    }
+
+    #[must_use]
     pub fn to_body(&self, agent_id: u64) -> Value {
         let mut body = json!({
             "touser": self.targets.touser(),

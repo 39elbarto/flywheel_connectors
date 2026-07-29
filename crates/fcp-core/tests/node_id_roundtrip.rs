@@ -59,7 +59,7 @@ fn quorum_node_id_equality_across_construction_paths() {
 
 #[test]
 fn quorum_node_id_ordering_is_lexical_by_display_text() {
-    let mut ids = vec![
+    let mut ids = [
         NodeId::new("charlie"),
         NodeId::new("alice"),
         NodeId::new("bob"),

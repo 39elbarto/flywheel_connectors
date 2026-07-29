@@ -29,13 +29,14 @@ Important runtime truths the contract preserves:
 
 - Runtime connector ID is `fcp.whatsapp`.
 - `base_url` defaults to `https://graph.facebook.com/v21.0`.
-- Configuration requires `phone_number_id` and accepts `access_token`, `app_secret`, `webhook_verify_token`, `webhook_allowed_senders`, retry settings, and `request_timeout_ms`.
+- Configuration requires `phone_number_id` and accepts `access_token`, `app_secret`, `webhook_verify_token`, `webhook_allowed_senders`, `chat_coordination`, retry settings, and `request_timeout_ms`.
 - Empty `access_token` enables a secretless host-injection posture. In that mode provider calls omit the bearer header and `self_check` reports degraded `credential_injection_required`.
 - Non-empty `access_token` sends `Authorization: Bearer <token>`.
 - `phone_number_id` is sanitized as a path segment and rejects blank values, separators, traversal, and encoded slash or backslash forms.
 - Runtime `base_url` validation accepts the production Graph host and local test hosts, rejects remote plaintext HTTP, rejects userinfo/query/fragment components, and trims trailing slashes.
 - Personal bridge configuration keys are rejected during configuration.
-- `send_text` and `send_template` post to `/{phone_number_id}/messages`.
+- `send_text` and `send_template` claim the recipient conversation through chat coordination before posting to `/{phone_number_id}/messages`; duplicate active owners are denied before provider HTTP.
+- Successful `send_text` and `send_template` responses include redaction-safe `coordination` audit records that do not expose phone numbers, message text, template parameters, or provider response bodies.
 - `get_profile` reads `/{phone_number_id}/whatsapp_business_profile` with the current field list.
 - `self_check` probes `GET /{phone_number_id}`; HTTP 400 is treated as reachable, HTTP 401 fails auth, and HTTP 429 reports degraded retryable health.
 - `webhook_verify` is a local challenge-response check for `hub.mode`, `hub.verify_token`, and `hub.challenge`.
@@ -82,6 +83,7 @@ The current WhatsApp README slice documents the implemented runtime surface:
 
 - Authentication mechanism: WhatsApp Cloud API access token or host-injected credential.
 - Provider request auth: `Authorization: Bearer <token>` when configured.
+- Outbound send coordination: `chat_coordination` supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`. The default backend for this connector is the in-memory checker used by local tests until a durable shared backend is wired by the host.
 - Webhook signature: `X-Hub-Signature-256` with HMAC-SHA256 over the raw webhook body.
 - Webhook verification token: configured `webhook_verify_token`.
 - Home zone: `z:work`.
@@ -143,8 +145,8 @@ This is a hard scope boundary for the current crate. Personal WhatsApp automatio
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Rationale |
 |-----------|----------------|------------|------------|-----------|-------------|-----------|
-| `whatsapp.send_text` | `POST /{phone_number_id}/messages` | `whatsapp.send` | `Risky` | `Medium` | `None` | Sends a user-visible WhatsApp text message. |
-| `whatsapp.send_template` | `POST /{phone_number_id}/messages` | `whatsapp.send` | `Risky` | `Medium` | `None` | Sends a user-visible approved template message. |
+| `whatsapp.send_text` | chat coordination claim, then `POST /{phone_number_id}/messages` | `whatsapp.send` | `Risky` | `Medium` | `None` | Sends a user-visible WhatsApp text message after duplicate-owner denial. |
+| `whatsapp.send_template` | chat coordination claim, then `POST /{phone_number_id}/messages` | `whatsapp.send` | `Risky` | `Medium` | `None` | Sends a user-visible approved template message after duplicate-owner denial. |
 | `whatsapp.get_profile` | `GET /{phone_number_id}/whatsapp_business_profile` | `whatsapp.read` | `Safe` | `Low` | `Strict` | Reads business profile metadata. |
 | `whatsapp.webhook_verify` | local challenge response | `whatsapp.webhook` | `Safe` | `Low` | `Strict` | Verifies the provider callback challenge without provider I/O. |
 | `whatsapp.webhook_receive` | host-forwarded signed webhook body | `whatsapp.webhook` | `Risky` | `Medium` | `BestEffort` | Authenticates provider events, applies policy, and emits normalized event records. |
@@ -192,6 +194,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 - manifest/runtime schema parity for all runtime operations
 - direct text send and template send request bodies
+- outbound chat coordination audit output and duplicate-owner denial before provider HTTP
 - business profile request path and field selection
 - access-token and secretless request postures
 - base URL validation and phone-number ID path sanitization

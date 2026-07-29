@@ -255,6 +255,7 @@ classify_test_file() {
   local host_named=false
   local local_named=false
   local acceptance_named=false
+  local legacy_migration_contract=false
   local class=""
   local misnamed_no_mock=false
   local reserved_acceptance=false
@@ -266,7 +267,7 @@ classify_test_file() {
   file_has_host_e2e_signal "${file}" && host_marker=true
 
   case "${base}" in
-    *live*.rs|*sandbox*.rs|*nightly_live*.rs)
+    live*.rs|*_live.rs|*_live_*.rs|*nightly_live*.rs|*sandbox*.rs)
       live_named=true
       ;;
   esac
@@ -283,9 +284,23 @@ classify_test_file() {
       ;;
   esac
 
+  # These legacy Google migration suites predate the V3 Section 6
+  # acceptance taxonomy. They intentionally remain deterministic_contract
+  # substrate checks, so their historical filename should not be treated as
+  # a claim of final V3 acceptance.
+  case "$(relative_path "${file}")" in
+    connectors/gmail/tests/migration_acceptance.rs|\
+    connectors/google-calendar/tests/migration_acceptance.rs|\
+    connectors/youtube/tests/migration_acceptance.rs)
+      legacy_migration_contract=true
+      ;;
+  esac
+
   case "${base}" in
     *acceptance*.rs)
-      acceptance_named=true
+      if [[ "${legacy_migration_contract}" != "true" ]]; then
+        acceptance_named=true
+      fi
       ;;
   esac
 

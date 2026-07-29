@@ -2092,42 +2092,76 @@ pub struct ResourceObject {
 
 /// Stable policy decision reason codes (NORMATIVE).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum DecisionReasonCode {
+    #[serde(rename = "allow")]
     Allow,
+    #[serde(rename = "capability.insufficient")]
     CapabilityInsufficient,
+    #[serde(rename = "checkpoint.stale_frontier")]
     CheckpointStaleFrontier,
+    #[serde(rename = "revocation.stale_frontier")]
     RevocationStaleFrontier,
+    #[serde(rename = "taint.public_input_dangerous")]
     TaintPublicInputDangerous,
+    #[serde(rename = "taint.unverified_link_risky")]
     TaintUnverifiedLinkRisky,
+    #[serde(rename = "taint.malicious_input")]
     TaintMaliciousInput,
+    #[serde(rename = "taint.risky_requires_elevation")]
     TaintRiskyRequiresElevation,
+    #[serde(rename = "taint.cross_zone_unapproved")]
     TaintCrossZoneUnapproved,
+    #[serde(rename = "integrity.insufficient")]
     IntegrityInsufficient,
+    #[serde(rename = "zone_policy.principal_denied")]
     ZonePolicyPrincipalDenied,
+    #[serde(rename = "zone_policy.connector_denied")]
     ZonePolicyConnectorDenied,
+    #[serde(rename = "zone_policy.capability_denied")]
     ZonePolicyCapabilityDenied,
+    #[serde(rename = "zone_policy.principal_not_allowed")]
     ZonePolicyPrincipalNotAllowed,
+    #[serde(rename = "zone_policy.connector_not_allowed")]
     ZonePolicyConnectorNotAllowed,
+    #[serde(rename = "zone_policy.capability_not_allowed")]
     ZonePolicyCapabilityNotAllowed,
+    #[serde(rename = "approval.missing_elevation")]
     ApprovalMissingElevation,
+    #[serde(rename = "approval.missing_declassification")]
     ApprovalMissingDeclassification,
+    #[serde(rename = "approval.missing_execution")]
     ApprovalMissingExecution,
+    #[serde(rename = "approval.elevation_scope_mismatch")]
     ApprovalElevationScopeMismatch,
+    #[serde(rename = "approval.execution_scope_mismatch")]
     ApprovalExecutionScopeMismatch,
+    #[serde(rename = "approval.expired")]
     ApprovalExpired,
+    #[serde(rename = "approval.zone_mismatch")]
     ApprovalZoneMismatch,
+    #[serde(rename = "approval.token_invalid")]
     ApprovalTokenInvalid,
+    #[serde(rename = "transport.derp_forbidden")]
     TransportDerpForbidden,
+    #[serde(rename = "transport.funnel_forbidden")]
     TransportFunnelForbidden,
+    #[serde(rename = "transport.lan_forbidden")]
     TransportLanForbidden,
+    #[serde(rename = "taint.sanitizer_invalid")]
     SanitizerReceiptInvalid,
+    #[serde(rename = "taint.sanitizer_coverage_insufficient")]
     SanitizerCoverageInsufficient,
+    #[serde(rename = "posture.attestation_missing")]
     PostureAttestationMissing,
+    #[serde(rename = "posture.attestation_expired")]
     PostureAttestationExpired,
+    #[serde(rename = "posture.attestation_invalid")]
     PostureAttestationInvalid,
+    #[serde(rename = "posture.requirement_not_met")]
     PostureRequirementNotMet,
+    #[serde(rename = "posture.verifier_not_allowed")]
     PostureVerifierNotAllowed,
+    #[serde(rename = "operation.forbidden")]
     OperationForbidden,
 }
 
@@ -3506,6 +3540,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: std::marker::PhantomData,
         };
 
         let id1 = approval_token_object_id(&token);
@@ -4960,6 +4995,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: std::marker::PhantomData,
         }
     }
 

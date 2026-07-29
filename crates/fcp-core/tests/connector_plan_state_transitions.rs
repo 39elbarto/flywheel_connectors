@@ -1,5 +1,5 @@
 //! Pin `ConnectorLifecycleState` documented transitions + serde matrix —
-//! the closest analogue to "ConnectorPlanState transitions"
+//! the closest analogue to "`ConnectorPlanState` transitions"
 //! (flywheel_connectors-df5uj).
 //!
 //! Bead asks for `ConnectorPlanState` transition pinning per documented
@@ -9,8 +9,8 @@
 //! with 5 documented stages: Loaded → Activated → Running ↔ Suspended →
 //! Terminated.
 //!
-//! Existing `connector_lifecycle_state_display.rs` covers Display +
-//! FromStr happy path only. This pin adds:
+//! Existing `connector_lifecycle_state_display.rs` covers `Display` +
+//! `FromStr` happy path only. This pin adds:
 //!   * Documented state-machine transition allow-list per the docstrings:
 //!     Loaded → Activated; Activated → Running | Terminated;
 //!     Running → Suspended | Terminated; Suspended → Running |
@@ -19,13 +19,13 @@
 //!   * Terminal-state contract: Terminated has no outgoing transitions,
 //!   * Self-transitions are not legal (you don't transition from Running
 //!     to Running),
-//!   * JSON serde tag matrix (snake_case) + as_str alignment with Display
+//!   * JSON serde tag matrix (`snake_case`) + `as_str` alignment with `Display`
 //!     and serde,
 //!   * CBOR Text scalar shape per variant,
-//!   * PascalCase rejection sentinel,
+//!   * `PascalCase` rejection sentinel,
 //!   * Distinct-variant serialization,
-//!   * FromStr rejects non-canonical with documented expected list,
-//!   * HashMap key behavior for status-bucketing.
+//!   * `FromStr` rejects non-canonical with documented expected list,
+//!   * `HashMap` key behavior for status-bucketing.
 
 use ciborium::Value as CborValue;
 use fcp_core::ConnectorLifecycleState;
@@ -49,14 +49,13 @@ const ALL_STATES: &[(ConnectorLifecycleState, &str)] = &[
 ///   Suspended  → Running           (resume)
 ///   Suspended  → Terminated        (stop without resume)
 ///   Terminated → (none)            (terminal)
-fn is_documented_legal(from: ConnectorLifecycleState, to: ConnectorLifecycleState) -> bool {
+const fn is_documented_legal(from: ConnectorLifecycleState, to: ConnectorLifecycleState) -> bool {
     use ConnectorLifecycleState::*;
     matches!(
         (from, to),
         (Loaded, Activated)
-            | (Activated, Running | Terminated)
+            | (Activated | Suspended, Running | Terminated)
             | (Running, Suspended | Terminated)
-            | (Suspended, Running | Terminated)
     )
 }
 

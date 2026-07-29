@@ -1,4 +1,3 @@
-use asupersync::Cx;
 use asupersync::io::{AsyncRead, ReadBuf};
 use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
@@ -19,13 +18,15 @@ use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::task::Poll;
+use std::time::Duration;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path},
+    matchers::{body_json, header, method, path, query_param},
 };
 
 const OP_TRANSCRIBE: &str = "deepgram.listen.transcribe";
 const CAP_LISTEN: &str = "deepgram.listen";
+const DEFAULT_TRANSCRIPTION_MODEL: &str = "nova-3";
 const MAX_HEADERS: usize = 16 * 1024;
 type TestServerWebSocket = ServerWebSocket<TcpStream>;
 
@@ -234,6 +235,22 @@ fn suite(server: &MockServer) -> ConnectorSuite {
     }
 }
 
+async fn configured_connector(server: &MockServer) -> DeepgramConnector {
+    let mut connector = DeepgramConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "test-key",
+            "base_url": server.uri()
+        }))
+        .await
+        .expect("configure should succeed");
+    connector
+        .handle_handshake(json!({ "session_id": "deepgram-http-contract" }))
+        .await
+        .expect("handshake should succeed");
+    connector
+}
+
 async fn read_http_headers<R>(stream: &mut R) -> io::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
@@ -283,23 +300,26 @@ async fn accept_deepgram_test_websocket(mut stream: TcpStream) -> (TestServerWeb
         .expect("read websocket handshake");
     let headers = String::from_utf8_lossy(&request).into_owned();
     let ws = WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket");
     (ws, headers)
 }
 
 async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        ServerWsMessage::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn recv_frame(
     ws: &mut TestServerWebSocket,
     context: &str,
 ) -> Result<ServerWsMessage, String> {
-    match ws.recv(&Cx::for_testing()).await {
+    match ws.recv(&fcp_async_core::compatibility_cx()).await {
         Ok(Some(message)) => Ok(message),
         Ok(None) => Err(format!("websocket closed before {context}")),
         Err(err) => Err(format!("{context}: {err}")),
@@ -314,7 +334,151 @@ async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Result<
 }
 
 async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_performs_authenticated_project_probe() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/projects"))
+        .and(header("authorization", "Token test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "projects": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&server).await;
+    let self_check = connector
+        .handle_self_check()
+        .await
+        .expect("expected self-check result");
+    assert_eq!(self_check["status"], "ok");
+}
+
+#[fcp_async_core::runtime::test]
+async fn upstream_retry_after_hint_is_preserved() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/listen"))
+        .and(header("authorization", "Token test-key"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "7")
+                .set_body_string("{\"error\":\"slow down\"}"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&server).await;
+    let error = connector
+        .handle_invoke(json!({
+            "operation_id": OP_TRANSCRIBE,
+            "input": {
+                "audio_url": "https://media.example.test/audio.wav",
+                "media_byte_count": 12_u64
+            }
+        }))
+        .await
+        .expect_err("expected rate-limited error");
+
+    assert!(
+        matches!(error, FcpError::External { .. }),
+        "expected external error, got {error:?}"
+    );
+    if let FcpError::External {
+        status_code,
+        retry_after,
+        retryable,
+        ..
+    } = error
+    {
+        assert_eq!(status_code, Some(429));
+        assert_eq!(retry_after, Some(Duration::from_secs(7)));
+        assert!(retryable);
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn transcribe_uses_openclaw_aligned_default_model_when_omitted() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/listen"))
+        .and(query_param("model", DEFAULT_TRANSCRIPTION_MODEL))
+        .and(header("authorization", "Token test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": {
+                "channels": [{
+                    "alternatives": [{
+                        "transcript": "hello with default model"
+                    }]
+                }]
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&server).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": OP_TRANSCRIBE,
+            "input": {
+                "audio_url": "https://media.example.test/audio.wav",
+                "media_byte_count": 12_u64
+            }
+        }))
+        .await
+        .expect("default model transcription should succeed");
+
+    assert_eq!(
+        result["results"]["channels"][0]["alternatives"][0]["transcript"],
+        "hello with default model"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn transcribe_strips_audio_url_credentials_and_fragment() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/listen"))
+        .and(query_param("model", DEFAULT_TRANSCRIPTION_MODEL))
+        .and(header("authorization", "Token test-key"))
+        .and(body_json(json!({
+            "url": "https://media.example.test/audio.wav?download=1"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": {
+                "channels": [{
+                    "alternatives": [{
+                        "transcript": "sanitized"
+                    }]
+                }]
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&server).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": OP_TRANSCRIBE,
+            "input": {
+                "audio_url": "https://user:secret@media.example.test/audio.wav?download=1#secret-fragment",
+                "media_byte_count": 12_u64
+            }
+        }))
+        .await
+        .expect("sanitized transcription should succeed");
+
+    assert_eq!(
+        result["results"]["channels"][0]["alternatives"][0]["transcript"],
+        "sanitized"
+    );
 }
 
 #[fcp_async_core::runtime::test]

@@ -10,6 +10,7 @@ use fcp_prelude::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -21,6 +22,7 @@ use crate::{
 };
 
 const MAX_NOTION_CURSOR_BYTES: usize = 512;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Validated configuration for the Notion connector.
 struct NotionConfig {
@@ -229,6 +231,18 @@ impl NotionConnector {
         }
     }
 
+    /// Return the connector instance ID used for bound capability verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_prelude::InstanceId {
+        &self.base.instance_id
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -287,7 +301,7 @@ impl NotionConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:notion-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1510,6 +1524,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         cap: &str,
         operations: &[&str],
+        instance_id: &fcp_prelude::InstanceId,
     ) -> CapabilityToken {
         use fcp_prelude::CapabilityConstraints;
 
@@ -1526,6 +1541,7 @@ mod tests {
             .zone_id("z:work")
             .principal("user:test")
             .operations(operations)
+            .target_instance(instance_id.as_str())
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
@@ -1577,7 +1593,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_page"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.read",
+            &["notion.get_page"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -1616,7 +1637,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_page"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.read",
+            &["notion.get_page"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -1689,7 +1715,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_database"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.read",
+            &["notion.get_database"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -1733,7 +1764,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.write",
+            &["notion.create_database"],
+            &connector.base.instance_id,
+        );
 
         // Missing parent
         let result = connector
@@ -1752,8 +1788,12 @@ mod tests {
         }
 
         // Missing title
-        let token2 =
-            generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
+        let token2 = generate_valid_token(
+            &signing_key,
+            "notion.write",
+            &["notion.create_database"],
+            &connector.base.instance_id,
+        );
         let result2 = connector
             .handle_invoke(json!({
                 "operation": "notion.create_database",
@@ -1770,8 +1810,12 @@ mod tests {
         }
 
         // Missing properties
-        let token3 =
-            generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
+        let token3 = generate_valid_token(
+            &signing_key,
+            "notion.write",
+            &["notion.create_database"],
+            &connector.base.instance_id,
+        );
         let result3 = connector
             .handle_invoke(json!({
                 "operation": "notion.create_database",
@@ -1813,7 +1857,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_block"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.read",
+            &["notion.get_block"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -1857,7 +1906,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.delete", &["notion.delete_block"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.delete",
+            &["notion.delete_block"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -2333,5 +2387,17 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = NotionConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:notion-connector-v1");
     }
 }

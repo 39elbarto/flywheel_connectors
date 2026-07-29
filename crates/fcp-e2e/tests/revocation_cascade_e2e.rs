@@ -639,9 +639,7 @@ fn revocation_cascade_e2e_lean_witness_registered_for_formal_gate() {
     let scenario = "rfs4h.lean_witness_gate";
     log_event(scenario, "setup", "started", None);
 
-    let registered = FORMAL_INVARIANT_THEOREMS
-        .iter()
-        .any(|t| *t == REVOCATION_LEAN_THEOREM);
+    let registered = FORMAL_INVARIANT_THEOREMS.contains(&REVOCATION_LEAN_THEOREM);
     assert!(
         registered,
         "Lean theorem {REVOCATION_LEAN_THEOREM} MUST be in FORMAL_INVARIANT_THEOREMS — \

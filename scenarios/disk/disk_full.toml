@@ -1,0 +1,19 @@
+name = "disk_full"
+blast_radius = 1
+recovery_objective_secs = 30
+
+[[rollback_steps]]
+name = "clear_disk_pressure"
+action = "remove_fallocate_reservation"
+target = "synthetic_audit_wal"
+
+[rollback_steps.args]
+volume = "audit-wal"
+
+[[rollback_steps]]
+name = "verify_wal_replay"
+action = "verify_wal_replay_chain_head"
+target = "audit_chain_wal"
+
+[rollback_steps.args]
+timeout_secs = "30"

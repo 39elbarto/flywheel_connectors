@@ -2139,6 +2139,7 @@ mod verification_pack {
     // identity's key — defeating the security purpose of rotation.
 
     #[test]
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
     fn scenario_token_rotation_zero_key_reuse() {
         let mut record = VerificationRecord::new("hwtoken-token-rotation-zero-key-reuse");
 
@@ -2211,13 +2212,13 @@ mod verification_pack {
                 .identities
                 .iter()
                 .find(|i| i.id == pre.pair.key.id)
-                .map(|i| i.signing_key_bytes.clone())
+                .map(|i| i.signing_key_bytes)
                 .expect("pre key bytes must resolve");
             let post_key = driver_b
                 .identities
                 .iter()
                 .find(|i| i.id == post.pair.key.id)
-                .map(|i| i.signing_key_bytes.clone())
+                .map(|i| i.signing_key_bytes)
                 .expect("post key bytes must resolve");
             let step = record.add_step(
                 "assert",
@@ -2280,7 +2281,7 @@ mod verification_pack {
     // surfaces `NoMatchingKeyPair`. Falling back silently to the implicit
     // CA cert is the bug we are pinning against.
 
-    /// Driver wrapper that filters certificates by CKA_ID at enumerate
+    /// Driver wrapper that filters certificates by `CKA_ID` at enumerate
     /// time, simulating revocation propagation.
     struct RevokingSoftTokenDriver {
         inner: SoftTokenDriver,

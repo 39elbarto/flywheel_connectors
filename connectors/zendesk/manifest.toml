@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4464cafa1abc708c18a5ebb67dc6329bcccd622fe5f3198cb07c60a3550f90c4"
+interface_hash = "blake3-256:fcp.interface.v2:e34b048e4eba356411f892c93912770d15e7ba329042eba2ac62f9cc8b615dda"
 
 [connector]
 id = "fcp.zendesk"

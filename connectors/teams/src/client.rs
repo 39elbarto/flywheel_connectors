@@ -654,6 +654,311 @@ impl TeamsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::{HashMap, VecDeque},
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::Duration as StdDuration,
+    };
+
+    #[derive(Clone)]
+    enum LoopbackMatcher {
+        Method(&'static str),
+        Path(&'static str),
+        Header(&'static str, &'static str),
+    }
+
+    fn method(expected: &'static str) -> LoopbackMatcher {
+        LoopbackMatcher::Method(expected)
+    }
+
+    fn path(expected: &'static str) -> LoopbackMatcher {
+        LoopbackMatcher::Path(expected)
+    }
+
+    fn header(name: &'static str, value: &'static str) -> LoopbackMatcher {
+        LoopbackMatcher::Header(name, value)
+    }
+
+    #[derive(Clone)]
+    struct LoopbackResponse {
+        status: u16,
+        body: Vec<u8>,
+        headers: Vec<(&'static str, String)>,
+    }
+
+    impl LoopbackResponse {
+        fn new(status: u16) -> Self {
+            Self {
+                status,
+                body: Vec::new(),
+                headers: Vec::new(),
+            }
+        }
+
+        fn set_body_json(mut self, body: impl serde::Serialize) -> Self {
+            self.body = serde_json::to_vec(&body).expect("serialize loopback response");
+            self
+        }
+
+        fn set_body_string(mut self, body: &'static str) -> Self {
+            self.body = body.as_bytes().to_vec();
+            self
+        }
+
+        fn insert_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.headers.push((name, value.to_string()));
+            self
+        }
+    }
+
+    #[derive(Clone)]
+    struct LoopbackRequest {
+        method: String,
+        target: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    #[derive(Clone)]
+    struct LoopbackRoute {
+        matchers: Vec<LoopbackMatcher>,
+        response: LoopbackResponse,
+        reject_if_called: bool,
+    }
+
+    impl LoopbackRoute {
+        fn given(matcher: LoopbackMatcher) -> LoopbackRouteBuilder {
+            LoopbackRouteBuilder {
+                matchers: vec![matcher],
+                response: LoopbackResponse::new(200),
+                expected_calls: 1,
+            }
+        }
+
+        fn matches(&self, request: &LoopbackRequest) -> bool {
+            self.matchers.iter().all(|matcher| match matcher {
+                LoopbackMatcher::Method(expected) => request.method == *expected,
+                LoopbackMatcher::Path(expected) => {
+                    request
+                        .target
+                        .split_once('?')
+                        .map_or(request.target.as_str(), |(path, _)| path)
+                        == *expected
+                }
+                LoopbackMatcher::Header(name, expected) => request
+                    .headers
+                    .get(&name.to_ascii_lowercase())
+                    .is_some_and(|actual| actual == expected),
+            })
+        }
+    }
+
+    struct LoopbackRouteBuilder {
+        matchers: Vec<LoopbackMatcher>,
+        response: LoopbackResponse,
+        expected_calls: usize,
+    }
+
+    impl LoopbackRouteBuilder {
+        fn and(mut self, matcher: LoopbackMatcher) -> Self {
+            self.matchers.push(matcher);
+            self
+        }
+
+        fn respond_with(mut self, response: LoopbackResponse) -> Self {
+            self.response = response;
+            self
+        }
+
+        #[allow(clippy::unused_async)]
+        async fn mount(self, server: &LoopbackServer) {
+            let mut routes = server.routes.lock().expect("lock loopback routes");
+            if self.expected_calls == 0 {
+                routes.push_back(LoopbackRoute {
+                    matchers: self.matchers,
+                    response: self.response,
+                    reject_if_called: true,
+                });
+                return;
+            }
+            for _ in 0..self.expected_calls {
+                routes.push_back(LoopbackRoute {
+                    matchers: self.matchers.clone(),
+                    response: self.response.clone(),
+                    reject_if_called: false,
+                });
+            }
+        }
+    }
+
+    struct LoopbackServer {
+        base_url: String,
+        routes: Arc<Mutex<VecDeque<LoopbackRoute>>>,
+        requests: Arc<Mutex<Vec<LoopbackRequest>>>,
+        stop: Arc<AtomicBool>,
+        join: Option<thread::JoinHandle<()>>,
+    }
+
+    impl LoopbackServer {
+        #[allow(clippy::unused_async)]
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback server");
+            listener
+                .set_nonblocking(true)
+                .expect("set loopback nonblocking");
+            let addr = listener.local_addr().expect("loopback address");
+            let routes = Arc::new(Mutex::new(VecDeque::<LoopbackRoute>::new()));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_routes = Arc::clone(&routes);
+            let thread_requests = Arc::clone(&requests);
+            let thread_stop = Arc::clone(&stop);
+            let join = thread::spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream
+                                .set_nonblocking(false)
+                                .expect("set loopback stream blocking");
+                            let request = read_loopback_request(&mut stream);
+                            let route = {
+                                let mut routes =
+                                    thread_routes.lock().expect("lock loopback routes");
+                                let route_index = routes
+                                    .iter()
+                                    .position(|route| route.matches(&request))
+                                    .expect("loopback route registered");
+                                routes.remove(route_index).expect("remove loopback route")
+                            };
+                            assert!(!route.reject_if_called, "unexpected loopback request");
+                            thread_requests
+                                .lock()
+                                .expect("lock loopback requests")
+                                .push(request.clone());
+                            write_loopback_response(&mut stream, &route.response);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(StdDuration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept loopback request: {error}"),
+                    }
+                }
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                routes,
+                requests,
+                stop,
+                join: Some(join),
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+
+        #[allow(clippy::unused_async)]
+        async fn received_requests(&self) -> Option<Vec<LoopbackRequest>> {
+            Some(
+                self.requests
+                    .lock()
+                    .expect("lock loopback requests")
+                    .clone(),
+            )
+        }
+    }
+
+    impl Drop for LoopbackServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            let _ = TcpStream::connect(self.base_url.trim_start_matches("http://"));
+            if let Some(join) = self.join.take() {
+                join.join().expect("loopback thread should exit");
+            }
+        }
+    }
+
+    fn read_loopback_request(stream: &mut TcpStream) -> LoopbackRequest {
+        let mut buffer = Vec::new();
+        let mut scratch = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut scratch).expect("read loopback request");
+            assert!(read > 0, "unexpected EOF before headers");
+            buffer.extend_from_slice(&scratch[..read]);
+            if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let header_text =
+            std::str::from_utf8(&buffer[..header_end]).expect("HTTP headers are UTF-8");
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().expect("request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("method").to_string();
+        let target = parts.next().expect("target").to_string();
+        let mut headers = HashMap::new();
+        for line in lines.filter(|line| !line.is_empty()) {
+            let (name, value) = line.split_once(':').expect("header separator");
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = buffer[header_end..].to_vec();
+        while body.len() < content_length {
+            let read = stream.read(&mut scratch).expect("read loopback body");
+            assert!(read > 0, "unexpected EOF before body");
+            body.extend_from_slice(&scratch[..read]);
+        }
+        body.truncate(content_length);
+        LoopbackRequest {
+            method,
+            target,
+            headers,
+            body,
+        }
+    }
+
+    fn write_loopback_response(stream: &mut TcpStream, response: &LoopbackResponse) {
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            status_reason(response.status),
+            response.body.len()
+        );
+        for (name, value) in &response.headers {
+            head.push_str(name);
+            head.push_str(": ");
+            head.push_str(value);
+            head.push_str("\r\n");
+        }
+        head.push_str("\r\n");
+        stream
+            .write_all(head.as_bytes())
+            .expect("write response header");
+        stream
+            .write_all(&response.body)
+            .expect("write response body");
+        stream.flush().expect("flush response");
+    }
+
+    const fn status_reason(status: u16) -> &'static str {
+        match status {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            _ => "OK",
+        }
+    }
 
     #[test]
     fn new_client_trims_trailing_slash() {
@@ -701,21 +1006,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn list_my_teams_parses_response() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me/joinedTeams"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": [
-                        { "id": "t1", "displayName": "Team A" },
-                        { "id": "t2", "displayName": "Team B" }
-                    ]
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me/joinedTeams"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    { "id": "t1", "displayName": "Team A" },
+                    { "id": "t2", "displayName": "Team B" }
+                ]
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let teams = client.list_my_teams().await.unwrap();
         assert_eq!(teams.len(), 2);
         assert_eq!(teams[0].display_name, "Team A");
@@ -723,31 +1026,27 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn list_my_teams_follows_odata_pagination() {
-        let mock_server = wiremock::MockServer::start().await;
-        let page_2 = format!("{}/page-2", mock_server.uri());
+        let server = LoopbackServer::start().await;
+        let page_2 = format!("{}/page-2", server.uri());
 
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me/joinedTeams"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": [{ "id": "t1", "displayName": "Team A" }],
-                    "@odata.nextLink": page_2,
-                })),
-            )
-            .mount(&mock_server)
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me/joinedTeams"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "t1", "displayName": "Team A" }],
+                "@odata.nextLink": page_2,
+            })))
+            .mount(&server)
             .await;
 
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/page-2"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": [{ "id": "t2", "displayName": "Team B" }],
-                })),
-            )
-            .mount(&mock_server)
+        LoopbackRoute::given(method("GET"))
+            .and(path("/page-2"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "t2", "displayName": "Team B" }],
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let teams = client.list_my_teams().await.unwrap();
         assert_eq!(teams.len(), 2);
         assert_eq!(teams[1].display_name, "Team B");
@@ -755,62 +1054,52 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn secretless_client_sends_credential_header() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me/joinedTeams"))
-            .and(wiremock::matchers::header(CREDENTIAL_ID_HEADER, "cred_1"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": []
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me/joinedTeams"))
+            .and(header(CREDENTIAL_ID_HEADER, "cred_1"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "value": []
+            })))
+            .mount(&server)
             .await;
 
         let client =
-            TeamsClient::new_secretless(&mock_server.uri(), "cred_1", Duration::from_secs(10))
-                .unwrap();
+            TeamsClient::new_secretless(&server.uri(), "cred_1", Duration::from_secs(10)).unwrap();
         let teams = client.list_my_teams().await.unwrap();
         assert!(teams.is_empty());
 
-        let requests = mock_server.received_requests().await.unwrap_or_default();
+        let requests = server.received_requests().await.unwrap_or_default();
         assert_eq!(requests.len(), 1);
-        assert!(requests[0].headers.get("authorization").is_none());
+        assert!(!requests[0].headers.contains_key("authorization"));
     }
 
     #[fcp_async_core::runtime::test]
     async fn client_credentials_flow_materializes_access_token() {
-        let mock_server = wiremock::MockServer::start().await;
+        let server = LoopbackServer::start().await;
 
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/oauth2/v2.0/token"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "graph_tok",
-                    "token_type": "Bearer",
-                    "expires_in": 3600,
-                })),
-            )
-            .mount(&mock_server)
+        LoopbackRoute::given(method("POST"))
+            .and(path("/oauth2/v2.0/token"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "access_token": "graph_tok",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            })))
+            .mount(&server)
             .await;
 
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me/joinedTeams"))
-            .and(wiremock::matchers::header(
-                "authorization",
-                "Bearer graph_tok",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": [{ "id": "t1", "displayName": "Team A" }]
-                })),
-            )
-            .mount(&mock_server)
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me/joinedTeams"))
+            .and(header("authorization", "Bearer graph_tok"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "value": [{ "id": "t1", "displayName": "Team A" }]
+            })))
+            .mount(&server)
             .await;
 
         let client = TeamsClient::from_client_credentials_with_token_url(
-            &mock_server.uri(),
-            &format!("{}/oauth2/v2.0/token", mock_server.uri()),
+            &server.uri(),
+            &format!("{}/oauth2/v2.0/token", server.uri()),
             "client_id",
             "client_secret",
             Duration::from_secs(10),
@@ -825,39 +1114,35 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn get_team_parses_response() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/teams/t1"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": "t1",
-                    "displayName": "Engineering"
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/teams/t1"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "id": "t1",
+                "displayName": "Engineering"
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let team = client.get_team("t1").await.unwrap();
         assert_eq!(team.id, "t1");
     }
 
     #[fcp_async_core::runtime::test]
     async fn list_channels_parses_response() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/teams/t1/channels"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": [
-                        { "id": "ch1", "displayName": "General" }
-                    ]
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/teams/t1/channels"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    { "id": "ch1", "displayName": "General" }
+                ]
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let channels = client.list_channels("t1").await.unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].display_name, "General");
@@ -865,19 +1150,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_channel_message_returns_message() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/teams/t1/channels/ch1/messages"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": "msg_1",
-                    "body": { "contentType": "text", "content": "Hello" }
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path("/teams/t1/channels/ch1/messages"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(serde_json::json!({
+                "id": "msg_1",
+                "body": { "contentType": "text", "content": "Hello" }
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let msg = client
             .send_channel_message("t1", "ch1", "Hello", "text")
             .await
@@ -887,22 +1170,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_channel_message_payload_preserves_attachments() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/teams/t1/channels/ch1/messages"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": "msg_card",
-                    "attachments": [{
-                        "id": "card_1",
-                        "contentType": "application/vnd.microsoft.card.adaptive"
-                    }]
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path("/teams/t1/channels/ch1/messages"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(serde_json::json!({
+                "id": "msg_card",
+                "attachments": [{
+                    "id": "card_1",
+                    "contentType": "application/vnd.microsoft.card.adaptive"
+                }]
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let payload = serde_json::json!({
             "body": {
                 "contentType": "html",
@@ -921,26 +1202,24 @@ mod tests {
             .unwrap();
         assert_eq!(msg.id, Some("msg_card".into()));
 
-        let requests = mock_server.received_requests().await.unwrap();
+        let requests = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["attachments"][0]["id"], "card_1");
     }
 
     #[fcp_async_core::runtime::test]
     async fn send_chat_message_returns_message() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/chats/chat_1/messages"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": "msg_2",
-                    "body": { "contentType": "html", "content": "<p>Hi</p>" }
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path("/chats/chat_1/messages"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(serde_json::json!({
+                "id": "msg_2",
+                "body": { "contentType": "html", "content": "<p>Hi</p>" }
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let msg = client
             .send_chat_message("chat_1", "<p>Hi</p>", "html")
             .await
@@ -950,22 +1229,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn reply_to_channel_message_returns_reply() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
-                "/teams/t1/channels/ch1/messages/root_1/replies",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": "reply_1",
-                    "replyToId": "root_1",
-                    "body": { "contentType": "html", "content": "Hello reply" }
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path("/teams/t1/channels/ch1/messages/root_1/replies"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(serde_json::json!({
+                "id": "reply_1",
+                "replyToId": "root_1",
+                "body": { "contentType": "html", "content": "Hello reply" }
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let reply = client
             .reply_to_channel_message(
                 "t1",
@@ -985,22 +1260,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn reply_with_quote_posts_action_payload() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
-                "/chats/chat_1/messages/replyWithQuote",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": "reply_quote_1",
-                    "chatId": "chat_1",
-                    "body": { "contentType": "html", "content": "Quoted reply" }
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path("/chats/chat_1/messages/replyWithQuote"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(serde_json::json!({
+                "id": "reply_quote_1",
+                "chatId": "chat_1",
+                "body": { "contentType": "html", "content": "Quoted reply" }
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let message_ids = vec!["1728088338580".to_string()];
         let reply = client
             .reply_with_quote(
@@ -1016,23 +1287,21 @@ mod tests {
             .unwrap();
         assert_eq!(reply.chat_id, Some("chat_1".into()));
 
-        let requests = mock_server.received_requests().await.unwrap();
+        let requests = server.received_requests().await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["messageIds"][0], "1728088338580");
     }
 
     #[fcp_async_core::runtime::test]
     async fn update_channel_message_accepts_no_content_response() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
-            .and(wiremock::matchers::path(
-                "/teams/t1/channels/ch1/messages/msg_1",
-            ))
-            .respond_with(wiremock::ResponseTemplate::new(204))
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("PATCH"))
+            .and(path("/teams/t1/channels/ch1/messages/msg_1"))
+            .respond_with(LoopbackResponse::new(204))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         client
             .update_channel_message(
                 "t1",
@@ -1051,14 +1320,14 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn update_chat_message_accepts_no_content_response() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
-            .and(wiremock::matchers::path("/chats/chat_1/messages/msg_2"))
-            .respond_with(wiremock::ResponseTemplate::new(204))
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("PATCH"))
+            .and(path("/chats/chat_1/messages/msg_2"))
+            .respond_with(LoopbackResponse::new(204))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         client
             .update_chat_message(
                 "chat_1",
@@ -1076,21 +1345,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn handles_401_as_unauthorized() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me/joinedTeams"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                    "error": {
-                        "code": "InvalidAuthenticationToken",
-                        "message": "Access token has expired."
-                    }
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me/joinedTeams"))
+            .respond_with(LoopbackResponse::new(401).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "InvalidAuthenticationToken",
+                    "message": "Access token has expired."
+                }
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let result: TeamsResult<Vec<Team>> = client.list_my_teams().await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TeamsError::Unauthorized(_)));
@@ -1098,18 +1365,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn handles_429_as_rate_limited() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me/joinedTeams"))
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me/joinedTeams"))
             .respond_with(
-                wiremock::ResponseTemplate::new(429)
+                LoopbackResponse::new(429)
                     .insert_header("retry-after", "60")
                     .set_body_string("rate limited"),
             )
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let result: TeamsResult<Vec<Team>> = client.list_my_teams().await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1122,21 +1389,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn handles_404_as_not_found() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/teams/nonexistent"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                    "error": {
-                        "code": "NotFound",
-                        "message": "Team not found."
-                    }
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/teams/nonexistent"))
+            .respond_with(LoopbackResponse::new(404).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "NotFound",
+                    "message": "Team not found."
+                }
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let result = client.get_team("nonexistent").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TeamsError::NotFound(_)));
@@ -1144,32 +1409,30 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn health_check_200_ok() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": "user_1",
-                    "displayName": "Test"
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "id": "user_1",
+                "displayName": "Test"
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         assert!(client.health_check().await.is_ok());
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_check_401_is_unauthorized() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me"))
-            .respond_with(wiremock::ResponseTemplate::new(401))
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(LoopbackResponse::new(401))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let err = client.health_check().await.unwrap_err();
         assert!(matches!(err, TeamsError::Unauthorized(_)));
     }
@@ -1248,41 +1511,37 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn get_team_encodes_traversal_in_team_id() {
-        let mock_server = wiremock::MockServer::start().await;
+        let server = LoopbackServer::start().await;
 
         // The encoded path should be requested, NOT the raw traversal
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/teams/..%2F..%2Fadmin"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "id": "safe",
-                    "displayName": "Safe"
-                })),
-            )
-            .mount(&mock_server)
+        LoopbackRoute::given(method("GET"))
+            .and(path("/teams/..%2F..%2Fadmin"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "id": "safe",
+                "displayName": "Safe"
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let team = client.get_team("../../admin").await.unwrap();
         assert_eq!(team.id, "safe");
     }
 
     #[fcp_async_core::runtime::test]
     async fn send_chat_message_encodes_traversal_in_chat_id() {
-        let mock_server = wiremock::MockServer::start().await;
+        let server = LoopbackServer::start().await;
 
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/chats/..%2F..%2Fsecret/messages"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": "msg_safe",
-                    "body": { "contentType": "text", "content": "test" }
-                })),
-            )
-            .mount(&mock_server)
+        LoopbackRoute::given(method("POST"))
+            .and(path("/chats/..%2F..%2Fsecret/messages"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(serde_json::json!({
+                "id": "msg_safe",
+                "body": { "contentType": "text", "content": "test" }
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let msg = client
             .send_chat_message("../../secret", "test", "text")
             .await
@@ -1292,21 +1551,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn list_channel_messages_encodes_both_ids() {
-        let mock_server = wiremock::MockServer::start().await;
+        let server = LoopbackServer::start().await;
 
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path(
-                "/teams/t%2F1/channels/c%2F2/messages",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": []
-                })),
-            )
-            .mount(&mock_server)
+        LoopbackRoute::given(method("GET"))
+            .and(path("/teams/t%2F1/channels/c%2F2/messages"))
+            .respond_with(LoopbackResponse::new(200).set_body_json(serde_json::json!({
+                "value": []
+            })))
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let msgs = client.list_channel_messages("t/1", "c/2").await.unwrap();
         assert!(msgs.is_empty());
     }

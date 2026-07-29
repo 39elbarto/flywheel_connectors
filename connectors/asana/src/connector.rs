@@ -1493,9 +1493,12 @@ mod tests {
                 .iter()
                 .any(|cap| cap.as_str() == "asana.tasks.delete")
         );
+        let rate_limits = manifest
+            .rate_limits
+            .as_ref()
+            .expect("manifest should declare rate limits");
         assert_eq!(
-            manifest
-                .rate_limits
+            rate_limits
                 .operation_pools
                 .get("asana.tasks.delete")
                 .map(|pools| pools.iter().map(|pool| pool.as_str()).collect::<Vec<_>>()),
@@ -1769,7 +1772,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "asana.personal_access_token");
-        assert!(v["steps"].as_array().unwrap().len() == 3);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     }
 
     #[test]

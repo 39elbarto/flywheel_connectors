@@ -5,9 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tracing::{debug, instrument};
@@ -116,8 +115,6 @@ impl AmplitudeClient {
     /// through the connector boundary unnoticed. Each caller now declares the
     /// exact type it expects, so a shape regression surfaces as a `Decode`
     /// error at the boundary instead of as silently wrong output downstream.
-    /// Empty bodies use the type's `Default` so endpoints that legitimately
-    /// return an empty 200 (e.g. some health-check shapes) continue to work.
     async fn handle_response<T>(&self, resp: Response) -> AmplitudeResult<T>
     where
         T: DeserializeOwned + Default,
@@ -125,10 +122,7 @@ impl AmplitudeClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(T::default());
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -161,6 +155,14 @@ impl AmplitudeClient {
         }
     }
 
+    /// Issue a request with retry.
+    ///
+    /// br-kxd3e: replay safety is derived from the verb. Only POST ingests, and
+    /// a replay after a 5xx DOUBLE-COUNTS the event in every downstream
+    /// dashboard and funnel. These providers all offer a per-event dedup id
+    /// (`insert_id` / `messageId` / `$insert_id`) that would make the retry
+    /// genuinely safe, but the events are caller-supplied here so the key may
+    /// be absent — recorded as a follow-up rather than assumed present.
     async fn request_with_retry<T>(
         &self,
         http_method: &'static str,
@@ -170,11 +172,12 @@ impl AmplitudeClient {
     where
         T: DeserializeOwned + Default,
     {
+        let replay_safe = http_method != "POST";
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, method = http_method, url = %redact_url(&url), "amplitude request");
+            debug!(attempt, method = http_method, url = %redact_url(url), "amplitude request");
 
             let req = match http_method {
                 "GET" => self.client.get(url),
@@ -187,22 +190,18 @@ impl AmplitudeClient {
             match req.send().await {
                 Ok(resp) => match self.handle_response(resp).await {
                     Ok(val) => AttemptOutcome::Success(val),
-                    Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
-                        retry_after: err.retry_after(),
-                        error: err,
-                    },
+                    Err(err) if err.is_retryable() => {
+                        let replayable = replay_safe || err.replay_is_safe();
+                        let retry_after = err.retry_after();
+                        AttemptOutcome::retryable_if_replayable(err, retry_after, replayable)
+                    }
                     Err(err) => AttemptOutcome::Terminal(err),
                 },
                 Err(err) => {
                     let err = AmplitudeError::Http(err);
-                    if err.is_retryable() {
-                        AttemptOutcome::Retryable {
-                            retry_after: err.retry_after(),
-                            error: err,
-                        }
-                    } else {
-                        AttemptOutcome::Terminal(err)
-                    }
+                    let replayable = replay_safe || err.replay_is_safe();
+                    let retry_after = err.retry_after();
+                    AttemptOutcome::retryable_if_replayable(err, retry_after, replayable)
                 }
             }
         })
@@ -300,6 +299,19 @@ fn encode_query_value(value: &str, field: &str) -> AmplitudeResult<String> {
         }
     }
     Ok(encoded)
+}
+
+fn decode_success_body<T>(status: StatusCode, body: &str) -> AmplitudeResult<T>
+where
+    T: DeserializeOwned + Default,
+{
+    if status == StatusCode::NO_CONTENT {
+        return Ok(T::default());
+    }
+    if body.trim().is_empty() {
+        return Ok(T::default());
+    }
+    Ok(serde_json::from_str(body)?)
 }
 
 const HEX_UPPER: [u8; 16] = *b"0123456789ABCDEF";
@@ -516,6 +528,24 @@ mod tests {
         assert!(!dbg.contains("MY_SECRET_KEY"));
         assert!(!dbg.contains("MY_SECRET_SECRET"));
         assert!(dbg.contains("AmplitudeClient"));
+    }
+
+    #[test]
+    fn decode_success_body_accepts_empty_ok() {
+        let parsed = decode_success_body::<serde_json::Value>(StatusCode::OK, "").unwrap();
+        assert_eq!(parsed, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn decode_success_body_accepts_whitespace_ok() {
+        let parsed = decode_success_body::<serde_json::Value>(StatusCode::OK, "  \n\t").unwrap();
+        assert_eq!(parsed, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        let parsed = decode_success_body::<serde_json::Value>(StatusCode::NO_CONTENT, "").unwrap();
+        assert_eq!(parsed, serde_json::Value::Null);
     }
 
     #[test]

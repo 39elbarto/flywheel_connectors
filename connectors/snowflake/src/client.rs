@@ -4,7 +4,8 @@ use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -47,6 +48,37 @@ fn validate_sql_identifier<'a>(value: &'a str, field: &str) -> SnowflakeResult<&
         )));
     }
     Ok(value)
+}
+
+/// Validate a Snowflake account identifier before it is interpolated into the
+/// request host (`https://{account}.snowflakecomputing.com`).
+///
+/// Account identifiers are either `orgname-account_name` or a legacy account
+/// locator optionally suffixed with region/cloud segments
+/// (`xy12345.us-east-1.aws`), so only ASCII alphanumerics plus `-`, `_`, and
+/// `.` are legitimate. Anything else (`/`, `\`, `@`, `:`, `?`, `#`, `%`,
+/// whitespace) could terminate or escape the intended host — e.g. `evil.com/`
+/// parses to host `evil.com` — redirecting the bearer-token-carrying request to
+/// an attacker-controlled server.
+fn validate_account_identifier(value: &str) -> SnowflakeResult<()> {
+    if value.is_empty() {
+        return Err(SnowflakeError::InvalidInput(
+            "account_identifier must not be empty".into(),
+        ));
+    }
+    for ch in value.chars() {
+        if !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_' && ch != '.' {
+            return Err(SnowflakeError::InvalidInput(format!(
+                "account_identifier contains invalid character '{ch}'"
+            )));
+        }
+    }
+    if value.starts_with('.') || value.ends_with('.') || value.contains("..") {
+        return Err(SnowflakeError::InvalidInput(
+            "account_identifier has invalid dot placement".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// `Snowflake` authentication credentials.
@@ -110,12 +142,14 @@ impl SnowflakeClient {
             .user_agent("fcp-snowflake/0.1.0 (FCP connector)")
             .build()?;
 
-        let url = match base_url {
-            Some(u) => u.trim_end_matches('/').to_string(),
-            None => format!(
+        let url = if let Some(u) = base_url {
+            u.trim_end_matches('/').to_string()
+        } else {
+            validate_account_identifier(&auth.account_identifier)?;
+            format!(
                 "https://{}.snowflakecomputing.com/api/v2",
                 auth.account_identifier
-            ),
+            )
         };
 
         Ok(Self {
@@ -148,10 +182,7 @@ impl SnowflakeClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -318,6 +349,19 @@ impl SnowflakeClient {
     }
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> SnowflakeResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(SnowflakeError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +421,47 @@ mod tests {
     }
 
     #[test]
+    fn client_new_rejects_host_injecting_account_identifier() {
+        // A crafted account identifier must not be able to break out of the
+        // `{account}.snowflakecomputing.com` host and redirect the
+        // access-token-carrying request to an attacker-controlled server.
+        for evil in [
+            "evil.com/",
+            "evil.com\\",
+            "acct@evil.com",
+            "acct:8080",
+            "acct?x=1",
+            "acct#frag",
+            "acct%2f..",
+            "..",
+            "acct with space",
+            "",
+        ] {
+            let auth = SnowflakeAuth {
+                access_token: "TOKEN".into(),
+                account_identifier: evil.into(),
+            };
+            let result = SnowflakeClient::new(auth, None, None, None, None);
+            assert!(
+                matches!(result, Err(SnowflakeError::InvalidInput(_))),
+                "account_identifier {evil:?} must be rejected"
+            );
+        }
+
+        // Legitimate identifier shapes (org-account and legacy locator) accepted.
+        for ok in ["myorg-myaccount", "xy12345.us-east-1.aws", "ACC_1"] {
+            let auth = SnowflakeAuth {
+                access_token: "TOKEN".into(),
+                account_identifier: ok.into(),
+            };
+            assert!(
+                SnowflakeClient::new(auth, None, None, None, None).is_ok(),
+                "account_identifier {ok:?} must be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn client_new_strips_trailing_slash() {
         let auth = SnowflakeAuth {
             access_token: "TOKEN".into(),
@@ -391,6 +476,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.base_url, "https://test.example.com/api/v2");
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            SnowflakeError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            SnowflakeError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

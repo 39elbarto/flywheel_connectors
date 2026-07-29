@@ -18,7 +18,6 @@ use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
 };
 use base64::Engine as _;
-use fcp_async_core::Cx;
 use fcp_async_core::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_deepgram::DeepgramConnector;
@@ -1199,23 +1198,26 @@ async fn accept_test_websocket(mut stream: TcpStream) -> (TestServerWebSocket, S
         .expect("read websocket handshake");
     let headers = String::from_utf8_lossy(&request).into_owned();
     let ws = WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket");
     (ws, headers)
 }
 
 async fn send_json_frame(ws: &mut TestServerWebSocket, value: Value, context: &str) {
-    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        ServerWsMessage::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn recv_frame(
     ws: &mut TestServerWebSocket,
     context: &str,
 ) -> Result<ServerWsMessage, String> {
-    match ws.recv(&Cx::for_testing()).await {
+    match ws.recv(&fcp_async_core::compatibility_cx()).await {
         Ok(Some(message)) => Ok(message),
         Ok(None) => Err(format!("websocket closed before {context}")),
         Err(err) => Err(format!("{context}: {err}")),
@@ -1279,7 +1281,9 @@ async fn expect_elevenlabs_audio_chunk(
 }
 
 async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
 }
 
 struct EvidenceInput<'a> {

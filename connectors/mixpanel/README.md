@@ -214,6 +214,20 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
+The gated sandbox live suite uses `FCP_LIVE_SANDBOX=1` plus:
+
+- `MIXPANEL_SANDBOX_PROJECT_TOKEN`: token for the dedicated sandbox project.
+- `MIXPANEL_SANDBOX_SERVICE_ACCOUNT_USER`: service-account username with sandbox-project access.
+- `MIXPANEL_SANDBOX_SERVICE_ACCOUNT_SECRET`: matching service-account secret.
+- `MIXPANEL_SANDBOX_PROJECT_ID`: numeric project id required by Mixpanel service-account Query and Import APIs.
+- `FCP_SANDBOX_RUN_NAMESPACE`: namespace written into synthetic event properties and evidence.
+
+`MIXPANEL_SANDBOX_BASE_URL` defaults to `https://mixpanel.com/api/2.0` for the
+read-only Query API path. Synthetic event import uses Mixpanel's canonical
+`https://api.mixpanel.com/import` endpoint with `strict=1` and a two-call
+ceiling. Imported sandbox events are immutable; the suite records the namespace
+and cleanup evidence instead of claiming deletion.
+
 Run these after changing this connector contract:
 
 ```bash
@@ -230,6 +244,13 @@ rch exec -- cargo test -p fcp-mixpanel
 rch exec -- cargo check -p fcp-mixpanel --all-targets
 rch exec -- cargo clippy -p fcp-mixpanel --all-targets -- -D warnings
 rch exec -- cargo fmt --check
+```
+
+For the live harness specifically:
+
+```bash
+rch exec -- env TMPDIR=/Volumes/trj-data/tmp CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-mixpanel-bky21 CARGO_INCREMENTAL=0 cargo test -p fcp-mixpanel --test live_verification -- --nocapture
+rch exec -- env TMPDIR=/Volumes/trj-data/tmp CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-mixpanel-bky21 CARGO_INCREMENTAL=0 cargo clippy -p fcp-mixpanel --all-targets -- -D warnings
 ```
 
 ## Operator Guidance

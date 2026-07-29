@@ -2,8 +2,10 @@
 
 use base64::Engine;
 use fcp_prelude::log_redaction::redact_url;
+use fcp_sdk::ConnectorRuntime;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status,
+    transport_error_reached_service,
 };
 use fcp_sdk::retry::RetryDecision;
 use reqwest::Client;
@@ -33,14 +35,25 @@ impl std::fmt::Debug for ConfluenceClient {
     }
 }
 
-/// Sanitize a path segment to prevent path traversal.
+/// Sanitize a path segment to prevent path traversal and query/fragment
+/// injection. Confluence space keys, content/page IDs, and version numbers are
+/// `[A-Za-z0-9._~-]`-shaped, so rejecting slashes, `..`, encoded slashes, and
+/// URL delimiters (`?`/`#`/`&`/`=`) never trips a legitimate value while
+/// stopping `123?status=trashed` (query smuggling) and `x%2f..%2fadmin`.
 fn sanitize_path_segment(segment: &str) -> Result<&str> {
+    let lower = segment.to_ascii_lowercase();
     if segment.trim().is_empty()
         || segment.contains('/')
         || segment.contains('\\')
         || segment.contains('\0')
+        || segment.contains("..")
+        || segment.contains('?')
+        || segment.contains('#')
+        || segment.contains('&')
+        || segment.contains('=')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
         || segment == "."
-        || segment == ".."
     {
         return Err(Error::InvalidInput(format!(
             "Invalid path segment: {segment}"
@@ -253,13 +266,18 @@ impl ConfluenceClient {
                         };
                     }
                 };
-                handle_response(resp).await
+                handle_response(resp, true).await
             }
         })
         .await
     }
 
     /// Generic POST with retry.
+    /// Generic POST with retry.
+    ///
+    /// br-kxd3e: every caller of this helper CREATES content, and Confluence
+    /// has no idempotency key, so a replay that reached the server produces a
+    /// second page. Only a connect-phase failure is retried.
     async fn post_with_retry<T: serde::de::DeserializeOwned>(
         &self,
         runtime: &ConnectorRuntime,
@@ -288,13 +306,15 @@ impl ConfluenceClient {
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        return AttemptOutcome::Retryable {
-                            error: Error::Http(e),
-                            retry_after: None,
-                        };
+                        let replayable = !transport_error_reached_service(&e);
+                        return AttemptOutcome::retryable_if_replayable(
+                            Error::Http(e),
+                            None,
+                            replayable,
+                        );
                     }
                 };
-                handle_response(resp).await
+                handle_response(resp, false).await
             }
         })
         .await
@@ -335,7 +355,7 @@ impl ConfluenceClient {
                         };
                     }
                 };
-                handle_response(resp).await
+                handle_response(resp, true).await
             }
         })
         .await
@@ -417,8 +437,14 @@ impl ConfluenceClient {
 }
 
 /// Handle response: check status, parse JSON.
+/// Classify a Confluence response.
+///
+/// `replay_safe` gates only the post-transmission retry classes. A 429 is
+/// always retryable: Confluence refused it WITHOUT performing the work
+/// (br-kxd3e).
 async fn handle_response<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
+    replay_safe: bool,
 ) -> AttemptOutcome<T, Error> {
     let status = resp.status().as_u16();
 
@@ -450,10 +476,9 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
         let decision = classify_http_status(status, None);
         let err = Error::Api { status, message };
         if !matches!(decision, RetryDecision::Terminal) {
-            return AttemptOutcome::Retryable {
-                error: err,
-                retry_after: None,
-            };
+            // A 5xx means Confluence received the request and may already
+            // have created the page.
+            return AttemptOutcome::retryable_if_replayable(err, None, replay_safe);
         }
         return AttemptOutcome::Terminal(err);
     }
@@ -467,8 +492,6 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -565,74 +588,5 @@ mod tests {
             .unwrap();
         let decoded_str = String::from_utf8(decoded).unwrap();
         assert_eq!(decoded_str, "user@example.com:api_token");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/rest/api/space"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [],
-                "start": 0,
-                "limit": 1,
-                "size": 0
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = ConfluenceClient::new(
-            &mock_server.uri(),
-            "user@example.com",
-            "test_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_unauthorized() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/rest/api/space"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client = ConfluenceClient::new(
-            &mock_server.uri(),
-            "user@example.com",
-            "bad_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let err = client.health_check().await.unwrap_err();
-        assert!(matches!(err, Error::Unauthorized(_)));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_rate_limited() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/rest/api/space"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
-            .mount(&mock_server)
-            .await;
-
-        let client = ConfluenceClient::new(
-            &mock_server.uri(),
-            "user@example.com",
-            "test_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let err = client.health_check().await.unwrap_err();
-        assert!(matches!(
-            err,
-            Error::RateLimited {
-                retry_after_ms: 60000
-            }
-        ));
     }
 }

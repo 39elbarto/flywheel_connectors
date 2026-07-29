@@ -13,11 +13,14 @@
 //!
 //! Live tree adoption (per the dja9u bead's evidence scan):
 //!
-//! - 78 connectors USE_TYPESTATE (verify_bound / promote_with_*).
-//! - 0 connectors USE_LEGACY_VERIFY (deprecated `verifier.verify(...)`
-//!   alias — same code path as `verify_bound` but discards the
-//!   `BoundVerified` token, so the connector can no longer prove to
-//!   downstream code that the token was structurally verified).
+#![allow(clippy::manual_let_else)]
+//!
+//! - 78 connectors `USE_TYPESTATE` (`verify_bound` / `promote_with`_*).
+//! - 0 connectors `USE_LEGACY_VERIFY` (deprecated `verifier.verify(...)`
+//!   alias — the `#[deprecated]` `CapabilityVerifier::verify` entrypoint with
+//!   an ambiguous return type, which discards the structural-verification
+//!   typestate so the connector can no longer prove to downstream code that
+//!   the token was bound-verified).
 //! - The remaining files in `connectors/*/src/connector.rs` either
 //!   delegate verification to a shared helper or are scaffolds that
 //!   do not yet wire a verifier at all.
@@ -26,18 +29,18 @@
 //!
 //! 1. It enumerates every file under `connectors/*/src/connector.rs`
 //!    in the live tree.
-//! 2. It classifies each as USES_TYPESTATE / USES_LEGACY_VERIFY /
-//!    NO_VERIFIER based on substring scan of the source.
+//! 2. It classifies each as `USES_TYPESTATE` / `USES_LEGACY_VERIFY` /
+//!    `NO_VERIFIER` based on substring scan of the source.
 //! 3. It asserts the legacy-`.verify(...)` set is a subset of the
-//!    pinned LEGACY_VERIFY allowlist below — adding a new
+//!    pinned `LEGACY_VERIFY` allowlist below — adding a new
 //!    `.verify(...)` call site fails the test, removing one always
 //!    passes.
 //! 4. It asserts the typestate-using set is a superset of the pinned
-//!    TYPESTATE_ENFORCED allowlist — removing typestate enforcement
+//!    `TYPESTATE_ENFORCED` allowlist — removing typestate enforcement
 //!    from a connector that already had it fails the test.
 //!
-//! When a future bead migrates a connector from LEGACY_VERIFY to
-//! USES_TYPESTATE, the migration shrinks `LEGACY_VERIFY_ALLOWLIST`
+//! When a future bead migrates a connector from `LEGACY_VERIFY` to
+//! `USES_TYPESTATE`, the migration shrinks `LEGACY_VERIFY_ALLOWLIST`
 //! and grows `TYPESTATE_ENFORCED_ALLOWLIST`. The ratchet means the
 //! typestate adoption number can only ever increase from this
 //! commit forward.
@@ -54,10 +57,20 @@ const TYPESTATE_MARKERS: &[&str] = &[
     "promote_with_constraints(",
 ];
 
-/// Marker for the deprecated `verifier.verify(...)` alias. We look for
-/// the exact substring `verifier.verify(` rather than `.verify(`
-/// alone so we don't false-flag e.g. `signing_key.verify(...)` (which
-/// is an Ed25519 signature check, not a capability gate).
+/// Marker for the deprecated `verifier.verify(...)` alias — the
+/// `#[deprecated]` `CapabilityVerifier::verify` method ("ambiguous return
+/// type; use `verify_bound` (full enforcement) or `verify_unbound` (gateway
+/// vantage)"). We look for the exact substring `verifier.verify(` rather than
+/// `.verify(` alone so we don't false-flag e.g. `signing_key.verify(...)` or a
+/// webhook `verifier.verify(headers, payload, ...)` signature check (neither is
+/// a capability gate).
+///
+/// This MUST stay disjoint from `TYPESTATE_MARKERS`: `verify_bound` is the
+/// GOOD typestate method, so the legacy marker keys off the bare `verify(`
+/// method name, which is not a substring of `verify_bound(`. `classify`
+/// additionally checks the typestate markers first, so a connector that uses
+/// both a capability `verify_bound` and an unrelated webhook `verify(` is
+/// correctly classified as typestate-enforcing.
 const LEGACY_VERIFY_MARKER: &str = "verifier.verify(";
 
 /// Connectors known to currently use the legacy `.verify(...)` alias
@@ -71,7 +84,7 @@ const LEGACY_VERIFY_MARKER: &str = "verifier.verify(";
 const LEGACY_VERIFY_ALLOWLIST: &[&str] = &[];
 
 /// Connectors known to currently use the typestate ladder correctly
-/// (verify_bound / promote_with_instance / promote_with_constraints).
+/// (`verify_bound` / `promote_with_instance` / `promote_with_constraints`).
 /// Removing any of these fails this test (regression: connector
 /// dropped its typestate enforcement). Adding a new one always
 /// passes.
@@ -244,7 +257,7 @@ fn dja9u_no_new_connectors_use_legacy_verify_alias_at_invoke_boundary() {
         violations.is_empty(),
         "br-dja9u regression: new connectors must use verify_bound (or \
          promote_with_instance / promote_with_constraints), not the \
-         deprecated `verifier.verify(...)` alias. New violators: {:#?}. \
+         deprecated `verifier.verify_bound(...)` alias. New violators: {:#?}. \
          If migrating a connector ON TO the typestate path, also remove it \
          from LEGACY_VERIFY_ALLOWLIST in {}",
         violations,
@@ -266,7 +279,7 @@ fn dja9u_no_typestate_regressions_in_already_enforced_connectors() {
         }
     }
     let mut regressed: Vec<String> = Vec::new();
-    for name in want_typestate.iter() {
+    for name in &want_typestate {
         if !have_typestate.contains(*name) {
             regressed.push((*name).to_owned());
         }

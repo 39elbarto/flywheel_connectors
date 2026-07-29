@@ -1,0 +1,102 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:d66a85374c3787cae1a2a79c90c83532b50188aaa5f109cf3821723db57e97ee"
+
+[connector]
+id = "fcp.adversarial"
+name = "FCP Adversarial Test Connector"
+version = "0.1.0"
+description = "Opt-in fake connector that emits hostile response scenarios for FCP layer tests"
+archetypes = ["operational"]
+format = "native"
+status = "adversarial"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No state. This connector is never loaded in production mode."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = []
+optional = ["adversarial.emit"]
+forbidden = ["network.dns", "network.egress", "network.listen", "network.tls.sni", "storage.state", "system.exec"]
+
+[provides.operations."adversarial.emit"]
+description = "Trigger one hostile response scenario and return the structured FCP error that caught it."
+capability = "adversarial.emit"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "strict"
+revocation_freshness = "critical"
+
+[provides.operations."adversarial.emit".input_schema]
+type = "object"
+required = ["scenario"]
+additionalProperties = false
+
+[provides.operations."adversarial.emit".input_schema.properties.scenario]
+type = "string"
+enum = [
+    "oversized_payload",
+    "mid_stream_disconnect",
+    "time_skew_plus_1y",
+    "time_skew_minus_1y",
+    "invalid_utf8_header",
+    "deeply_nested_json",
+    "oversized_json_key",
+    "null_byte_in_response_field",
+    "header_smuggling",
+    "crlf_injection",
+]
+
+[provides.operations."adversarial.emit".output_schema]
+type = "object"
+required = ["status"]
+additionalProperties = true
+
+[provides.operations."adversarial.emit".output_schema.properties.status]
+const = "never_successful"
+
+[provides.operations."adversarial.emit".network_constraints]
+host_allow = ["adversarial.invalid"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 1
+max_redirects = 0
+connect_timeout_ms = 1
+total_timeout_ms = 1
+max_response_bytes = 1
+
+[provides.operations."adversarial.emit".ai_hints]
+when_to_use = "Use only in FCP conformance tests that need a deliberate hostile connector response."
+common_mistakes = ["Do not deploy this connector in production.", "Do not treat a successful invocation as possible; every scenario must fail with a structured FCP error."]
+examples = ['{"scenario":"oversized_payload"}']
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 16
+cpu_percent = 5
+wall_clock_timeout_ms = 1000
+deny_exec = true
+deny_ptrace = true

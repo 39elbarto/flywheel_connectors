@@ -356,7 +356,7 @@ async fn connector_suite_happy_path_scrapes_page() {
             "excludeTags": ["nav"],
             "waitFor": 50,
             "timeout": 5000,
-            "maxAge": 172800000,
+            "maxAge": 172_800_000,
             "proxy": "auto",
             "storeInCache": false
         })))
@@ -390,7 +390,7 @@ async fn connector_suite_happy_path_scrapes_page() {
             "exclude_tags": ["nav"],
             "wait_for": 50,
             "timeout": 5000,
-            "max_age_ms": 172800000,
+            "max_age_ms": 172_800_000,
             "proxy": "auto",
             "store_in_cache": false
         }),

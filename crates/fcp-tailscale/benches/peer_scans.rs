@@ -91,7 +91,10 @@ fn status_peer_scans(c: &mut Criterion) {
     for size in SIZES {
         let status = status_with_peers(size);
         group.bench_function(format!("borrowed_validate_peer_ids_{size}"), |b| {
-            b.iter(|| std::hint::black_box(status.validate_peer_ids().unwrap()));
+            b.iter(|| {
+                status.validate_peer_ids().unwrap();
+                std::hint::black_box(());
+            });
         });
         group.bench_function(format!("allocating_peers_map_{size}"), |b| {
             b.iter(|| std::hint::black_box(status.peers().unwrap().len()));

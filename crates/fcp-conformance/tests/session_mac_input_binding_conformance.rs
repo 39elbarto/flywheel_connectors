@@ -1,7 +1,7 @@
 //! Session MAC input-binding conformance.
 //!
 //! `compute_session_mac` is the per-frame data-plane authenticator. It
-//! takes (suite, mac_key, session_id, direction, seq, frame_bytes) and
+//! takes (suite, `mac_key`, `session_id`, direction, seq, `frame_bytes`) and
 //! produces a 16-byte tag. Existing conformance tests in
 //! `datagram_golden_vectors.rs` and `negative_path_conformance.rs`
 //! cover direction-binding, seq-binding, wrong-key rejection, and
@@ -15,7 +15,7 @@
 //!    forge a Suite1 MAC for a session that the responder believes is
 //!    running Suite2.
 //!
-//! 2. **session_id binding.** The session id is mixed in via
+//! 2. **`session_id` binding.** The session id is mixed in via
 //!    `mac.update(session_id.as_bytes())`. A MAC produced for session
 //!    A MUST NOT verify for session B even with the same key, suite,
 //!    direction, seq, and frame — otherwise an attacker observing

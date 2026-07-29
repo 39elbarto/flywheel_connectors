@@ -262,15 +262,40 @@ pub struct TailnetInvokeRealTransportInput {
     pub attempts: Vec<TailnetInvokeAttemptEvidence>,
 }
 
+/// Inputs for a structured-skip record that still preserves attempted probe diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailnetInvokeStructuredSkipInput {
+    /// Requested route mode.
+    pub route_mode: TailnetInvokeRouteMode,
+    /// Redacted rerunnable command line.
+    pub command_line: Vec<String>,
+    /// Git revision under test.
+    pub git_revision: String,
+    /// Redacted topology label.
+    pub topology: String,
+    /// Full prerequisite diagnostics.
+    pub prerequisites: Vec<TailnetInvokePrerequisite>,
+    /// Redacted nodes involved in an attempted invoke probe, if known.
+    pub nodes: Vec<TailnetInvokeNodeEvidence>,
+    /// Authentication outcome label.
+    pub auth_result: String,
+    /// Number of transport retries observed.
+    pub retries: u64,
+    /// Successful-attempt latency summary retained for diagnostic skips.
+    pub latency: Option<TailnetInvokeLatencySummary>,
+    /// Per-invoke samples and error classifications.
+    pub attempts: Vec<TailnetInvokeAttemptEvidence>,
+}
+
 /// Live prerequisite observations collected by the executable evidence runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TailnetInvokeHarnessObservation {
-    /// Whether a Tailscale `LocalAPI` endpoint was configured for the run.
-    pub localapi_configured: bool,
-    /// Whether `LocalAPI` reported the local node connected to the tailnet.
+    /// Whether a live Tailscale status source was available for the run.
+    pub tailscale_status_available: bool,
+    /// Whether live Tailscale status reported the local node connected to the tailnet.
     pub tailscale_connected: bool,
-    /// Count of online peers visible from `LocalAPI`.
+    /// Count of online peers visible from live Tailscale status.
     pub online_peer_count: usize,
     /// Whether the runner can prove the requested route mode from live telemetry.
     pub route_telemetry_available: bool,
@@ -280,24 +305,24 @@ pub struct TailnetInvokeHarnessObservation {
     pub production_mesh_invoke_transport_available: bool,
     /// Redaction-safe detail explaining the production transport decision.
     pub production_mesh_invoke_transport_detail: String,
-    /// Redaction-safe detail from the `LocalAPI` probe.
-    pub localapi_detail: String,
+    /// Redaction-safe detail from the live Tailscale status probe.
+    pub tailscale_status_detail: String,
 }
 
 impl TailnetInvokeHarnessObservation {
-    /// Build a conservative observation for environments without `LocalAPI`.
+    /// Build a conservative observation for environments without live Tailscale status.
     #[must_use]
-    pub fn localapi_not_configured() -> Self {
+    pub fn tailscale_status_unavailable(detail: impl Into<String>) -> Self {
         Self {
-            localapi_configured: false,
+            tailscale_status_available: false,
             tailscale_connected: false,
             online_peer_count: 0,
             route_telemetry_available: false,
-            route_telemetry_detail: "LocalAPI status unavailable".to_string(),
+            route_telemetry_detail: "Tailscale status unavailable".to_string(),
             production_mesh_invoke_transport_available: false,
             production_mesh_invoke_transport_detail:
                 "no production tailnet invoke endpoint configured".to_string(),
-            localapi_detail: "set --localapi-url or FCP_TAILSCALE_LOCALAPI_URL".to_string(),
+            tailscale_status_detail: detail.into(),
         }
     }
 
@@ -314,9 +339,9 @@ impl TailnetInvokeHarnessObservation {
 
         vec![
             TailnetInvokePrerequisite::new(
-                "tailscale-localapi-url",
-                self.localapi_configured,
-                self.localapi_detail.clone(),
+                "tailscale-status-source",
+                self.tailscale_status_available,
+                self.tailscale_status_detail.clone(),
             ),
             TailnetInvokePrerequisite::new(
                 "tailscale-connected",
@@ -439,16 +464,18 @@ impl TailnetInvokeEvidenceRecord {
         topology: impl Into<String>,
         prerequisites: Vec<TailnetInvokePrerequisite>,
     ) -> Self {
-        Self::structured_skip_with_attempts(
+        Self::structured_skip_with_probe(TailnetInvokeStructuredSkipInput {
             route_mode,
             command_line,
-            git_revision,
-            topology,
+            git_revision: git_revision.into(),
+            topology: topology.into(),
             prerequisites,
-            "not_attempted",
-            0,
-            Vec::new(),
-        )
+            nodes: Vec::new(),
+            auth_result: "not_attempted".to_string(),
+            retries: 0,
+            latency: None,
+            attempts: Vec::new(),
+        })
     }
 
     /// Build a structured skip record while preserving attempted invoke samples.
@@ -464,10 +491,25 @@ impl TailnetInvokeEvidenceRecord {
         retries: u64,
         attempts: Vec<TailnetInvokeAttemptEvidence>,
     ) -> Self {
-        let git_revision = git_revision.into();
-        let topology = topology.into();
-        let auth_result = auth_result.into();
-        let missing_prerequisites = prerequisites
+        Self::structured_skip_with_probe(TailnetInvokeStructuredSkipInput {
+            route_mode,
+            command_line,
+            git_revision: git_revision.into(),
+            topology: topology.into(),
+            prerequisites,
+            nodes: Vec::new(),
+            auth_result: auth_result.into(),
+            retries,
+            latency: None,
+            attempts,
+        })
+    }
+
+    /// Build a structured skip record while preserving attempted probe context.
+    #[must_use]
+    pub fn structured_skip_with_probe(input: TailnetInvokeStructuredSkipInput) -> Self {
+        let missing_prerequisites = input
+            .prerequisites
             .iter()
             .filter(|prerequisite| !prerequisite.satisfied)
             .map(|prerequisite| prerequisite.name.clone())
@@ -484,16 +526,16 @@ impl TailnetInvokeEvidenceRecord {
             schema_version: TAILNET_INVOKE_EVIDENCE_SCHEMA_VERSION.to_string(),
             bead_id: TAILNET_INVOKE_EVIDENCE_BEAD.to_string(),
             source: TailnetInvokeEvidenceSource::StructuredSkip,
-            route_mode,
-            command_line: redact_command_line(command_line),
-            git_revision: redact_sensitive_text(&git_revision),
-            topology: redact_sensitive_text(&topology),
-            nodes: Vec::new(),
-            auth_result: redact_sensitive_text(&auth_result),
-            retries,
-            latency: None,
-            attempts,
-            prerequisites,
+            route_mode: input.route_mode,
+            command_line: redact_command_line(input.command_line),
+            git_revision: redact_sensitive_text(&input.git_revision),
+            topology: redact_sensitive_text(&input.topology),
+            nodes: input.nodes,
+            auth_result: redact_sensitive_text(&input.auth_result),
+            retries: input.retries,
+            latency: input.latency,
+            attempts: input.attempts,
+            prerequisites: input.prerequisites,
             missing_prerequisites,
             skip_reason,
             generated_at: Utc::now(),
@@ -754,9 +796,56 @@ mod tests {
     }
 
     #[test]
+    fn structured_skip_with_probe_preserves_redacted_nodes_and_success_latency() {
+        let attempts = vec![
+            TailnetInvokeAttemptEvidence::success(0, 10),
+            TailnetInvokeAttemptEvidence::success(1, 40),
+        ];
+        let latency = TailnetInvokeLatencySummary::from_successful_attempts(&attempts)
+            .expect("latency summary");
+        let record = TailnetInvokeEvidenceRecord::structured_skip_with_probe(
+            TailnetInvokeStructuredSkipInput {
+                route_mode: TailnetInvokeRouteMode::DirectLan,
+                command_line: vec!["fcp-tailnet-invoke-evidence".to_string()],
+                git_revision: "abcdef123456".to_string(),
+                topology: "caller alice.tailnet.ts.net to responder bob.tailnet.ts.net".to_string(),
+                prerequisites: vec![TailnetInvokePrerequisite::new(
+                    "direct-lan-route-observed",
+                    false,
+                    "route missing for bob.tailnet.ts.net",
+                )],
+                nodes: vec![
+                    TailnetInvokeNodeEvidence::new("caller", "alice.tailnet.ts.net"),
+                    TailnetInvokeNodeEvidence::new("responder", "bob.tailnet.ts.net"),
+                ],
+                auth_result: "capability_verified".to_string(),
+                retries: 1,
+                latency: Some(latency),
+                attempts,
+            },
+        );
+
+        assert_eq!(record.source, TailnetInvokeEvidenceSource::StructuredSkip);
+        assert_eq!(record.nodes.len(), 2);
+        assert_eq!(record.latency.expect("latency").p99_ns, 40);
+        assert!(
+            record
+                .nodes
+                .iter()
+                .all(|node| node.redacted_node_id.starts_with("blake3:"))
+        );
+
+        let jsonl = record.to_jsonl_line().expect("serialize JSONL");
+        assert!(!jsonl.contains("alice.tailnet.ts.net"));
+        assert!(!jsonl.contains("bob.tailnet.ts.net"));
+        assert!(jsonl.contains("\"p99_ns\":40"));
+        assert!(jsonl.contains("missing_prerequisites:direct-lan-route-observed"));
+    }
+
+    #[test]
     fn harness_observation_builds_truthful_structured_skip() {
         let observation = TailnetInvokeHarnessObservation {
-            localapi_configured: true,
+            tailscale_status_available: true,
             tailscale_connected: true,
             online_peer_count: 1,
             route_telemetry_available: false,
@@ -764,7 +853,7 @@ mod tests {
             production_mesh_invoke_transport_available: false,
             production_mesh_invoke_transport_detail:
                 "no production tailnet invoke endpoint configured".to_string(),
-            localapi_detail: "backend_state=Running".to_string(),
+            tailscale_status_detail: "status_source=localapi,backend_state=Running".to_string(),
         };
 
         let record = observation.structured_skip_record(

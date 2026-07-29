@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -45,6 +46,7 @@ use fcp_testkit::evidence_helpers::{
     SwarmRunEnvironment, SwarmStatisticalGateInput, SwarmStatisticalGateOutcome,
     SwarmStatisticalGateReasonKind, SwarmStatisticalGateReport, SwarmStatisticalGateTuning,
     SwarmStatisticalTraceQuality, SwarmWorkloadKind,
+    validate_swarm_prewarm_cold_start_evidence_bundle,
 };
 use serde_json::{Value, json};
 
@@ -851,7 +853,49 @@ fn maybe_write_batch_morselization_jsonl_artifact(jsonl: &str) -> std::io::Resul
 }
 
 fn prewarm_cargo_target_dir() -> String {
-    std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "/tmp/fcp-prewarm-e2e".to_string())
+    std::env::var("PREWARM_EVIDENCE_CARGO_TARGET_DIR")
+        .or_else(|_| std::env::var("PREWARM_CARGO_TARGET_DIR"))
+        .or_else(|_| std::env::var("CARGO_TARGET_DIR"))
+        .unwrap_or_else(|_| "/tmp/fcp-prewarm-e2e".to_string())
+}
+
+fn prewarm_cargo_target_dir_class(cargo_target_dir: &str) -> &'static str {
+    if cargo_target_dir == "/tmp"
+        || cargo_target_dir.starts_with("/tmp/")
+        || cargo_target_dir == "/private/tmp"
+        || cargo_target_dir.starts_with("/private/tmp/")
+    {
+        "tmp"
+    } else if cargo_target_dir.starts_with("/Users/")
+        || cargo_target_dir.starts_with("/private/var/")
+    {
+        "private_absolute"
+    } else if Path::new(cargo_target_dir).is_absolute() {
+        "absolute"
+    } else {
+        "relative"
+    }
+}
+
+fn prewarm_cargo_target_dir_hash(cargo_target_dir: &str) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(cargo_target_dir.as_bytes()).to_hex()
+    )
+}
+
+fn prewarm_manifest_hash() -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(b"fcp-test-connector:request-response:strict-prewarm").to_hex()
+    )
+}
+
+fn prewarm_zone_hash() -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(b"z:project:swarm-prewarm").to_hex()
+    )
 }
 
 fn prewarm_command_line(cargo_target_dir: &str) -> Vec<String> {
@@ -898,6 +942,17 @@ fn prewarm_observation(
         entry_age: Duration::from_millis(20),
         previous_exit,
     }
+}
+
+fn prewarm_sandbox_gap_observation() -> PrewarmCheckoutObservation {
+    let mut observation = prewarm_observation(
+        PrewarmPoolState::WarmHit,
+        PrewarmManifestState::Current,
+        PrewarmHealthState::Ready,
+        None,
+    );
+    observation.sandbox = PrewarmSandboxState::LimitsUnavailable;
+    observation
 }
 
 fn prewarm_latency(
@@ -959,6 +1014,8 @@ fn prewarm_evidence(
     let decision = case.config.decide_checkout(&case.observation);
     let (fallback_reason, unsafe_rejection_reason) = prewarm_decision_reasons(&decision)?;
     let cargo_target_dir = prewarm_cargo_target_dir();
+    let cargo_target_dir_class = prewarm_cargo_target_dir_class(&cargo_target_dir).to_string();
+    let cargo_target_dir_hash = prewarm_cargo_target_dir_hash(&cargo_target_dir);
     let error_mapping = match (&fallback_reason, &unsafe_rejection_reason) {
         (Some(reason), None) => format!("fallback_on_demand:{reason}"),
         (None, Some(reason)) => format!("reject_unsafe:{reason}"),
@@ -968,16 +1025,20 @@ fn prewarm_evidence(
 
     Ok(SwarmPrewarmColdStartEvidence {
         schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+        execution_mode: SwarmEvidenceExecutionMode::Smoke,
+        source_kind: SwarmEvidenceSourceKind::Offline,
         scenario_id: case.scenario_id.to_string(),
         connector_id: "fcp.github:utility:1.0.0".to_string(),
         command_line: prewarm_command_line(&cargo_target_dir),
-        git_revision: "e2e-smoke-revision".to_string(),
+        git_revision: "abc1234".to_string(),
         worker_id: "offline-e2e-runner".to_string(),
         cargo_target_dir,
+        cargo_target_dir_class,
+        cargo_target_dir_hash,
         connector_fixture_id: "fcp-test-connector:request-response".to_string(),
         host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout".to_string(),
-        manifest_hash: "blake3:prewarm-manifest".to_string(),
-        zone: "z:project:swarm-prewarm".to_string(),
+        manifest_hash: prewarm_manifest_hash(),
+        zone: prewarm_zone_hash(),
         strategy: serde_label(&case.config.strategy)?,
         pool_state: serde_label(&case.observation.pool_state)?,
         pool_size: case.config.max_idle,
@@ -1020,6 +1081,12 @@ fn maybe_write_prewarm_jsonl_artifact(jsonl: &str) -> std::io::Result<()> {
     file.write_all(jsonl.as_bytes())?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+fn emit_prewarm_jsonl_stdout(jsonl: &str) {
+    for line in jsonl.lines() {
+        println!("FCP_PREWARM_COLD_START_JSONL {line}");
+    }
 }
 
 fn statistical_baseline_snapshot() -> SwarmRegressionMetricSnapshot {
@@ -1397,6 +1464,58 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             shutdown_cleanup_verified: true,
         })?,
         prewarm_evidence(PrewarmEvidenceCase {
+            scenario_id: "prewarm_exhausted_under_burst",
+            config: &config,
+            observation: prewarm_observation(
+                PrewarmPoolState::Empty,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                None,
+            ),
+            activation_latency_ms: 128,
+            baseline_on_demand_latency_ms: 128,
+            latency: prewarm_latency(128, 128, 128, 128, 128, 128),
+            baseline_latency: prewarm_latency(128, 128, 128, 128, 128, 128),
+            process_count: 256,
+            concurrent_startups: 4_096,
+            restart_reason: None,
+            skip_reason: Some("pool_exhausted_by_burst"),
+            shutdown_cleanup_verified: true,
+        })?,
+        prewarm_evidence(PrewarmEvidenceCase {
+            scenario_id: "prewarm_sandbox_limits_unavailable",
+            config: &config,
+            observation: prewarm_sandbox_gap_observation(),
+            activation_latency_ms: 96,
+            baseline_on_demand_latency_ms: 96,
+            latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            baseline_latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            process_count: 1,
+            concurrent_startups: 1,
+            restart_reason: None,
+            skip_reason: Some("sandbox_limits_unverified"),
+            shutdown_cleanup_verified: true,
+        })?,
+        prewarm_evidence(PrewarmEvidenceCase {
+            scenario_id: "prewarm_checkout_cancelled_before_admit",
+            config: &config,
+            observation: prewarm_observation(
+                PrewarmPoolState::WarmHit,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Starting,
+                None,
+            ),
+            activation_latency_ms: 96,
+            baseline_on_demand_latency_ms: 96,
+            latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            baseline_latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            process_count: 1,
+            concurrent_startups: 1,
+            restart_reason: None,
+            skip_reason: Some("checkout_cancelled_before_admit"),
+            shutdown_cleanup_verified: true,
+        })?,
+        prewarm_evidence(PrewarmEvidenceCase {
             scenario_id: "prewarm_zygote_rejected_without_security_proof",
             config: &zygote_config,
             observation: prewarm_observation(
@@ -1417,6 +1536,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         })?,
     ];
 
+    validate_swarm_prewarm_cold_start_evidence_bundle(&evidence, false)?;
     let records = evidence
         .into_iter()
         .map(|record| -> Result<Value, Box<dyn Error>> {
@@ -1430,6 +1550,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     maybe_write_prewarm_jsonl_artifact(&jsonl)?;
+    emit_prewarm_jsonl_stdout(&jsonl);
     let types = record_types(&records);
     let warm_hit = records
         .iter()
@@ -1455,6 +1576,18 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         .iter()
         .find(|record| record["scenario_id"] == "prewarm_concurrent_swarm_startup")
         .ok_or("concurrent-swarm prewarm record should be present")?;
+    let exhausted = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_exhausted_under_burst")
+        .ok_or("burst-exhaustion prewarm record should be present")?;
+    let sandbox_gap = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_sandbox_limits_unavailable")
+        .ok_or("sandbox-gap prewarm record should be present")?;
+    let cancelled = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_checkout_cancelled_before_admit")
+        .ok_or("cancelled-checkout prewarm record should be present")?;
     let zygote = records
         .iter()
         .find(|record| record["scenario_id"] == "prewarm_zygote_rejected_without_security_proof")
@@ -1465,11 +1598,24 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         warm_hit["schema_version"],
         SWARM_PREWARM_COLD_START_SCHEMA_VERSION
     );
+    assert_eq!(warm_hit["execution_mode"], "smoke");
+    assert_eq!(warm_hit["source_kind"], "offline");
     assert_eq!(warm_hit["connector_id"], "fcp.github:utility:1.0.0");
+    assert_eq!(warm_hit["git_revision"], "abc1234");
+    assert_eq!(warm_hit["worker_id"], "offline-e2e-runner");
     let cargo_target_dir = warm_hit["cargo_target_dir"]
         .as_str()
         .ok_or("cargo target dir should be recorded")?;
     assert!(!cargo_target_dir.is_empty());
+    assert_eq!(
+        warm_hit["cargo_target_dir_class"],
+        prewarm_cargo_target_dir_class(cargo_target_dir)
+    );
+    assert!(
+        warm_hit["cargo_target_dir_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:"))
+    );
     assert_eq!(
         warm_hit["connector_fixture_id"],
         "fcp-test-connector:request-response"
@@ -1478,8 +1624,30 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         warm_hit["host_boundary"],
         "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
     );
-    assert_eq!(warm_hit["manifest_hash"], "blake3:prewarm-manifest");
-    assert_eq!(warm_hit["zone"], "z:project:swarm-prewarm");
+    let warm_manifest_hash = warm_hit["manifest_hash"]
+        .as_str()
+        .ok_or("manifest hash should be recorded")?;
+    let warm_manifest_hash_hex = warm_manifest_hash
+        .strip_prefix("blake3:")
+        .ok_or("manifest hash should use blake3 prefix")?;
+    assert_eq!(warm_manifest_hash_hex.len(), 64);
+    assert!(
+        warm_manifest_hash_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    let warm_zone = warm_hit["zone"]
+        .as_str()
+        .ok_or("zone hash should be recorded")?;
+    let warm_zone_hex = warm_zone
+        .strip_prefix("blake3:")
+        .ok_or("zone hash should use blake3 prefix")?;
+    assert_eq!(warm_zone_hex.len(), 64);
+    assert!(
+        warm_zone_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
     assert_eq!(warm_hit["strategy"], "warm_pool");
     assert_eq!(warm_hit["pool_state"], "warm_hit");
     assert_eq!(warm_hit["pool_size"], 256);
@@ -1604,6 +1772,26 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             .as_u64()
             .is_some_and(|improvement| improvement > 0)
     );
+    assert_eq!(exhausted["fallback_reason"], "empty_pool");
+    assert_eq!(exhausted["error_mapping"], "fallback_on_demand:empty_pool");
+    assert_eq!(exhausted["skip_reason"], "pool_exhausted_by_burst");
+    assert_eq!(exhausted["warm_checkout"], false);
+    assert_eq!(exhausted["concurrent_startups"], 4_096);
+    assert_eq!(sandbox_gap["fallback_reason"], "sandbox_limits_unavailable");
+    assert_eq!(
+        sandbox_gap["error_mapping"],
+        "fallback_on_demand:sandbox_limits_unavailable"
+    );
+    assert_eq!(sandbox_gap["sandbox_layer"], "limits_unavailable");
+    assert_eq!(sandbox_gap["skip_reason"], "sandbox_limits_unverified");
+    assert_eq!(sandbox_gap["warm_checkout"], false);
+    assert_eq!(cancelled["fallback_reason"], "warm_entry_still_starting");
+    assert_eq!(
+        cancelled["error_mapping"],
+        "fallback_on_demand:warm_entry_still_starting"
+    );
+    assert_eq!(cancelled["skip_reason"], "checkout_cancelled_before_admit");
+    assert_eq!(cancelled["warm_checkout"], false);
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;
     }

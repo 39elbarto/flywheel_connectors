@@ -10,6 +10,32 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## RULE 0.5 — NO BRANCHES, NO WORKTREES. EVER. ONLY `main`.
+
+**THIS PROJECT HAS EXACTLY ONE BRANCH: `main`.** (`master` exists only as a legacy mirror of `main` — see the branch rule below. It is NOT a second working branch.)
+
+**YOU ARE ABSOLUTELY FORBIDDEN FROM:**
+- Creating ANY git branch other than `main` — no `feature/*`, no `codex/*`, no `icy-*`/`sage-*`, no dated branches, no "just-in-case" safety branches. **NONE.**
+- Creating ANY git worktree — no `git worktree add`, no `.claude/worktrees`, no `/tmp/fcp-*` checkouts, no "isolated copy" of the repo. **NONE.**
+- Doing work on a detached HEAD and pushing it as a new ref.
+
+**WHY THIS MATTERS:** Branch and worktree proliferation has repeatedly created hundreds of orphaned refs and detached checkouts that bury useful work, waste enormous disk, confuse every other agent, and force expensive manual consolidation passes to fold the scattered work back into `main`. We always want `main` to hold the latest, best, most optimized, most mature and correct code — that is impossible when work is fragmented across a graveyard of branches and worktrees.
+
+**WHAT TO DO INSTEAD — MCP Agent Mail advisory file reservations:**
+Multiple agents work in this single `main` checkout simultaneously. You coordinate to avoid stepping on each other NOT by branching, but by **reserving the files you are about to edit** via MCP Agent Mail (see the "MCP Agent Mail" section below):
+
+```
+file_reservation_paths(project_key, agent_name, ["connectors/foo/**"], ttl_seconds=3600, exclusive=true, reason="<bead-id>")
+```
+
+Edit directly on `main`, commit on `main`, push `main`. If you hit a `FILE_RESERVATION_CONFLICT`, wait or narrow your patterns — do NOT escape into a branch or worktree to dodge the conflict.
+
+**If you find yourself typing `git branch`, `git checkout -b`, `git switch -c`, or `git worktree add` — STOP. You are about to violate this rule.** The only acceptable answer to "where should this work go?" is: **on `main`, after reserving the files.**
+
+If you encounter pre-existing stray branches or worktrees, do not silently delete them (they may hold unmerged work) — surface them so their content can be folded into `main` first, then cleaned up.
+
+---
+
 ## AGENT MAIL (am) PROCESS PROTECTION — DO NOT TOUCH
 
 **NEVER run any of these commands:**
@@ -45,7 +71,9 @@ The `am serve-http` process is a **shared singleton** that all agents depend on.
 
 **The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
 
-- **All work happens on `main`** — commits, PRs, feature branches all merge to `main`
+> **SEE RULE 0.5 ABOVE: NO branches and NO worktrees are permitted in this repo — only `main`.** Coordinate via MCP Agent Mail file reservations, never by branching or creating a worktree. This section governs the `main`/`master` mirror relationship only; it does NOT authorize creating any other branch.
+
+- **All work happens on `main`** — commits and PRs land on `main`; there are no feature branches
 - **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
 - **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
   ```bash
@@ -294,7 +322,7 @@ Gateway -> Zone Check -> Capability Check -> Connector -> External Service
 ### Workspace Structure
 
 This is a schematic map, not an exhaustive directory dump. The current tree has
-29 crate directories (28 active Cargo workspace members) and 89 connector
+42 crate directories (42 active Cargo workspace members) and 177 connector
 crates.
 
 ```
@@ -328,7 +356,7 @@ flywheel_connectors/
 |   |-- fcp-testkit/                   # Shared fixtures and mocks
 |   |-- fcp-e2e/                       # End-to-end harness
 |   +-- fwc/                           # Canonical Flywheel connectors CLI
-|-- connectors/                        # 89 connector crates at varying maturity
+|-- connectors/                        # 177 connector crates at varying maturity
 |   |-- anthropic/
 |   |-- discord/
 |   |-- github/

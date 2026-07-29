@@ -23,6 +23,7 @@ use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
     HostAdminStateStore, HostError, HostPreflightRequest, HostSimulateRequest,
     HostSimulateResponse, PreflightRequest, PreflightResponse, SimulatePhase, SimulateReceipt,
+    ToolDescriptor,
 };
 use fcp_prelude::{
     AgentHint, ApprovalMode, CapabilityToken, ConnectorHealth, ConnectorId, Decision,
@@ -47,6 +48,7 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 struct TestRegistry {
     summary: ConnectorSummary,
     introspection: Introspection,
+    allowed_zones: Vec<String>,
 }
 
 impl TestRegistry {
@@ -93,14 +95,20 @@ impl TestRegistry {
         Self {
             summary,
             introspection,
+            allowed_zones: vec![ZoneId::work().as_str().to_string()],
         }
     }
 
-    async fn allowed_zones(&self, id: &ConnectorId) -> Option<Vec<String>> {
-        (id == &self.summary.id).then(Vec::new)
+    fn with_allowed_zones(mut self, allowed_zones: Vec<String>) -> Self {
+        self.allowed_zones = allowed_zones;
+        self
     }
 
-    async fn simulate(&self, request: SimulateRequest) -> Result<SimulateResponse, HostError> {
+    fn allowed_zones(&self, id: &ConnectorId) -> Option<Vec<String>> {
+        (id == &self.summary.id).then(|| self.allowed_zones.clone())
+    }
+
+    fn simulate(&self, request: SimulateRequest) -> Result<SimulateResponse, HostError> {
         if request.connector_id != self.summary.id {
             return Err(HostError::RegistryError(format!(
                 "unknown connector `{}`",
@@ -211,10 +219,11 @@ fn test_zone_policy(zone_id: ZoneId) -> ZonePolicyObject {
     }
 }
 
-fn map_host_error(error: HostError) -> (StatusCode, String) {
+fn map_host_error(error: &HostError) -> (StatusCode, String) {
     let message = error.to_string();
     let status = match error {
         HostError::InvalidFilter(_) | HostError::PreflightFailed(_) => StatusCode::BAD_REQUEST,
+        HostError::ZoneEnvelopeRequired(_) => StatusCode::FORBIDDEN,
         HostError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         HostError::RegistryError(_) => StatusCode::BAD_GATEWAY,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -320,7 +329,7 @@ fn invoke_request_from_simulate(request: &HostSimulateRequest) -> Result<InvokeR
         idempotency_key: None,
         lease_seq: None,
         deadline_ms: Some(request.deadline_ms),
-        correlation_id: simulate_request.correlation_id.clone(),
+        correlation_id: simulate_request.correlation_id,
         provenance: None,
         approval_tokens: request.approval_tokens.clone(),
     })
@@ -373,38 +382,37 @@ async fn record_simulate_receipt_summary(
 }
 
 fn elapsed_millis(started_at: Instant) -> u64 {
-    started_at.elapsed().as_millis() as u64
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-async fn verify_live_request(
+fn ensure_connector_zone_allowed(
+    registry: &TestRegistry,
+    request: &InvokeRequest,
+) -> Result<(), HostError> {
+    if let Some(allowed) = registry.allowed_zones(&request.connector_id) {
+        if allowed.is_empty() {
+            return Err(HostError::ZoneEnvelopeRequired(format!(
+                "connector `{}` has no `allowed_zones`; configure at least one explicit zone before host RPC",
+                request.connector_id
+            )));
+        }
+        if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
+            return Err(HostError::PreflightFailed(format!(
+                "connector `{}` is not bound to zone `{}` (allowed: [{}])",
+                request.connector_id,
+                request.zone_id.as_str(),
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn verified_capability_principal(
     state: &TestAppState,
     request: &InvokeRequest,
-    principal_override: Option<&str>,
-) -> Result<VerifiedLiveRequest, HostError> {
-    if let Some(allowed) = state.registry.allowed_zones(&request.connector_id).await
-        && !allowed.is_empty()
-        && !allowed.iter().any(|zone| zone == request.zone_id.as_str())
-    {
-        return Err(HostError::PreflightFailed(format!(
-            "connector `{}` is not bound to zone `{}` (allowed: [{}])",
-            request.connector_id,
-            request.zone_id.as_str(),
-            allowed.join(", ")
-        )));
-    }
-
-    let introspection = state.discovery.introspect(&request.connector_id).await?;
-    let tool = introspection
-        .tools
-        .iter()
-        .find(|tool| tool.name == request.operation.as_str())
-        .ok_or_else(|| {
-            HostError::InvalidFilter(format!(
-                "connector `{}` does not expose operation `{}`",
-                request.connector_id, request.operation
-            ))
-        })?;
-
+    tool: &ToolDescriptor,
+) -> Result<String, HostError> {
     let capability_key = state.capability_verifying_key.as_ref().ok_or_else(|| {
         HostError::PreflightFailed(
             "FCP_HOST_CAPABILITY_PUBLIC_KEY[_FILE] is not configured, so live auth checks cannot be verified"
@@ -456,17 +464,16 @@ async fn verify_live_request(
             "capability token is missing the subject or principal_id claim required for live execution".to_string(),
         )
     })?;
-    if let Some(expected) = principal_override
-        && expected != principal
-    {
-        return Err(HostError::PreflightFailed(format!(
-            "request principal `{expected}` does not match capability token subject/principal_id `{principal}`"
-        )));
-    }
+    Ok(principal.to_owned())
+}
 
-    let approval_required = tool
-        .approval_mode
-        .is_some_and(|mode| !matches!(mode, ApprovalMode::None));
+async fn enforce_live_policy(
+    state: &TestAppState,
+    request: &InvokeRequest,
+    tool: &ToolDescriptor,
+    principal: &str,
+    approval_required: bool,
+) -> Result<(), HostError> {
     let zone_policy = state.lookup_zone_policy(&request.zone_id).await?;
     let receipt = simulate_policy_decision(&PolicySimulationInput {
         zone_policy,
@@ -493,15 +500,50 @@ async fn verify_live_request(
             receipt.reason_code
         )));
     }
+    Ok(())
+}
+
+async fn verify_live_request(
+    state: &TestAppState,
+    request: &InvokeRequest,
+    principal_override: Option<&str>,
+) -> Result<VerifiedLiveRequest, HostError> {
+    ensure_connector_zone_allowed(&state.registry, request)?;
+
+    let introspection = state.discovery.introspect(&request.connector_id).await?;
+    let tool = introspection
+        .tools
+        .iter()
+        .find(|tool| tool.name == request.operation.as_str())
+        .ok_or_else(|| {
+            HostError::InvalidFilter(format!(
+                "connector `{}` does not expose operation `{}`",
+                request.connector_id, request.operation
+            ))
+        })?;
+
+    let principal = verified_capability_principal(state, request, tool).await?;
+    if let Some(expected) = principal_override
+        && expected != principal.as_str()
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "request principal `{expected}` does not match capability token subject/principal_id `{principal}`"
+        )));
+    }
+
+    let approval_required = tool
+        .approval_mode
+        .is_some_and(|mode| !matches!(mode, ApprovalMode::None));
+    enforce_live_policy(state, request, tool, &principal, approval_required).await?;
 
     Ok(VerifiedLiveRequest {
-        principal: principal.to_owned(),
+        principal,
         approval_required,
         safety_tier: tool.safety_tier,
     })
 }
 
-fn preflight_response_from_error(error: HostError) -> PreflightResponse {
+fn preflight_response_from_error(error: &HostError) -> PreflightResponse {
     let reason = error.to_string();
     let mut response = PreflightResponse::denied(&reason);
     response.reason = Some(reason);
@@ -555,9 +597,59 @@ async fn preflight_handler(
         Ok(invoke_request) => {
             evaluate_live_preflight(&state, &invoke_request, asserted_principal.as_deref()).await
         }
-        Err(error) => preflight_response_from_error(error),
+        Err(error) => preflight_response_from_error(&error),
     };
     Json(response)
+}
+
+fn simulate_failure_response(
+    request: &HostSimulateRequest,
+    input: &Value,
+    phase: SimulatePhase,
+    preflight_allowed: bool,
+    failure_reason: String,
+    duration_ms: u64,
+) -> Result<HostSimulateResponse, HostError> {
+    Ok(HostSimulateResponse {
+        request_id: request.request_id.clone(),
+        would_succeed: false,
+        phase,
+        preflight_allowed,
+        failure_reason: Some(failure_reason),
+        denial_code: None,
+        missing_capabilities: Vec::new(),
+        cost_estimate: None,
+        availability: None,
+        duration_ms,
+        receipt: simulate_receipt_for_request(request, input, phase, false, duration_ms)?,
+    })
+}
+
+fn connector_reached_response(
+    request: &HostSimulateRequest,
+    input: &Value,
+    simulate_response: SimulateResponse,
+    duration_ms: u64,
+) -> Result<HostSimulateResponse, HostError> {
+    Ok(HostSimulateResponse {
+        request_id: request.request_id.clone(),
+        would_succeed: simulate_response.would_succeed,
+        phase: SimulatePhase::ConnectorReached,
+        preflight_allowed: true,
+        failure_reason: simulate_response.failure_reason,
+        denial_code: simulate_response.denial_code,
+        missing_capabilities: simulate_response.missing_capabilities,
+        cost_estimate: None,
+        availability: None,
+        duration_ms,
+        receipt: simulate_receipt_for_request(
+            request,
+            input,
+            SimulatePhase::ConnectorReached,
+            simulate_response.would_succeed,
+            duration_ms,
+        )?,
+    })
 }
 
 async fn simulate_handler(
@@ -574,26 +666,15 @@ async fn simulate_handler(
         Err(error) => {
             let input = request.input.clone().unwrap_or(Value::Null);
             let duration_ms = elapsed_millis(started_at);
-            let response = HostSimulateResponse {
-                request_id: request.request_id.clone(),
-                would_succeed: false,
-                phase: SimulatePhase::PreflightOnly,
-                preflight_allowed: false,
-                failure_reason: Some(error.to_string()),
-                denial_code: None,
-                missing_capabilities: Vec::new(),
-                cost_estimate: None,
-                availability: None,
+            let response = simulate_failure_response(
+                &request,
+                &input,
+                SimulatePhase::PreflightOnly,
+                false,
+                error.to_string(),
                 duration_ms,
-                receipt: simulate_receipt_for_request(
-                    &request,
-                    &input,
-                    SimulatePhase::PreflightOnly,
-                    false,
-                    duration_ms,
-                )
-                .map_err(map_host_error)?,
-            };
+            )
+            .map_err(|error| map_host_error(&error))?;
             record_simulate_receipt_summary(state.lifecycle.as_ref(), &response.receipt).await;
             return Ok(Json(response));
         }
@@ -604,85 +685,46 @@ async fn simulate_handler(
     if !preflight.allowed {
         let input = request.input.clone().unwrap_or(Value::Null);
         let duration_ms = elapsed_millis(started_at);
-        let response = HostSimulateResponse {
-            request_id: request.request_id.clone(),
-            would_succeed: false,
-            phase: SimulatePhase::PreflightOnly,
-            preflight_allowed: false,
-            failure_reason: Some(
-                preflight
-                    .reason
-                    .unwrap_or_else(|| "preflight denied live simulate request".to_string()),
-            ),
-            denial_code: None,
-            missing_capabilities: Vec::new(),
-            cost_estimate: None,
-            availability: None,
+        let response = simulate_failure_response(
+            &request,
+            &input,
+            SimulatePhase::PreflightOnly,
+            false,
+            preflight
+                .reason
+                .unwrap_or_else(|| "preflight denied live simulate request".to_string()),
             duration_ms,
-            receipt: simulate_receipt_for_request(
-                &request,
-                &input,
-                SimulatePhase::PreflightOnly,
-                false,
-                duration_ms,
-            )
-            .map_err(map_host_error)?,
-        };
+        )
+        .map_err(|error| map_host_error(&error))?;
         record_simulate_receipt_summary(state.lifecycle.as_ref(), &response.receipt).await;
         return Ok(Json(response));
     }
 
-    let simulate_request = simulate_request_from_host(&request).map_err(map_host_error)?;
+    let simulate_request =
+        simulate_request_from_host(&request).map_err(|error| map_host_error(&error))?;
     let simulate_input = simulate_request.input.clone();
     let simulate_result = fcp_async_core::time::timeout(
         Duration::from_millis(request.deadline_ms),
-        state.registry.simulate(simulate_request),
+        std::future::ready(state.registry.simulate(simulate_request)),
     )
     .await;
     let duration_ms = elapsed_millis(started_at);
 
     let response = match simulate_result {
-        Ok(Ok(simulate_response)) => HostSimulateResponse {
-            request_id: request.request_id.clone(),
-            would_succeed: simulate_response.would_succeed,
-            phase: SimulatePhase::ConnectorReached,
-            preflight_allowed: true,
-            failure_reason: simulate_response.failure_reason,
-            denial_code: simulate_response.denial_code,
-            missing_capabilities: simulate_response.missing_capabilities,
-            cost_estimate: None,
-            availability: None,
+        Ok(Ok(simulate_response)) => {
+            connector_reached_response(&request, &simulate_input, simulate_response, duration_ms)
+                .map_err(|error| map_host_error(&error))?
+        }
+        Ok(Err(error)) => return Err(map_host_error(&error)),
+        Err(_) => simulate_failure_response(
+            &request,
+            &simulate_input,
+            SimulatePhase::TimedOut,
+            true,
+            "simulation deadline exceeded".to_string(),
             duration_ms,
-            receipt: simulate_receipt_for_request(
-                &request,
-                &simulate_input,
-                SimulatePhase::ConnectorReached,
-                simulate_response.would_succeed,
-                duration_ms,
-            )
-            .map_err(map_host_error)?,
-        },
-        Ok(Err(error)) => return Err(map_host_error(error)),
-        Err(_) => HostSimulateResponse {
-            request_id: request.request_id.clone(),
-            would_succeed: false,
-            phase: SimulatePhase::TimedOut,
-            preflight_allowed: true,
-            failure_reason: Some("simulation deadline exceeded".to_string()),
-            denial_code: None,
-            missing_capabilities: Vec::new(),
-            cost_estimate: None,
-            availability: None,
-            duration_ms,
-            receipt: simulate_receipt_for_request(
-                &request,
-                &simulate_input,
-                SimulatePhase::TimedOut,
-                false,
-                duration_ms,
-            )
-            .map_err(map_host_error)?,
-        },
+        )
+        .map_err(|error| map_host_error(&error))?,
     };
 
     record_simulate_receipt_summary(state.lifecycle.as_ref(), &response.receipt).await;
@@ -819,7 +861,19 @@ where
 }
 
 fn test_state(connector_id: ConnectorId, signing_key: &Ed25519SigningKey) -> Arc<TestAppState> {
-    let registry = Arc::new(TestRegistry::new(connector_id));
+    test_state_with_allowed_zones(
+        connector_id,
+        signing_key,
+        vec![ZoneId::work().as_str().to_string()],
+    )
+}
+
+fn test_state_with_allowed_zones(
+    connector_id: ConnectorId,
+    signing_key: &Ed25519SigningKey,
+    allowed_zones: Vec<String>,
+) -> Arc<TestAppState> {
+    let registry = Arc::new(TestRegistry::new(connector_id).with_allowed_zones(allowed_zones));
     let budget = Arc::new(BudgetPolicyEngine::new());
     let discovery = Arc::new(DiscoveryEndpoint::new(
         Arc::clone(&registry),
@@ -924,6 +978,65 @@ async fn conformance_preflight_surface_covers_allow_missing_capability_and_princ
             .as_deref()
             .is_some_and(|reason| reason.contains(TEST_FORGED_PRINCIPAL)),
         "{forged_principal:?}"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn conformance_live_surfaces_reject_empty_allowed_zones() -> TestResult<()> {
+    let connector_id = route_test_connector_id("empty-zone-envelope");
+    let signing_key = Ed25519SigningKey::generate();
+    let state = test_state_with_allowed_zones(connector_id.clone(), &signing_key, Vec::new());
+    let valid_token = issue_live_capability_token(
+        state.lifecycle.as_ref(),
+        &signing_key,
+        &connector_id,
+        TEST_CAPABILITY_ID,
+        TEST_PRINCIPAL,
+        TEST_OPERATION,
+        &ZoneId::work(),
+    )
+    .await?;
+    let app = test_router(state);
+
+    let (_, preflight_denied): (_, PreflightResponse) = post_json_response(
+        &app,
+        "/rpc/preflight",
+        preflight_request(connector_id.clone(), Some(valid_token.clone())),
+        None,
+    )
+    .await?;
+    assert!(!preflight_denied.allowed, "{preflight_denied:?}");
+    assert!(
+        preflight_denied.reason.as_deref().is_some_and(|reason| {
+            reason.contains("zone envelope required") && reason.contains("allowed_zones")
+        }),
+        "{preflight_denied:?}"
+    );
+
+    let (_, simulate_denied): (_, HostSimulateResponse) = post_json_response(
+        &app,
+        "/rpc/simulate",
+        simulate_request(
+            &connector_id,
+            Some(valid_token),
+            "simulate-empty-zone-envelope",
+        ),
+        None,
+    )
+    .await?;
+    assert!(!simulate_denied.preflight_allowed, "{simulate_denied:?}");
+    assert!(!simulate_denied.would_succeed, "{simulate_denied:?}");
+    assert_eq!(simulate_denied.phase, SimulatePhase::PreflightOnly);
+    assert!(
+        simulate_denied
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| {
+                reason.contains("zone envelope required") && reason.contains("allowed_zones")
+            }),
+        "{simulate_denied:?}"
     );
 
     Ok(())

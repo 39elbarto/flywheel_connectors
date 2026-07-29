@@ -14,10 +14,14 @@
 //! - `ZoneCheckpoint` advancement (coordinator election)
 //! - Exclusive resource access (e.g., specific hardware)
 use fcp_cbor::SchemaId;
+use fcp_crypto::{canonical_signing_bytes, canonicalize::to_deterministic_cbor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{ObjectHeader, ObjectId, SignatureSet, TailscaleNodeId, ZoneId};
+
+/// Domain-separated schema ID for quorum signatures over durable lease authority.
+pub const LEASE_QUORUM_SIGNING_SCHEMA_ID: &str = "fcp.lease.quorum-signing.v1";
 
 /// Get current Unix timestamp in seconds.
 ///
@@ -144,6 +148,16 @@ pub struct LeaseParams {
     pub provenance: crate::Provenance,
     pub purpose: LeasePurpose,
     pub quorum_signatures: SignatureSet,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaseQuorumSignable<'a> {
+    header: &'a ObjectHeader,
+    holder: &'a TailscaleNodeId,
+    lease_seq: u64,
+    exp: u64,
+    subject_object_id: &'a ObjectId,
+    purpose: LeasePurpose,
 }
 
 /// Canonical identifier for a lease object referenced elsewhere in the mesh.
@@ -315,6 +329,12 @@ pub struct LeaseHandoff {
 }
 
 impl Lease {
+    /// Canonical schema identifier for durable lease authority objects.
+    #[must_use]
+    pub fn schema_id() -> SchemaId {
+        SchemaId::new("fcp.lease", "lease", semver::Version::new(1, 0, 0))
+    }
+
     /// Create a new lease.
     #[must_use]
     pub fn new(params: LeaseParams) -> Self {
@@ -357,6 +377,32 @@ impl Lease {
     #[must_use]
     pub const fn zone_id(&self) -> &ZoneId {
         &self.header.zone_id
+    }
+
+    /// Compute canonical bytes that quorum signers must sign for this lease.
+    ///
+    /// The signable view intentionally excludes `quorum_signatures`; otherwise
+    /// each signer would need to sign a payload that already contains its own
+    /// signature. The signed fields bind the lease authority context:
+    /// header/zone/provenance/refs, holder, fence, expiry, subject, and purpose.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crypto serialization error if deterministic CBOR encoding fails.
+    pub fn quorum_signing_bytes(&self) -> fcp_crypto::CryptoResult<Vec<u8>> {
+        let signable = LeaseQuorumSignable {
+            header: &self.header,
+            holder: &self.holder,
+            lease_seq: self.lease_seq,
+            exp: self.exp,
+            subject_object_id: &self.subject_object_id,
+            purpose: self.purpose,
+        };
+        let cbor = to_deterministic_cbor(&signable)?;
+        Ok(canonical_signing_bytes(
+            LEASE_QUORUM_SIGNING_SCHEMA_ID,
+            &cbor,
+        ))
     }
 }
 
@@ -633,6 +679,9 @@ pub enum LeaseValidationError {
 
     /// Insufficient quorum signatures.
     InsufficientQuorum { required: usize, got: usize },
+
+    /// Quorum signature set contains multiple signatures for the same node.
+    DuplicateQuorumSigner { node_id: String },
 }
 
 impl std::fmt::Display for LeaseValidationError {
@@ -672,6 +721,9 @@ impl std::fmt::Display for LeaseValidationError {
                     f,
                     "insufficient quorum: required {required} signatures, got {got}"
                 )
+            }
+            Self::DuplicateQuorumSigner { node_id } => {
+                write!(f, "duplicate quorum signer: {node_id}")
             }
         }
     }
@@ -743,7 +795,15 @@ pub fn validate_lease(
         });
     }
 
-    // Check quorum
+    // Check quorum. A malformed serialized SignatureSet can contain duplicate
+    // node IDs even though SignatureSet::add rejects them, so reject duplicates
+    // before raw signature count can satisfy quorum.
+    if let Some(node_id) = lease.quorum_signatures.duplicate_node_id() {
+        return Err(LeaseValidationError::DuplicateQuorumSigner {
+            node_id: node_id.to_owned(),
+        });
+    }
+
     let sig_count = lease.quorum_signatures.len();
     if sig_count < required_signatures {
         return Err(LeaseValidationError::InsufficientQuorum {
@@ -1137,6 +1197,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_validate_lease_rejects_duplicate_quorum_signer() {
+        let subject = test_object_id("subject");
+        let zone = test_zone();
+        let mut lease = create_test_lease_with_subject(5, 2000, subject);
+        lease.quorum_signatures = duplicate_signature_set("node-1");
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            5,
+            1500,
+            2,
+        );
+
+        assert!(matches!(
+            result,
+            Err(LeaseValidationError::DuplicateQuorumSigner { node_id })
+                if node_id == "node-1"
+        ));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // LeaseValidationError Display Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -1160,6 +1244,11 @@ mod tests {
             got: 1,
         };
         assert!(err.to_string().contains("quorum"));
+
+        let err = LeaseValidationError::DuplicateQuorumSigner {
+            node_id: "node-1".to_owned(),
+        };
+        assert!(err.to_string().contains("duplicate quorum signer"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1726,12 +1815,6 @@ mod tests {
             got: LeasePurpose::Migration,
         };
         assert!(purpose.to_string().contains("purpose mismatch"));
-
-        let coordinator = LeaseValidationError::CoordinatorMismatch {
-            expected: test_node("a"),
-            got: test_node("b"),
-        };
-        assert!(coordinator.to_string().contains("coordinator mismatch"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1878,6 +1961,28 @@ mod tests {
         assert_eq!(cloned.purpose, params.purpose);
     }
 
+    #[test]
+    fn quorum_signing_bytes_exclude_quorum_signatures() {
+        let lease_a = create_test_lease(7);
+        let mut lease_b = lease_a.clone();
+        let mut signatures = SignatureSet::new();
+        signatures.add(crate::NodeSignature::new(
+            crate::NodeId::new("node-a"),
+            [0xA5; 64],
+            1_000,
+        ));
+        lease_b.quorum_signatures = signatures;
+
+        let bytes_a = lease_a.quorum_signing_bytes().expect("signing bytes");
+        let bytes_b = lease_b.quorum_signing_bytes().expect("signing bytes");
+
+        assert_eq!(bytes_a, bytes_b);
+
+        lease_b.lease_seq += 1;
+        let bytes_c = lease_b.quorum_signing_bytes().expect("signing bytes");
+        assert_ne!(bytes_a, bytes_c);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Helper Functions
     // ─────────────────────────────────────────────────────────────────────────
@@ -1925,6 +2030,24 @@ mod tests {
         let mut lease = create_test_lease_with_subject(lease_seq, exp, subject);
         lease.purpose = purpose;
         lease
+    }
+
+    fn duplicate_signature_set(node_id: &str) -> SignatureSet {
+        serde_json::from_value(serde_json::json!({
+            "signatures": [
+                {
+                    "node_id": node_id,
+                    "signature": "aa".repeat(64),
+                    "signed_at": 1000
+                },
+                {
+                    "node_id": node_id,
+                    "signature": "bb".repeat(64),
+                    "signed_at": 2000
+                }
+            ]
+        }))
+        .expect("duplicate signature JSON should deserialize")
     }
 
     // ─────────────────────────────────────────────────────────────────────────

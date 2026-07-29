@@ -1,9 +1,9 @@
 # Google Calendar Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: PROVEN runtime contract documented with manifest/runtime drift called out
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/google_calendar_connector_verification.sh`
 > **Calendar API upstream**: https://developers.google.com/workspace/calendar/api/v3/reference
 > **Events upstream**: https://developers.google.com/workspace/calendar/api/v3/reference/events
 > **Freebusy upstream**: https://developers.google.com/workspace/calendar/api/v3/reference/freebusy/query
@@ -53,16 +53,16 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Runtime `BaseConnector` ID is `google-calendar`, while the manifest connector ID is `fcp.google-calendar`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-calendar-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest `event_caps.streaming = true`, but runtime handshake reports `streaming = false`, runtime introspection has no events, and no watch/channel flow is implemented.
 - Runtime `simulate` returns allowed for any syntactically valid `SimulateRequest`; it does not validate operation inventory, readiness, input schema, capability, or capability token.
 - Manifest `gcal.create_event` declares `start` and `end` as objects, while runtime requires RFC3339 strings and wraps them as `EventDateTime.dateTime`.
 - Manifest `gcal.update_event` says idempotency is `strict`; runtime introspection says `BestEffort`, and runtime sends a sparse `PUT` event object that can clear omitted fields and arrays.
 - Manifest output names for list/delete operations drift from runtime output names. Runtime `list_events` returns `events`, `next_page_token`, and `summary`; runtime `delete_event` returns `status: deleted`.
 - Runtime `handle_shutdown` shuts down the client runtime but does not clear config, client, verifier, session, or configured/handshaken flags.
-- There is no dedicated tracked verification shell script for this connector.
+- The dedicated tracked verification shell script is `scripts/e2e/google_calendar_connector_verification.sh`.
 
-A follow-up parity bead should align simulation, manifest/runtime event capability, start/end schemas, update semantics, output schemas, manifest hash/interface proof, and shutdown state reset.
+A follow-up parity bead should align simulation, manifest/runtime event capability, start/end schemas, update semantics, output schemas, interface proof, and shutdown state reset.
 
 ## First-Slice Scope
 
@@ -177,7 +177,13 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/google_calendar_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked verification bundle is `scripts/e2e/google_calendar_connector_verification.sh`. It writes a redaction-safe artifact tree under `artifacts/e2e/google-calendar/<run-id>` by default and records the gauntlet output, manifest check, connector-local Cargo proof logs, extracted `local_non_mock` JSONL, environment metadata, replay command, and summary status.
+
+Promotion evidence:
+
+- Pre-promotion verifier run `sagestork-pre-20260604T153143Z` wrote its summary to `/tmp/fcp-google-calendar-e2e/sagestork-pre-20260604T153143Z/summary.json` (`sha256:fc9db13a7d0d70e5982ed6dae2695bc2c8ad46c89658b5653515e0dd6ebe8776`). The run passed `cargo_check`, `format_check`, `integration_suite`, `local_non_mock`, `local_non_mock_jsonl`, and `clippy`; it remained non-green only because README/manifest promotion metadata and the manifest `interface_hash` update were still pending.
+- Extracted local non-mock evidence is `/tmp/fcp-google-calendar-e2e/sagestork-pre-20260604T153143Z/evidence/local_non_mock.jsonl` (`sha256:5546317526fefad2d076c34d39626d678d4706abeec25f2f6812ce866324e2d2`). It records redaction-safe acceptance for `gcal.list_calendars`, `self_check`, `gcal.create_event`, and pre-egress wrong-capability denial.
+- Remote proof summaries are recorded for `cargo_check` on `vmi1156319`, plus `integration_suite`, `local_non_mock`, and `clippy` on `vmi1153651`.
 
 The verification surface captures:
 
@@ -185,6 +191,8 @@ The verification surface captures:
 - deterministic WireMock coverage for Calendar API paths
 - auth, endpoint policy, provider error, lifecycle, simulation, and introspection tests
 - formatting, check, test, and clippy proof through `rch`
+- extracted local non-mock acceptance records for `gcal.list_calendars`, `self_check`, `gcal.create_event`, and pre-egress wrong-capability denial
+- redaction checks for Calendar access tokens, loopback endpoints, attendee email addresses, fixture event IDs, event summaries, event descriptions, live credential markers, and provider error-body markers
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -218,7 +226,8 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID=manual-google-calendar OUT_ROOT=/tmp/fcp-google-calendar-e2e/manual-google-calendar scripts/e2e/google_calendar_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-calendar-readme cargo check -p fcp-google-calendar --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-calendar-readme cargo test -p fcp-google-calendar --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-calendar-readme cargo clippy -p fcp-google-calendar --all-targets --no-deps -- -D warnings`
-- `ubs connectors/google-calendar/README.md`
+- `ubs connectors/google-calendar/README.md scripts/e2e/google_calendar_connector_verification.sh`

@@ -1,4 +1,4 @@
-//! `fcp_host` CancelReason + CleanupBehavior + ProgressUnit wire-
+//! `fcp_host` `CancelReason` + `CleanupBehavior` + `ProgressUnit` wire-
 //! format + label contract conformance.
 //!
 //! `host_cancellation_controller_conformance.rs` and
@@ -14,17 +14,19 @@
 //!    `agent_abort` (carries `reason`), `timeout_approaching` (carries
 //!    `remaining_ms`), `resource_limit` (carries resource/current/limit),
 //!    `superseded` (carries `by_operation_id`), `session_closing`.
-//! 2. **`CancelReason::label`** returns the snake_case discriminator
+//! 2. **`CancelReason::label`** returns the `snake_case` discriminator
 //!    for each variant (operator log greps).
 //! 3. **`CleanupBehavior::default == BestEffort`** + 4 internally-
 //!    tagged variants: `best_effort`, `full` (carries `timeout_ms`),
 //!    `abandon`, `checkpoint`.
-//! 4. **`ProgressUnit` 5 variants** — 4 fixed (snake_case: `bytes`,
+//! 4. **`ProgressUnit` 5 variants** — 4 fixed (`snake_case`: `bytes`,
 //!    `items`, `requests`, `rows`) + `custom` with String label.
-//! 5. **`ProgressUnit::label`** returns the snake_case for fixed
+//! 5. **`ProgressUnit::label`** returns the `snake_case` for fixed
 //!    variants and the inner String for `Custom`.
 //! 6. **All three serde forms reject malformed/unknown payloads.**
 //! 7. **Roundtrip identity** for every variant.
+
+#![allow(clippy::many_single_char_names)]
 
 use fcp_host::{CancelReason, CleanupBehavior, ProgressUnit};
 use serde_json::json;

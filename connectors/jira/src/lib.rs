@@ -35,4 +35,6 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+#[cfg(test)]
+mod http_contract_support;
 pub mod types;

@@ -30,6 +30,13 @@ Optional:
 
 `credential_id` mode is the production path for host-owned credential injection. Entra credential references request the `https://ai.azure.com/.default` token scope from the host credential broker. The connector never shells out to Azure CLI on production invocation paths.
 
+## Runtime Contract
+
+- Manifest interface hash is `blake3-256:fcp.interface.v2:dd5f28d4d0643e6695f6e38d8b835a760350b4d64dcd07ea1cb65ddba2182193`.
+- Runtime operation introspection derives operation descriptions, schemas, capabilities, safety, risk, idempotency, approval mode, and AI hints from the embedded strict manifest.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+- Invoke capability verification still uses a connector-local operation-to-capability mapping before checking the host-issued capability token.
+
 ## Security Boundaries
 
 - The `model` field is a Foundry deployment name, not an Azure resource path.
@@ -39,15 +46,11 @@ Optional:
 
 ## Proof Lane
 
-Focused implementation proof:
+Focused implementation proof is anchored on `scripts/e2e/microsoft_foundry_connector_verification.sh`. It runs Cargo proof through `rch exec`, writes a summary plus redaction-checked JSONL artifacts, and should use `CARGO_TARGET_PREFIX` on a spacious volume when the local checkout is disk constrained.
 
 ```bash
-cargo fmt --package fcp-microsoft-foundry --check
-cargo test -p fcp-microsoft-foundry --all-targets -- --nocapture
-cargo check -p fcp-microsoft-foundry --all-targets
-cargo clippy -p fcp-microsoft-foundry --all-targets --no-deps -- -D warnings
-scripts/e2e/microsoft_foundry_connector_verification.sh
+RUN_ID=manual-microsoft-foundry OUT_ROOT=/Volumes/trj-data/fcp-artifacts/microsoft-foundry/manual-microsoft-foundry CARGO_TARGET_PREFIX=/Volumes/trj-data/tmp/fcp-microsoft-foundry-manual scripts/e2e/microsoft_foundry_connector_verification.sh
 ubs connectors/microsoft-foundry scripts/e2e/microsoft_foundry_connector_verification.sh Cargo.toml
 ```
 
-Shared-session proof should run the Cargo commands through `rch` with a connector-specific `CARGO_TARGET_DIR`.
+The bundle captures manifest schema/hash validation, formatting, check, conformance, WireMock integration, optional live smoke, local non-mock loopback acceptance, clippy, and redaction checks for secrets, prompts, completions, raw hostnames, and loopback endpoints.

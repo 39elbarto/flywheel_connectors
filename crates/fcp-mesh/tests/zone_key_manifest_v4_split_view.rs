@@ -88,7 +88,7 @@ fn split_view_validate_passes_on_v4_only_recipient() {
     let sealed = provider.seal(&pk, zone_key.as_bytes(), &aad).unwrap();
 
     let mut m = empty_v4_manifest();
-    m.add_xwing_wrap(alice.clone(), 1_700_000_000, sealed);
+    m.add_xwing_wrap(alice, 1_700_000_000, sealed);
 
     assert!(m.split_view_recipients().is_empty());
     m.validate_no_recipient_split_view()
@@ -248,7 +248,7 @@ fn split_view_validate_passes_on_two_independent_recipients() {
 
     let mut m = empty_v4_manifest();
     m.wrapped_keys = vec![alice_v3];
-    m.add_xwing_wrap(bob.clone(), 1_700_000_001, bob_v4);
+    m.add_xwing_wrap(bob, 1_700_000_001, bob_v4);
 
     assert!(m.split_view_recipients().is_empty());
     m.validate_no_recipient_split_view()

@@ -17,6 +17,7 @@ const MANIFEST: &str = include_str!("../manifest.toml");
 const OP_HEALTH: &str = "email_generic.health";
 const OP_LIST_MAILBOXES: &str = "email_generic.list_mailboxes";
 const OP_SEARCH_MESSAGES: &str = "email_generic.search_messages";
+const OP_POLL_INBOUND_ONCE: &str = "email_generic.poll_inbound_once";
 const OP_SEND_MESSAGE: &str = "email_generic.send_message";
 const CAP_READ: &str = "email_generic.read";
 const CAP_WRITE: &str = "email_generic.write";
@@ -29,13 +30,19 @@ fn operation_info_matches_email_generic_contract() {
         .map(|operation| (operation.id.as_str(), operation))
         .collect::<BTreeMap<_, _>>();
 
-    assert_eq!(by_id.len(), 4);
+    assert_eq!(by_id.len(), 5);
     assert!(by_id.contains_key(OP_HEALTH));
     assert!(by_id.contains_key(OP_LIST_MAILBOXES));
     assert!(by_id.contains_key(OP_SEARCH_MESSAGES));
+    assert!(by_id.contains_key(OP_POLL_INBOUND_ONCE));
     assert!(by_id.contains_key(OP_SEND_MESSAGE));
 
-    for op_id in [OP_HEALTH, OP_LIST_MAILBOXES, OP_SEARCH_MESSAGES] {
+    for op_id in [
+        OP_HEALTH,
+        OP_LIST_MAILBOXES,
+        OP_SEARCH_MESSAGES,
+        OP_POLL_INBOUND_ONCE,
+    ] {
         let operation = by_id[op_id];
         assert_eq!(operation.capability.as_str(), CAP_READ);
         assert_eq!(operation.risk_level, RiskLevel::Low);
@@ -93,6 +100,17 @@ fn operation_schemas_are_strict_and_cover_required_fields() {
     assert_eq!(search_input["required"][0], "mailbox");
     assert_eq!(search_input["required"][1], "query");
 
+    let poll_input = &by_id[OP_POLL_INBOUND_ONCE].input_schema;
+    assert_eq!(poll_input["type"], "object");
+    assert_eq!(poll_input["additionalProperties"], false);
+    assert_eq!(poll_input["properties"]["mailbox"]["minLength"], 1);
+    assert_eq!(poll_input["properties"]["seen_uids"]["type"], "array");
+    assert_eq!(
+        poll_input["properties"]["seen_uids"]["items"]["minLength"],
+        1
+    );
+    assert_eq!(poll_input["required"][0], "mailbox");
+
     let send_input = &by_id[OP_SEND_MESSAGE].input_schema;
     assert_eq!(send_input["type"], "object");
     assert_eq!(send_input["additionalProperties"], false);
@@ -122,7 +140,11 @@ fn operation_schemas_are_strict_and_cover_required_fields() {
     }
     assert_eq!(
         health_output["properties"]["inbound_monitor"]["properties"]["status"]["enum"][0],
-        "deferred"
+        "idle"
+    );
+    assert_eq!(
+        health_output["properties"]["inbound_monitor"]["properties"]["streaming"]["enum"][0],
+        true
     );
 
     let list_output = &by_id[OP_LIST_MAILBOXES].output_schema;
@@ -131,6 +153,31 @@ fn operation_schemas_are_strict_and_cover_required_fields() {
     let search_output = &by_id[OP_SEARCH_MESSAGES].output_schema;
     assert_eq!(search_output["properties"]["uids"]["type"], "array");
     assert_eq!(search_output["properties"]["uids"]["items"]["minimum"], 0);
+
+    let poll_output = &by_id[OP_POLL_INBOUND_ONCE].output_schema;
+    for required in [
+        "mailbox",
+        "fetched_count",
+        "accepted_count",
+        "dropped_count",
+        "seen_uids",
+        "messages",
+    ] {
+        assert!(
+            poll_output["required"]
+                .as_array()
+                .expect("required should be an array")
+                .iter()
+                .any(|value| value == required),
+            "poll output should require {required}"
+        );
+    }
+    assert_eq!(poll_output["properties"]["seen_uids"]["type"], "array");
+    assert_eq!(poll_output["properties"]["messages"]["type"], "array");
+    assert_eq!(
+        poll_output["properties"]["messages"]["items"]["properties"]["decision"]["enum"][0],
+        "accept"
+    );
 
     let send_output = &by_id[OP_SEND_MESSAGE].output_schema;
     assert_eq!(send_output["properties"]["status"]["enum"][0], "sent");
@@ -143,6 +190,7 @@ fn manifest_declares_matching_operation_suffixes_and_capabilities() {
         ("health", CAP_READ),
         ("list_mailboxes", CAP_READ),
         ("search_messages", CAP_READ),
+        ("poll_inbound_once", CAP_READ),
         ("send_message", CAP_WRITE),
     ] {
         let section_header = format!("[provides.operations.{section}]");
@@ -178,7 +226,12 @@ fn manifest_declares_runtime_scoped_network_constraints() {
     let manifest =
         toml::from_str::<Value>(MANIFEST).expect("email-generic manifest should parse as TOML");
 
-    for section in ["health", "list_mailboxes", "search_messages"] {
+    for section in [
+        "health",
+        "list_mailboxes",
+        "search_messages",
+        "poll_inbound_once",
+    ] {
         let constraints = network_constraints(&manifest, section);
         assert_eq!(
             string_list(constraints, "host_allow"),

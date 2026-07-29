@@ -1,9 +1,9 @@
 # LLM Router Connector V3 Contract
 
-> **Status**: runtime contract documented with routing-only dispatch semantics
+> **Status**: PROVEN runtime contract documented with routing-only dispatch semantics
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/llm_router_connector_verification.sh`
 > **OpenAI chat upstream**: https://developers.openai.com/api/reference/resources/chat
 > **Cloudflare AI Gateway upstream**: https://developers.cloudflare.com/ai-gateway/configuration/authentication/
 > **Vercel AI Gateway upstream**: https://vercel.com/docs/ai-gateway
@@ -52,7 +52,7 @@ Important runtime truths the contract preserves:
 - `handle_doctor()` checks local configuration, static provider status, network policy, credential-injection mode, and budget settings.
 - `handle_self_check()` reports provider readiness, credential-injection requirements, network-policy failures, unavailable providers, and providers with no models.
 - `handle_handshake()` creates a new session ID, marks the base connector handshaken, and creates a `CapabilityVerifier` from the host public key, zone, and requested instance ID.
-- Runtime handshake returns placeholder manifest hash `blake3-256:fcp.interface.v2:pending`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `invoke` expects `operation`, `input`, and `capability_token`.
 - Proper FCP capability tokens are verified against the operation capability when a verifier exists.
 - Legacy string `capability_token` values are accepted as a presence check.
@@ -214,7 +214,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/llm_router_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated closeout bundle is `scripts/e2e/llm_router_connector_verification.sh`. It runs the manifest check, focused `rch` check/fmt/integration/local-non-mock/clippy lanes, extracts redaction-safe local non-mock JSONL evidence, and writes a replay script plus summary artifact.
 
 The verification surface captures:
 
@@ -222,6 +222,7 @@ The verification surface captures:
 - deterministic provider catalog and routing behavior
 - auth, provider error, lifecycle, simulation, introspection, self-check, and doctor coverage
 - formatting, check, test, and clippy proof through `rch`
+- replayable verification artifacts under `artifacts/e2e/llm-router/<run-id>/`
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -260,6 +261,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID=manual-llm-router OUT_ROOT=artifacts/e2e/llm-router/manual-llm-router scripts/e2e/llm_router_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-llm-router-readme cargo check -p fcp-llm-router --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-llm-router-readme cargo test -p fcp-llm-router --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-llm-router-readme cargo clippy -p fcp-llm-router --all-targets --no-deps -- -D warnings`

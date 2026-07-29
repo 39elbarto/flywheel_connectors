@@ -1,0 +1,2 @@
+path crates/nonexistent/foo.rs -- documented stale path fixture for allowlist coverage
+symbol fcp_core::deleted_fn -- documented stale symbol fixture for allowlist coverage

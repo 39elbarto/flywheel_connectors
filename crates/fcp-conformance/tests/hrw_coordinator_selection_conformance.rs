@@ -18,13 +18,8 @@
 //! 3. **`rank[0] == select_coordinator`.** The two APIs share an
 //!    underlying ordering; consistency is required so callers can
 //!    interchange them.
-//! 4. **`rank_nodes_by_hrw` covers all eligible nodes.** No drops,
-//!    no extras — failover routing depends on the full list.
-//! 5. **Empty input → `None`.**
-//! 6. **Single-node trivial case → that node.**
-//! 7. **Subject-dependence.** Different subjects under the same
-//!    eligible set distribute across nodes (probabilistic, but
-//!    asserted on a small set of known-different subjects).
+
+#![allow(clippy::items_after_statements)]
 
 use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId, rank_nodes_by_hrw, select_coordinator};
 
@@ -60,7 +55,7 @@ fn single_node_eligible_set_returns_that_node() {
 
     let coord = select_coordinator(&zone, &subject, &only);
     assert_eq!(
-        coord.as_ref().map(|n| n.as_str()),
+        coord.as_ref().map(fcp_prelude::TailscaleNodeId::as_str),
         Some("node-only"),
         "single-node eligible set MUST select that node"
     );

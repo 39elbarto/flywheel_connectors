@@ -10,23 +10,11 @@
 //!    `requires_session`** govern whether a method needs a JSON-RPC
 //!    response and whether it can run pre-`initialize`. Drift breaks
 //!    the entire MCP handshake protocol.
-//! 3. **`SessionStatus`** snake_case wire form — emitted in admin
+//! 3. **`SessionStatus`** `snake_case` wire form — emitted in admin
 //!    APIs and dashboards.
 //!
-//! Properties pinned (NORMATIVE):
-//!
-//! - `route_mcp_method` 12-mapping table (10 explicit + notifications
-//!   prefix + Unknown fallback)
-//! - `notifications/<anything>` prefix routes to `Notification`
-//! - `expects_response` is true for ALL except `Notification`
-//! - `requires_session` is true for ALL except `Initialize`, `Ping`,
-//!   and `Unknown` (the latter so unknown-method errors propagate
-//!   without needing a session)
-//! - `Display` returns the exact wire-method literal for each
-//!   category (used in audit logs)
-//! - `Hash + Copy + Eq` for HashMap keys
-//! - `SessionStatus` 4 snake_case variants (active/idle/expired/
-//!   terminated) + reject mixed-case + Copy
+
+#![allow(clippy::items_after_statements)]
 
 use fcp_host::{McpMethodCategory, SessionStatus, route_mcp_method};
 

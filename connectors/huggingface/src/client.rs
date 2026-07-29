@@ -6,7 +6,8 @@ use reqwest::{Client, RequestBuilder};
 use tracing::debug;
 use url::Url;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 
 use crate::error::{HuggingfaceError, HuggingfaceResult};
 use crate::types::{

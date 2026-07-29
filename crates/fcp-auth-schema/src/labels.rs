@@ -75,6 +75,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn cwt_claims_are_positive() {
         assert!(cwt_claims::ISS > 0);
         assert!(cwt_claims::SUB > 0);
@@ -86,6 +87,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn fcp2_claims_are_negative() {
         assert!(fcp2_claims::CAPABILITY_ID < 0);
         assert!(fcp2_claims::ZONE_ID < 0);

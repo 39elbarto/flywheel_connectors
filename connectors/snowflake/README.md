@@ -1,9 +1,10 @@
 # Snowflake Connector V3 Contract
 
-> **Status**: runtime contract documented; Snowflake SQL API drift documented
+> **Status**: strict manifest hash and manifest-derived runtime contract documented; Snowflake SQL API drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
+> **Interface hash**: `blake3-256:fcp.interface.v2:f2515f76b5e8a8e31edd315e1a253c2d725d1f81487f59d9e95758740791957e`
 > **Snowflake SQL API upstream**: https://docs.snowflake.com/en/developer-guide/sql-api/index
 > **Snowflake SQL API endpoints upstream**: https://docs.snowflake.com/en/developer-guide/sql-api/about-endpoints
 > **Snowflake SQL API reference upstream**: https://docs.snowflake.com/en/developer-guide/sql-api/reference
@@ -51,6 +52,7 @@ Important runtime truths the contract preserves:
 - Runtime `invoke` does not require or verify a capability token.
 - Runtime `simulate` only checks whether the `operation_id` is known.
 - Runtime `simulate` does not check configuration, handshake, input shape, approval policy, SQL safety, or capability tokens.
+- Runtime operation introspection derives operation descriptions, schemas, capabilities, safety/risk/idempotency, AI hints, and approval modes from the embedded strict manifest.
 - Runtime `shutdown()` clears config and client state and clears the base configured/handshaken flags.
 - Runtime `shutdown()` does not clear the stored `session_id`.
 
@@ -91,8 +93,8 @@ This README documents runtime truth and keeps current drift visible:
 - Provisioning recipe is named `snowflake.password_auth` and asks for an access token or password, but the runtime only has a Bearer-token transport. It does not implement Snowflake password login.
 - Snowflake SQL API authentication documentation points to OAuth or key-pair authentication. The runtime accepts a pre-issued token or host credential reference and does not mint, refresh, or sign tokens.
 - Manifest operation approval modes mark `snowflake.sql.execute` as interactive. Runtime does not enforce approval tokens.
-- Runtime introspection reports no `requires_approval` metadata for any operation.
-- Manifest rate-limit pools exist for SQL read/write, warehouse read, and database read operations. Runtime introspection reports no rate-limit metadata and the client does not enforce those pools.
+- Runtime introspection reports manifest approval metadata, but runtime invoke does not enforce approval tokens.
+- Manifest rate-limit pools exist for SQL read/write, warehouse read, and database read operations. Runtime introspection derives operation-level rate-limit metadata from the manifest, but this manifest currently uses connector-level operation pools rather than inline operation `rate_limit` values, and the client does not enforce those pools.
 - Manifest response caps vary by operation. Runtime does not enforce those response byte caps before parsing JSON.
 - Handshake returns all four Snowflake capabilities unconditionally after configure. It does not filter requested capabilities.
 - Handshake does not parse a full `HandshakeRequest`, does not install a `CapabilityVerifier`, and does not return a manifest hash.
@@ -112,7 +114,7 @@ The current Snowflake README slice documents the existing runtime surface:
 - database, warehouse, SQL query, SQL execute, and table listing operations
 - lifecycle, doctor, health, self-check, simulate, introspect, invoke, and shutdown behavior
 - provider error mapping, timeout behavior, SQL context handling, and identifier validation
-- runtime/manifest/provider-doc drift around endpoint paths, auth, approval, rate limits, response caps, statement polling, result pagination, and capability-token verification
+- runtime/provider-doc drift around endpoint paths, auth, approval enforcement, rate-limit enforcement, response caps, statement polling, result pagination, and capability-token verification
 - deterministic WireMock integration tests
 
 ## Auth And Zone Boundary
@@ -202,11 +204,16 @@ The current implementation does not include:
 
 ## Verification
 
-README-only changes do not require Cargo or `rch` compilation. For this connector contract, use:
+For this connector contract, use:
 
 ```bash
-git diff --check -- connectors/snowflake/README.md
+cargo run -p fwc -- manifest fix --check --json connectors/snowflake/manifest.toml
+cargo fmt --package fcp-snowflake --check
+cargo check -p fcp-snowflake --all-targets
+cargo test -p fcp-snowflake -- --nocapture
+cargo clippy -p fcp-snowflake --all-targets --no-deps -- -D warnings
+git diff --check -- connectors/snowflake/Cargo.toml connectors/snowflake/manifest.toml connectors/snowflake/README.md connectors/snowflake/src/connector.rs Cargo.lock
 LC_ALL=C rg -n '[^ -~]' connectors/snowflake/README.md
 rg -n '\bmaster\b' connectors/snowflake/README.md
-ubs connectors/snowflake/README.md
+ubs connectors/snowflake/README.md connectors/snowflake/src/connector.rs connectors/snowflake/Cargo.toml connectors/snowflake/manifest.toml
 ```

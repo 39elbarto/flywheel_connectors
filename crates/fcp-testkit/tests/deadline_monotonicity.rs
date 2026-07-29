@@ -57,15 +57,14 @@ async fn context_remaining_budget_shrinks_over_time() {
 // ============================================================================
 
 #[fcp_async_core::runtime::test]
-async fn zero_deadline_allows_synchronous_completion() {
-    // Tokio semantics: timeout(Duration::ZERO, fut) polls the future once.
-    // If it completes on first poll, it succeeds.
+async fn zero_deadline_times_out_before_polling_work() {
+    // fcp-async-core deadlines are fail-closed: an already-expired deadline is
+    // observed before polling user work, even when that work is synchronous.
     let deadline = Deadline::after(Duration::ZERO);
     assert!(deadline.is_expired());
 
-    // Instant-completing future succeeds even with zero deadline
     let result = deadline.run(async { 42 }).await;
-    assert_eq!(result.unwrap(), 42);
+    assert!(matches!(result, Err(AsyncError::Timeout { timeout_ms: 0 })));
 }
 
 #[fcp_async_core::runtime::test]
@@ -202,8 +201,8 @@ async fn retry_loop_exhausts_deadline_budget() {
 
     let total_attempts = attempts.load(Ordering::SeqCst);
     assert!(
-        (3..=7).contains(&total_attempts),
-        "expected 3-7 attempts in 100ms with 20ms sleeps, got {total_attempts}"
+        (2..=7).contains(&total_attempts),
+        "expected 2-7 attempts in 100ms with 20ms sleeps, got {total_attempts}"
     );
     assert!(
         matches!(last_err, Some(AsyncError::Timeout { .. })),

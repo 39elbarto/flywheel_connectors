@@ -2,21 +2,22 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use chrono::Utc;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, Introspection, OperationId, OperationInfo,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use hmac::{Hmac, Mac};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tracing::{info, instrument};
 
@@ -29,6 +30,47 @@ use crate::{
 
 const DEFAULT_WEBHOOK_TOLERANCE_SECONDS: i64 = 300;
 const STRIPE_API_HOST: &str = "api.stripe.com";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OP_CREATE_CUSTOMER: &str = "stripe.create_customer";
+const OP_GET_CUSTOMER: &str = "stripe.get_customer";
+const OP_LIST_CUSTOMERS: &str = "stripe.list_customers";
+const OP_UPDATE_CUSTOMER: &str = "stripe.update_customer";
+const OP_DELETE_CUSTOMER: &str = "stripe.delete_customer";
+const OP_CREATE_PAYMENT_INTENT: &str = "stripe.create_payment_intent";
+const OP_GET_PAYMENT_INTENT: &str = "stripe.get_payment_intent";
+const OP_CONFIRM_PAYMENT_INTENT: &str = "stripe.confirm_payment_intent";
+const OP_CAPTURE_PAYMENT_INTENT: &str = "stripe.capture_payment_intent";
+const OP_CANCEL_PAYMENT_INTENT: &str = "stripe.cancel_payment_intent";
+const OP_CREATE_REFUND: &str = "stripe.create_refund";
+const OP_CREATE_SUBSCRIPTION: &str = "stripe.create_subscription";
+const OP_GET_SUBSCRIPTION: &str = "stripe.get_subscription";
+const OP_LIST_SUBSCRIPTIONS: &str = "stripe.list_subscriptions";
+const OP_CANCEL_SUBSCRIPTION: &str = "stripe.cancel_subscription";
+const OP_LIST_INVOICES: &str = "stripe.list_invoices";
+const OP_GET_INVOICE: &str = "stripe.get_invoice";
+const OP_GET_BALANCE: &str = "stripe.get_balance";
+const OP_INGEST_WEBHOOK_EVENT: &str = "stripe.ingest_webhook_event";
+const OPERATION_ORDER: [&str; 19] = [
+    OP_CREATE_CUSTOMER,
+    OP_GET_CUSTOMER,
+    OP_LIST_CUSTOMERS,
+    OP_UPDATE_CUSTOMER,
+    OP_DELETE_CUSTOMER,
+    OP_CREATE_PAYMENT_INTENT,
+    OP_GET_PAYMENT_INTENT,
+    OP_CONFIRM_PAYMENT_INTENT,
+    OP_CAPTURE_PAYMENT_INTENT,
+    OP_CANCEL_PAYMENT_INTENT,
+    OP_CREATE_REFUND,
+    OP_CREATE_SUBSCRIPTION,
+    OP_GET_SUBSCRIPTION,
+    OP_LIST_SUBSCRIPTIONS,
+    OP_CANCEL_SUBSCRIPTION,
+    OP_LIST_INVOICES,
+    OP_GET_INVOICE,
+    OP_GET_BALANCE,
+    OP_INGEST_WEBHOOK_EVENT,
+];
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -292,6 +334,18 @@ impl StripeConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     ///
     /// Accepts either `secret_key` (direct) or `credential_id` (secretless via
@@ -486,7 +540,7 @@ impl StripeConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:stripe-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -516,514 +570,15 @@ impl StripeConnector {
         }))
     }
 
+    fn operations_info() -> Vec<OperationInfo> {
+        static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+        OPERATIONS.get_or_init(typed_operations_info).clone()
+    }
+
     /// Handle introspect method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations: vec![
-                op_info(
-                    "stripe.create_customer",
-                    "Create a new Stripe customer",
-                    json!({
-                        "type": "object",
-                        "required": ["email"],
-                        "properties": {
-                            "email": { "type": "string" },
-                            "name": { "type": "string" },
-                            "idempotency_key": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "customer": { "type": "object" }, "audit": { "type": "object" } } }),
-                    "stripe.write",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Create a new customer record in Stripe.".into(),
-                        common_mistakes: vec![
-                            "Not checking for duplicate customers by email".into(),
-                        ],
-                        examples: vec![
-                            r#"{"email": "user@example.com", "name": "Jane Doe"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("stripe.get_customer"),
-                            CapabilityId::from_static("stripe.list_customers"),
-                            CapabilityId::from_static("stripe.update_customer"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.get_customer",
-                    "Retrieve a Stripe customer by ID",
-                    json!({
-                        "type": "object",
-                        "required": ["customer_id"],
-                        "properties": { "customer_id": { "type": "string" } }
-                    }),
-                    json!({ "type": "object", "properties": { "customer": { "type": "object" } } }),
-                    "stripe.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Look up a customer by their Stripe ID.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"customer_id": "cus_abc123"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.create_customer"),
-                            CapabilityId::from_static("stripe.list_customers"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.list_customers",
-                    "List Stripe customers with optional filters",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "limit": { "type": "integer" },
-                            "email": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "data": { "type": "array" }, "has_more": { "type": "boolean" } } }),
-                    "stripe.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "List customers, optionally filtered by email.".into(),
-                        common_mistakes: vec!["Not handling pagination with starting_after".into()],
-                        examples: vec![r#"{"limit": 10, "email": "user@example.com"}"#.into()],
-                        related: vec![CapabilityId::from_static("stripe.get_customer")],
-                    },
-                ),
-                op_info(
-                    "stripe.update_customer",
-                    "Update a Stripe customer",
-                    json!({
-                        "type": "object",
-                        "required": ["customer_id"],
-                        "properties": {
-                            "customer_id": { "type": "string" },
-                            "email": { "type": "string" },
-                            "name": { "type": "string" },
-                            "idempotency_key": { "type": "string" }
-                        },
-                        "anyOf": [
-                            { "required": ["email"] },
-                            { "required": ["name"] }
-                        ]
-                    }),
-                    json!({ "type": "object", "properties": { "customer": { "type": "object" }, "audit": { "type": "object" } } }),
-                    "stripe.write",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Update customer metadata such as email or name.".into(),
-                        common_mistakes: vec!["Sending an update without any mutable fields".into()],
-                        examples: vec![r#"{"customer_id": "cus_abc123", "email": "new@example.com"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.get_customer"),
-                            CapabilityId::from_static("stripe.create_customer"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.delete_customer",
-                    "Delete a Stripe customer",
-                    json!({
-                        "type": "object",
-                        "required": ["customer_id"],
-                        "properties": {
-                            "customer_id": { "type": "string" },
-                            "idempotency_key": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "deleted": { "type": "object" }, "audit": { "type": "object" } } }),
-                    "stripe.write",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Permanently remove a customer object from Stripe.".into(),
-                        common_mistakes: vec!["Deleting before exporting data needed for audit/reconciliation".into()],
-                        examples: vec![r#"{"customer_id": "cus_abc123"}"#.into()],
-                        related: vec![CapabilityId::from_static("stripe.get_customer")],
-                    },
-                ),
-                op_info(
-                    "stripe.create_payment_intent",
-                    "Create a payment intent",
-                    json!({
-                        "type": "object",
-                        "required": ["amount", "currency"],
-                        "properties": {
-                            "amount": { "type": "integer" },
-                            "currency": { "type": "string" },
-                            "customer": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "payment_intent": { "type": "object" } } }),
-                    "stripe.payment",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use:
-                            "Initiate a payment. Amount is in smallest currency unit (e.g. cents)."
-                                .into(),
-                        common_mistakes: vec![
-                            "Using dollars instead of cents for amount".into(),
-                            "Invalid ISO 4217 currency code".into(),
-                        ],
-                        examples: vec![
-                            r#"{"amount": 2000, "currency": "usd", "customer": "cus_abc123"}"#
-                                .into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("stripe.get_payment_intent"),
-                            CapabilityId::from_static("stripe.create_refund"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.get_payment_intent",
-                    "Retrieve a payment intent by ID",
-                    json!({
-                        "type": "object",
-                        "required": ["payment_intent_id"],
-                        "properties": { "payment_intent_id": { "type": "string" } }
-                    }),
-                    json!({ "type": "object", "properties": { "payment_intent": { "type": "object" } } }),
-                    "stripe.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Check status of a payment intent.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"payment_intent_id": "pi_abc123"}"#.into()],
-                        related: vec![CapabilityId::from_static("stripe.create_payment_intent")],
-                    },
-                ),
-                op_info(
-                    "stripe.confirm_payment_intent",
-                    "Confirm a payment intent to proceed with payment",
-                    json!({
-                        "type": "object",
-                        "required": ["payment_intent_id"],
-                        "properties": {
-                            "payment_intent_id": { "type": "string" },
-                            "payment_method": { "type": "string" },
-                            "idempotency_key": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "payment_intent": { "type": "object" }, "audit": { "type": "object" } } }),
-                    "stripe.payment",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Confirm a payment intent after the customer has provided payment details.".into(),
-                        common_mistakes: vec!["Confirming without a valid payment method attached".into()],
-                        examples: vec![r#"{"payment_intent_id": "pi_abc123", "payment_method": "pm_card_visa"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.create_payment_intent"),
-                            CapabilityId::from_static("stripe.capture_payment_intent"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.capture_payment_intent",
-                    "Capture a previously authorized payment intent",
-                    json!({
-                        "type": "object",
-                        "required": ["payment_intent_id"],
-                        "properties": {
-                            "payment_intent_id": { "type": "string" },
-                            "amount_to_capture": { "type": "integer" },
-                            "idempotency_key": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "payment_intent": { "type": "object" }, "audit": { "type": "object" } } }),
-                    "stripe.payment",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Capture funds from a payment intent that was created with capture_method=manual.".into(),
-                        common_mistakes: vec!["Capturing more than the authorized amount".into()],
-                        examples: vec![r#"{"payment_intent_id": "pi_abc123", "amount_to_capture": 1500}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.confirm_payment_intent"),
-                            CapabilityId::from_static("stripe.cancel_payment_intent"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.cancel_payment_intent",
-                    "Cancel a payment intent",
-                    json!({
-                        "type": "object",
-                        "required": ["payment_intent_id"],
-                        "properties": {
-                            "payment_intent_id": { "type": "string" },
-                            "cancellation_reason": { "type": "string", "enum": ["duplicate", "fraudulent", "requested_by_customer", "abandoned"] },
-                            "idempotency_key": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "payment_intent": { "type": "object" }, "audit": { "type": "object" } } }),
-                    "stripe.payment",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Cancel a payment intent that has not yet been captured.".into(),
-                        common_mistakes: vec!["Cancelling an already captured payment (use refund instead)".into()],
-                        examples: vec![r#"{"payment_intent_id": "pi_abc123", "cancellation_reason": "requested_by_customer"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.create_refund"),
-                            CapabilityId::from_static("stripe.get_payment_intent"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.create_refund",
-                    "Refund a payment",
-                    json!({
-                        "type": "object",
-                        "required": ["payment_intent"],
-                        "properties": {
-                            "payment_intent": { "type": "string" },
-                            "amount": { "type": "integer" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "refund": { "type": "object" } } }),
-                    "stripe.payment",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use:
-                            "Refund all or part of a payment. Omit amount for full refund.".into(),
-                        common_mistakes: vec![
-                            "Refunding more than the original charge amount".into(),
-                        ],
-                        examples: vec![r#"{"payment_intent": "pi_abc123", "amount": 500}"#.into()],
-                        related: vec![CapabilityId::from_static("stripe.get_payment_intent")],
-                    },
-                ),
-                op_info(
-                    "stripe.create_subscription",
-                    "Create a subscription for a customer",
-                    json!({
-                        "type": "object",
-                        "required": ["customer", "price"],
-                        "properties": {
-                            "customer": { "type": "string" },
-                            "price": { "type": "string" },
-                            "idempotency_key": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "subscription": { "type": "object" }, "audit": { "type": "object" } } }),
-                    "stripe.payment",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Start a recurring subscription for a customer.".into(),
-                        common_mistakes: vec![
-                            "Not attaching a payment method to the customer first".into(),
-                        ],
-                        examples: vec![
-                            r#"{"customer": "cus_abc123", "price": "price_abc123"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("stripe.cancel_subscription"),
-                            CapabilityId::from_static("stripe.get_customer"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.get_subscription",
-                    "Retrieve a subscription by ID",
-                    json!({
-                        "type": "object",
-                        "required": ["subscription_id"],
-                        "properties": { "subscription_id": { "type": "string" } }
-                    }),
-                    json!({ "type": "object", "properties": { "subscription": { "type": "object" } } }),
-                    "stripe.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Check status and billing cycle details for a subscription.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"subscription_id": "sub_abc123"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.create_subscription"),
-                            CapabilityId::from_static("stripe.cancel_subscription"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.list_subscriptions",
-                    "List subscriptions with optional filters",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "customer": { "type": "string" },
-                            "status": { "type": "string" },
-                            "limit": { "type": "integer" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "data": { "type": "array" }, "has_more": { "type": "boolean" } } }),
-                    "stripe.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Enumerate subscriptions for a customer or status.".into(),
-                        common_mistakes: vec!["Not filtering by status when expecting only active subscriptions".into()],
-                        examples: vec![r#"{"customer": "cus_abc123", "status": "active", "limit": 10}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.get_subscription"),
-                            CapabilityId::from_static("stripe.list_invoices"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.cancel_subscription",
-                    "Cancel an active subscription",
-                    json!({
-                        "type": "object",
-                        "required": ["subscription_id"],
-                        "properties": {
-                            "subscription_id": { "type": "string" },
-                            "idempotency_key": { "type": "string" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "subscription": { "type": "object" }, "audit": { "type": "object" } } }),
-                    "stripe.payment",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Cancel a customer's subscription.".into(),
-                        common_mistakes: vec![
-                            "Not specifying whether to cancel immediately or at period end".into(),
-                        ],
-                        examples: vec![r#"{"subscription_id": "sub_abc123"}"#.into()],
-                        related: vec![CapabilityId::from_static("stripe.create_subscription")],
-                    },
-                ),
-                op_info(
-                    "stripe.list_invoices",
-                    "List invoices for a customer",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "customer": { "type": "string" },
-                            "limit": { "type": "integer" }
-                        }
-                    }),
-                    json!({ "type": "object", "properties": { "data": { "type": "array" }, "has_more": { "type": "boolean" } } }),
-                    "stripe.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "List invoices, optionally filtered by customer.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"customer": "cus_abc123", "limit": 10}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.get_customer"),
-                            CapabilityId::from_static("stripe.get_invoice"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.get_invoice",
-                    "Retrieve an invoice by ID",
-                    json!({
-                        "type": "object",
-                        "required": ["invoice_id"],
-                        "properties": { "invoice_id": { "type": "string" } }
-                    }),
-                    json!({ "type": "object", "properties": { "invoice": { "type": "object" } } }),
-                    "stripe.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Retrieve full invoice details for reconciliation.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"invoice_id": "in_abc123"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("stripe.list_invoices"),
-                            CapabilityId::from_static("stripe.get_subscription"),
-                        ],
-                    },
-                ),
-                op_info(
-                    "stripe.get_balance",
-                    "Retrieve the current Stripe account balance",
-                    json!({ "type": "object", "properties": {} }),
-                    json!({ "type": "object", "properties": { "balance": { "type": "object" } } }),
-                    "stripe.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Check the current account balance.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r"{}".into()],
-                        related: vec![CapabilityId::from_static("stripe.list_invoices")],
-                    },
-                ),
-                op_info(
-                    "stripe.ingest_webhook_event",
-                    "Validate and ingest a Stripe webhook payload forwarded by fcp-host",
-                    json!({
-                        "type": "object",
-                        "required": ["payload", "stripe_signature"],
-                        "properties": {
-                            "payload": { "type": "string" },
-                            "stripe_signature": { "type": "string" },
-                            "received_at": { "type": "integer" },
-                            "delivery_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "required": ["event", "delivery"],
-                        "properties": {
-                            "event": { "type": "object" },
-                            "delivery": { "type": "object" }
-                        }
-                    }),
-                    "stripe.webhook",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Process a Stripe webhook that has been forwarded by the host ingress path.".into(),
-                        common_mistakes: vec![
-                            "Passing parsed JSON instead of the original raw payload string".into(),
-                            "Reusing a delivery ID across distinct webhook deliveries".into(),
-                        ],
-                        examples: vec![
-                            r#"{"payload":"{\"id\":\"evt_123\",\"object\":\"event\",\"type\":\"invoice.paid\",\"created\":1700000000,\"data\":{\"object\":{\"id\":\"in_1\",\"object\":\"invoice\"}}}","stripe_signature":"t=1700000000,v1=..."}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("stripe.get_invoice"),
-                            CapabilityId::from_static("stripe.get_subscription"),
-                        ],
-                    },
-                ),
-            ],
+            operations: Self::operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -2085,31 +1640,57 @@ fn sanitize_idempotency_component(component: &str, fallback: &str) -> String {
     selected.chars().take(64).collect()
 }
 
-#[allow(clippy::fn_params_excessive_bools)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
+fn typed_operations_info() -> Vec<OperationInfo> {
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Stripe manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
     OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
     }
 }
 
@@ -2125,14 +1706,16 @@ mod tests {
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         cap: &str,
         operations: &[&str],
     ) -> CapabilityToken {
-        generate_valid_token_with_resources(signing_key, cap, operations, &["*"])
+        generate_valid_token_with_resources(signing_key, instance_id, cap, operations, &["*"])
     }
 
     fn generate_valid_token_with_resources(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         cap: &str,
         operations: &[&str],
         resource_allow: &[&str],
@@ -2154,6 +1737,7 @@ mod tests {
             .principal("user:test")
             .operations(operations)
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
@@ -2210,9 +1794,15 @@ mod tests {
     }
 
     fn assert_invalid_request_contains(error: FcpError, expected: &str) {
-        assert!(matches!(&error, FcpError::InvalidRequest { .. }));
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest containing {expected:?}, got: {error:?}"
+        );
         if let FcpError::InvalidRequest { message, .. } = error {
-            assert!(message.contains(expected));
+            assert!(
+                message.contains(expected),
+                "expected InvalidRequest message to contain {expected:?}, got: {message:?}"
+            );
         }
     }
 
@@ -2256,8 +1846,12 @@ mod tests {
             .await
             .unwrap();
 
-        let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let capability = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "stripe.read",
+            &["stripe.get_customer"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.get_customer",
@@ -2273,8 +1867,12 @@ mod tests {
     async fn test_invoke_before_handshake_returns_not_handshaken() {
         let connector = configured_stripe_connector().await;
         let signing_key = Ed25519SigningKey::generate();
-        let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let capability = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "stripe.read",
+            &["stripe.get_customer"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.get_customer",
@@ -2289,8 +1887,12 @@ mod tests {
     async fn test_simulate_before_configure_denied() {
         let connector = StripeConnector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let capability = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "stripe.read",
+            &["stripe.get_customer"],
+        );
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2312,8 +1914,12 @@ mod tests {
     async fn test_simulate_before_handshake_denied() {
         let connector = configured_stripe_connector().await;
         let signing_key = Ed25519SigningKey::generate();
-        let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let capability = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "stripe.read",
+            &["stripe.get_customer"],
+        );
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2334,8 +1940,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_simulate_wrong_capability_denied() {
         let (connector, signing_key) = handshaken_stripe_connector().await;
-        let capability =
-            generate_valid_token(&signing_key, "stripe.write", &["stripe.get_customer"]);
+        let capability = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "stripe.write",
+            &["stripe.get_customer"],
+        );
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2353,8 +1963,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_simulate_known_operation_allowed() {
         let (connector, signing_key) = handshaken_stripe_connector().await;
-        let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let capability = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "stripe.read",
+            &["stripe.get_customer"],
+        );
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2373,6 +1987,7 @@ mod tests {
         let (connector, signing_key) = handshaken_stripe_connector().await;
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.create_payment_intent"],
         );
@@ -2402,8 +2017,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_simulate_unknown_operation_denied() {
         let (connector, signing_key) = handshaken_stripe_connector().await;
-        let capability =
-            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let capability = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "stripe.read",
+            &["stripe.get_customer"],
+        );
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -2452,6 +2071,7 @@ mod tests {
 
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.create_payment_intent"],
         );
@@ -2490,8 +2110,12 @@ mod tests {
             .await
             .unwrap();
 
-        let capability =
-            generate_valid_token(&signing_key, "stripe.write", &["stripe.update_customer"]);
+        let capability = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "stripe.write",
+            &["stripe.update_customer"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.update_customer",
@@ -2544,6 +2168,7 @@ mod tests {
 
         let capability = generate_valid_token_with_resources(
             &signing_key,
+            connector.instance_id(),
             "stripe.read",
             &["stripe.get_customer"],
             &["stripe:customer:cus_allowed"],
@@ -2573,26 +2198,7 @@ mod tests {
         let ops = result["operations"].as_array().unwrap();
         let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
 
-        assert!(op_ids.contains(&"stripe.create_customer"));
-        assert!(op_ids.contains(&"stripe.get_customer"));
-        assert!(op_ids.contains(&"stripe.list_customers"));
-        assert!(op_ids.contains(&"stripe.update_customer"));
-        assert!(op_ids.contains(&"stripe.delete_customer"));
-        assert!(op_ids.contains(&"stripe.create_payment_intent"));
-        assert!(op_ids.contains(&"stripe.get_payment_intent"));
-        assert!(op_ids.contains(&"stripe.create_refund"));
-        assert!(op_ids.contains(&"stripe.create_subscription"));
-        assert!(op_ids.contains(&"stripe.get_subscription"));
-        assert!(op_ids.contains(&"stripe.list_subscriptions"));
-        assert!(op_ids.contains(&"stripe.cancel_subscription"));
-        assert!(op_ids.contains(&"stripe.list_invoices"));
-        assert!(op_ids.contains(&"stripe.get_invoice"));
-        assert!(op_ids.contains(&"stripe.get_balance"));
-        assert!(op_ids.contains(&"stripe.ingest_webhook_event"));
-        assert!(op_ids.contains(&"stripe.confirm_payment_intent"));
-        assert!(op_ids.contains(&"stripe.capture_payment_intent"));
-        assert!(op_ids.contains(&"stripe.cancel_payment_intent"));
-        assert_eq!(ops.len(), 19);
+        assert_eq!(op_ids, OPERATION_ORDER);
     }
 
     #[test]
@@ -2710,6 +2316,7 @@ mod tests {
         let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2762,6 +2369,7 @@ mod tests {
         let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2809,6 +2417,7 @@ mod tests {
         let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2828,6 +2437,7 @@ mod tests {
 
         let replay_capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2882,6 +2492,7 @@ mod tests {
         let header = build_test_webhook_signature("whsec_test", payload, stale_timestamp);
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -2929,6 +2540,7 @@ mod tests {
         let payload = r#"{"id":"evt_bad","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
         );
@@ -3176,6 +2788,7 @@ mod tests {
 
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.confirm_payment_intent"],
         );
@@ -3216,6 +2829,7 @@ mod tests {
 
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.capture_payment_intent"],
         );
@@ -3256,6 +2870,7 @@ mod tests {
 
         let capability = generate_valid_token(
             &signing_key,
+            connector.instance_id(),
             "stripe.payment",
             &["stripe.cancel_payment_intent"],
         );
@@ -3329,6 +2944,99 @@ mod tests {
         assert_eq!(cancel_subscription["idempotency"], "strict");
     }
 
+    fn strict_stripe_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_stripe_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn operations_info_json_exposes_manifest_approval_modes() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let create_customer = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_CREATE_CUSTOMER))
+            .unwrap();
+        let delete_customer = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_DELETE_CUSTOMER))
+            .unwrap();
+        let create_payment_intent = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_CREATE_PAYMENT_INTENT))
+            .unwrap();
+        let ingest_webhook = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_INGEST_WEBHOOK_EVENT))
+            .unwrap();
+
+        assert_eq!(create_customer["requires_approval"], "policy");
+        assert_eq!(delete_customer["requires_approval"], "interactive");
+        assert_eq!(create_payment_intent["requires_approval"], "interactive");
+        assert_eq!(ingest_webhook["requires_approval"], "policy");
+    }
+
     #[test]
     fn manifest_interface_hash_is_deterministic() {
         let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
@@ -3349,6 +3057,19 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut expected = Sha256::new();
+        expected.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(expected.finalize()));
+
+        assert_eq!(StripeConnector::manifest_hash(), expected);
+        assert_ne!(
+            StripeConnector::manifest_hash(),
+            "sha256:stripe-connector-v1"
+        );
     }
 
     // --- sanitize_idempotency_component tests ---

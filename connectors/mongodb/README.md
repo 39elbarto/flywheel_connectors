@@ -1,6 +1,6 @@
 # MongoDB Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: runtime contract documented; manifest operation catalog aligned
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -34,7 +34,8 @@ Important runtime truths the contract preserves:
 - Package and binary name are `fcp-mongodb`.
 - Runtime `BaseConnector` ID is `mongodb`.
 - Manifest and reported connector ID are `fcp.mongodb`.
-- Manifest interface hash is `blake3-256:fcp.interface.v2:774e98368d9f1013d860cbdf2e902c2a54b8f8db5badb3da0d4f777fbb551879`.
+- Manifest interface hash is `blake3-256:fcp.interface.v2:f6b6c4c4eac726ab4e036726f16d02270eb209c0d0e38556c18807b093036f8c`.
+- Runtime operation metadata is derived from the manifest operation catalog for capability, approval mode, risk, safety tier, idempotency, schemas, and AI hints.
 - Configuration requires exactly one auth source: direct `api_key` or `credential_id`.
 - Direct API-key mode sends the Atlas Data API `apiKey` header.
 - `credential_id` mode sends `X-FCP-Credential-Id` and expects host egress policy to inject real secret material.
@@ -57,25 +58,21 @@ Important runtime truths the contract preserves:
 - `handle_shutdown()` shuts down the client runtime and clears config/client/base flags, but leaves `session_id` in memory.
 - `self_check()` is a local readiness check only; it does not issue a live Atlas Data API probe.
 
-## Drift Visible In This Checkout
+## Alignment And Remaining Drift
 
-This README documents the runtime truth and keeps current drift visible:
+This README documents the runtime truth, records the fixed manifest/runtime alignment, and keeps remaining drift visible:
 
 - Upstream Atlas Data API v1 is now documented by MongoDB as deprecated; the runtime still targets the Data API action endpoints.
-- Manifest advertises `mongodb.documents.find`, `mongodb.documents.insert`, `mongodb.documents.delete`, `mongodb.databases.list`, `mongodb.collections.list`, and `mongodb.aggregate`; runtime exposes nine different operation IDs.
-- Manifest advertises database and collection listing operations, but runtime does not implement `mongodb.databases.list` or `mongodb.collections.list`.
-- Runtime implements `find_one`, `insert_one`, `insert_many`, `update_one`, `update_many`, `delete_one`, and `delete_many` operations that are not individually represented in the manifest.
-- Manifest capabilities are `mongodb.documents.read`, `mongodb.databases.read`, and `mongodb.documents.write`; runtime operation metadata uses `mongodb.read` and `mongodb.write`.
+- Manifest and runtime operation metadata now use the same nine Atlas Data API action operation IDs.
+- Manifest and runtime operation metadata now use the same `mongodb.read` and `mongodb.write` capability IDs.
 - Handshake returns operation IDs in its `capabilities` array instead of capability IDs.
-- Manifest marks `mongodb.aggregate` as risky and policy-approved; runtime marks it safe/low and checks no approval token.
-- Manifest marks delete as interactive approval and idempotent; runtime delete operations are dangerous/high with no idempotency and no approval check.
-- Manifest state hint says connection string and database context are stored. Runtime keeps configuration in memory and uses Data API `base_url` plus `data_source`, not a MongoDB connection string.
-- Manifest network constraints allow only `*.mongodb.net`, while runtime readiness also accepts `*.mongodb.com`, exact `data.mongodb-api.com`, and loopback hosts.
+- Manifest metadata marks insert/update/aggregate operations as policy-approved and delete operations as interactive-approved; runtime still checks no approval token.
+- Manifest network constraints deny localhost, while runtime readiness allows loopback hosts for deterministic tests.
 - Runtime URL readiness can accept paths that are not Atlas Data API endpoints, such as generic MongoDB web/API hosts, then append `/action/*`.
 - Runtime introspection returns only `connector_id`, `version`, and operations, not the full `Introspection` shape with events, resource types, auth caps, or event caps.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should decide whether this connector remains on the deprecated Atlas Data API, align operation IDs and capability IDs across manifest/handshake/runtime, remove unimplemented database and collection list operations or implement them, add capability-token and approval-token verification, harden URL policy, reset handshake/session state consistently, and add a tracked verification bundle.
+A follow-up parity bead should decide whether this connector remains on the deprecated Atlas Data API, return capability IDs rather than operation IDs from handshake, add capability-token and approval-token verification, harden URL policy, reset handshake/session state consistently, and add a tracked verification bundle.
 
 ## First-Slice Scope
 
@@ -95,13 +92,10 @@ The current MongoDB README slice documents the existing runtime surface:
 - Allowed source zones: `z:owner`, `z:private`, and `z:work`.
 - Allowed target zone: `z:work`.
 - Forbidden zones: `z:public` and `z:community`.
-- Runtime capability surface:
-  - `mongodb.read` gates find and aggregate metadata, but runtime does not enforce capability tokens.
-  - `mongodb.write` gates insert, update, and delete metadata, but runtime does not enforce capability or approval tokens.
-- Manifest capability surface:
-  - `mongodb.documents.read`
-  - `mongodb.databases.read`
-  - `mongodb.documents.write`
+- Manifest and runtime metadata use `mongodb.read` for find and aggregate operations.
+- Manifest and runtime metadata use `mongodb.write` for insert, update, and delete operations.
+- Runtime does not enforce capability tokens for either capability.
+- Runtime does not enforce approval tokens for policy- or interactive-approved operations.
 - The connector does not persist API keys, credential secret material, documents, filters, update expressions, aggregation pipelines, results, or provider error bodies outside process memory.
 - MongoDB payloads can contain arbitrary application records. Treat live output as work-zone or private-zone data based on the configured Atlas app and collection.
 
@@ -123,17 +117,19 @@ The current MongoDB README slice documents the existing runtime surface:
 
 ## Operation Inventory
 
-| Operation | Endpoint action | Capability | SafetyTier | RiskLevel | Idempotency | Required input |
-|-----------|-----------------|------------|------------|-----------|-------------|----------------|
-| `mongodb.find_one` | `findOne` | `mongodb.read` | `Safe` | `Low` | `Strict` | `database`, `collection`; optional `filter`. |
-| `mongodb.find` | `find` | `mongodb.read` | `Safe` | `Low` | `Strict` | `database`, `collection`; optional `filter`, `limit`, `sort`, `projection`. |
-| `mongodb.insert_one` | `insertOne` | `mongodb.write` | `Risky` | `Medium` | `None` | `database`, `collection`, `document`. |
-| `mongodb.insert_many` | `insertMany` | `mongodb.write` | `Risky` | `Medium` | `None` | `database`, `collection`, `documents`. |
-| `mongodb.update_one` | `updateOne` | `mongodb.write` | `Risky` | `Medium` | `None` | `database`, `collection`, `filter`, `update`. |
-| `mongodb.update_many` | `updateMany` | `mongodb.write` | `Risky` | `Medium` | `None` | `database`, `collection`, `filter`, `update`. |
-| `mongodb.delete_one` | `deleteOne` | `mongodb.write` | `Dangerous` | `High` | `None` | `database`, `collection`, `filter`. |
-| `mongodb.delete_many` | `deleteMany` | `mongodb.write` | `Dangerous` | `High` | `None` | `database`, `collection`, `filter`. |
-| `mongodb.aggregate` | `aggregate` | `mongodb.read` | `Safe` | `Low` | `Strict` | `database`, `collection`, `pipeline`. |
+Runtime metadata is manifest-derived. Approval values in this table are metadata only until runtime token verification is implemented.
+
+| Operation | Endpoint action | Capability | SafetyTier | RiskLevel | Approval | Idempotency | Required input |
+|-----------|-----------------|------------|------------|-----------|----------|-------------|----------------|
+| `mongodb.find_one` | `findOne` | `mongodb.read` | `Safe` | `Low` | `None` | `Strict` | `database`, `collection`; optional `filter`. |
+| `mongodb.find` | `find` | `mongodb.read` | `Safe` | `Low` | `None` | `Strict` | `database`, `collection`; optional `filter`, `limit`, `sort`, `projection`. |
+| `mongodb.insert_one` | `insertOne` | `mongodb.write` | `Risky` | `Medium` | `Policy` | `None` | `database`, `collection`, `document`. |
+| `mongodb.insert_many` | `insertMany` | `mongodb.write` | `Risky` | `Medium` | `Policy` | `None` | `database`, `collection`, `documents`. |
+| `mongodb.update_one` | `updateOne` | `mongodb.write` | `Risky` | `Medium` | `Policy` | `None` | `database`, `collection`, `filter`, `update`. |
+| `mongodb.update_many` | `updateMany` | `mongodb.write` | `Risky` | `Medium` | `Policy` | `None` | `database`, `collection`, `filter`, `update`. |
+| `mongodb.delete_one` | `deleteOne` | `mongodb.write` | `Dangerous` | `High` | `Interactive` | `None` | `database`, `collection`, `filter`. |
+| `mongodb.delete_many` | `deleteMany` | `mongodb.write` | `Dangerous` | `High` | `Interactive` | `None` | `database`, `collection`, `filter`. |
+| `mongodb.aggregate` | `aggregate` | `mongodb.read` | `Risky` | `Medium` | `Policy` | `Strict` | `database`, `collection`, `pipeline`. |
 
 ## Explicit Non-Goals
 
@@ -147,7 +143,7 @@ The current implementation does not include:
 
 These are excluded on purpose:
 
-- Insert, update, and delete operations can mutate or destroy arbitrary application data and need explicit approval/runtime verification before broader mutation is safe.
+- Insert, update, aggregate, and delete operations can mutate, destroy, or perform expensive server-side work and need explicit approval/runtime verification before broader use is safe.
 - The deprecated upstream Data API should be revisited before adding large feature surface.
 - Native MongoDB access belongs in a different connector architecture than this HTTP Data API bridge.
 
@@ -158,7 +154,7 @@ These are excluded on purpose:
 - local configuration, client, session ID, request, and error counter state
 - local URL readiness and credential-injection warning state
 - degraded self-check for unconfigured and `credential_id` modes
-- operation metadata with capability, risk, safety tier, idempotency, schemas, and hints
+- manifest-derived operation metadata with capability, approval mode, risk, safety tier, idempotency, schemas, and hints
 - simulation allow/deny for known versus unknown operation IDs only
 - typed provider/FCP error mapping
 
@@ -205,6 +201,6 @@ rch exec -- cargo fmt --check
 - Treat the Atlas Data API v1 dependency as a migration risk because MongoDB now lists that API as deprecated.
 - Always configure a real Atlas Data API app endpoint; the default `data-xxxxx` URL is a placeholder.
 - Keep `data_source` explicit in production instead of relying on `Cluster0`.
-- Treat update and delete operations as high-review operations even though runtime approval checks are absent.
+- Treat insert, update, aggregate, and delete operations as high-review operations even though runtime approval checks are absent.
 - Do not rely on capability-token or approval-token enforcement until runtime verification is implemented.
 - Do not interpret this connector as a native MongoDB driver or Atlas administration surface.

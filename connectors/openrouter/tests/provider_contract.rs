@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_openrouter::OpenRouterConnector;
 use fcp_testkit::provider_contract::{
     ProviderAuthMethodContract, ProviderBaseUrlContract, ProviderContract,
@@ -5,6 +6,10 @@ use fcp_testkit::provider_contract::{
     ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
 use serde_json::{Value, json};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path},
+};
 
 fn input_schema<'a>(introspection: &'a Value, operation_id: &str) -> &'a Value {
     introspection
@@ -100,4 +105,93 @@ async fn openrouter_provider_contract_is_advertised() {
                 "provider registry",
             )),
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn video_generate_polls_and_strips_auth_from_cross_origin_urls() {
+    let openrouter = MockServer::start().await;
+    let status_server = MockServer::start().await;
+    let cdn_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/videos"))
+        .and(header("Authorization", "Bearer openrouter_test_key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "job-123",
+            "polling_url": format!("{}/videos/job-123", status_server.uri()),
+            "status": "pending"
+        })))
+        .expect(1)
+        .mount(&openrouter)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/videos/job-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "job-123",
+            "generation_id": "gen-123",
+            "status": "completed",
+            "model": "google/veo-3.1",
+            "unsigned_urls": [format!("{}/video.mp4", cdn_server.uri())],
+            "usage": {"cost": 0.25, "is_byok": false}
+        })))
+        .expect(1)
+        .mount(&status_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/video.mp4"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/mp4")
+                .set_body_bytes(b"mp4-bytes".to_vec()),
+        )
+        .expect(1)
+        .mount(&cdn_server)
+        .await;
+
+    let mut connector = OpenRouterConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "openrouter_test_key",
+            "base_url": openrouter.uri()
+        }))
+        .await
+        .expect("configure");
+    connector
+        .handle_handshake(json!({}))
+        .await
+        .expect("handshake");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "openrouter.videos.generate",
+            "input": {
+                "prompt": "A chrome sphere glides across a quiet moonlit beach",
+                "model": "google/veo-3.1",
+                "duration_seconds": 6,
+                "aspect_ratio": "16:9",
+                "resolution": "720P",
+                "poll_interval_ms": 0,
+                "max_poll_attempts": 3
+            }
+        }))
+        .await
+        .expect("video generate");
+
+    assert_eq!(result["job_id"], "job-123");
+    assert_eq!(result["generation_id"], "gen-123");
+    assert_eq!(result["video"]["mime_type"], "video/mp4");
+    assert_eq!(
+        result["video"]["base64"],
+        BASE64_STANDARD.encode("mp4-bytes")
+    );
+
+    let status_requests = status_server.received_requests().await.unwrap_or_default();
+    assert_eq!(status_requests.len(), 1);
+    assert!(status_requests[0].headers.get("authorization").is_none());
+
+    let download_requests = cdn_server.received_requests().await.unwrap_or_default();
+    assert_eq!(download_requests.len(), 1);
+    assert!(download_requests[0].headers.get("authorization").is_none());
 }

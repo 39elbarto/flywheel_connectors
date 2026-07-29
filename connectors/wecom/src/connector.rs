@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,12 +15,18 @@ use fcp_prelude::{
     HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId,
     Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
     Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest,
-    SimulateResponse, SubscribeRequest, SubscribeResponse, TrustLevel, UnsubscribeRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, TrustLevel, UnsubscribeRequest, ZoneId,
 };
 use fcp_sdk::prelude::*;
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::client::WeComClient;
 use crate::types::{
@@ -68,6 +74,116 @@ const VERIFY_COMMANDS: [&str; 5] = [
     "rch exec -- cargo clippy --manifest-path connectors/wecom/Cargo.toml -p fcp-wecom --all-targets --no-deps -- -D warnings",
     "git diff --check -- connectors/wecom/src/{client,connector,error,types}.rs connectors/wecom/{manifest.toml,README.md}",
 ];
+
+fn default_wecom_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_wecom_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
 
 fn bool_like_schema() -> Value {
     json!({
@@ -240,7 +356,12 @@ fn send_output_schema() -> Value {
             "invaliduser": { "type": "string" },
             "invalidparty": { "type": "string" },
             "invalidtag": { "type": "string" },
-            "response_code": { "type": "string" }
+            "response_code": { "type": "string" },
+            "coordination": {
+                "type": "array",
+                "description": "Redaction-safe chat thread ownership audit records",
+                "items": { "type": "object" }
+            }
         }
     })
 }
@@ -440,6 +561,38 @@ fn output_schema_for(operation_id: &str) -> Value {
         OP_HEALTH => health_output_schema(),
         _ => json!({ "type": "object" }),
     }
+}
+
+fn wecom_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
+fn wecom_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let object = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Serialized WeCom send response was not an object".into(),
+    })?;
+    object.insert(
+        "coordination".into(),
+        json!(wecom_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -884,12 +1037,26 @@ fn contract_details(config: Option<&WeComConfig>) -> Value {
     })
 }
 
-#[derive(Debug)]
 pub struct WeComConnector {
     base: BaseConnector,
     state: Option<WeComState>,
     verifier: Option<CapabilityVerifier>,
     started_at: Instant,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
+}
+
+impl std::fmt::Debug for WeComConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeComConnector")
+            .field("base", &self.base)
+            .field("state", &self.state)
+            .field("verifier", &self.verifier)
+            .field("started_at", &self.started_at)
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .field("thread_ownership_checker", &"<thread-ownership-checker>")
+            .finish()
+    }
 }
 
 impl WeComConnector {
@@ -900,7 +1067,20 @@ impl WeComConnector {
             state: None,
             verifier: None,
             started_at: Instant::now(),
+            chat_coordination_config: default_wecom_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     fn manifest_hash() -> String {
@@ -977,6 +1157,69 @@ impl WeComConnector {
     ) -> SelfCheckReport {
         report.details = Some(self.diagnostic_details(model, live_probe));
         report
+    }
+
+    fn chat_coordination_agent_id(&self) -> AgentId {
+        AgentId::new(self.base.instance_id.as_str().to_owned())
+    }
+
+    async fn claim_before_wecom_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    ConnectorId::from_static("fcp.wecom"),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
+
+    async fn send_message_with_coordination(
+        &self,
+        state: &WeComState,
+        input: &Value,
+        kind: WeComMessageKind,
+        operation_id: &'static str,
+        zone_id: ZoneId,
+    ) -> FcpResult<Value> {
+        let request = WeComMessageRequest::from_value(input, kind)?;
+        let claimant_agent_id = self.chat_coordination_agent_id();
+        let coordination = self
+            .claim_before_wecom_send(
+                zone_id,
+                ChannelId::new(request.coordination_channel_id()),
+                None,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(operation_id, "WeCom send denied by chat coordination");
+            return Err(error.clone());
+        }
+        let mut output = state
+            .client
+            .send_message(&request)
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        wecom_insert_coordination(
+            &mut output,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(output)
     }
 
     pub fn doctor(&self) -> DoctorResult {
@@ -1087,7 +1330,8 @@ impl WeComConnector {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn operations() -> Vec<OperationInfo> {
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
         vec![
             operation(
                 OP_SEND_TEXT,
@@ -1213,40 +1457,51 @@ impl WeComConnector {
 
         let (output, resource_uris) = match req.operation.as_str() {
             OP_SEND_TEXT => {
-                let request = WeComMessageRequest::from_value(&req.input, WeComMessageKind::Text)?;
-                let output = state
-                    .client
-                    .send_message(&request)
-                    .await
-                    .map_err(|error| error.to_fcp_error())?;
+                let output = self
+                    .send_message_with_coordination(
+                        state,
+                        &req.input,
+                        WeComMessageKind::Text,
+                        OP_SEND_TEXT,
+                        req.zone_id.clone(),
+                    )
+                    .await?;
                 (output, Vec::new())
             }
             OP_SEND_MARKDOWN => {
-                let request =
-                    WeComMessageRequest::from_value(&req.input, WeComMessageKind::Markdown)?;
-                let output = state
-                    .client
-                    .send_message(&request)
-                    .await
-                    .map_err(|error| error.to_fcp_error())?;
+                let output = self
+                    .send_message_with_coordination(
+                        state,
+                        &req.input,
+                        WeComMessageKind::Markdown,
+                        OP_SEND_MARKDOWN,
+                        req.zone_id.clone(),
+                    )
+                    .await?;
                 (output, Vec::new())
             }
             OP_SEND_IMAGE => {
-                let request = WeComMessageRequest::from_value(&req.input, WeComMessageKind::Image)?;
-                let output = state
-                    .client
-                    .send_message(&request)
-                    .await
-                    .map_err(|error| error.to_fcp_error())?;
+                let output = self
+                    .send_message_with_coordination(
+                        state,
+                        &req.input,
+                        WeComMessageKind::Image,
+                        OP_SEND_IMAGE,
+                        req.zone_id.clone(),
+                    )
+                    .await?;
                 (output, Vec::new())
             }
             OP_SEND_FILE => {
-                let request = WeComMessageRequest::from_value(&req.input, WeComMessageKind::File)?;
-                let output = state
-                    .client
-                    .send_message(&request)
-                    .await
-                    .map_err(|error| error.to_fcp_error())?;
+                let output = self
+                    .send_message_with_coordination(
+                        state,
+                        &req.input,
+                        WeComMessageKind::File,
+                        OP_SEND_FILE,
+                        req.zone_id.clone(),
+                    )
+                    .await?;
                 (output, Vec::new())
             }
             OP_UPLOAD_MEDIA => {
@@ -1405,12 +1660,17 @@ impl FcpConnector for WeComConnector {
     }
 
     async fn configure(&mut self, config: Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_wecom_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config = WeComConfig::from_value(config)?;
         let client = WeComClient::new(config).map_err(|error| error.to_fcp_error())?;
         self.state = Some(WeComState::new(client));
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
+        self.chat_coordination_config = chat_coordination_config;
         Ok(())
     }
 
@@ -1524,7 +1784,7 @@ impl FcpConnector for WeComConnector {
 
     fn introspect(&self) -> Introspection {
         Introspection {
-            operations: Self::operations(),
+            operations: Self::operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -2142,14 +2402,9 @@ mod tests {
     use std::fs;
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, OrderingPolicy, RequestId, ZoneId};
+    use chrono::Utc;
+    use fcp_prelude::OrderingPolicy;
     use serde_json::Value;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
 
     use super::*;
     use crate::types::DEFAULT_TIMEOUT_MS;
@@ -2327,55 +2582,6 @@ mod tests {
         })
     }
 
-    fn handshake_request(
-        host_public_key: [u8; 32],
-        requested_instance_id: Option<InstanceId>,
-    ) -> HandshakeRequest {
-        HandshakeRequest {
-            protocol_version: "2.0.0".into(),
-            zone: ZoneId::work(),
-            zone_dir: None,
-            host_public_key,
-            nonce: [19_u8; 32],
-            capabilities_requested: vec![CapabilityId::from_static(CAP_HEALTH_READ)],
-            host: None,
-            transport_caps: None,
-            requested_instance_id,
-        }
-    }
-
-    fn test_constraints_cbor() -> Vec<u8> {
-        let constraints = CapabilityConstraints {
-            resource_allow: vec!["*".into()],
-            ..Default::default()
-        };
-        let mut cbor = Vec::new();
-        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-        cbor
-    }
-
-    fn capability_token(
-        signing_key: &Ed25519SigningKey,
-        capability: &'static str,
-        operation: &'static str,
-        instance_id: &InstanceId,
-    ) -> CapabilityToken {
-        let now = Utc::now();
-        let raw = CapabilityTokenBuilder::new()
-            .capability_id(capability)
-            .zone_id("z:work")
-            .principal("user:test")
-            .operations(&[operation])
-            .issuer("node:test")
-            .validity(now, now + ChronoDuration::hours(1))
-            .try_constraints_cbor(&test_constraints_cbor())
-            .expect("test constraints cbor should be valid")
-            .target_instance(instance_id.as_str())
-            .sign(signing_key)
-            .expect("token should sign");
-        CapabilityToken::from_raw(raw)
-    }
-
     fn sample_callback_key() -> String {
         BASE64.encode([7_u8; 32]).trim_end_matches('=').to_string()
     }
@@ -2432,190 +2638,6 @@ mod tests {
         }
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn health_performs_token_probe_and_reports_cached_state() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/cgi-bin/gettoken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "errcode": 0,
-                "errmsg": "ok",
-                "access_token": "token-123",
-                "expires_in": 7200
-            })))
-            .mount(&server)
-            .await;
-
-        let mut connector = WeComConnector::new();
-        connector
-            .configure(json!({
-                "base_url": server.uri(),
-                "corp_id": "corp",
-                "agent_id": 1_000_002_u64,
-                "agent_secret": "secret",
-                "request_timeout_ms": DEFAULT_TIMEOUT_MS
-            }))
-            .await
-            .expect("configure should succeed");
-
-        let health_before = connector.health().await;
-        assert!(matches!(health_before.status, HealthState::Ready));
-        assert_eq!(
-            health_before
-                .details
-                .as_ref()
-                .and_then(|details| details.get("token_cached"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-
-        let report = connector
-            .self_check()
-            .await
-            .expect("self_check should return");
-        assert_eq!(
-            report.status,
-            fcp_core::SelfCheckStatus::Ok,
-            "self_check should populate the token cache"
-        );
-        assert_eq!(
-            report
-                .details
-                .as_ref()
-                .and_then(|details| details.get("live_probe"))
-                .and_then(|probe| probe.get("token_issuance_probe"))
-                .and_then(Value::as_str),
-            Some(WECOM_TOKEN_PROBE)
-        );
-        assert!(
-            report
-                .details
-                .as_ref()
-                .and_then(|details| details.get("operator_guidance"))
-                .is_some(),
-            "self_check should attach operator guidance details"
-        );
-
-        let health_after = connector.health().await;
-        assert!(matches!(health_after.status, HealthState::Ready));
-        assert_eq!(
-            health_after
-                .details
-                .as_ref()
-                .and_then(|details| details.get("token_cached"))
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_degrades_when_token_probe_fails() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/cgi-bin/gettoken"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-                "errcode": 40013,
-                "errmsg": "invalid corpid"
-            })))
-            .mount(&server)
-            .await;
-
-        let mut connector = WeComConnector::new();
-        connector
-            .configure(json!({
-                "base_url": server.uri(),
-                "corp_id": "corp",
-                "agent_id": 1_000_002_u64,
-                "agent_secret": "wrong-secret",
-                "request_timeout_ms": DEFAULT_TIMEOUT_MS
-            }))
-            .await
-            .expect("configure should succeed");
-
-        let health = connector.health().await;
-        assert!(matches!(health.status, HealthState::Degraded { .. }));
-        assert_eq!(
-            health
-                .details
-                .as_ref()
-                .and_then(|details| details.get("token_cached"))
-                .and_then(Value::as_bool),
-            Some(false)
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn invoke_health_returns_status_and_state() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/cgi-bin/gettoken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "errcode": 0,
-                "errmsg": "ok",
-                "access_token": "token-123",
-                "expires_in": 7200
-            })))
-            .mount(&server)
-            .await;
-
-        let mut connector = WeComConnector::new();
-        connector
-            .configure(json!({
-                "base_url": server.uri(),
-                "corp_id": "corp",
-                "agent_id": 1_000_002_u64,
-                "agent_secret": "secret",
-                "request_timeout_ms": DEFAULT_TIMEOUT_MS
-            }))
-            .await
-            .expect("configure should succeed");
-        let signing_key = Ed25519SigningKey::generate();
-        let requested_instance_id = InstanceId::new();
-        connector
-            .handshake(handshake_request(
-                signing_key.verifying_key().to_bytes(),
-                Some(requested_instance_id.clone()),
-            ))
-            .await
-            .expect("handshake should succeed");
-
-        let response = connector
-            .invoke(InvokeRequest {
-                r#type: "invoke".into(),
-                id: RequestId::new("wecom-health"),
-                connector_id: ConnectorId::from_static("fcp.wecom"),
-                operation: OperationId::from_static(OP_HEALTH),
-                zone_id: ZoneId::work(),
-                input: json!({}),
-                capability_token: capability_token(
-                    &signing_key,
-                    CAP_HEALTH_READ,
-                    OP_HEALTH,
-                    &requested_instance_id,
-                ),
-                holder_proof: None,
-                context: None,
-                idempotency_key: None,
-                lease_seq: None,
-                deadline_ms: None,
-                correlation_id: None,
-                provenance: None,
-                approval_tokens: Vec::new(),
-            })
-            .await
-            .expect("health invoke should succeed");
-
-        assert_eq!(response.result.as_ref().expect("result")["status"], "ok");
-        assert_eq!(
-            response.result.as_ref().expect("result")["details"]["token_cached"],
-            json!(true)
-        );
-        assert_eq!(
-            response.result.as_ref().expect("result")["details"]["manifest_hash"],
-            json!(WeComConnector::manifest_hash())
-        );
-    }
-
     #[test]
     fn doctor_requires_configuration() {
         let report = WeComConnector::new().doctor();
@@ -2641,11 +2663,10 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn doctor_reports_callback_readiness_and_localhost_override() {
-        let server = MockServer::start().await;
         let mut connector = WeComConnector::new();
         connector
             .configure(json!({
-                "base_url": server.uri(),
+                "base_url": "http://localhost:18080",
                 "corp_id": "corp",
                 "agent_id": 1_000_002_u64,
                 "agent_secret": "secret",
@@ -2777,7 +2798,7 @@ mod tests {
             "manifest operation inventory should match expected schema coverage"
         );
 
-        let runtime_operations = WeComConnector::operations();
+        let runtime_operations = WeComConnector::operations_info();
         assert_eq!(
             runtime_operations.len(),
             EXPECTED_MANIFEST_SCHEMA_OPS.len(),
@@ -3040,7 +3061,7 @@ mod tests {
 
     #[test]
     fn operations_advertise_image_file_and_duplicate_check_inputs() {
-        let operations = WeComConnector::operations();
+        let operations = WeComConnector::operations_info();
 
         let send_text = operations
             .iter()

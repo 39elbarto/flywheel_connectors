@@ -1,5 +1,5 @@
 //! Pin `PostureAttestation` Display + JSON serde + predicate truth tables —
-//! the closest analogue to "ConnectorAttestation Display"
+//! the closest analogue to "`ConnectorAttestation` Display"
 //! (flywheel_connectors-v8tvx).
 //!
 //! Bead asks for `ConnectorAttestation` Display + serde pinning. No type
@@ -17,17 +17,17 @@
 //!     tables exhaustively, or `PostureAttributeValue` untagged shape.
 //!
 //! Coverage:
-//!   * 9-field JSON shape pinned (schema, attestation_id, node_id,
-//!     attributes, issued_at, expires_at, verifier_id, signature,
-//!     verifier_kid),
+//!   * 9-field JSON shape pinned (schema, `attestation_id`, `node_id`,
+//!     attributes, `issued_at`, `expires_at`, `verifier_id`, signature,
+//!     `verifier_kid`),
 //!   * SCHEMA = "fcp.posture.v1" constant pin,
-//!   * is_valid truth table: NOT expired AND schema matches,
-//!   * is_expired vs is_expired_at boundary alignment,
-//!   * is_for_node identity sentinel,
-//!   * Attribute getter helpers (disk_encryption_enabled, os_version, os_type),
-//!   * PostureAttributeKey 11-variant snake_case serde + as_str
+//!   * `is_valid` truth table: NOT expired AND schema matches,
+//!   * `is_expired` vs `is_expired_at` boundary alignment,
+//!   * `is_for_node` identity sentinel,
+//!   * Attribute getter helpers (`disk_encryption_enabled`, `os_version`, `os_type`),
+//!   * `PostureAttributeKey` 11-variant `snake_case` serde + `as_str`
 //!     alignment (Custom is the only payload variant),
-//!   * PostureAttributeValue untagged shape (Bool/String/Number — pin so
+//!   * `PostureAttributeValue` untagged shape (Bool/String/Number — pin so
 //!     a future internal-tag silently changes wire form),
 //!   * JSON + CBOR round-trip preserves attributes Map,
 //!   * Distinct-verifier-id sentinel (security-critical: switching the
@@ -391,6 +391,6 @@ fn posture_attribute_key_distinct_variants_serialize_distinctly() {
         );
     }
     // Custom is a payload variant — its JSON form differs from any unit form.
-    let custom_v = serde_json::to_value(&PostureAttributeKey::Custom("x".to_string())).unwrap();
+    let custom_v = serde_json::to_value(PostureAttributeKey::Custom("x".to_string())).unwrap();
     assert!(seen.insert(custom_v));
 }

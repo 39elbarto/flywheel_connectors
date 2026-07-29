@@ -1,7 +1,6 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_async_core::Cx;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_openai_compat::{
     ChatCompletionsRequest, ChatMessage, ContentPart, ContentParts, EmbeddingInput, HttpRequest,
@@ -462,7 +461,7 @@ async fn rate_limit_errors_cancellation_trait_and_shutdown_are_safe() {
     assert!(!error.to_string().contains("should-not-leak"));
     assert!(!error.to_string().contains("private prompt"));
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let client = QwenClient::new(
         QwenProvider::new(
@@ -481,6 +480,11 @@ async fn rate_limit_errors_cancellation_trait_and_shutdown_are_safe() {
         .await
         .expect_err("cancelled context should fail before dispatch");
     assert!(cancelled.to_string().contains("cancelled"));
+    // compatibility_cx() returns the shared ambient runtime context, so the
+    // cancel flag we set above must be cleared before the rest of the test
+    // drives the runtime again (otherwise async Mutex locks observe the
+    // cancellation and panic).
+    cx.set_cancel_requested(false);
 
     let capability_grant =
         valid_token(&signing_key, connector.instance_id(), CAP_MODELS, OP_MODELS);

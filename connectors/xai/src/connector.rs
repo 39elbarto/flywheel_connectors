@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_async_core::Cx;
 use fcp_openai_compat::{ChatChunk, OpenAiError, RateLimitPolicy};
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
@@ -14,6 +13,7 @@ use fcp_prelude::{
 };
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::{
@@ -27,6 +27,7 @@ use crate::types::{
 
 pub const CONNECTOR_ID: &str = "fcp.xai";
 pub const CONNECTOR_VERSION: &str = "0.1.0";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const OP_CHAT: &str = "xai.chat.completions";
 const OP_CHAT_STREAM: &str = "xai.chat.completions_stream";
@@ -155,6 +156,12 @@ impl XaiConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let config = XaiConfig::from_params(&params)?;
         let client = config.build_client();
@@ -205,7 +212,7 @@ impl XaiConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:xai-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -336,7 +343,10 @@ impl XaiConnector {
             message: "xAI client not initialized".into(),
         })?;
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
-        let cx = Cx::for_testing();
+        // asupersync 0.3.2 gates `Cx::for_testing` out of production builds
+        // (cap-mask bypass hardening); operations run under the connector
+        // runtime, so take the ambient context instead of fabricating one.
+        let cx = fcp_async_core::compatibility_cx();
         match operation {
             OP_CHAT => {
                 let request = chat_request_from_value(input, &config.default_model)?;
@@ -918,5 +928,20 @@ pub fn test_handshake_request(
         host: None,
         transport_caps: None,
         requested_instance_id: Some(InstanceId::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(XaiConnector::manifest_hash(), expected);
+        assert_ne!(XaiConnector::manifest_hash(), "sha256:xai-connector-v1");
     }
 }

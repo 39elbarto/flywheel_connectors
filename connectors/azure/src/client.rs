@@ -4,9 +4,8 @@ use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use quick_xml::de::from_str as from_xml_str;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -15,8 +14,8 @@ use tracing::debug;
 use crate::{
     error::{AzureError, AzureResult},
     types::{
-        ApiErrorResponse, AzureAuth, BlobContainer, BlobContainerListResponse, BlobGetResponse,
-        BlobItem, BlobListResponse, BlobPutResponse, ResourceGroupListResponse,
+        ApiErrorResponse, AzureAuth, BlobContainer, BlobContainerListResponse, BlobDeleteResponse,
+        BlobGetResponse, BlobItem, BlobListResponse, BlobPutResponse, ResourceGroupListResponse,
         ResourceListResponse, SecretBundle, SecretListResponse, SetSecretRequest,
         SubscriptionListResponse,
     },
@@ -495,6 +494,7 @@ impl AzureClient {
         &self,
         storage_account: &str,
         container: &str,
+        prefix: Option<&str>,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobListResponse> {
         let storage_account = validate_hostname_component(storage_account, "storage_account")?;
@@ -504,9 +504,11 @@ impl AzureClient {
         let safe_container =
             percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/{safe_container}");
-        let xml: BlobEnumerationResultsXml = self
-            .blob_get_xml(&url, &[("restype", "container"), ("comp", "list")])
-            .await?;
+        let mut query = vec![("restype", "container"), ("comp", "list")];
+        if let Some(prefix) = prefix {
+            query.push(("prefix", prefix));
+        }
+        let xml: BlobEnumerationResultsXml = self.blob_get_xml(&url, &query).await?;
         Ok(xml.into())
     }
 
@@ -635,6 +637,66 @@ impl AzureClient {
                         if status.is_success() {
                             AttemptOutcome::Success(BlobPutResponse {
                                 created: true,
+                                blob_name: Some(blob_name.to_string()),
+                            })
+                        } else {
+                            let body = response.text().await.unwrap_or_default();
+                            let err = parse_error_response(status, &body, None);
+                            if err.is_retryable() {
+                                AttemptOutcome::Retryable {
+                                    retry_after: err.retry_after(),
+                                    error: err,
+                                }
+                            } else {
+                                AttemptOutcome::Terminal(err)
+                            }
+                        }
+                    }
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: AzureError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(AzureError::Http(e)),
+                }
+            }
+        })
+        .await
+    }
+
+    pub async fn blob_delete(
+        &self,
+        storage_account: &str,
+        container: &str,
+        blob_name: &str,
+        blob_base_url: Option<&str>,
+    ) -> AzureResult<BlobDeleteResponse> {
+        let storage_account = validate_hostname_component(storage_account, "storage_account")?;
+        let base = blob_base_url
+            .unwrap_or("https://{account}.blob.core.windows.net")
+            .replace("{account}", storage_account);
+        let safe_container =
+            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE).to_string();
+        let safe_blob =
+            percent_encoding::utf8_percent_encode(blob_name, AZURE_PATH_SAFE).to_string();
+        let url = format!("{base}/{safe_container}/{safe_blob}");
+
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            async move {
+                debug!(attempt, url = %redact_url(&url), "Azure Blob DELETE");
+                let builder = self
+                    .apply_auth(self.http.delete(&url))
+                    .header("x-ms-version", self.blob_api_version());
+
+                match builder.send().await {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            AttemptOutcome::Success(BlobDeleteResponse {
+                                deleted: true,
                                 blob_name: Some(blob_name.to_string()),
                             })
                         } else {
@@ -967,344 +1029,6 @@ fn parse_error_response(status: StatusCode, body: &str, retry_after_ms: Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path, query_param},
-    };
-
-    fn test_client(base_url: &str) -> AzureClient {
-        AzureClient::new(
-            AzureAuth::BearerToken {
-                bearer_token: "test-token".into(),
-            },
-            HttpRetryConfig::default(),
-            AzureApiVersions::compiled_defaults(),
-            Duration::from_secs(5),
-        )
-        .unwrap()
-        .with_management_url(base_url)
-    }
-
-    #[test]
-    fn list_subscriptions_returns_typed_payload() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/subscriptions"))
-                .and(query_param(
-                    "api-version",
-                    DEFAULT_SUBSCRIPTIONS_API_VERSION,
-                ))
-                .and(header("authorization", "Bearer test-token"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": [
-                        {
-                            "subscriptionId": "sub-123",
-                            "displayName": "Test Sub",
-                            "state": "Enabled"
-                        }
-                    ]
-                })))
-                .mount(&server)
-                .await;
-
-            let client = test_client(&server.uri());
-            let resp = client.list_subscriptions().await.unwrap();
-            assert_eq!(resp.value.len(), 1);
-            assert_eq!(resp.value[0].subscription_id.as_deref(), Some("sub-123"));
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn list_resource_groups_returns_typed_payload() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/subscriptions/sub-1/resourcegroups"))
-                .and(query_param(
-                    "api-version",
-                    DEFAULT_RESOURCE_GROUPS_API_VERSION,
-                ))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": [
-                        { "name": "rg-1", "location": "eastus" }
-                    ]
-                })))
-                .mount(&server)
-                .await;
-
-            let client = test_client(&server.uri());
-            let resp = client.list_resource_groups("sub-1").await.unwrap();
-            assert_eq!(resp.value.len(), 1);
-            assert_eq!(resp.value[0].name.as_deref(), Some("rg-1"));
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn list_resources_returns_typed_payload() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path(
-                    "/subscriptions/sub-1/resourceGroups/rg-1/resources",
-                ))
-                .and(query_param("api-version", DEFAULT_RESOURCES_API_VERSION))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "value": [
-                        { "name": "vm-1", "type": "Microsoft.Compute/virtualMachines", "location": "westus2" }
-                    ]
-                })))
-                .mount(&server)
-                .await;
-
-            let client = test_client(&server.uri());
-            let resp = client.list_resources("sub-1", "rg-1").await.unwrap();
-            assert_eq!(resp.value.len(), 1);
-            assert_eq!(resp.value[0].name.as_deref(), Some("vm-1"));
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn health_check_succeeds_when_subscriptions_ok() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/subscriptions"))
-                .and(query_param(
-                    "api-version",
-                    DEFAULT_SUBSCRIPTIONS_API_VERSION,
-                ))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })),
-                )
-                .mount(&server)
-                .await;
-
-            let client = test_client(&server.uri());
-            client.health_check().await.unwrap();
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn blob_list_containers_parses_xml_response() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/"))
-                .and(query_param("comp", "list"))
-                .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
-                .respond_with(ResponseTemplate::new(200).set_body_string(
-                    r#"<?xml version="1.0" encoding="utf-8"?>
-<EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/">
-  <Containers>
-    <Container>
-      <Name>audio</Name>
-      <Properties>
-        <Last-Modified>Wed, 26 Oct 2016 20:39:39 GMT</Last-Modified>
-        <PublicAccess>container</PublicAccess>
-      </Properties>
-    </Container>
-  </Containers>
-  <NextMarker>next-token</NextMarker>
-</EnumerationResults>"#,
-                ))
-                .mount(&server)
-                .await;
-
-            let client = test_client(&server.uri());
-            let resp = client
-                .blob_list_containers("acct", Some(&server.uri()))
-                .await
-                .unwrap();
-            assert_eq!(resp.containers.len(), 1);
-            assert_eq!(resp.containers[0].name.as_deref(), Some("audio"));
-            assert_eq!(
-                resp.containers[0].last_modified.as_deref(),
-                Some("Wed, 26 Oct 2016 20:39:39 GMT")
-            );
-            assert_eq!(
-                resp.containers[0].public_access.as_deref(),
-                Some("container")
-            );
-            assert_eq!(resp.next_marker.as_deref(), Some("next-token"));
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn blob_list_blobs_parses_xml_response() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/docs"))
-                .and(query_param("restype", "container"))
-                .and(query_param("comp", "list"))
-                .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
-                .respond_with(ResponseTemplate::new(200).set_body_string(
-                    r#"<?xml version="1.0" encoding="utf-8"?>
-<EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/" ContainerName="docs">
-  <Blobs>
-    <Blob>
-      <Name>report.txt</Name>
-      <Properties>
-        <Last-Modified>Wed, 26 Oct 2016 20:39:39 GMT</Last-Modified>
-        <Content-Length>1024</Content-Length>
-        <Content-Type>text/plain</Content-Type>
-      </Properties>
-    </Blob>
-  </Blobs>
-  <NextMarker>blob-next</NextMarker>
-</EnumerationResults>"#,
-                ))
-                .mount(&server)
-                .await;
-
-            let client = test_client(&server.uri());
-            let resp = client
-                .blob_list_blobs("acct", "docs", Some(&server.uri()))
-                .await
-                .unwrap();
-            assert_eq!(resp.blobs.len(), 1);
-            assert_eq!(resp.blobs[0].name.as_deref(), Some("report.txt"));
-            assert_eq!(resp.blobs[0].content_length, Some(1024));
-            assert_eq!(resp.blobs[0].content_type.as_deref(), Some("text/plain"));
-            assert_eq!(
-                resp.blobs[0].last_modified.as_deref(),
-                Some("Wed, 26 Oct 2016 20:39:39 GMT")
-            );
-            assert_eq!(resp.next_marker.as_deref(), Some("blob-next"));
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn unauthorized_returns_error() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/subscriptions"))
-                .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                    "error": {
-                        "code": "AuthenticationFailed",
-                        "message": "The access token is invalid."
-                    }
-                })))
-                .mount(&server)
-                .await;
-
-            let client = test_client(&server.uri());
-            let err = client.list_subscriptions().await.unwrap_err();
-            assert!(matches!(err, AzureError::Unauthorized(_)));
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn not_found_returns_error() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/subscriptions/sub-missing/resourcegroups"))
-                .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                    "error": {
-                        "code": "SubscriptionNotFound",
-                        "message": "Subscription not found"
-                    }
-                })))
-                .mount(&server)
-                .await;
-
-            let client = test_client(&server.uri());
-            let err = client
-                .list_resource_groups("sub-missing")
-                .await
-                .unwrap_err();
-            assert!(matches!(err, AzureError::NotFound(_)));
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn rate_limited_returns_error() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/subscriptions"))
-                .respond_with(
-                    ResponseTemplate::new(429)
-                        .insert_header("retry-after", "5")
-                        .set_body_json(serde_json::json!({ "message": "throttled" })),
-                )
-                .mount(&server)
-                .await;
-
-            let no_retry = HttpRetryConfig {
-                max_retries: 0,
-                ..HttpRetryConfig::default()
-            };
-            let client = AzureClient::new(
-                AzureAuth::BearerToken {
-                    bearer_token: "test-token".into(),
-                },
-                no_retry,
-                AzureApiVersions::compiled_defaults(),
-                Duration::from_secs(5),
-            )
-            .unwrap()
-            .with_management_url(&server.uri());
-            let err = client.list_subscriptions().await.unwrap_err();
-            assert!(matches!(
-                err,
-                AzureError::RateLimited {
-                    retry_after_ms: 5_000
-                }
-            ));
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn rate_limited_huge_retry_after_saturates() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/subscriptions"))
-                .respond_with(
-                    ResponseTemplate::new(429)
-                        .insert_header("retry-after", u64::MAX.to_string())
-                        .set_body_json(serde_json::json!({ "message": "throttled" })),
-                )
-                .mount(&server)
-                .await;
-
-            let no_retry = HttpRetryConfig {
-                max_retries: 0,
-                ..HttpRetryConfig::default()
-            };
-            let client = AzureClient::new(
-                AzureAuth::BearerToken {
-                    bearer_token: "test-token".into(),
-                },
-                no_retry,
-                AzureApiVersions::compiled_defaults(),
-                Duration::from_secs(5),
-            )
-            .unwrap()
-            .with_management_url(&server.uri());
-            let err = client.list_subscriptions().await.unwrap_err();
-            assert!(matches!(
-                err,
-                AzureError::RateLimited {
-                    retry_after_ms: u64::MAX
-                }
-            ));
-        })
-        .unwrap();
-    }
 
     #[test]
     fn client_debug_hides_auth() {

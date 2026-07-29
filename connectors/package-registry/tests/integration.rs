@@ -9,25 +9,32 @@
     clippy::unused_async
 )]
 
+use std::time::Duration as StdDuration;
+
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_package_registry::client::PackageRegistryClient;
 use fcp_package_registry::connector::{PackageRegistryConnector, operations_info};
+use fcp_package_registry::error::Error;
+use fcp_package_registry::types::RegistryProvider;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
+    HandshakeRequest, InstanceId, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
 };
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
 use serde_json::json;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/package_registry_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/package_registry_connector/<timestamp>";
 const OP_SEARCH: &str = "registry.search";
 
-fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_req(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -44,11 +51,15 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
         ],
         host: None,
         transport_caps: None,
-        requested_instance_id: None,
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let capability = match op {
         OP_SEARCH => "registry.search",
         _ => panic!("unsupported package-registry integration operation: {op}"),
@@ -66,9 +77,11 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .zone_id("z:work")
         .principal("user:test")
         .operations(&[op])
+        .target_instance(instance_id.as_str())
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -101,9 +114,10 @@ fn invoke_req(
 async fn setup_connector(
     provider: &str,
     base_url: &str,
-) -> (PackageRegistryConnector, Ed25519SigningKey) {
+) -> (PackageRegistryConnector, Ed25519SigningKey, InstanceId) {
     let mut connector = PackageRegistryConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     connector
         .configure(json!({
             "provider": provider,
@@ -119,10 +133,37 @@ async fn setup_connector(
         .await
         .unwrap();
     connector
-        .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+        .handshake(handshake_req(
+            signing_key.verifying_key().to_bytes(),
+            instance_id.clone(),
+        ))
         .await
         .unwrap();
-    (connector, signing_key)
+    (connector, signing_key, instance_id)
+}
+
+fn runtime_with_timeout(timeout_ms: u64) -> ConnectorRuntime {
+    ConnectorRuntime::new(
+        ConnectorRuntimeConfig::default()
+            .with_request_timeout(StdDuration::from_millis(timeout_ms)),
+    )
+}
+
+fn registry_client(
+    provider: RegistryProvider,
+    base_url: &str,
+    token: Option<&str>,
+    retry_config: HttpRetryConfig,
+    request_timeout_ms: u64,
+) -> PackageRegistryClient {
+    PackageRegistryClient::new(
+        provider,
+        base_url.to_string(),
+        token.map(ToOwned::to_owned),
+        retry_config,
+        request_timeout_ms,
+    )
+    .unwrap()
 }
 
 #[fcp_async_core::runtime::test]
@@ -173,7 +214,7 @@ async fn self_check_ready_with_crates_override_and_evidence() {
         .mount(&server)
         .await;
 
-    let (connector, _signing_key) = setup_connector("crates_io", &server.uri()).await;
+    let (connector, _signing_key, _instance_id) = setup_connector("crates_io", &server.uri()).await;
     let doctor = serde_json::to_value(connector.doctor()).unwrap();
     assert_doctor_response_valid(&doctor);
     assert_eq!(doctor["ready"], true);
@@ -210,12 +251,182 @@ async fn self_check_retryable_registry_failure_reports_degraded() {
         .mount(&server)
         .await;
 
-    let (connector, _signing_key) = setup_connector("crates_io", &server.uri()).await;
+    let (connector, _signing_key, _instance_id) = setup_connector("crates_io", &server.uri()).await;
     let report = connector.self_check().await.unwrap();
     let value = serde_json::to_value(&report).unwrap();
     assert_self_check_not_ready(&value);
     assert_eq!(value["status"], "degraded");
     assert_eq!(value["reason_code"], "self_check_retryable");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_search_uses_page_offset_for_npm() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/-/v1/search"))
+        .and(query_param("text", "serde"))
+        .and(query_param("size", "2"))
+        .and(query_param("from", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total": 1,
+            "objects": [
+                {
+                    "package": {
+                        "name": "serde-json",
+                        "description": "fixture",
+                        "version": "1.0.0",
+                        "links": { "homepage": "https://example.test/serde-json" }
+                    }
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let runtime = runtime_with_timeout(1_000);
+    let client = registry_client(
+        RegistryProvider::Npm,
+        &server.uri(),
+        None,
+        HttpRetryConfig {
+            max_retries: 0,
+            ..HttpRetryConfig::default()
+        },
+        1_000,
+    );
+
+    let response = client.search(&runtime, "serde", 2, 2).await.unwrap();
+    assert_eq!(response.page, 2);
+    assert_eq!(response.limit, 2);
+    assert_eq!(response.results[0].name, "serde-json");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_includes_auth_header_when_token_supplied() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/crates"))
+        .and(query_param("q", "serde"))
+        .and(query_param("per_page", "1"))
+        .and(header("authorization", "Bearer crates-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "crates": [{ "name": "serde", "max_version": "1.0.228" }],
+            "meta": { "total": 1 }
+        })))
+        .mount(&server)
+        .await;
+
+    let runtime = runtime_with_timeout(1_000);
+    let client = registry_client(
+        RegistryProvider::CratesIo,
+        &server.uri(),
+        Some("crates-token"),
+        HttpRetryConfig {
+            max_retries: 0,
+            ..HttpRetryConfig::default()
+        },
+        1_000,
+    );
+
+    let probe = client.health_check(&runtime).await.unwrap();
+    assert_eq!(probe["provider"], "crates_io");
+    assert_eq!(probe["anonymous"], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_maps_401_to_unauthorized() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/crates"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "errors": [{ "detail": "bad token" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let runtime = runtime_with_timeout(1_000);
+    let client = registry_client(
+        RegistryProvider::CratesIo,
+        &server.uri(),
+        Some("bad-token"),
+        HttpRetryConfig {
+            max_retries: 0,
+            ..HttpRetryConfig::default()
+        },
+        1_000,
+    );
+
+    let error = client.health_check(&runtime).await.unwrap_err();
+    match error {
+        Error::Unauthorized(message) => assert!(message.contains("crates_io")),
+        other => panic!("expected unauthorized error, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_search_retries_retryable_503_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/-/v1/search"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "message": "temporary outage"
+        })))
+        .mount(&server)
+        .await;
+
+    let runtime = runtime_with_timeout(1_000);
+    let client = registry_client(
+        RegistryProvider::Npm,
+        &server.uri(),
+        None,
+        HttpRetryConfig {
+            max_retries: 1,
+            initial_delay_ms: 1,
+            max_delay_ms: 1,
+            jitter_enabled: false,
+        },
+        1_000,
+    );
+
+    let error = client.search(&runtime, "serde", 1, 1).await.unwrap_err();
+    assert!(matches!(error, Error::Api { status: 503, .. }));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_timeout_surfaces_retryable_http_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/crates"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(StdDuration::from_millis(100))
+                .set_body_json(json!({
+                    "crates": [{ "name": "serde", "max_version": "1.0.228" }],
+                    "meta": { "total": 1 }
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let runtime = runtime_with_timeout(20);
+    let client = registry_client(
+        RegistryProvider::CratesIo,
+        &server.uri(),
+        None,
+        HttpRetryConfig {
+            max_retries: 0,
+            ..HttpRetryConfig::default()
+        },
+        20,
+    );
+
+    let error = client.health_check(&runtime).await.unwrap_err();
+    match error {
+        Error::Http(inner) => assert!(inner.is_timeout()),
+        other => panic!("expected timeout http error, got {other:?}"),
+    }
 }
 
 #[fcp_async_core::runtime::test]
@@ -242,7 +453,7 @@ async fn invoke_search_uses_npm_pagination_offset() {
         .mount(&server)
         .await;
 
-    let (connector, signing_key) = setup_connector("npm", &server.uri()).await;
+    let (connector, signing_key, instance_id) = setup_connector("npm", &server.uri()).await;
     let response = connector
         .invoke(invoke_req(
             OP_SEARCH,
@@ -251,7 +462,7 @@ async fn invoke_search_uses_npm_pagination_offset() {
                 "limit": 2,
                 "page": 2
             }),
-            generate_valid_token(&signing_key, OP_SEARCH),
+            generate_valid_token(&signing_key, OP_SEARCH, &instance_id),
         ))
         .await
         .unwrap();

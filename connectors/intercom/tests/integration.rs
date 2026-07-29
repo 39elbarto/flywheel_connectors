@@ -454,6 +454,26 @@ async fn error_429() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn error_200_empty_body_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/contacts.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "intercom.contacts.list",
+            "input": {}
+        }))
+        .await
+        .is_ok()
+    );
+}
+
 // ── Unknown op / Simulate ───────────────────────────────────────────
 
 #[fcp_async_core::runtime::test]

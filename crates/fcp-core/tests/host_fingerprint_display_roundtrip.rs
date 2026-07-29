@@ -1,4 +1,4 @@
-//! Pin `HostFingerprint` Display + FromStr roundtrip and format invariants.
+//! Pin `HostFingerprint` Display + `FromStr` roundtrip and format invariants.
 
 use std::str::FromStr;
 

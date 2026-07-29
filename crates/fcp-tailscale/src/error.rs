@@ -417,7 +417,7 @@ mod tests {
             TailscaleError::AttestationExpired,
         ];
         for v in &variants {
-            assert!(v.source().is_none(), "expected source() == None for {v:?}",);
+            assert!(v.source().is_none(), "expected source() == None for {v:?}");
         }
     }
 

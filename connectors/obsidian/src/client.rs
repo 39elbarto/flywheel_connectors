@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 
 use crate::error::{ObsidianError, ObsidianResult};
 use crate::types::{Backlink, Note, NoteEntry, SearchMatch, SearchResult, TagInfo, VaultHealth};

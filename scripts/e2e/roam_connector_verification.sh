@@ -6,6 +6,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/roam_connector/${RUN_ID}}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-verbose}"
+
+export RCH_FORCE_REMOTE=1
+export RCH_VISIBILITY
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -40,10 +44,17 @@ run_logged() {
   local log_path="${OUT_ROOT}/logs/${name}.log"
 
   echo "[roam-verification] ${name}: $*"
-  (
+  if ! (
     cd "${REPO_ROOT}"
     "$@"
-  ) >"${log_path}" 2>&1
+  ) >"${log_path}" 2>&1; then
+    return 1
+  fi
+
+  if [[ "${name}" != "format_check" ]] && command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
+    printf '%s\n' "rch command did not produce accepted remote proof" >>"${log_path}"
+    return 1
+  fi
 }
 
 run_capture_stdout() {
@@ -53,10 +64,33 @@ run_capture_stdout() {
   local log_path="${OUT_ROOT}/logs/${name}.log"
 
   echo "[roam-verification] ${name}: $*"
-  (
+  if ! (
     cd "${REPO_ROOT}"
     "$@"
-  ) >"${stdout_path}" 2>"${log_path}"
+  ) >"${stdout_path}" 2>"${log_path}"; then
+    return 1
+  fi
+
+  if command_uses_rch_exec "$@" && ! rch_remote_summary_present "${stdout_path}" && ! rch_remote_summary_present "${log_path}"; then
+    printf '%s\n' "rch command did not produce accepted remote proof" >>"${log_path}"
+    return 1
+  fi
+}
+
+command_uses_rch_exec() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "rch" && "${arg}" == "exec" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
+rch_remote_summary_present() {
+  local log_path="$1"
+  grep -aEq '^\[RCH\] remote([[:space:]]|$)' "${log_path}"
 }
 
 promote_overall_status() {
@@ -77,6 +111,7 @@ promote_overall_status() {
 
 classify_manifest_failure() {
   local log_path="$1"
+  # shellcheck disable=SC2016 # Diagnostic regex intentionally matches literal backtick text.
   if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
     echo "infra_blocked"
   else
@@ -133,7 +168,7 @@ fi
 
 if run_logged \
   cargo_check \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo check -p fcp-roam --all-targets
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo check -p fcp-roam --all-targets
 then
   cargo_check_status="passed"
 else
@@ -143,7 +178,7 @@ fi
 
 if run_logged \
   format_check \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt --manifest-path connectors/roam/Cargo.toml --check
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt --manifest-path connectors/roam/Cargo.toml --check
 then
   format_check_status="passed"
 else
@@ -153,7 +188,7 @@ fi
 
 if run_logged \
   health_guidance_evidence \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration health_unconfigured_includes_guidance -- --nocapture
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration health_unconfigured_includes_guidance -- --nocapture
 then
   health_guidance_status="passed"
 else
@@ -163,7 +198,7 @@ fi
 
 if run_logged \
   doctor_guidance_evidence \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
 then
   doctor_guidance_status="passed"
 else
@@ -173,7 +208,7 @@ fi
 
 if run_logged \
   self_check_evidence \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration self_check_ready_with_mock_roam_api_and_evidence -- --nocapture
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration self_check_ready_with_mock_roam_api_and_evidence -- --nocapture
 then
   self_check_status="passed"
 else
@@ -183,7 +218,7 @@ fi
 
 if run_logged \
   retryable_self_check_evidence \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration self_check_retryable_roam_failure_reports_degraded -- --nocapture
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration self_check_retryable_roam_failure_reports_degraded -- --nocapture
 then
   retryable_self_check_status="passed"
 else
@@ -193,7 +228,7 @@ fi
 
 if run_logged \
   compliance_evidence \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 then
   compliance_status="passed"
 else
@@ -203,7 +238,7 @@ fi
 
 if run_logged \
   integration_suite \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration -- --nocapture
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration -- --nocapture
 then
   integration_suite_status="passed"
 else
@@ -213,7 +248,7 @@ fi
 
 if run_logged \
   crate_suite \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam -- --nocapture
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam -- --nocapture
 then
   crate_suite_status="passed"
 else
@@ -223,7 +258,7 @@ fi
 
 if run_logged \
   clippy \
-  rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo clippy -p fcp-roam --all-targets -- -D warnings
+  env RCH_VISIBILITY="${RCH_VISIBILITY}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo clippy -p fcp-roam --all-targets -- -D warnings
 then
   clippy_status="passed"
 else
@@ -249,8 +284,9 @@ cat > "${OUT_ROOT}/replay.sh" <<'EOF'
 set -euo pipefail
 
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+export RCH_FORCE_REMOTE=1
 rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo run -q -p fwc -- manifest fix connectors/roam/manifest.toml --check --json
-rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt --manifest-path connectors/roam/Cargo.toml --check
+env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY="${RCH_VISIBILITY:-verbose}" rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt --manifest-path connectors/roam/Cargo.toml --check
 rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo check -p fcp-roam --all-targets
 rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration health_unconfigured_includes_guidance -- --nocapture
 rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-roam --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture

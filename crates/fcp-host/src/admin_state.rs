@@ -16,6 +16,7 @@ use fcp_kernel::{
     ConnectorHealth, ConnectorId, LifecycleError, LifecycleManager, LifecycleRecord,
     LifecycleState, LifecycleStatus, TransitionReason,
 };
+pub use fcp_mesh::planner::SimulateResourceAvailability;
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken,
     CredentialId, ObjectPlacementPolicy, OperationId,
@@ -26,7 +27,7 @@ use serde_json::Value;
 
 use crate::{
     HostError, HostResult, ManagedNetworkConstraints, RuntimeNetworkEnforcement,
-    discovery::ConnectorSummary,
+    discovery::ConnectorSummary, supervisor::ConnectorPrewarmConfig,
 };
 
 const HOST_ADMIN_STATE_SNAPSHOT_VERSION: u32 = 1;
@@ -68,12 +69,12 @@ pub struct ManagedConnectorConfig {
     /// Optional explicit semantic version override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// Allowed invocation zones — when non-empty, the host gateway rejects
-    /// any `InvokeRequest` whose `zone_id` is not present here, even with
-    /// a structurally-valid capability token. Empty (the default) preserves
-    /// pre-binding behavior so existing inventories don't break, but
-    /// production deployments should pin every connector to its declared
-    /// `home/allowed_sources` set per the manifest's `[zones]` section.
+    /// Allowed invocation zones. The host gateway rejects any connector
+    /// RPC whose config leaves this list empty, and rejects any
+    /// `InvokeRequest` whose `zone_id` is not present here even with a
+    /// structurally-valid capability token. Production deployments must pin
+    /// every connector to its declared `home/allowed_sources` set per the
+    /// manifest's `[zones]` section.
     /// br-flywheel_connectors-by4vu.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_zones: Vec<String>,
@@ -98,8 +99,8 @@ pub struct ManagedConnectorConfig {
     ///
     /// Empty (the default) preserves pre-pinning behavior so
     /// existing inventories don't break. Production deployments
-    /// should pin the list per connector. Same shape as
-    /// `allowed_zones`.
+    /// should pin the list per connector. Unlike `allowed_zones`,
+    /// an empty operation list remains a legacy fall-through.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_operations: Vec<String>,
     /// Fail closed on live invokes unless `manifest_path` declares
@@ -113,19 +114,11 @@ pub struct ManagedConnectorConfig {
     /// connector manifest.
     #[serde(default, skip_serializing_if = "is_false")]
     pub enforce_operation_network_constraints: bool,
-    /// br-v2kt4: explicit fail-closed flag for empty `allowed_zones`
-    /// / `allowed_operations` lists. The pre-v2kt4 semantics treated
-    /// `Some(empty)` as "no restriction" (back-compat permissive)
-    /// — same end-state as None. That made the security ergonomics
-    /// inverted: an operator who forgot to populate either list got
-    /// the LEAST restrictive behaviour. There was no way to express
-    /// "deny everything for this connector."
-    ///
-    /// When `enforce_empty_allow_lists = true`, an empty
-    /// `allowed_zones` rejects EVERY zone and an empty
-    /// `allowed_operations` rejects EVERY operation. When the flag
-    /// is `false` (default for back-compat), empty lists preserve
-    /// the legacy permissive path.
+    /// br-v2kt4: explicit fail-closed flag for empty
+    /// `allowed_operations` lists. Empty `allowed_zones` now fail
+    /// closed unconditionally as a missing zone envelope; this flag
+    /// only controls whether an empty operation allow-list rejects
+    /// every operation or preserves the legacy operation fall-through.
     ///
     /// New deployments should set this to `true` and explicitly
     /// populate the allowlists. Existing deployments deserialize
@@ -140,6 +133,14 @@ pub struct ManagedConnectorConfig {
         skip_serializing_if = "RuntimeNetworkEnforcement::is_legacy_unspecified"
     )]
     pub runtime_network_enforcement: RuntimeNetworkEnforcement,
+    /// Host-owned connector startup prewarm policy.
+    ///
+    /// This is persisted operator intent, not connector introspection. The
+    /// production host must validate it before launching or checking out any
+    /// process so prewarm evidence cannot be confused with the default
+    /// on-demand startup path.
+    #[serde(default, skip_serializing_if = "is_default_prewarm_config")]
+    pub prewarm: ConnectorPrewarmConfig,
     /// Per-operation network policy used by the host runtime path.
     ///
     /// Keys are operation ids. Values are host-managed constraints that can
@@ -609,22 +610,6 @@ pub enum SimulateCostConfidence {
     Medium,
     /// Connector queried upstream API for exact cost.
     High,
-}
-
-/// Resource availability reported by a connector simulation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SimulateResourceAvailability {
-    /// Whether the upstream resource is available.
-    pub available: bool,
-    /// Remaining rate limit quota, if known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit_remaining: Option<u32>,
-    /// Unix timestamp when the rate limit resets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit_reset_at: Option<u64>,
-    /// Connector-specific availability details.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<String>,
 }
 
 /// Bounded simulation receipt for audit and deduplication.
@@ -5155,6 +5140,10 @@ fn extend_json_pointer(prefix: &str, token: &str) -> String {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_default_prewarm_config(config: &ConnectorPrewarmConfig) -> bool {
+    config == &ConnectorPrewarmConfig::default()
 }
 
 #[cfg(test)]
@@ -10470,6 +10459,7 @@ mod tests {
         assert!(config.name.is_none());
         assert!(config.args.is_empty());
         assert!(config.env.is_empty());
+        assert_eq!(config.prewarm, ConnectorPrewarmConfig::default());
     }
 
     #[test]
@@ -10490,11 +10480,45 @@ mod tests {
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: ManagedConnectorConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn managed_connector_config_serializes_explicit_prewarm_policy() {
+        let config = ManagedConnectorConfig {
+            id: "test-connector".to_string(),
+            binary: "/usr/bin/test".to_string(),
+            manifest_path: None,
+            name: None,
+            description: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            config: None,
+            categories: Vec::new(),
+            version: None,
+            allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
+            enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::warm_pool(
+                1,
+                2,
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_millis(50),
+            ),
+            operation_network_constraints: BTreeMap::new(),
+        };
+
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["prewarm"]["strategy"], "warm_pool");
+        let back: ManagedConnectorConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(back.prewarm, config.prewarm);
     }
 
     #[test]
@@ -10532,6 +10556,7 @@ mod tests {
                 enforce_operation_network_constraints: true,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: ConnectorPrewarmConfig::default(),
                 operation_network_constraints: BTreeMap::new(),
             },
         };

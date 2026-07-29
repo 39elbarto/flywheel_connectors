@@ -226,6 +226,8 @@ pub use fcp_manifest::{
 pub mod contract;
 pub mod coordination;
 pub mod credentials;
+/// Canonical connector error-mapping contract.
+pub mod error_mapping;
 pub mod formatting;
 pub mod migration;
 pub mod prelude;
@@ -280,8 +282,14 @@ pub use formatting::{
     is_parse_error_message,
 };
 
+/// Canonical connector error-mapping trait and async-runtime error conversion.
+pub use error_mapping::{ConnectorErrorMapping, map_async_to_fcp_error, redact_urls_in_error_text};
+
 /// Retry policy helpers.
 pub use retry::{RetryDecision, RetryPolicy};
+
+/// Connector lifecycle runtime helpers.
+pub use runtime::{ConnectorRuntime, ConnectorRuntimeConfig, ConnectorRuntimeConfigError};
 
 /// Streaming utilities for replay, acknowledgements, and per-key sequential processing.
 pub use streaming::{

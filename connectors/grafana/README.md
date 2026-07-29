@@ -201,6 +201,20 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 There is no dedicated tracked `scripts/e2e/grafana_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
 
+The gated sandbox live suite uses `FCP_LIVE_SANDBOX=1` plus:
+
+- `GRAFANA_SANDBOX_URL`: base URL for a disposable Grafana Cloud stack or self-hosted sandbox.
+- `GRAFANA_SANDBOX_TOKEN`: service-account token scoped to the sandbox stack.
+- `GRAFANA_SANDBOX_FOLDER_UID`: dedicated folder UID reserved for connector-created dashboards.
+- `FCP_SANDBOX_RUN_NAMESPACE`: namespace recorded in redaction-safe evidence.
+
+The current live harness performs `grafana.datasources.list`, creates one
+namespaced empty dashboard in `GRAFANA_SANDBOX_FOLDER_UID`, deletes that
+dashboard in the same run, and records a three-call ceiling. It does not log
+datasource IDs, dashboard UIDs, folder UIDs, service-account tokens, or tenant
+URLs. Alert and annotation mutation proof remains separate from this dashboard
+smoke path.
+
 The verification surface captures:
 
 - runtime operation inventory and policy metadata

@@ -12,7 +12,7 @@ use fcp_prelude::{CapabilityConstraints, CapabilityId, FcpConnector, FcpError, I
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_partial_json, header, method, path},
+    matchers::{any, body_partial_json, header, method, path},
 };
 
 const OP_CHAT: &str = "deepseek.chat.completions";
@@ -123,6 +123,30 @@ fn emit_fixture(event: &str, payload: &Value) {
     eprintln!("DEEPSEEK_FIXTURE_JSONL {}", Value::Object(object));
 }
 
+fn closed_response(status: u16) -> ResponseTemplate {
+    ResponseTemplate::new(status).insert_header("connection", "close")
+}
+
+fn closed_json_response(status: u16, body: Value) -> ResponseTemplate {
+    closed_response(status).set_body_json(body)
+}
+
+async fn mount_unmatched_request_guard(server: &MockServer) {
+    Mock::given(any())
+        .respond_with(closed_json_response(
+            599,
+            json!({
+                "error": {
+                    "type": "unexpected_wiremock_request",
+                    "message": "DeepSeek integration test received an unmatched HTTP request"
+                }
+            }),
+        ))
+        .with_priority(255)
+        .mount(server)
+        .await;
+}
+
 #[test]
 fn provider_construction_base_url_and_auth_policy() {
     let provider = DeepSeekProvider::new(
@@ -145,6 +169,11 @@ fn provider_construction_base_url_and_auth_policy() {
         header_value(&request.headers, "authorization"),
         Some("Bearer direct-key")
     );
+    assert_eq!(
+        provider.extra_request_headers("deepseek-v4-pro"),
+        Vec::new()
+    );
+
     assert!(normalize_deepseek_base_url(Some("https://example.com")).is_err());
     assert!(normalize_deepseek_base_url(Some("http://api.deepseek.com")).is_err());
 }
@@ -152,6 +181,7 @@ fn provider_construction_base_url_and_auth_policy() {
 #[fcp_async_core::runtime::test]
 async fn chat_completions_v4_flash_without_reasoning_content() {
     let server = MockServer::start().await;
+    mount_unmatched_request_guard(&server).await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .and(header("authorization", "Bearer deepseek-test-key"))
@@ -161,18 +191,21 @@ async fn chat_completions_v4_flash_without_reasoning_content() {
             "stream": false,
             "thinking": {"type": "disabled"}
         })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "chatcmpl-deepseek-v4-flash",
-            "object": "chat.completion",
-            "created": 1,
-            "model": "deepseek-v4-flash",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "hello from DeepSeek"},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
-        })))
+        .respond_with(closed_json_response(
+            200,
+            json!({
+                "id": "chatcmpl-deepseek-v4-flash",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello from DeepSeek"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+            }),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -221,6 +254,7 @@ async fn chat_completions_v4_flash_without_reasoning_content() {
 #[fcp_async_core::runtime::test]
 async fn chat_completions_reasoning_content_stays_separate_for_v4_pro() {
     let server = MockServer::start().await;
+    mount_unmatched_request_guard(&server).await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .and(header("authorization", "Bearer deepseek-test-key"))
@@ -229,27 +263,30 @@ async fn chat_completions_reasoning_content_stays_separate_for_v4_pro() {
             "reasoning_effort": "high",
             "thinking": {"type": "enabled"}
         })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "chatcmpl-deepseek-v4-pro",
-            "object": "chat.completion",
-            "created": 1,
-            "model": "deepseek-v4-pro",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "reasoning_content": "private reasoning",
-                    "content": "final answer"
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 3,
-                "completion_tokens": 4,
-                "total_tokens": 7,
-                "completion_tokens_details": {"reasoning_tokens": 2}
-            }
-        })))
+        .respond_with(closed_json_response(
+            200,
+            json!({
+                "id": "chatcmpl-deepseek-v4-pro",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "private reasoning",
+                        "content": "final answer"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 4,
+                    "total_tokens": 7,
+                    "completion_tokens_details": {"reasoning_tokens": 2}
+                }
+            }),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -294,6 +331,7 @@ async fn chat_completions_reasoning_content_stays_separate_for_v4_pro() {
 #[fcp_async_core::runtime::test]
 async fn streaming_chat_assembles_reasoning_and_final_content_separately() {
     let server = MockServer::start().await;
+    mount_unmatched_request_guard(&server).await;
     let sse = concat!(
         "data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4-pro\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"private \"},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chunk-2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"deepseek-v4-pro\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"trace\"},\"finish_reason\":null}]}\n\n",
@@ -305,7 +343,7 @@ async fn streaming_chat_assembles_reasoning_and_final_content_separately() {
         .and(path("/chat/completions"))
         .and(body_partial_json(json!({"stream": true})))
         .respond_with(
-            ResponseTemplate::new(200)
+            closed_response(200)
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(sse),
         )
@@ -352,16 +390,20 @@ async fn streaming_chat_assembles_reasoning_and_final_content_separately() {
 #[fcp_async_core::runtime::test]
 async fn models_list_is_cached_and_health_reuses_shared_client() {
     let server = MockServer::start().await;
+    mount_unmatched_request_guard(&server).await;
     Mock::given(method("GET"))
         .and(path("/models"))
         .and(header("authorization", "Bearer deepseek-test-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "object": "list",
-            "data": [
-                {"id": "deepseek-v4-flash", "object": "model", "owned_by": "deepseek"},
-                {"id": "deepseek-v4-pro", "object": "model", "owned_by": "deepseek"}
-            ]
-        })))
+        .respond_with(closed_json_response(
+            200,
+            json!({
+                "object": "list",
+                "data": [
+                    {"id": "deepseek-v4-flash", "object": "model", "owned_by": "deepseek"},
+                    {"id": "deepseek-v4-pro", "object": "model", "owned_by": "deepseek"}
+                ]
+            }),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -402,10 +444,11 @@ async fn models_list_is_cached_and_health_reuses_shared_client() {
 #[fcp_async_core::runtime::test]
 async fn rate_limit_retry_waits_once_then_succeeds() {
     let server = MockServer::start().await;
+    mount_unmatched_request_guard(&server).await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
-            ResponseTemplate::new(429)
+            closed_response(429)
                 .insert_header("retry-after", "0")
                 .set_body_json(json!({
                     "error": {"type": "rate_limit_error", "message": "too fast"}
@@ -416,17 +459,20 @@ async fn rate_limit_retry_waits_once_then_succeeds() {
         .await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "chatcmpl-retry",
-            "object": "chat.completion",
-            "created": 1,
-            "model": "deepseek-v4-flash",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "recovered"},
-                "finish_reason": "stop"
-            }]
-        })))
+        .respond_with(closed_json_response(
+            200,
+            json!({
+                "id": "chatcmpl-retry",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "recovered"},
+                    "finish_reason": "stop"
+                }]
+            }),
+        ))
         .mount(&server)
         .await;
 
@@ -463,16 +509,20 @@ async fn rate_limit_retry_waits_once_then_succeeds() {
 #[fcp_async_core::runtime::test]
 async fn provider_errors_map_to_fcp_and_redact_reasoning_content() {
     let server = MockServer::start().await;
+    mount_unmatched_request_guard(&server).await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-            "error": {
-                "type": "authentication_error",
-                "message": "bad Bearer should-not-leak",
-                "prompt": "private prompt",
-                "reasoning_content": "private reasoning"
-            }
-        })))
+        .respond_with(closed_json_response(
+            401,
+            json!({
+                "error": {
+                    "type": "authentication_error",
+                    "message": "bad Bearer should-not-leak",
+                    "prompt": "private prompt",
+                    "reasoning_content": "private reasoning"
+                }
+            }),
+        ))
         .expect(1)
         .mount(&server)
         .await;
@@ -517,10 +567,11 @@ async fn provider_errors_map_to_fcp_and_redact_reasoning_content() {
 #[fcp_async_core::runtime::test]
 async fn request_timeout_maps_to_retryable_external_error() {
     let server = MockServer::start().await;
+    mount_unmatched_request_guard(&server).await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
-            ResponseTemplate::new(200)
+            closed_response(200)
                 .set_delay(Duration::from_millis(500))
                 .set_body_json(json!({
                     "id": "late",
@@ -603,10 +654,13 @@ async fn fcp_connector_trait_happy_path_validates_capability_token() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/models"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "object": "list",
-            "data": [{"id": "deepseek-v4-pro", "object": "model", "owned_by": "deepseek"}]
-        })))
+        .respond_with(closed_json_response(
+            200,
+            json!({
+                "object": "list",
+                "data": [{"id": "deepseek-v4-pro", "object": "model", "owned_by": "deepseek"}]
+            }),
+        ))
         .expect(1)
         .mount(&server)
         .await;

@@ -1,4 +1,4 @@
-//! Pin the closest analogue to "BuildEnvironment Display"
+//! Pin the closest analogue to "`BuildEnvironment` Display"
 //! (flywheel_connectors-ic6mz).
 //!
 //! Bead asks for `BuildEnvironment Display formatting`. No type
@@ -30,10 +30,10 @@
 //!   4. **`AttestationMaterial::validate` truth table** — empty uri
 //!      and malformed digest both rejected with named reasons.
 //!   5. **`AttestationMetadata::validate` truth table** —
-//!      finished < started rejected; empty invocation_id (when set)
+//!      finished < started rejected; empty `invocation_id` (when set)
 //!      rejected.
-//!   6. **`TrustRootBinding::validate`** — empty root_id rejected;
-//!      unknown root_type rejected; the three documented root_types
+//!   6. **`TrustRootBinding::validate`** — empty `root_id` rejected;
+//!      unknown `root_type` rejected; the three documented `root_types`
 //!      (sigstore / tuf / manual) all accepted.
 //!   7. **JSON round-trip preserves all build-environment fields**
 //!      on a populated `AttestationMaterial` and `AttestationMetadata`.
@@ -48,7 +48,7 @@ use fcp_core::{
 const VALID_DIGEST: &str =
     "blake3-256:1111111111111111111111111111111111111111111111111111111111111111";
 
-fn fixed_dt(secs: i64) -> DateTime<Utc> {
+const fn fixed_dt(secs: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(secs, 0).expect("valid timestamp")
 }
 
@@ -329,7 +329,8 @@ fn material_metadata_predicate_round_trip_consistently_across_formats() {
     let predicate = AttestationPredicateType::SlsaProvenanceV1;
 
     // Round-trip each through both formats and confirm equivalence.
-    for wrapper in [serde_json::to_value(&material).unwrap()] {
+    {
+        let wrapper = serde_json::to_value(&material).unwrap();
         let from_json: AttestationMaterial = serde_json::from_value(wrapper).unwrap();
         assert_eq!(from_json, material);
     }

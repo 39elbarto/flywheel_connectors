@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 const OP_CONVERSE: &str = "aws_bedrock.converse";
 const OP_CONVERSE_STREAM: &str = "aws_bedrock.converse_stream";
 const OP_MODELS_LIST: &str = "aws_bedrock.models.list";
+const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
 
 #[derive(Debug)]
 struct LiveEnv {
@@ -39,6 +40,16 @@ struct LiveEnv {
 
 impl LiveEnv {
     fn load() -> Option<Self> {
+        if !live_gate_enabled() {
+            emit_jsonl(json!({
+                "event": "bedrock_live_smoke_skipped",
+                "status": "skipped",
+                "skip_reason": format!("{LIVE_GATE_ENV} is not set to 1"),
+                "fixture_mode": "skip"
+            }));
+            return None;
+        }
+
         if std::env::var("AWS_BEDROCK_E2E").ok().as_deref() != Some("1") {
             emit_jsonl(json!({
                 "event": "bedrock_live_smoke_skipped",
@@ -84,6 +95,11 @@ impl LiveEnv {
     }
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 fn live_jsonl_record(mut value: serde_json::Value) -> serde_json::Value {
     if let Some(object) = value.as_object_mut() {
         object
@@ -92,6 +108,12 @@ fn live_jsonl_record(mut value: serde_json::Value) -> serde_json::Value {
         object
             .entry("redaction_scope")
             .or_insert_with(|| json!("hashed"));
+        object
+            .entry("suite_class")
+            .or_insert_with(|| json!("sandbox_required"));
+        object
+            .entry("gate_env_var")
+            .or_insert_with(|| json!(LIVE_GATE_ENV));
     }
     value
 }

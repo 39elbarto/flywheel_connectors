@@ -4,9 +4,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 /// RFC 3986 unreserved characters preserved in path segments.
@@ -424,6 +423,12 @@ impl FirebaseClient {
         query: Vec<(String, String)>,
         body: Option<Value>,
     ) -> FirebaseResult<Value> {
+        // br-kxd3e: derived from the verb, which is sound here because this
+        // client uses each one for its standard meaning. GET reads; PATCH and
+        // PUT write a document at a caller-chosen path, so they converge;
+        // DELETE converges. Only POST creates a document with a SERVER-chosen
+        // auto-id, so a replay makes a second document.
+        let replay_safe = method != Method::POST;
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
@@ -441,10 +446,12 @@ impl FirebaseClient {
                 );
                 match self.execute_once(method, &url, &query, body.as_ref()).await {
                     Ok(response) => AttemptOutcome::Success(response),
-                    Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
-                        retry_after: error.retry_after(),
-                        error,
-                    },
+                    Err(error) if error.is_retryable() => {
+                        // 429 stays retryable; a 5xx reached Firestore.
+                        let replayable = replay_safe || error.replay_is_safe();
+                        let retry_after = error.retry_after();
+                        AttemptOutcome::retryable_if_replayable(error, retry_after, replayable)
+                    }
                     Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
@@ -654,259 +661,6 @@ fn redact_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_google_discovery::auth::GoogleAuthSourceKind;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, header_exists, method, path, query_param},
-    };
-
-    fn test_auth() -> GoogleMaterializedAuth {
-        GoogleMaterializedAuth::BearerToken {
-            access_token: "ya29.test-token".into(),
-            source: GoogleAuthSourceKind::AccessToken,
-            granted_scopes: Vec::new(),
-            quota_project_id: None,
-        }
-    }
-
-    fn client_for(server: &MockServer) -> FirebaseClient {
-        FirebaseClient::new(
-            test_auth(),
-            "demo-project",
-            "db1",
-            &format!("{}/v1", server.uri()),
-            &server.uri(),
-            5_000,
-        )
-        .unwrap()
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn firestore_get_document_hits_expected_endpoint() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(
-                "/v1/projects/demo-project/databases/db1/documents/users/alice",
-            ))
-            .and(header_exists("authorization"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "name": "projects/demo-project/databases/db1/documents/users/alice",
-                "fields": {
-                    "displayName": { "stringValue": "Alice" }
-                }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = client_for(&server);
-        let response = client
-            .firestore_get(&FirestoreGetRequest {
-                document_path: "users/alice".into(),
-                mask: Vec::new(),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(response.fields["displayName"], "Alice");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn firestore_list_documents_passes_page_size() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(
-                "/v1/projects/demo-project/databases/db1/documents/rooms/alpha/messages",
-            ))
-            .and(query_param("pageSize", "10"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "documents": [{
-                    "name": "projects/demo-project/databases/db1/documents/rooms/alpha/messages/m1",
-                    "fields": {
-                        "text": { "stringValue": "hello" }
-                    }
-                }],
-                "nextPageToken": "next-1"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = client_for(&server);
-        let response = client
-            .firestore_list(&FirestoreListRequest {
-                collection_path: "rooms/alpha/messages".into(),
-                page_size: Some(10),
-                page_token: None,
-                order_by: None,
-                show_missing: false,
-                mask: Vec::new(),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(response.documents.len(), 1);
-        assert_eq!(response.next_page_token.as_deref(), Some("next-1"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn firestore_create_document_sends_document_id() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path(
-                "/v1/projects/demo-project/databases/db1/documents/users",
-            ))
-            .and(query_param("documentId", "alice"))
-            .and(body_json(json!({
-                "fields": {
-                    "displayName": { "stringValue": "Alice" }
-                }
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "name": "projects/demo-project/databases/db1/documents/users/alice",
-                "fields": {
-                    "displayName": { "stringValue": "Alice" }
-                }
-            })))
-            .mount(&server)
-            .await;
-
-        let client = client_for(&server);
-        let response = client
-            .firestore_create(&FirestoreCreateRequest {
-                collection_path: "users".into(),
-                document_id: Some("alice".into()),
-                document: json!({ "displayName": "Alice" }),
-                mask: Vec::new(),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(
-            response.name,
-            "projects/demo-project/databases/db1/documents/users/alice"
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn firestore_query_accumulates_documents() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path(
-                "/v1/projects/demo-project/databases/db1/documents:runQuery",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                {
-                    "document": {
-                        "name": "projects/demo-project/databases/db1/documents/users/alice",
-                        "fields": {
-                            "displayName": { "stringValue": "Alice" }
-                        }
-                    },
-                    "readTime": "2026-01-01T00:00:00Z"
-                }
-            ])))
-            .mount(&server)
-            .await;
-
-        let client = client_for(&server);
-        let response = client
-            .firestore_query(&FirestoreQueryRequest {
-                parent_path: None,
-                structured_query: json!({
-                    "from": [{ "collectionId": "users" }]
-                }),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(response.documents.len(), 1);
-        assert_eq!(response.read_time.as_deref(), Some("2026-01-01T00:00:00Z"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn firestore_batch_write_posts_to_batch_endpoint() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path(
-                "/v1/projects/demo-project/databases/db1/documents:batchWrite",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "writeResults": [{}],
-                "status": [{}]
-            })))
-            .mount(&server)
-            .await;
-
-        let client = client_for(&server);
-        let response = client
-            .firestore_batch_write(&FirestoreBatchWriteRequest {
-                writes: vec![json!({
-                    "update": {
-                        "name": "projects/demo-project/databases/db1/documents/users/alice",
-                        "fields": {
-                            "displayName": { "stringValue": "Alice" }
-                        }
-                    }
-                })],
-                labels: std::collections::BTreeMap::default(),
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(response["writeResults"].as_array().unwrap().len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn rtdb_get_uses_json_suffix_and_query_encoding() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/presence/alice.json"))
-            .and(query_param("orderBy", "\"timestamp\""))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "online": true
-            })))
-            .mount(&server)
-            .await;
-
-        let client = client_for(&server);
-        let response = client
-            .rtdb_get(&RealtimeGetRequest {
-                path: "presence/alice".into(),
-                order_by: Some("timestamp".into()),
-                start_at: None,
-                end_at: None,
-                equal_to: None,
-                limit_to_first: None,
-                limit_to_last: None,
-                shallow: false,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(response["online"], true);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn rtdb_set_uses_put_and_json_path() {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/presence/alice.json"))
-            .and(body_json(json!(true)))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!(true)))
-            .mount(&server)
-            .await;
-
-        let client = client_for(&server);
-        let response = client
-            .rtdb_set(&RealtimeSetRequest {
-                path: "presence/alice".into(),
-                value: json!(true),
-                silent: false,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(response, json!(true));
-    }
 
     #[test]
     fn document_path_requires_even_segments() {

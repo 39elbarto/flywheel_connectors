@@ -1,4 +1,4 @@
-//! Pin the full 24-variant Display surface of [`CryptoError`].
+//! Pin the full 33-variant Display surface of [`CryptoError`].
 //!
 //! The inline `mod tests` block at `crates/fcp-crypto/src/error.rs:138`
 //! has 18-variant exhaustion lists that pre-date the COSE-era additions:
@@ -24,6 +24,7 @@ type CryptoErrorDisplayCase = (CryptoError, &'static str);
 /// guarantees.
 fn variant_display_matrix() -> Vec<CryptoErrorDisplayCase> {
     let mut cases = core_crypto_error_display_matrix();
+    cases.extend(hybrid_crypto_error_display_matrix());
     cases.extend(cose_crypto_error_display_matrix());
     cases
 }
@@ -47,6 +48,14 @@ fn core_crypto_error_display_matrix() -> Vec<CryptoErrorDisplayCase> {
         (
             CryptoError::SignatureVerificationFailed,
             "signature verification failed",
+        ),
+        (
+            CryptoError::ClassicalSignatureMissing,
+            "classical Ed25519 signature missing",
+        ),
+        (
+            CryptoError::PqSignatureMissing,
+            "post-quantum signature missing",
         ),
         (
             CryptoError::InvalidKeyId(String::from("bad hex")),
@@ -106,6 +115,54 @@ fn core_crypto_error_display_matrix() -> Vec<CryptoErrorDisplayCase> {
     ]
 }
 
+fn hybrid_crypto_error_display_matrix() -> Vec<CryptoErrorDisplayCase> {
+    vec![
+        (
+            CryptoError::MissingClassicalSigner {
+                policy: "BothRequired",
+            },
+            "missing classical signer for hybrid signing policy BothRequired",
+        ),
+        (
+            CryptoError::MissingPqSigner {
+                policy: "BothRequired",
+            },
+            "missing post-quantum signer for hybrid signing policy BothRequired",
+        ),
+        (
+            CryptoError::MissingClassicalSignature {
+                policy: "BothRequired",
+            },
+            "missing classical signature for hybrid signing policy BothRequired",
+        ),
+        (
+            CryptoError::MissingPqSignature {
+                policy: "BothRequired",
+            },
+            "missing post-quantum signature for hybrid signing policy BothRequired",
+        ),
+        (
+            CryptoError::MissingClassicalVerifier {
+                policy: "BothRequired",
+            },
+            "missing classical verifier for hybrid signing policy BothRequired",
+        ),
+        (
+            CryptoError::MissingPqVerifier {
+                policy: "BothRequired",
+            },
+            "missing post-quantum verifier for hybrid signing policy BothRequired",
+        ),
+        (
+            CryptoError::HybridPolicyViolation {
+                policy: "BothRequired",
+                reason: String::from("no acceptable signature verified"),
+            },
+            "hybrid signing policy BothRequired rejected envelope: no acceptable signature verified",
+        ),
+    ]
+}
+
 fn cose_crypto_error_display_matrix() -> Vec<CryptoErrorDisplayCase> {
     vec![
         (
@@ -142,8 +199,8 @@ fn crypto_error_full_variant_matrix_pins_display_per_variant() {
     let matrix = variant_display_matrix();
     assert_eq!(
         matrix.len(),
-        24,
-        "CryptoError variant matrix length drift: expected 24, got {}",
+        33,
+        "CryptoError variant matrix length drift: expected 33, got {}",
         matrix.len()
     );
     for (variant, expected) in &matrix {
@@ -164,6 +221,8 @@ fn crypto_error_exhaustive_match_sentinel() {
         CryptoError::InvalidKeyLength { .. }
         | CryptoError::InvalidSignatureLength { .. }
         | CryptoError::SignatureVerificationFailed
+        | CryptoError::ClassicalSignatureMissing
+        | CryptoError::PqSignatureMissing
         | CryptoError::InvalidKeyId(_)
         | CryptoError::AeadEncryptFailed
         | CryptoError::AeadDecryptFailed
@@ -180,6 +239,13 @@ fn crypto_error_exhaustive_match_sentinel() {
         | CryptoError::TokenExpired
         | CryptoError::TokenNotYetValid
         | CryptoError::MissingField(_)
+        | CryptoError::MissingClassicalSigner { .. }
+        | CryptoError::MissingPqSigner { .. }
+        | CryptoError::MissingClassicalSignature { .. }
+        | CryptoError::MissingPqSignature { .. }
+        | CryptoError::MissingClassicalVerifier { .. }
+        | CryptoError::MissingPqVerifier { .. }
+        | CryptoError::HybridPolicyViolation { .. }
         | CryptoError::AlgorithmMismatch { .. }
         | CryptoError::UnsupportedCriticalHeader(_)
         | CryptoError::KeyIdMismatch { .. }

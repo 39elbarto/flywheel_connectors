@@ -158,8 +158,8 @@ async fn handle_message(connector: &mut WeComConnector, message: &str) -> serde_
                 "jsonrpc": "2.0",
                 "result": value
             });
-            if let Some(id) = id {
-                response["id"] = id;
+            if let (Some(id), Some(object)) = (id, response.as_object_mut()) {
+                object.insert("id".to_string(), id);
             }
             response
         }
@@ -168,8 +168,8 @@ async fn handle_message(connector: &mut WeComConnector, message: &str) -> serde_
                 "jsonrpc": "2.0",
                 "error": error.to_response()
             });
-            if let Some(id) = id {
-                response["id"] = id;
+            if let (Some(id), Some(object)) = (id, response.as_object_mut()) {
+                object.insert("id".to_string(), id);
             }
             response
         }

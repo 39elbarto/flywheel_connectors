@@ -1,9 +1,12 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_manifest::ConnectorManifest;
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::{
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
@@ -14,7 +17,8 @@ const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.exa.ai";
 const BOUNDARY: &str = "This first slice is read-only and covers Exa search. Content expansion and crawling stay out of scope for now.";
 const EXA_INTEGRATION: &str = "fcp";
-const EXA_MAX_SEARCH_RESULTS: u64 = 100;
+const EXA_MIN_SEARCH_RESULTS: u32 = 1;
+const EXA_MAX_SEARCH_RESULTS: u32 = 100;
 const EXA_MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const OPERATION_ORDER: [&str; 1] = ["exa.search"];
 const EXA_SEARCH_TYPES: &[&str] = &[
@@ -334,7 +338,7 @@ impl ExaConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": operations_info()?,
+            "operations": introspect_operations()?,
             "events": [],
             "resource_types": []
         }))
@@ -446,7 +450,7 @@ impl Default for ExaConnector {
     }
 }
 
-fn operations_info() -> FcpResult<Vec<Value>> {
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
     let manifest =
         ConnectorManifest::parse_str(EXA_MANIFEST_TOML).map_err(|error| FcpError::Internal {
             message: format!("Embedded Exa manifest is invalid: {error}"),
@@ -457,10 +461,43 @@ fn operations_info() -> FcpResult<Vec<Value>> {
         let right_index = operation_order(right);
         left_index.cmp(&right_index).then_with(|| left.cmp(right))
     });
-    Ok(operations
-        .into_iter()
-        .map(|(id, operation)| operation_info_from_manifest(id, operation))
-        .collect())
+    Ok(operations)
+}
+
+fn introspect_operations() -> FcpResult<Vec<Value>> {
+    static OPERATIONS: OnceLock<FcpResult<Vec<Value>>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            Ok(ordered_manifest_operations()?
+                .into_iter()
+                .map(|(id, operation)| {
+                    let operation_info = operation_info_from_manifest(id, &operation);
+                    introspect_operation_from_manifest(operation_info, &operation)
+                })
+                .collect())
+        })
+        .clone()
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata =
+        serde_json::to_value(operation_info).expect("Exa operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata
 }
 
 fn operation_order(operation_id: &str) -> usize {
@@ -470,39 +507,28 @@ fn operation_order(operation_id: &str) -> usize {
         .unwrap_or(OPERATION_ORDER.len())
 }
 
-fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
-    let mut entry = serde_json::Map::new();
-    entry.insert("id".into(), Value::String(id));
-    entry.insert(
-        "summary".into(),
-        Value::String(operation.description.clone()),
-    );
-    entry.insert("description".into(), Value::String(operation.description));
-    entry.insert(
-        "capability".into(),
-        Value::String(operation.capability.as_str().to_string()),
-    );
-    entry.insert("risk_level".into(), json!(operation.risk_level));
-    entry.insert("safety_tier".into(), json!(operation.safety_tier));
-    entry.insert("idempotency".into(), json!(operation.idempotency));
-    entry.insert(
-        "requires_approval".into(),
-        json!(operation.requires_approval),
-    );
-    entry.insert(
-        "revocation_freshness".into(),
-        json!(operation.revocation_freshness),
-    );
-    entry.insert("input_schema".into(), operation.input_schema);
-    entry.insert("output_schema".into(), operation.output_schema);
-    entry.insert("ai_hints".into(), json!(operation.ai_hints));
-    if let Some(rate_limit) = operation.rate_limit {
-        entry.insert("rate_limit".into(), json!(rate_limit));
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
     }
-    if let Some(network_constraints) = operation.network_constraints {
-        entry.insert("network_constraints".into(), json!(network_constraints));
-    }
-    Value::Object(entry)
 }
 
 const fn health_status(
@@ -526,6 +552,15 @@ fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
 }
 
 fn validated_num_results(value: &Value) -> FcpResult<u64> {
+    if let Some(raw) = value.as_u64() {
+        return Ok(clamp_num_results(raw));
+    }
+    if let Some(raw) = value.as_i64() {
+        return raw.try_into().map_or_else(
+            |_| Ok(u64::from(EXA_MIN_SEARCH_RESULTS)),
+            |unsigned| Ok(clamp_num_results(unsigned)),
+        );
+    }
     let Some(raw) = value.as_f64() else {
         return Err(FcpError::InvalidRequest {
             code: 1003,
@@ -538,7 +573,30 @@ fn validated_num_results(value: &Value) -> FcpResult<u64> {
             message: "numResults must be finite".into(),
         });
     }
-    Ok(raw.floor().clamp(1.0, EXA_MAX_SEARCH_RESULTS as f64) as u64)
+    Ok(floor_clamped_num_results(raw))
+}
+
+fn clamp_num_results(raw: u64) -> u64 {
+    raw.clamp(
+        u64::from(EXA_MIN_SEARCH_RESULTS),
+        u64::from(EXA_MAX_SEARCH_RESULTS),
+    )
+}
+
+fn floor_clamped_num_results(raw: f64) -> u64 {
+    if raw <= f64::from(EXA_MIN_SEARCH_RESULTS) {
+        return u64::from(EXA_MIN_SEARCH_RESULTS);
+    }
+    if raw >= f64::from(EXA_MAX_SEARCH_RESULTS) {
+        return u64::from(EXA_MAX_SEARCH_RESULTS);
+    }
+
+    for candidate in (EXA_MIN_SEARCH_RESULTS..EXA_MAX_SEARCH_RESULTS).rev() {
+        if raw >= f64::from(candidate) {
+            return u64::from(candidate);
+        }
+    }
+    u64::from(EXA_MIN_SEARCH_RESULTS)
 }
 
 fn validated_search_type(value: &Value) -> FcpResult<&str> {

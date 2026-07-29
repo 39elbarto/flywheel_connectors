@@ -139,7 +139,9 @@ fn iblt_with_cell_count_rejects_below_hash_count() {
         let err = r.expect_err("MUST fail");
         match err {
             IbltError::InvalidCellCount { got } => assert_eq!(got, cells),
-            other => panic!("expected InvalidCellCount, got {other:?}"),
+            other @ IbltError::CellCountMismatch { .. } => {
+                panic!("expected InvalidCellCount, got {other:?}")
+            }
         }
     }
 }
@@ -225,7 +227,7 @@ fn iblt_cell_serde_roundtrip_preserves_all_fields() {
     let c = IbltCell {
         count: -7,
         key_sum: [42u8; 32],
-        hash_check: 0xDEADBEEF,
+        hash_check: 0xDEAD_BEEF,
     };
     let json_str = serde_json::to_string(&c).expect("serialize");
     let parsed: IbltCell = serde_json::from_str(&json_str).expect("deserialize");

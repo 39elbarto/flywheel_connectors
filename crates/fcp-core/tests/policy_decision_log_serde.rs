@@ -1,5 +1,5 @@
 //! Pin `AuditEvent` 14-field JSON shape + skip-when-None semantics + chain-
-//! link distinctness — the closest analogue to "PolicyDecisionLog serde"
+//! link distinctness — the closest analogue to "`PolicyDecisionLog` serde"
 //! (flywheel_connectors-3pz0m).
 //!
 //! Bead asks for `PolicyDecisionLog` JSON+CBOR roundtrip pinning. No type
@@ -11,23 +11,23 @@
 //!
 //! Existing `audit_chain_golden_vectors.rs` covers chain semantics
 //! (genesis, follows, prev, seq) but not the 14-field JSON shape, the
-//! 7 skip-when-None Option fields, or the per-axis serialization
+//! 7 skip-when-`None` `Option` fields, or the per-axis serialization
 //! distinctness for security-critical fields.
 //!
 //! Coverage:
-//!   * 14-field JSON shape pinned (header / correlation_id / trace_context
-//!     / event_type / actor / zone_id / connector_id / operation /
-//!     capability_token_jti / request_object_id / result_object_id /
-//!     prev / seq / occurred_at / signature),
-//!   * skip-when-None for 7 optional fields (trace_context, connector_id,
-//!     operation, capability_token_jti, request_object_id, result_object_id,
-//!     prev),
-//!   * Required minimum-shape contract: 7 fields when all optionals are None,
-//!   * is_genesis truth table (seq=0 AND prev=None),
-//!   * follows() truth table for chain-linkage,
+//!   * 14-field JSON shape pinned (`header` / `correlation_id` / `trace_context`
+//!     / `event_type` / `actor` / `zone_id` / `connector_id` / `operation` /
+//!     `capability_token_jti` / `request_object_id` / `result_object_id` /
+//!     `prev` / `seq` / `occurred_at` / `signature`),
+//!   * skip-when-`None` for 7 optional fields (`trace_context`, `connector_id`,
+//!     `operation`, `capability_token_jti`, `request_object_id`, `result_object_id`,
+//!     `prev`),
+//!   * Required minimum-shape contract: 7 fields when all optionals are `None`,
+//!   * `is_genesis` truth table (`seq=0` AND `prev=None`),
+//!   * `follows()` truth table for chain-linkage,
 //!   * JSON + CBOR full round-trip,
-//!   * Per-axis distinctness for security-critical fields (event_type,
-//!     actor, seq, prev, occurred_at).
+//!   * Per-axis distinctness for security-critical fields (`event_type`,
+//!     `actor`, `seq`, `prev`, `occurred_at`).
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
@@ -38,7 +38,7 @@ use semver::Version;
 use serde_json::json;
 use uuid::Uuid;
 
-fn obj(byte: u8) -> ObjectId {
+const fn obj(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 

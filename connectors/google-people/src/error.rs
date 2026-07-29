@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Google People-specific errors.
@@ -53,6 +53,22 @@ impl GooglePeopleError {
         match self {
             Self::Http(_) | Self::RateLimited { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, 429 | 500..=599),
+            _ => false,
+        }
+    }
+
+    /// Whether replaying the request that produced this error cannot duplicate
+    /// a side effect (br-kxd3e).
+    ///
+    /// Distinct from [`Self::is_retryable`]: a rate limit was refused WITHOUT
+    /// creating anything, so replaying is safe; a 5xx means Google received
+    /// the request and may already have created the contact.
+    #[must_use]
+    pub fn replay_is_safe(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } => true,
+            Self::Api { status_code, .. } => *status_code == 429,
+            Self::Http(e) => !fcp_sdk::migration::transport_error_reached_service(e),
             _ => false,
         }
     }

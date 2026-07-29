@@ -205,6 +205,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     // C3.4 default-deny: the verifier rejects tokens with no
@@ -225,7 +226,10 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        // dja9u typestate ratchet: tokens MUST carry target_instance matching the connector.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -328,7 +332,12 @@ async fn notion_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["notion.write"]);
     // Token grants "notion.write" but invoke targets "notion.get_page" -> denial
-    let token = build_token(&signing_key, "notion.write", &["notion.write"]);
+    let token = build_token(
+        &signing_key,
+        "notion.write",
+        &["notion.write"],
+        connector.connector.instance_id().as_str(),
+    );
     let invoke = invoke_request(
         "notion.get_page",
         json!({ "page_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890" }),
@@ -386,7 +395,12 @@ async fn notion_allow_valid_token_connector_suite_passes() {
     // Introspection declares `notion.get_page` operation requires
     // capability `notion.read` (permission class, not op id).
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["notion.read"]);
-    let token = build_token(&signing_key, "notion.read", &["notion.get_page"]);
+    let token = build_token(
+        &signing_key,
+        "notion.read",
+        &["notion.get_page"],
+        connector.connector.instance_id().as_str(),
+    );
     let invoke = invoke_request(
         "notion.get_page",
         json!({ "page_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890" }),

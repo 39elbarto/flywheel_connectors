@@ -9,8 +9,9 @@ use std::time::Duration;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, header};
 use tracing::warn;
 
@@ -263,13 +264,16 @@ impl M365Client {
         }
 
         let data = self
-            .execute(|| {
-                self.apply_auth(
-                    self.http
-                        .get(url.as_str())
-                        .header("ConsistencyLevel", "eventual"),
-                )
-            })
+            .execute(
+                || {
+                    self.apply_auth(
+                        self.http
+                            .get(url.as_str())
+                            .header("ConsistencyLevel", "eventual"),
+                    )
+                },
+                true,
+            )
             .await?;
         Ok(serde_json::from_value(data)?)
     }
@@ -591,7 +595,8 @@ impl M365Client {
             "startTime": start_time,
             "endTime": end_time,
         });
-        self.post_json(&url, &body).await
+        // Read-only POST: getSchedule queries availability and creates nothing.
+        self.post_json_replay_safe(&url, &body).await
     }
 
     // ── Tasks operations ─────────────────────────────────────────
@@ -833,11 +838,12 @@ impl M365Client {
     // ── HTTP helpers ─────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> M365Result<serde_json::Value> {
-        self.execute(|| self.apply_auth(self.http.get(url))).await
+        self.execute(|| self.apply_auth(self.http.get(url)), true)
+            .await
     }
 
     async fn get_bytes(&self, url: &str) -> M365Result<Vec<u8>> {
-        self.execute_bytes(|| self.apply_auth(self.http.get(url)))
+        self.execute_bytes(|| self.apply_auth(self.http.get(url)), true)
             .await
     }
 
@@ -863,35 +869,58 @@ impl M365Client {
     }
 
     async fn get_text(&self, url: &str) -> M365Result<String> {
-        self.execute_text(|| self.apply_auth(self.http.get(url)))
+        self.execute_text(|| self.apply_auth(self.http.get(url)), true)
             .await
     }
 
+    /// POST with retry.
+    ///
+    /// br-kxd3e: fail-closed. The Graph POSTs behind this helper send mail
+    /// (`sendMail`, `reply`, `forward`) or create items, so a replay is
+    /// externally visible and irreversible. Read-only POSTs use
+    /// [`Self::post_json_replay_safe`].
     async fn post_json(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        self.execute(|| self.apply_auth(self.http.post(url).json(body)))
+        self.execute(|| self.apply_auth(self.http.post(url).json(body)), false)
+            .await
+    }
+
+    /// POST whose replay cannot duplicate a side effect.
+    ///
+    /// Graph exposes some queries as POSTs because the request carries a body
+    /// (`calendar/getSchedule`); those create nothing.
+    async fn post_json_replay_safe(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> M365Result<serde_json::Value> {
+        self.execute(|| self.apply_auth(self.http.post(url).json(body)), true)
             .await
     }
 
     async fn post_json_no_content(&self, url: &str, body: &serde_json::Value) -> M365Result<()> {
-        self.execute_no_content(|| self.apply_auth(self.http.post(url).json(body)))
+        self.execute_no_content(|| self.apply_auth(self.http.post(url).json(body)), false)
             .await
     }
 
     async fn post_html(&self, url: &str, html: &str) -> M365Result<serde_json::Value> {
         let html = html.to_string();
-        self.execute(|| {
-            self.apply_auth(
-                self.http
-                    .post(url)
-                    .header(header::ACCEPT, "application/json")
-                    .header(header::CONTENT_TYPE, "text/html")
-                    .body(html.clone()),
-            )
-        })
+        // NOT replay-safe: creates a OneNote page.
+        self.execute(
+            || {
+                self.apply_auth(
+                    self.http
+                        .post(url)
+                        .header(header::ACCEPT, "application/json")
+                        .header(header::CONTENT_TYPE, "text/html")
+                        .body(html.clone()),
+                )
+            },
+            false,
+        )
         .await
     }
 
@@ -900,36 +929,41 @@ impl M365Client {
         url: &str,
         body: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        self.execute(|| self.apply_auth(self.http.patch(url).json(body)))
+        self.execute(|| self.apply_auth(self.http.patch(url).json(body)), true)
             .await
     }
 
     async fn patch_json_no_content(&self, url: &str, body: &serde_json::Value) -> M365Result<()> {
-        self.execute_no_content(|| self.apply_auth(self.http.patch(url).json(body)))
+        self.execute_no_content(|| self.apply_auth(self.http.patch(url).json(body)), true)
             .await
     }
 
     async fn put_bytes(&self, url: &str, content: &[u8]) -> M365Result<serde_json::Value> {
         let content = content.to_vec();
-        self.execute(|| {
-            self.apply_auth(
-                self.http
-                    .put(url)
-                    .header(header::CONTENT_TYPE, "application/octet-stream")
-                    .body(content.clone()),
-            )
-        })
+        // PUT of file content is idempotent: the same bytes to the same URL.
+        self.execute(
+            || {
+                self.apply_auth(
+                    self.http
+                        .put(url)
+                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                        .body(content.clone()),
+                )
+            },
+            true,
+        )
         .await
     }
 
     async fn delete_no_content(&self, url: &str) -> M365Result<()> {
-        self.execute_no_content(|| self.apply_auth(self.http.delete(url)))
+        self.execute_no_content(|| self.apply_auth(self.http.delete(url)), true)
             .await
     }
 
     async fn execute(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
+        replay_safe: bool,
     ) -> M365Result<serde_json::Value> {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -944,10 +978,15 @@ impl M365Client {
                     match self.handle_error_status(status, &response, attempt).await {
                         ErrorAction::Return(err) => return AttemptOutcome::Terminal(err),
                         ErrorAction::Retry(err) => {
-                            return AttemptOutcome::Retryable {
-                                retry_after: err.retry_after(),
-                                error: err,
-                            };
+                            // 429 stays retryable — Graph throttled it WITHOUT
+                            // performing the work. A 5xx did reach Graph.
+                            let replayable = replay_safe || err.replay_is_safe();
+                            let retry_after = err.retry_after();
+                            return AttemptOutcome::retryable_if_replayable(
+                                err,
+                                retry_after,
+                                replayable,
+                            );
                         }
                         ErrorAction::Success => {}
                     }
@@ -960,10 +999,12 @@ impl M365Client {
                         Err(e) => AttemptOutcome::Terminal(M365Error::Http(e)),
                     }
                 }
-                Err(e) => AttemptOutcome::Retryable {
-                    retry_after: None,
-                    error: M365Error::Http(e),
-                },
+                // Only a connect-phase failure proves the request never
+                // reached Graph.
+                Err(e) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&e);
+                    AttemptOutcome::retryable_if_replayable(M365Error::Http(e), None, replayable)
+                }
             }
         })
         .await
@@ -972,6 +1013,7 @@ impl M365Client {
     async fn execute_bytes(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
+        replay_safe: bool,
     ) -> M365Result<Vec<u8>> {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -986,10 +1028,15 @@ impl M365Client {
                     match self.handle_error_status(status, &response, attempt).await {
                         ErrorAction::Return(err) => return AttemptOutcome::Terminal(err),
                         ErrorAction::Retry(err) => {
-                            return AttemptOutcome::Retryable {
-                                retry_after: err.retry_after(),
-                                error: err,
-                            };
+                            // 429 stays retryable — Graph throttled it WITHOUT
+                            // performing the work. A 5xx did reach Graph.
+                            let replayable = replay_safe || err.replay_is_safe();
+                            let retry_after = err.retry_after();
+                            return AttemptOutcome::retryable_if_replayable(
+                                err,
+                                retry_after,
+                                replayable,
+                            );
                         }
                         ErrorAction::Success => {}
                     }
@@ -999,10 +1046,12 @@ impl M365Client {
                         Err(e) => AttemptOutcome::Terminal(M365Error::Http(e)),
                     }
                 }
-                Err(e) => AttemptOutcome::Retryable {
-                    retry_after: None,
-                    error: M365Error::Http(e),
-                },
+                // Only a connect-phase failure proves the request never
+                // reached Graph.
+                Err(e) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&e);
+                    AttemptOutcome::retryable_if_replayable(M365Error::Http(e), None, replayable)
+                }
             }
         })
         .await
@@ -1011,6 +1060,7 @@ impl M365Client {
     async fn execute_text(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
+        replay_safe: bool,
     ) -> M365Result<String> {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -1025,10 +1075,15 @@ impl M365Client {
                     match self.handle_error_status(status, &response, attempt).await {
                         ErrorAction::Return(err) => return AttemptOutcome::Terminal(err),
                         ErrorAction::Retry(err) => {
-                            return AttemptOutcome::Retryable {
-                                retry_after: err.retry_after(),
-                                error: err,
-                            };
+                            // 429 stays retryable — Graph throttled it WITHOUT
+                            // performing the work. A 5xx did reach Graph.
+                            let replayable = replay_safe || err.replay_is_safe();
+                            let retry_after = err.retry_after();
+                            return AttemptOutcome::retryable_if_replayable(
+                                err,
+                                retry_after,
+                                replayable,
+                            );
                         }
                         ErrorAction::Success => {}
                     }
@@ -1038,10 +1093,12 @@ impl M365Client {
                         Err(e) => AttemptOutcome::Terminal(M365Error::Http(e)),
                     }
                 }
-                Err(e) => AttemptOutcome::Retryable {
-                    retry_after: None,
-                    error: M365Error::Http(e),
-                },
+                // Only a connect-phase failure proves the request never
+                // reached Graph.
+                Err(e) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&e);
+                    AttemptOutcome::retryable_if_replayable(M365Error::Http(e), None, replayable)
+                }
             }
         })
         .await
@@ -1050,6 +1107,7 @@ impl M365Client {
     async fn execute_no_content(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
+        replay_safe: bool,
     ) -> M365Result<()> {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -1063,17 +1121,20 @@ impl M365Client {
                     let status = response.status();
                     match self.handle_error_status(status, &response, attempt).await {
                         ErrorAction::Return(err) => AttemptOutcome::Terminal(err),
-                        ErrorAction::Retry(err) => AttemptOutcome::Retryable {
-                            retry_after: err.retry_after(),
-                            error: err,
-                        },
+                        ErrorAction::Retry(err) => {
+                            let replayable = replay_safe || err.replay_is_safe();
+                            let retry_after = err.retry_after();
+                            AttemptOutcome::retryable_if_replayable(err, retry_after, replayable)
+                        }
                         ErrorAction::Success => AttemptOutcome::Success(()),
                     }
                 }
-                Err(e) => AttemptOutcome::Retryable {
-                    retry_after: None,
-                    error: M365Error::Http(e),
-                },
+                // Only a connect-phase failure proves the request never
+                // reached Graph.
+                Err(e) => {
+                    let replayable = replay_safe || !transport_error_reached_service(&e);
+                    AttemptOutcome::retryable_if_replayable(M365Error::Http(e), None, replayable)
+                }
             }
         })
         .await
@@ -1195,660 +1256,6 @@ enum ErrorAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path, query_param},
-    };
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_messages() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [
-                    { "id": "msg_1", "subject": "Hello" },
-                    { "id": "msg_2", "subject": "World" }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let result = client
-            .list_messages("me", None, None, None, None)
-            .await
-            .unwrap();
-        assert_eq!(result.value.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_messages_explicit_user_keeps_users_prefix() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/users/alice@contoso.com/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [{ "id": "msg_9", "subject": "Hello Alice" }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let result = client
-            .list_messages("alice@contoso.com", None, None, None, None)
-            .await
-            .unwrap();
-        assert_eq!(result.value.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_message() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/messages/msg_123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "msg_123",
-                "subject": "Test Message"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let result = client.get_message("me", "msg_123").await.unwrap();
-        assert_eq!(result["id"], "msg_123");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_send_message() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/me/sendMail"))
-            .respond_with(ResponseTemplate::new(202))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let message = serde_json::json!({
-            "subject": "Hello",
-            "body": { "contentType": "Text", "content": "Hi" },
-            "toRecipients": [{ "emailAddress": { "address": "bob@contoso.com" } }]
-        });
-
-        client.send_message("me", &message).await.unwrap();
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_search_messages() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/messages"))
-            .and(query_param("$search", "\"project status\""))
-            .and(query_param("$top", "10"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [
-                    { "id": "msg_1", "subject": "Project status" }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let result = client
-            .search_messages("me", "project status", Some(10), None)
-            .await
-            .unwrap();
-        assert_eq!(result.value.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_reply_message() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/me/messages/msg_123/reply"))
-            .respond_with(ResponseTemplate::new(202))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        client
-            .reply_message("me", "msg_123", Some("Thanks!"), None)
-            .await
-            .unwrap();
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_delta_sync_urlencodes_delta_token() {
-        let mock_server = MockServer::start().await;
-        let delta_token = "opaque/with?reserved=1&two";
-
-        Mock::given(method("GET"))
-            .and(path("/me/messages/delta"))
-            .and(query_param("$deltatoken", delta_token))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [{ "id": "msg_1" }],
-                "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=next-token"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let result = client
-            .delta_sync("/me/messages", Some(delta_token))
-            .await
-            .unwrap();
-
-        assert_eq!(result.value.len(), 1);
-        assert_eq!(
-            result.delta_link.as_deref(),
-            Some("https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=next-token")
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_forward_message() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/me/messages/msg_123/forward"))
-            .respond_with(ResponseTemplate::new(202))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let recipients = vec![serde_json::json!({
-            "emailAddress": { "address": "alice@contoso.com" }
-        })];
-        client
-            .forward_message("me", "msg_123", Some("FYI"), &recipients)
-            .await
-            .unwrap();
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_attachments() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/messages/msg_123/attachments"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [
-                    { "id": "att_1", "name": "report.pdf" }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let result = client
-            .list_attachments("me", "msg_123", None, None)
-            .await
-            .unwrap();
-        assert_eq!(result.value.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_add_attachment() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/me/messages/msg_123/attachments"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "id": "att_1",
-                "name": "report.pdf"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let attachment = serde_json::json!({
-            "@odata.type": "#microsoft.graph.fileAttachment",
-            "name": "report.pdf",
-            "contentType": "application/pdf",
-            "contentBytes": "dGVzdA=="
-        });
-        let result = client
-            .add_attachment("me", "msg_123", &attachment)
-            .await
-            .unwrap();
-        assert_eq!(result["id"], "att_1");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_items() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/drive/root/children"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [
-                    { "id": "item_1", "name": "Documents", "folder": { "childCount": 5 } },
-                    { "id": "item_2", "name": "photo.jpg", "file": { "mimeType": "image/jpeg" } }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let result = client.list_items("me", None).await.unwrap();
-        assert_eq!(result.value.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_items_normalizes_and_encodes_path() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/drive/root:/Shared%20Documents:/children"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [{ "id": "item_1", "name": "Quarterly Report.docx" }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let result = client
-            .list_items("me", Some("/Shared Documents/"))
-            .await
-            .unwrap();
-        assert_eq!(result.value.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_download_file_as_pdf() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/drive/items/doc-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "doc-1",
-                "name": "Quarterly Report.docx",
-                "size": 5120
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/drive/items/doc-1/content"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"%PDF-test".to_vec()))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let (content, metadata) = client.download_file_as("me", "doc-1", "pdf").await.unwrap();
-        assert_eq!(content, b"%PDF-test".to_vec());
-        assert_eq!(metadata["name"], "Quarterly Report.docx");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_update_item_content() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("PUT"))
-            .and(path("/me/drive/items/doc-1/content"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "doc-1",
-                "name": "Updated Report.docx",
-                "size": 1280
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let item = client
-            .update_item_content("me", "doc-1", b"updated content")
-            .await
-            .unwrap();
-        assert_eq!(item["name"], "Updated Report.docx");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_upload_file_normalizes_and_encodes_path() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("PUT"))
-            .and(path(
-                "/me/drive/root:/Documents/Meeting%20Notes.docx:/content",
-            ))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "id": "doc-9",
-                "name": "Meeting Notes.docx",
-                "size": 1024
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let item = client
-            .upload_file("me", "/Documents/Meeting Notes.docx", b"payload")
-            .await
-            .unwrap();
-        assert_eq!(item["name"], "Meeting Notes.docx");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_events() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/events"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [
-                    { "id": "evt_1", "subject": "Standup" }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let result = client.list_events("me", None, None).await.unwrap();
-        assert_eq!(result.value.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_task_lists() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/todo/lists"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [
-                    { "id": "list_1", "displayName": "Tasks" }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let result = client.list_task_lists("me").await.unwrap();
-        assert_eq!(result.value.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_notebooks() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/onenote/notebooks"))
-            .and(query_param("$top", "10"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "value": [
-                    { "id": "notebook_1", "displayName": "Engineering" }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let result = client.list_notebooks("me", Some(10)).await.unwrap();
-        assert_eq!(result.value.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_page_content() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/onenote/pages/page_123/content"))
-            .and(query_param("includeIDs", "true"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/html")
-                    .set_body_string("<html><body><p>Hello OneNote</p></body></html>"),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let result = client
-            .get_page_content("me", "page_123", true)
-            .await
-            .unwrap();
-        assert!(result.contains("Hello OneNote"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_page() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/me/onenote/sections/section_123/pages"))
-            .and(header("content-type", "text/html"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "id": "page_123",
-                "title": "Daily Notes"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let result = client
-            .create_page(
-                "me",
-                "section_123",
-                "<html><body><p>Daily Notes</p></body></html>",
-            )
-            .await
-            .unwrap();
-        assert_eq!(result["id"], "page_123");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_update_page() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("PATCH"))
-            .and(path("/me/onenote/pages/page_123/content"))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let commands = vec![PageContentCommand {
-            target: "body".into(),
-            action: "append".into(),
-            position: None,
-            content: Some("<p>Follow-up</p>".into()),
-        }];
-        client
-            .update_page("me", "page_123", &commands)
-            .await
-            .unwrap();
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_subscription() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/subscriptions"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "id": "sub_123",
-                "resource": "/me/messages",
-                "changeType": "created",
-                "expirationDateTime": "2026-03-04T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        let sub = serde_json::json!({
-            "changeType": "created",
-            "notificationUrl": "https://webhook.example.com",
-            "resource": "/me/messages",
-            "expirationDateTime": "2026-03-04T00:00:00Z"
-        });
-
-        let result = client.create_subscription(&sub).await.unwrap();
-        assert_eq!(result["id"], "sub_123");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/messages"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("bad_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri())
-            .with_retry_config(0);
-
-        let result = client.list_messages("me", None, None, None, None).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            M365Error::Api { status_code, .. } => assert_eq!(status_code, Some(401)),
-            e => panic!("Expected Api error with 401, got: {e:?}"),
-        }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/messages/nonexistent"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri())
-            .with_retry_config(0);
-
-        let result = client.get_message("me", "nonexistent").await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            M365Error::Api { status_code, .. } => assert_eq!(status_code, Some(404)),
-            e => panic!("Expected Api error with 404, got: {e:?}"),
-        }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/me/messages"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri())
-            .with_retry_config(0);
-
-        let result = client.list_messages("me", None, None, None, None).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), M365Error::RateLimit { .. }));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_health_check_with_credential_id_header() {
-        let mock_server = MockServer::start().await;
-        let credential_id = CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap();
-
-        Mock::given(method("GET"))
-            .and(path("/me"))
-            .and(header("x-fcp-credential-id", credential_id.to_string()))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "user-1",
-                "userPrincipalName": "user@contoso.com"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new_with_auth(M365Auth::CredentialId(credential_id))
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-        let payload = client.health_check().await.unwrap();
-        assert_eq!(payload["id"], "user-1");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_delete_event() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("DELETE"))
-            .and(path("/me/events/evt_123"))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&mock_server)
-            .await;
-
-        let client = M365Client::new("test_token")
-            .unwrap()
-            .with_api_url(&mock_server.uri());
-
-        client.delete_event("me", "evt_123").await.unwrap();
-    }
 
     #[test]
     fn test_error_is_retryable() {

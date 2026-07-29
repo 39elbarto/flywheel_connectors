@@ -5,6 +5,10 @@ SCRIPT_NAME="e2e_raptorq_degraded_network_recovery"
 SEED="0xD3GRAD3D"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR="${RAPTORQ_DEGRADED_TARGET_DIR:-/tmp/fcp-raptorq-degraded-network}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 EXPECTED_FAILURE=""
 ACTUAL_FAILURE=""
@@ -18,19 +22,74 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
   fi
-  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- "$@"
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+rch_remote_summary_count() {
+  local execution_log="$1"
+
+  if [[ ! -f "${execution_log}" ]]; then
+    printf '0'
+    return 0
+  fi
+
+  grep -Ec '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" || true
+}
+
+run_cargo_to_log() {
+  local execution_log="$1"
+  local mode="$2"
+  shift 2
+
+  if [[ "${mode}" == "append" ]]; then
+    run_cargo "$@" >> "${execution_log}" 2>&1
+  else
+    run_cargo "$@" > "${execution_log}" 2>&1
+  fi
+}
+
+run_cargo_logged() {
+  local execution_log="$1"
+  shift
+
+  run_cargo_to_log "${execution_log}" "write" "$@" || return
+  rch_remote_summary_present "${execution_log}"
+}
+
+run_cargo_logged_append() {
+  local execution_log="$1"
+  shift
+  local remote_count_before remote_count_after
+
+  remote_count_before="$(rch_remote_summary_count "${execution_log}")"
+
+  run_cargo_to_log "${execution_log}" "append" "$@" || return
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  remote_count_after="$(rch_remote_summary_count "${execution_log}")"
+  if (( remote_count_after > remote_count_before )); then
+    return 0
+  fi
+
+  echo "Missing accepted remote rch summary in appended command for ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
 }
 
 now_ms() {
@@ -171,7 +230,8 @@ step_prepare() {
 step_degraded_control_plane() {
   local execution_log="${OUT_DIR}/degraded_control_plane.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_degraded_control_plane_roundtrip -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration meshnode_degraded_control_plane_roundtrip -- --nocapture || return
   grep -q "meshnode_degraded_control_plane_roundtrip ... ok" "${execution_log}" || {
     echo "Degraded control plane roundtrip did not pass in ${execution_log}" >&2
     exit 1
@@ -183,7 +243,8 @@ step_degraded_control_plane() {
 step_decode_status_stops_transfer() {
   local execution_log="${OUT_DIR}/decode_status_feedback.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_decode_status_stops_transfer -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration meshnode_decode_status_stops_transfer -- --nocapture || return
   grep -q "meshnode_decode_status_stops_transfer ... ok" "${execution_log}" || {
     echo "Decode status feedback did not pass in ${execution_log}" >&2
     exit 1
@@ -195,7 +256,8 @@ step_decode_status_stops_transfer() {
 step_symbol_ack_stops_transfer() {
   local execution_log="${OUT_DIR}/symbol_ack_stops.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_symbol_ack_stops_transfer -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration meshnode_symbol_ack_stops_transfer -- --nocapture || return
   grep -q "meshnode_symbol_ack_stops_transfer ... ok" "${execution_log}" || {
     echo "Symbol ack stops transfer did not pass in ${execution_log}" >&2
     exit 1
@@ -207,7 +269,8 @@ step_symbol_ack_stops_transfer() {
 step_quarantine_enforcement() {
   local execution_log="${OUT_DIR}/quarantine_enforcement.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_quarantined -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration meshnode_quarantined -- --nocapture || return
 
   local pass_count
   pass_count=$(grep -c "test .* ok" "${execution_log}" || true)
@@ -224,9 +287,12 @@ step_quarantine_enforcement() {
 step_symbol_request_degraded() {
   local execution_log="${OUT_DIR}/symbol_request_degraded.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_symbol_request_missing_object -- --nocapture > "${execution_log}" 2>&1
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_symbol_request_no_symbols -- --nocapture >> "${execution_log}" 2>&1
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_symbol_request_ignores_unavailable_hints -- --nocapture >> "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration meshnode_symbol_request_missing_object -- --nocapture || return
+  run_cargo_logged_append "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration meshnode_symbol_request_no_symbols -- --nocapture || return
+  run_cargo_logged_append "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration meshnode_symbol_request_ignores_unavailable_hints -- --nocapture || return
 
   local pass_count
   pass_count=$(grep -c "test .* ok" "${execution_log}" || true)
@@ -243,7 +309,8 @@ step_symbol_request_degraded() {
 step_gossip_partition_recovery() {
   local execution_log="${OUT_DIR}/gossip_partition.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration test_gossip_partition_prune_and_rejoin -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration test_gossip_partition_prune_and_rejoin -- --nocapture || return
   grep -q "test_gossip_partition_prune_and_rejoin ... ok" "${execution_log}" || {
     echo "Gossip partition recovery did not pass in ${execution_log}" >&2
     exit 1
@@ -255,7 +322,8 @@ step_gossip_partition_recovery() {
 step_unauthenticated_bounds() {
   local execution_log="${OUT_DIR}/unauthenticated_bounds.execution.log"
 
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_unauthenticated_bounds_enforced -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" \
+    test -p fcp-mesh --test mesh_integration meshnode_unauthenticated_bounds_enforced -- --nocapture || return
   grep -q "meshnode_unauthenticated_bounds_enforced ... ok" "${execution_log}" || {
     echo "Unauthenticated bounds test did not pass in ${execution_log}" >&2
     exit 1
@@ -263,7 +331,7 @@ step_unauthenticated_bounds() {
   STEP_CONTEXT='{"category":"unauthenticated_bounds","outcome":"degraded_access_limits_enforced"}'
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 run_step "prepare_output" 1 "[]" "" "{}" step_prepare
 run_step \
@@ -316,6 +384,7 @@ run_step \
   '{"purpose":"degraded_access_budget_enforcement"}' \
   step_unauthenticated_bounds
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" \
+  run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

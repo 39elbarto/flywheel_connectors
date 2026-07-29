@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:3212739e38cdad82f6c67da7d528e0a8ae4cc5fa4cd06c3fc4f85bf7b37bb373"
+interface_hash = "blake3-256:fcp.interface.v2:03af9e040d13d590435dd4ee9cc90edc223de9583217f9969eb3cc0ecaee3f1a"
 
 [connector]
 id = "fcp.google-calendar"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Google Calendar (events, calendars, free/busy)"
 archetypes = ["operational", "streaming"]
 format = "wasi"
+status = "proven"
 
 [connector.state]
 model = "singleton_writer"

@@ -5,6 +5,7 @@
 
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 
+use std::collections::BTreeSet;
 use std::sync::Once;
 use std::time::Duration;
 
@@ -12,7 +13,8 @@ use fcp_mastodon::client::MastodonClient;
 use fcp_mastodon::connector::MastodonConnector;
 use fcp_mastodon::error::MastodonError;
 use fcp_prelude::{ApprovalMode, FcpConnector, IdempotencyClass, RiskLevel, SafetyTier};
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -103,6 +105,29 @@ fn operation_network_constraints<'a>(
         .and_then(|operation| operation.get("network_constraints"))
         .and_then(toml::Value::as_table)
         .unwrap_or_else(|| panic!("{operation_key} should define network_constraints"))
+}
+
+fn operation_ai_hints<'a>(manifest: &'a toml::Value, operation_key: &str) -> &'a toml::Table {
+    manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get("ai_hints"))
+        .and_then(toml::Value::as_table)
+        .expect("operation should define ai_hints")
+}
+
+fn assert_manifest_operation_inventory(operations: &toml::Table) {
+    let expected = EXPECTED_MANIFEST_SCHEMA_OPS
+        .iter()
+        .map(|(operation_key, _operation_id)| *operation_key)
+        .collect::<BTreeSet<_>>();
+    let actual = operations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual, expected,
+        "manifest operation set should stay aligned with expected operation coverage"
+    );
 }
 
 fn network_string_list<'a>(constraints: &'a toml::Table, key: &str) -> Vec<&'a str> {
@@ -248,6 +273,53 @@ fn instance() -> serde_json::Value {
         "title": "FCP Mastodon",
         "version": "4.2.12"
     })
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_uses_v2_instance_endpoint() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/instance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "title": "Test Instance",
+            "version": "4.2.0"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    let result = client.health_check().await;
+    assert!(result.is_ok());
+    let instance = result.unwrap();
+    assert_eq!(instance.title, "Test Instance");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_falls_back_to_v1_instance_endpoint() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/instance"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/instance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "uri": "test.instance",
+            "title": "Test v1 Instance",
+            "version": "3.5.0"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    let result = client.health_check().await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().title, "Test v1 Instance");
 }
 
 #[fcp_async_core::runtime::test]
@@ -664,6 +736,72 @@ fn operation_catalog_preserves_risk_approval_and_event_metadata() {
 }
 
 #[test]
+fn manifest_ai_hints_cover_all_operations() {
+    init_logging();
+
+    let manifest = mastodon_manifest();
+    let operations = manifest_operations(&manifest);
+    assert_manifest_operation_inventory(operations);
+
+    for (operation_key, operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
+        let ai_hints = operation_ai_hints(&manifest, operation_key);
+        let when_to_use = ai_hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .expect("ai_hints.when_to_use should be a string");
+        assert!(
+            !when_to_use.trim().is_empty(),
+            "{operation_id} ai_hints.when_to_use should be non-empty"
+        );
+
+        let common_mistakes = ai_hints
+            .get("common_mistakes")
+            .and_then(toml::Value::as_array)
+            .expect("ai_hints.common_mistakes should be an array");
+        assert!(
+            common_mistakes.len() >= 2,
+            "{operation_id} should document at least two common mistakes"
+        );
+        for mistake in common_mistakes {
+            let mistake = mistake
+                .as_str()
+                .expect("ai_hints.common_mistakes entries should be strings");
+            assert!(
+                !mistake.trim().is_empty(),
+                "{operation_id} common mistakes should be non-empty"
+            );
+        }
+
+        let examples = ai_hints
+            .get("examples")
+            .and_then(toml::Value::as_array)
+            .expect("ai_hints.examples should be an array");
+        assert!(
+            !examples.is_empty(),
+            "{operation_id} should include at least one ai_hints example"
+        );
+        for example in examples {
+            let example = example
+                .as_str()
+                .expect("ai_hints.examples entries should be strings");
+            let lowered = example.to_ascii_lowercase();
+            for forbidden in ["api_key", "bearer", "password", "secret", "token"] {
+                assert!(
+                    !lowered.contains(forbidden),
+                    "{operation_id} example should not contain secret-shaped text: {forbidden}"
+                );
+            }
+            let parsed = serde_json::from_str::<Value>(example)
+                .expect("ai_hints examples should be valid JSON payloads");
+            assert!(
+                parsed.is_object(),
+                "{operation_id} ai_hints examples should be JSON objects"
+            );
+        }
+    }
+}
+
+#[test]
 fn manifest_operation_schemas_compile_and_validate_core_payloads() {
     init_logging();
 
@@ -803,11 +941,7 @@ fn manifest_declares_instance_scoped_network_constraints() {
 
     let manifest = mastodon_manifest();
     let operations = manifest_operations(&manifest);
-    assert_eq!(
-        operations.len(),
-        EXPECTED_MANIFEST_SCHEMA_OPS.len(),
-        "manifest operation set should stay aligned with expected operation coverage"
-    );
+    assert_manifest_operation_inventory(operations);
     for (operation_key, _operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
         assert_instance_egress_constraints(operation_network_constraints(&manifest, operation_key));
     }
@@ -827,4 +961,102 @@ fn debug_output_redacts_mastodon_secrets() {
     let debug_client = format!("{client:?}");
     assert!(!debug_client.contains("super-secret-mastodon-token"));
     assert!(debug_client.contains("[REDACTED]"));
+}
+
+// ── Replay safety on retry (br-kxd3e) ────────────────────────────────
+//
+// A 5xx or a timeout can both be reported after Mastodon already created the
+// status, so a bare retry posts the toot twice. Mastodon deduplicates on
+// `Idempotency-Key` for POST /statuses, which makes the retry genuinely safe
+// rather than merely refused.
+//
+// These pin the DISTINCTION: asserting only "the call succeeds" would pass
+// with a per-attempt key, which provides exactly zero protection.
+
+fn retrying_client(server: &MockServer) -> MastodonClient {
+    MastodonClient::new(
+        &server.uri(),
+        TEST_TOKEN,
+        HttpRetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            max_delay_ms: 5,
+            jitter_enabled: false,
+        },
+    )
+    .expect("wiremock URI should build a Mastodon client")
+}
+
+fn idempotency_keys_of(requests: &[wiremock::Request]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|r| {
+            r.headers
+                .get("idempotency-key")
+                .map(|v| v.to_str().expect("header is ASCII").to_string())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn status_body() -> Value {
+    status("109", "<p>hello</p>")
+}
+
+#[fcp_async_core::runtime::test]
+async fn post_status_presents_one_stable_idempotency_key_across_attempts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/statuses"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/statuses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(status_body()))
+        .mount(&server)
+        .await;
+
+    retrying_client(&server)
+        .post_status(&test_runtime(), "hello", None, None, false, None)
+        .await
+        .expect("the retry should succeed");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 2, "the 503 should have been retried");
+
+    let keys = idempotency_keys_of(&requests);
+    assert!(
+        !keys[0].is_empty(),
+        "POST /statuses must carry Idempotency-Key so the retry cannot post twice"
+    );
+    assert_eq!(
+        keys[0], keys[1],
+        "both attempts must present the SAME key — a per-attempt key would let \
+         Mastodon treat the retry as a new status and publish it twice"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn favourite_sends_no_idempotency_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/statuses/109/favourite"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(status_body()))
+        .mount(&server)
+        .await;
+
+    retrying_client(&server)
+        .favourite_status(&test_runtime(), "109")
+        .await
+        .expect("favourite should succeed");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        idempotency_keys_of(&requests)[0],
+        "",
+        "Mastodon honours Idempotency-Key only on POST /statuses; favourite is \
+         safe because the flag is already set on a replay"
+    );
 }

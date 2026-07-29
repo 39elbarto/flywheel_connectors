@@ -6,18 +6,21 @@ use fcp_prelude::ApprovalScope::Execution;
 use fcp_prelude::{
     AgentHint, ApprovalMode, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId,
     CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
-    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    HandshakeRequest, HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId,
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
     SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
     client::{DEFAULT_BASE_URL, S3Auth, S3Client},
     error::S3Error,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Validated configuration for the S3 connector.
 struct S3Config {
@@ -150,6 +153,19 @@ impl S3Connector {
         }
     }
 
+    /// Return the connector instance ID used for bound capability tokens.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
+    }
+
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -194,6 +210,14 @@ impl S3Connector {
             return Err(FcpError::NotConfigured);
         }
 
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -217,7 +241,7 @@ impl S3Connector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:s3-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -1277,7 +1301,11 @@ mod tests {
     use fcp_prelude::{CapabilityConstraints, ZoneId};
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+        instance_id: &InstanceId,
+    ) -> CapabilityToken {
         let cap = match op {
             "s3.get_object"
             | "s3.head_object"
@@ -1304,6 +1332,7 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
             .unwrap()
+            .target_instance(instance_id.as_str())
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -1352,6 +1381,16 @@ mod tests {
         assert_eq!(result["status"], "accepted");
     }
 
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(S3Connector::manifest_hash(), expected);
+        assert_ne!(S3Connector::manifest_hash(), "sha256:s3-connector-v1");
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake_requires_configuration() {
         let mut connector = S3Connector::new();
@@ -1380,7 +1419,7 @@ mod tests {
         let mut connector = S3Connector::new();
         let signing_key = Ed25519SigningKey::generate();
 
-        let token = generate_valid_token(&signing_key, "s3.get_object");
+        let token = generate_valid_token(&signing_key, "s3.get_object", connector.instance_id());
         let result = connector
             .handle_invoke(json!({
                 "operation": "s3.get_object",
@@ -1400,7 +1439,7 @@ mod tests {
         configure_for_tests(&mut connector).await;
         handshake_for_tests(&mut connector, &signing_key).await;
 
-        let token = generate_valid_token(&signing_key, "s3.put_object");
+        let token = generate_valid_token(&signing_key, "s3.put_object", connector.instance_id());
         let result = connector
             .handle_invoke(json!({
                 "operation": "s3.put_object",
@@ -1427,7 +1466,7 @@ mod tests {
             OperationId::from_static("s3.list_buckets"),
             ZoneId::work(),
             json!({}),
-            generate_valid_token(&signing_key, "s3.list_buckets"),
+            generate_valid_token(&signing_key, "s3.list_buckets", connector.instance_id()),
         );
         let result = connector
             .handle_simulate(serde_json::to_value(request).unwrap())
@@ -1449,7 +1488,7 @@ mod tests {
             OperationId::from_static("s3.put_object"),
             ZoneId::work(),
             json!({ "bucket": "bucket", "key": "key", "body": "body" }),
-            generate_valid_token(&signing_key, "s3.list_buckets"),
+            generate_valid_token(&signing_key, "s3.list_buckets", connector.instance_id()),
         );
         let result = connector
             .handle_simulate(serde_json::to_value(request).unwrap())
@@ -1472,7 +1511,7 @@ mod tests {
             OperationId::from_static("s3.put_object"),
             ZoneId::work(),
             json!({ "bucket": "bucket", "key": "key" }),
-            generate_valid_token(&signing_key, "s3.put_object"),
+            generate_valid_token(&signing_key, "s3.put_object", connector.instance_id()),
         );
         let result = connector
             .handle_simulate(serde_json::to_value(request).unwrap())
@@ -1499,7 +1538,7 @@ mod tests {
             OperationId::from_static("s3.unknown"),
             ZoneId::work(),
             json!({}),
-            generate_valid_token(&signing_key, "s3.unknown"),
+            generate_valid_token(&signing_key, "s3.unknown", connector.instance_id()),
         );
         let result = connector
             .handle_simulate(serde_json::to_value(request).unwrap())
@@ -1526,7 +1565,7 @@ mod tests {
             OperationId::from_static("s3.delete_object"),
             ZoneId::work(),
             json!({ "bucket": "bucket", "key": "key" }),
-            generate_valid_token(&signing_key, "s3.delete_object"),
+            generate_valid_token(&signing_key, "s3.delete_object", connector.instance_id()),
         );
         let result = connector
             .handle_simulate(serde_json::to_value(request).unwrap())

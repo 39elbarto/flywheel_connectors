@@ -844,6 +844,29 @@ async fn error_scholar_500() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn error_scholar_200_empty_body_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/paper/search.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri(), &server.uri()).await;
+
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "arxiv.search_semantic",
+            "input": {"query": "test"}
+        }))
+        .await;
+
+    println!("RESULT IS: {result:?}");
+
+    assert!(result.is_ok());
+}
+
 // ── Unknown op / Simulate ───────────────────────────────────────────
 
 #[fcp_async_core::runtime::test]

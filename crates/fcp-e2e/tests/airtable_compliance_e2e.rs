@@ -216,6 +216,16 @@ fn reference_manifest_with_hash() -> String {
     )
 }
 
+/// Deterministic instance id shared between the handshake's
+/// `requested_instance_id` and the capability token's `target_instance`.
+/// The connector binds its verifier to the handshake instance id (dja9u
+/// typestate ratchet: `verify_bound`), so the token MUST target the same id.
+const TEST_INSTANCE_ID: &str = "inst_e2e_test_fixture";
+
+fn test_instance_id() -> InstanceId {
+    InstanceId::try_from(TEST_INSTANCE_ID.to_string()).expect("valid test instance id")
+}
+
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
@@ -229,7 +239,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(test_instance_id()),
     }
 }
 
@@ -253,7 +263,9 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        .target_instance(TEST_INSTANCE_ID)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)

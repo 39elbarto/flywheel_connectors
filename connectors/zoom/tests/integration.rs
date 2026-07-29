@@ -49,7 +49,11 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &'static str,
+) -> CapabilityToken {
     let capability = match op {
         OP_MEETINGS_LIST => "zoom.meetings.read",
         OP_MEETINGS_DELETE => "zoom.meetings.write",
@@ -69,8 +73,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints should serialize into capability token")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -260,7 +266,7 @@ async fn invoke_meetings_list_preserves_pagination_evidence() {
                 "page_size": 2,
                 "next_page_token": "next-1"
             }),
-            generate_valid_token(&signing_key, OP_MEETINGS_LIST),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_MEETINGS_LIST),
         ))
         .await
         .unwrap();
@@ -291,7 +297,7 @@ async fn invoke_dangerous_meetings_delete_preserves_artifact_evidence() {
         .invoke(invoke_req(
             OP_MEETINGS_DELETE,
             json!({ "meeting_id": "987654321" }),
-            generate_valid_token(&signing_key, OP_MEETINGS_DELETE),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_MEETINGS_DELETE),
         ))
         .await
         .unwrap();
@@ -343,5 +349,84 @@ fn introspection_emits_v3_compliance_evidence() {
     println!(
         "zoom_introspection_evidence={}",
         serde_json::to_string_pretty(&value).unwrap()
+    );
+}
+
+// ============================================================================
+// Replay safety on retry (br-kxd3e)
+// ============================================================================
+//
+// Zoom has no idempotency key, so a 5xx retry on create_meeting schedules a
+// second meeting and sends a second set of invitations.
+//
+// The token-mint step inside this helper is deliberately NOT gated: if minting
+// the OAuth token failed, the create request was never sent, so retrying it is
+// safe. Only the create request itself is.
+
+fn zoom_replay_client(server: &MockServer) -> fcp_zoom::client::ZoomClient {
+    fcp_zoom::client::ZoomClient::new(
+        &server.uri(),
+        &server.uri(),
+        "acct",
+        "cid",
+        "csecret",
+        fcp_sdk::migration::HttpRetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            max_delay_ms: 5,
+            jitter_enabled: false,
+        },
+    )
+    .expect("wiremock URI should build a Zoom client")
+}
+
+async fn mount_zoom_token(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "tok",
+            "token_type": "bearer",
+            "expires_in": 3600
+        })))
+        .mount(server)
+        .await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_meeting_is_not_retried_after_a_5xx() {
+    let server = MockServer::start().await;
+    mount_zoom_token(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/users/me/meetings"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let runtime = fcp_sdk::ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
+    let request = fcp_zoom::types::CreateMeetingRequest {
+        topic: "Standup".into(),
+        meeting_type: Some(2),
+        start_time: None,
+        duration: None,
+        timezone: None,
+        agenda: None,
+        password: None,
+    };
+    let result = zoom_replay_client(&server)
+        .create_meeting(&runtime, "me", &request)
+        .await;
+    assert!(result.is_err());
+
+    let meeting_posts = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .iter()
+        .filter(|r| r.url.path().ends_with("/meetings"))
+        .count();
+    assert_eq!(
+        meeting_posts, 1,
+        "a 503 means Zoom received the create — retrying schedules a SECOND \
+         meeting and sends a second set of invitations"
     );
 }

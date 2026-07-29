@@ -12,6 +12,7 @@ pub const OP_SEND_GROUP: &str = "qq.messages.send_group";
 pub const OP_SEND_C2C: &str = "qq.messages.send_c2c";
 pub const OP_GET_GATEWAY: &str = "qq.gateway.get";
 pub const OP_GATEWAY_PROJECT_EVENT: &str = "qq.gateway.project_event";
+pub const OP_GATEWAY_DRAIN_EVENTS: &str = "qq.gateway.drain_events";
 pub const OP_HEALTH: &str = "qq.health";
 pub const OP_EVENTS_NORMALIZE: &str = "qq.events.normalize";
 
@@ -144,6 +145,8 @@ impl QqAccessPolicyMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QqInboundPolicyConfig {
+    pub channel_policy: QqAccessPolicyMode,
+    pub channel_allow_from: Vec<String>,
     pub dm_policy: QqAccessPolicyMode,
     pub dm_allow_from: Vec<String>,
     pub group_policy: QqAccessPolicyMode,
@@ -151,11 +154,14 @@ pub struct QqInboundPolicyConfig {
     pub group_require_mention: bool,
     pub bot_user_id: Option<String>,
     pub max_attachment_bytes: Option<u64>,
+    pub allowed_attachment_content_types: Vec<String>,
 }
 
 impl Default for QqInboundPolicyConfig {
     fn default() -> Self {
         Self {
+            channel_policy: QqAccessPolicyMode::Open,
+            channel_allow_from: Vec::new(),
             dm_policy: QqAccessPolicyMode::Open,
             dm_allow_from: Vec::new(),
             group_policy: QqAccessPolicyMode::Open,
@@ -163,6 +169,7 @@ impl Default for QqInboundPolicyConfig {
             group_require_mention: true,
             bot_user_id: None,
             max_attachment_bytes: None,
+            allowed_attachment_content_types: Vec::new(),
         }
     }
 }
@@ -170,8 +177,15 @@ impl Default for QqInboundPolicyConfig {
 impl QqInboundPolicyConfig {
     #[must_use]
     pub fn normalized(mut self) -> Self {
+        normalize_string_vec(&mut self.channel_allow_from);
         normalize_string_vec(&mut self.dm_allow_from);
         normalize_string_vec(&mut self.group_allow_from);
+        normalize_string_vec(&mut self.allowed_attachment_content_types);
+        for content_type in &mut self.allowed_attachment_content_types {
+            content_type.make_ascii_lowercase();
+        }
+        self.allowed_attachment_content_types.sort();
+        self.allowed_attachment_content_types.dedup();
         trim_optional_string(&mut self.bot_user_id);
         self
     }
@@ -185,9 +199,11 @@ pub struct QqGatewayRuntimeConfig {
     pub restore_sequence: Option<u64>,
     pub heartbeat_interval_ms: u64,
     pub reconnect_backoff_ms: u64,
+    pub max_reconnect_backoff_ms: u64,
     pub max_reconnect_attempts: u32,
     pub dedupe_window_size: usize,
     pub max_queue_depth: usize,
+    pub max_peer_queue_depth: usize,
     pub policy: QqInboundPolicyConfig,
 }
 
@@ -199,9 +215,11 @@ impl Default for QqGatewayRuntimeConfig {
             restore_sequence: None,
             heartbeat_interval_ms: 45_000,
             reconnect_backoff_ms: 1_000,
+            max_reconnect_backoff_ms: 30_000,
             max_reconnect_attempts: 5,
             dedupe_window_size: 1_024,
             max_queue_depth: 128,
+            max_peer_queue_depth: 32,
             policy: QqInboundPolicyConfig::default(),
         }
     }
@@ -236,15 +254,34 @@ pub struct QqGatewayRuntimeSnapshot {
     pub heartbeat_ack_count: u64,
     pub reconnect_attempts: u32,
     pub max_reconnect_attempts: u32,
+    pub terminal_reconnect_failures: u64,
     pub reconnect_backoff_ms: u64,
+    pub max_reconnect_backoff_ms: u64,
     pub queue_depth: usize,
     pub max_queue_depth: usize,
+    pub peer_queue_count: usize,
+    pub largest_peer_queue_depth: usize,
+    pub max_peer_queue_depth: usize,
     pub dedupe_size: usize,
     pub dedupe_window_size: usize,
+    pub reply_reference_count: usize,
+    pub max_reply_references: usize,
+    pub known_reply_references: u64,
+    pub unknown_reply_references: u64,
     pub accepted_events: u64,
     pub dropped_events: u64,
     pub duplicate_events: u64,
     pub stale_sequence_events: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QqGatewayLifecycleDirective {
+    pub action: &'static str,
+    pub reason_code: &'static str,
+    pub resume_session_id: Option<String>,
+    pub resume_sequence: u64,
+    pub heartbeat_interval_ms: u64,
+    pub reconnect_after_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,6 +293,24 @@ pub struct QqGatewayEventProjection {
     pub event_id: Option<String>,
     pub normalized: Option<NormalizedQqEvent>,
     pub policy: Option<QqInboundPolicyDecision>,
+    pub runtime: QqGatewayRuntimeSnapshot,
+    pub lifecycle: QqGatewayLifecycleDirective,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QqGatewayQueuedEvent {
+    pub topic: &'static str,
+    pub sequence: Option<u64>,
+    pub event_id: Option<String>,
+    pub normalized: NormalizedQqEvent,
+    pub policy: QqInboundPolicyDecision,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QqGatewayDrainResult {
+    pub drained_count: usize,
+    pub remaining_count: usize,
+    pub events: Vec<QqGatewayQueuedEvent>,
     pub runtime: QqGatewayRuntimeSnapshot,
 }
 
@@ -317,6 +372,7 @@ pub struct QqAttachment {
     pub filename: Option<String>,
     pub content_type: Option<String>,
     pub size: Option<u64>,
+    pub asr_refer_text: Option<String>,
 }
 
 /// Routing classification for a QQ message.
@@ -360,7 +416,64 @@ impl std::fmt::Display for QqRouting {
     }
 }
 
-/// Normalized QQ event with routing, quote context, and attachment detection.
+/// Coarse interaction classification for a normalized QQ message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QqInteractionKind {
+    /// Regular message text with no command or approval routing hint.
+    Plain,
+    /// Slash-style command text, such as `/deploy`.
+    SlashCommand,
+    /// Approval-style command text, such as `/approve`.
+    Approval,
+}
+
+impl QqInteractionKind {
+    /// String representation for serialization.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::SlashCommand => "slash_command",
+            Self::Approval => "approval",
+        }
+    }
+}
+
+impl std::fmt::Display for QqInteractionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Approval action extracted from command-like QQ message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QqApprovalAction {
+    Approve,
+    Reject,
+    Deny,
+}
+
+impl QqApprovalAction {
+    /// String representation for serialization.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+impl std::fmt::Display for QqApprovalAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Normalized QQ event with routing, quote context, attachment detection, and command metadata.
 #[derive(Debug, Clone, Serialize)]
 pub struct NormalizedQqEvent {
     /// The original gateway event type (e.g., `"AT_MESSAGE_CREATE"`)
@@ -389,6 +502,12 @@ pub struct NormalizedQqEvent {
     pub has_attachments: bool,
     /// Routing classification
     pub routing: QqRouting,
+    /// Interaction classification used by supervised gateway routing.
+    pub interaction_kind: QqInteractionKind,
+    /// Slash command name without the leading slash, if present.
+    pub command_name: Option<String>,
+    /// Approval action inferred from command-like text, if present.
+    pub approval_action: Option<QqApprovalAction>,
     /// Raw event data for pass-through
     pub raw: serde_json::Value,
 }
@@ -474,6 +593,7 @@ mod tests {
         assert_eq!(OP_SEND_C2C, "qq.messages.send_c2c");
         assert_eq!(OP_GET_GATEWAY, "qq.gateway.get");
         assert_eq!(OP_GATEWAY_PROJECT_EVENT, "qq.gateway.project_event");
+        assert_eq!(OP_GATEWAY_DRAIN_EVENTS, "qq.gateway.drain_events");
         assert_eq!(OP_HEALTH, "qq.health");
         assert_eq!(OP_EVENTS_NORMALIZE, "qq.events.normalize");
         assert_eq!(CAP_MESSAGES_WRITE, "qq.messages.write");
@@ -657,10 +777,12 @@ mod tests {
             filename: Some("f.png".into()),
             content_type: Some("image/png".into()),
             size: Some(2048),
+            asr_refer_text: Some("voice transcript".into()),
         };
         let json = serde_json::to_value(&att).unwrap();
         assert_eq!(json["url"], "https://example.com/f.png");
         assert_eq!(json["size"], 2048);
+        assert_eq!(json["asr_refer_text"], "voice transcript");
     }
 
     #[test]
@@ -679,11 +801,17 @@ mod tests {
             reply_to: None,
             has_attachments: false,
             routing: QqRouting::Channel,
+            interaction_kind: QqInteractionKind::Plain,
+            command_name: None,
+            approval_action: None,
             raw: serde_json::json!({}),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_type"], "AT_MESSAGE_CREATE");
         assert_eq!(json["routing"], "channel");
+        assert_eq!(json["interaction_kind"], "plain");
+        assert_eq!(json["command_name"], serde_json::Value::Null);
+        assert_eq!(json["approval_action"], serde_json::Value::Null);
         assert_eq!(json["is_reply"], false);
         assert_eq!(json["has_attachments"], false);
         assert_eq!(json["sender_name"], "Alice");
@@ -705,11 +833,16 @@ mod tests {
             reply_to: Some("msg-1".into()),
             has_attachments: true,
             routing: QqRouting::Channel,
+            interaction_kind: QqInteractionKind::SlashCommand,
+            command_name: Some("reply".into()),
+            approval_action: None,
             raw: serde_json::json!({"id": "msg-2"}),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["is_reply"], true);
         assert_eq!(json["reply_to"], "msg-1");
         assert_eq!(json["has_attachments"], true);
+        assert_eq!(json["interaction_kind"], "slash_command");
+        assert_eq!(json["command_name"], "reply");
     }
 }

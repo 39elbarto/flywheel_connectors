@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:db7bf04b86cf5f71d645b32a0cda556c2093f6e4cae88e46f117bdb66dc79a68"
 
 [connector]
 id = "fcp.annas-archive"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Anna's Archive (book search, metadata, ISBN/MD5 lookup)"
 archetypes = ["knowledge"]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "stateless"
@@ -50,124 +51,6 @@ forbidden = [
     "media.download",
 ]
 
-[provides.operations."annas.search"]
-description = "Search books and documents by keyword"
-capability = "annas.search"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-
-[provides.operations."annas.search".input_schema]
-required = ["query"]
-type = "object"
-
-[provides.operations."annas.search".input_schema.properties.query]
-description = "Search query (title, author, topic)"
-type = "string"
-
-[provides.operations."annas.search".input_schema.properties.lang]
-description = "Language filter (e.g. en, es, de)"
-type = "string"
-
-[provides.operations."annas.search".input_schema.properties.ext]
-description = "File extension filter (e.g. pdf, epub)"
-type = "string"
-
-[provides.operations."annas.search".input_schema.properties.sort]
-description = "Sort order (e.g. most_relevant, newest)"
-type = "string"
-
-[provides.operations."annas.search".output_schema]
-required = ["results"]
-type = "object"
-
-[provides.operations."annas.search".output_schema.properties.results]
-type = "array"
-
-[provides.operations."annas.search".network_constraints]
-host_allow = [
-    "annas-archive.org",
-    "annas-archive.se",
-]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 10485760
-
-[provides.operations."annas.search".ai_hints]
-when_to_use = "Search for books and documents by keyword, title, or author."
-common_mistakes = ["Using overly broad queries without language or format filters."]
-examples = ['{"query": "machine learning", "lang": "en", "ext": "pdf"}']
-related = [
-    "annas.metadata",
-    "annas.lookup.isbn",
-]
-
-[provides.operations."annas.metadata"]
-description = "Get detailed metadata for a book by MD5 hash"
-capability = "annas.read"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "strict"
-
-[provides.operations."annas.metadata".input_schema]
-required = ["md5"]
-type = "object"
-
-[provides.operations."annas.metadata".input_schema.properties.md5]
-description = "MD5 hash identifier of the book"
-type = "string"
-
-[provides.operations."annas.metadata".output_schema]
-required = ["book"]
-type = "object"
-
-[provides.operations."annas.metadata".output_schema.properties.book]
-type = "object"
-
-[provides.operations."annas.metadata".network_constraints]
-host_allow = [
-    "annas-archive.org",
-    "annas-archive.se",
-]
-port_allow = [443]
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 3
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 1048576
-
-[provides.operations."annas.metadata".ai_hints]
-when_to_use = "Get detailed book metadata when you have the MD5 identifier."
-common_mistakes = ["Using an uppercase MD5 hash — the identifier must be lowercase hex (32 characters)."]
-examples = ['{"md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"}']
-related = [
-    "annas.search",
-    "annas.lookup.md5",
-]
-
 [provides.operations."annas.lookup.isbn"]
 description = "Look up a book by ISBN"
 capability = "annas.read"
@@ -175,6 +58,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."annas.lookup.isbn".input_schema]
 required = ["isbn"]
@@ -228,6 +112,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."annas.lookup.md5".input_schema]
 required = ["md5"]
@@ -274,6 +159,126 @@ related = [
     "annas.search",
 ]
 
+[provides.operations."annas.metadata"]
+description = "Get detailed metadata for a book by MD5 hash"
+capability = "annas.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."annas.metadata".input_schema]
+required = ["md5"]
+type = "object"
+
+[provides.operations."annas.metadata".input_schema.properties.md5]
+description = "MD5 hash identifier of the book"
+type = "string"
+
+[provides.operations."annas.metadata".output_schema]
+required = ["book"]
+type = "object"
+
+[provides.operations."annas.metadata".output_schema.properties.book]
+type = "object"
+
+[provides.operations."annas.metadata".network_constraints]
+host_allow = [
+    "annas-archive.org",
+    "annas-archive.se",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."annas.metadata".ai_hints]
+when_to_use = "Get detailed book metadata when you have the MD5 identifier."
+common_mistakes = ["Using an uppercase MD5 hash — the identifier must be lowercase hex (32 characters)."]
+examples = ['{"md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"}']
+related = [
+    "annas.search",
+    "annas.lookup.md5",
+]
+
+[provides.operations."annas.search"]
+description = "Search books and documents by keyword"
+capability = "annas.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."annas.search".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."annas.search".input_schema.properties.ext]
+description = "File extension filter (e.g. pdf, epub)"
+type = "string"
+
+[provides.operations."annas.search".input_schema.properties.lang]
+description = "Language filter (e.g. en, es, de)"
+type = "string"
+
+[provides.operations."annas.search".input_schema.properties.query]
+description = "Search query (title, author, topic)"
+type = "string"
+
+[provides.operations."annas.search".input_schema.properties.sort]
+description = "Sort order (e.g. most_relevant, newest)"
+type = "string"
+
+[provides.operations."annas.search".output_schema]
+required = ["results"]
+type = "object"
+
+[provides.operations."annas.search".output_schema.properties.results]
+type = "array"
+
+[provides.operations."annas.search".network_constraints]
+host_allow = [
+    "annas-archive.org",
+    "annas-archive.se",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."annas.search".ai_hints]
+when_to_use = "Search for books and documents by keyword, title, or author."
+common_mistakes = ["Using overly broad queries without language or format filters."]
+examples = ['{"query": "machine learning", "lang": "en", "ext": "pdf"}']
+related = [
+    "annas.metadata",
+    "annas.lookup.isbn",
+]
+
 [sandbox]
 profile = "strict"
 memory_mb = 256
@@ -302,7 +307,7 @@ burst = 5
 scope = "instance"
 
 [rate_limits.operation_pools]
-"annas.search" = ["annas.search"]
 "annas.metadata" = ["annas.read"]
 "annas.lookup.isbn" = ["annas.read"]
 "annas.lookup.md5" = ["annas.read"]
+"annas.search" = ["annas.search"]

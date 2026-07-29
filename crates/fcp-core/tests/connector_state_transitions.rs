@@ -1,17 +1,17 @@
 //! Pin `MigratableComputationState` transition + serde shape
 //! (flywheel_connectors-cgfwt).
 //!
-//! Bead asks for "ConnectorState transitions per documented state
+//! Bead asks for "`ConnectorState` transitions per documented state
 //! machine (Loaded -> Activated -> Running -> Suspended ->
 //! Terminated)". The literal `Loaded` and `Activated` states do NOT
 //! exist in fcp-core. The actual NORMATIVE migration state machine
-//! is `MigratableComputationState` in connector_state.rs:589 with
+//! is `MigratableComputationState` in `connector_state.rs:589` with
 //! variants {Running, Suspended, Transferring, Completed, Failed}.
 //! `Completed`/`Failed` together cover the bead's "Terminated" leaf;
 //! `Transferring` is the in-flight handoff state with no analogue in
 //! the bead's description.
 //!
-//! The `MigratableComputation` struct (connector_state.rs:616)
+//! The `MigratableComputation` struct (`connector_state.rs:616`)
 //! enforces the explicit transitions: `suspend()` requires
 //! `Running`, `begin_transfer()` requires `Suspended`, `resume()`
 //! accepts `Suspended` or `Transferring` and lands on `Running`. We
@@ -27,14 +27,14 @@
 //!   2. **`is_terminal()` truth table** — true only for `Completed`
 //!      and `Failed`; false for the other three.
 //!   3. **Serde JSON tag form** — internally tagged on `state` field
-//!      with snake_case rename — exact JSON shape pinned per
+//!      with `snake_case` rename — exact JSON shape pinned per
 //!      variant including the nested `Transferring` payload.
 //!   4. **JSON round-trip** preserves variant + nested fields.
 //!   5. **CBOR round-trip** via ciborium preserves variant + nested
 //!      fields.
 //!   6. **CBOR map shape** — every encoding has a `state` key with
-//!      the snake_case label as its value.
-//!   7. **Unknown / PascalCase tag rejected** — only snake_case is
+//!      the `snake_case` label as its value.
+//!   7. **Unknown / `PascalCase` tag rejected** — only `snake_case` is
 //!      canonical.
 //!   8. **Equality & Clone** behave by variant, including across
 //!      the nested `Transferring` payload.
@@ -51,7 +51,7 @@ fn fixture_target() -> TailscaleNodeId {
     TailscaleNodeId::new("node-target-1")
 }
 
-fn fixture_lease_id() -> LeaseId {
+const fn fixture_lease_id() -> LeaseId {
     ObjectId::from_bytes([0x42; 32])
 }
 

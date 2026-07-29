@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -109,7 +110,7 @@ impl ZapierClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
+            if body.trim().is_empty() {
                 return Ok(serde_json::json!({}));
             }
             Ok(serde_json::from_str(&body)?)
@@ -228,14 +229,14 @@ impl ZapierClient {
     }
 }
 
-/// Maximum byte length for a Zapier action_id. Zapier's NLA action
+/// Maximum byte length for a Zapier `action_id`. Zapier's NLA action
 /// ids in practice are short (UUIDs or 12-32 char slugs); a 128-byte
 /// cap is well above any legitimate value and bounds the worst case
 /// for path-injection payloads.
 const MAX_ACTION_ID_LEN: usize = 128;
 
-/// Validate that an action_id is safe to interpolate into the
-/// /exposed/{action_id}/execute/ URL path.
+/// Validate that an `action_id` is safe to interpolate into the
+/// `/exposed/{action_id}/execute/` URL path.
 ///
 /// Allowed: ASCII alphanumeric + `-` + `_`. Disallowed: any path
 /// separator, query / fragment delimiter, percent-encoded byte,

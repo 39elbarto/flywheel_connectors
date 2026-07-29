@@ -6,7 +6,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header, redirect::Policy};
 use sha2::{Digest, Sha256};
 use tracing::{debug, instrument};
@@ -148,13 +149,18 @@ impl RedditClient {
     }
 
     async fn handle_response(&self, resp: Response) -> RedditResult<serde_json::Value> {
+        self.handle_response_with_empty_action(resp, false).await
+    }
+
+    async fn handle_response_with_empty_action(
+        &self,
+        resp: Response,
+        allow_empty_ok: bool,
+    ) -> RedditResult<serde_json::Value> {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body, allow_empty_ok)
         } else {
             self.handle_error(status, resp).await
         }
@@ -213,6 +219,15 @@ impl RedditClient {
         path: &str,
         body: &[(&str, &str)],
     ) -> RedditResult<serde_json::Value> {
+        self.post_form_with_empty_action(path, body, false).await
+    }
+
+    async fn post_form_with_empty_action(
+        &self,
+        path: &str,
+        body: &[(&str, &str)],
+        allow_empty_ok: bool,
+    ) -> RedditResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %redact_url(&url), "POST form request");
         let encoded: String = body
@@ -227,16 +242,21 @@ impl RedditClient {
                 .body(encoded),
         )?;
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.handle_response_with_empty_action(resp, allow_empty_ok)
+            .await
     }
 
     // -- Search --
 
     /// Search posts.
     pub async fn search_posts(&self, params: &SearchParams<'_>) -> RedditResult<serde_json::Value> {
-        let base = params
-            .subreddit
-            .map_or_else(|| "/search".to_string(), |sr| format!("/r/{sr}/search"));
+        let base = match params.subreddit {
+            Some(sr) => {
+                let sr = sanitize_path_segment(sr, "subreddit")?;
+                format!("/r/{sr}/search")
+            }
+            None => "/search".to_string(),
+        };
         let mut q = vec![
             ("q".to_string(), params.query.to_string()),
             ("restrict_sr".to_string(), "on".to_string()),
@@ -266,6 +286,7 @@ impl RedditClient {
         limit: Option<i64>,
         after: Option<&str>,
     ) -> RedditResult<serde_json::Value> {
+        let subreddit = sanitize_path_segment(subreddit, "subreddit")?;
         let mut q = Vec::new();
         if let Some(l) = limit {
             q.push(("limit", l.to_string()));
@@ -290,6 +311,7 @@ impl RedditClient {
         comment_limit: Option<i64>,
     ) -> RedditResult<serde_json::Value> {
         let post_id = post_fullname.strip_prefix("t3_").unwrap_or(post_fullname);
+        let post_id = sanitize_path_segment(post_id, "post_fullname")?;
         let mut q = Vec::new();
         if let Some(s) = sort {
             q.push(("sort", s.to_string()));
@@ -383,14 +405,19 @@ impl RedditClient {
         spam: bool,
     ) -> RedditResult<serde_json::Value> {
         let spam_s = spam.to_string();
-        self.post_form("/api/remove", &[("id", thing_fullname), ("spam", &spam_s)])
-            .await
+        self.post_form_with_empty_action(
+            "/api/remove",
+            &[("id", thing_fullname), ("spam", &spam_s)],
+            true,
+        )
+        .await
     }
 
     // -- Subreddit metadata --
 
     /// Get subreddit metadata (about page).
     pub async fn get_subreddit(&self, subreddit: &str) -> RedditResult<serde_json::Value> {
+        let subreddit = sanitize_path_segment(subreddit, "subreddit")?;
         self.get(&format!("/r/{subreddit}/about"), None).await
     }
 
@@ -433,6 +460,7 @@ impl RedditClient {
         if let Some(a) = after {
             q.push(("after", a.to_string()));
         }
+        let username = sanitize_path_segment(username, "username")?;
         self.get(
             &format!("/user/{username}/submitted"),
             if q.is_empty() { None } else { Some(&q) },
@@ -460,6 +488,7 @@ impl RedditClient {
         if let Some(a) = after {
             q.push(("after", a.to_string()));
         }
+        let username = sanitize_path_segment(username, "username")?;
         self.get(
             &format!("/user/{username}/comments"),
             if q.is_empty() { None } else { Some(&q) },
@@ -509,6 +538,7 @@ impl RedditClient {
         if let Some(a) = after {
             q.push(("after", a.to_string()));
         }
+        let username = sanitize_path_segment(username, "username")?;
         self.get(
             &format!("/user/{username}/saved"),
             if q.is_empty() { None } else { Some(&q) },
@@ -543,6 +573,7 @@ impl RedditClient {
         if let Some(a) = after {
             q.push(("after", a.to_string()));
         }
+        let subreddit = sanitize_path_segment(subreddit, "subreddit")?;
         self.get(
             &format!("/r/{subreddit}/about/modqueue"),
             if q.is_empty() { None } else { Some(&q) },
@@ -572,6 +603,7 @@ impl RedditClient {
         if let Some(a) = after {
             q.push(("after", a.to_string()));
         }
+        let category = sanitize_path_segment(category, "category")?;
         self.get(
             &format!("/message/{category}"),
             if q.is_empty() { None } else { Some(&q) },
@@ -643,6 +675,23 @@ impl RedditClient {
             .and_then(|url| url.host_str().map(canonical_host))
             .is_some_and(|host| is_local_test_host(&host))
     }
+}
+
+fn decode_success_body(
+    status: StatusCode,
+    body: &str,
+    allow_empty_ok: bool,
+) -> RedditResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT || (allow_empty_ok && body.trim().is_empty()) {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(RedditError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
 }
 
 async fn read_media_response(
@@ -809,6 +858,39 @@ fn urlencoded(s: &str) -> String {
         .replace('#', "%23")
 }
 
+/// Validate that a caller-supplied value is safe to interpolate into a URL path
+/// segment.
+///
+/// Rejects empty strings, path-traversal sequences, slashes, query/fragment
+/// delimiters, and percent-encoded slash equivalents. Reddit subreddit names,
+/// usernames, base-36 post IDs, and message categories are all
+/// `[A-Za-z0-9_-]`-shaped, so a legitimate value is returned unchanged (trimmed).
+/// Without this, a `subreddit` of `../api/v1/me` — or an embedded `?` — reaches
+/// a sibling endpoint under `oauth.reddit.com` carrying the caller's bearer
+/// token (e.g. reading the authenticated account's private identity).
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> RedditResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(RedditError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(RedditError::InvalidInput(format!(
+            "{field} contains path traversal or URL control characters"
+        )));
+    }
+    Ok(trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,6 +955,46 @@ mod tests {
     }
 
     #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "", false).unwrap_err();
+        assert!(matches!(
+            err,
+            RedditError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t", false).unwrap_err();
+        assert!(matches!(
+            err,
+            RedditError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "", false).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_action_ok() {
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "", true).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
     fn urlencoded_all_special() {
         let encoded = urlencoded("% + & = #");
         assert!(encoded.contains("%25"));
@@ -880,6 +1002,41 @@ mod tests {
         assert!(encoded.contains("%26"));
         assert!(encoded.contains("%3D"));
         assert!(encoded.contains("%23"));
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal_to_privileged_endpoints() {
+        for bad in [
+            "",
+            "   ",
+            "../api/v1/me",
+            "..",
+            "AskReddit/../api/v1/me",
+            "a/b",
+            "a\\b",
+            "sub?limit=1000",
+            "sub#frag",
+            "a%2f..%2fme",
+            "a%5cb",
+        ] {
+            assert!(
+                sanitize_path_segment(bad, "subreddit").is_err(),
+                "expected `{bad}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_real_names() {
+        assert_eq!(
+            sanitize_path_segment("AskReddit", "subreddit").unwrap(),
+            "AskReddit"
+        );
+        assert_eq!(sanitize_path_segment(" spez ", "username").unwrap(), "spez");
+        assert_eq!(
+            sanitize_path_segment("user_name-1", "username").unwrap(),
+            "user_name-1"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use fcp_prelude::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -32,6 +33,7 @@ const MAX_LINKED_RECORD_DEPTH: u32 = 3;
 const DEFAULT_LINKED_RECORD_LIMIT: u32 = 25;
 const MAX_LINKED_RECORD_LIMIT: u32 = 50;
 const MAX_AIRTABLE_OFFSET_BYTES: usize = 512;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Validated configuration for the Airtable connector.
 struct AirtableConfig {
@@ -245,6 +247,18 @@ impl AirtableConnector {
         }
     }
 
+    /// Return the generated instance ID for this connector.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     ///
     /// # Errors
@@ -293,10 +307,15 @@ impl AirtableConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        let verifier_instance_id = req
+            .requested_instance_id
+            .clone()
+            .unwrap_or_else(|| self.base.instance_id.clone());
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            self.base.instance_id.clone(),
+            verifier_instance_id,
         ));
         self.zone_id = Some(req.zone.clone());
 
@@ -317,7 +336,7 @@ impl AirtableConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:airtable-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -3446,6 +3465,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         cap: &str,
         op: &str,
+        instance_id: &str,
     ) -> CapabilityToken {
         let constraints = fcp_core::CapabilityConstraints {
             resource_allow: vec!["*".into()],
@@ -3458,6 +3478,7 @@ mod tests {
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
+            .target_instance(instance_id)
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
@@ -3559,7 +3580,12 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "airtable.read", "airtable.list_bases");
+        let capability = generate_valid_token(
+            &signing_key,
+            "airtable.read",
+            "airtable.list_bases",
+            connector.base.instance_id.as_str(),
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -3598,7 +3624,12 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "airtable.read", "airtable.get_record");
+        let capability = generate_valid_token(
+            &signing_key,
+            "airtable.read",
+            "airtable.get_record",
+            connector.base.instance_id.as_str(),
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -3607,6 +3638,8 @@ mod tests {
                 "capability_token": capability
             }))
             .await;
+
+        println!("RESULT IS: {result:?}");
 
         assert!(result.is_err());
         assert!(matches!(
@@ -3853,5 +3886,17 @@ mod tests {
             "Expected failed or degraded, got: {}",
             result["status"]
         );
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = AirtableConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:airtable-connector-v1");
     }
 }

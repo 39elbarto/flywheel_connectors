@@ -12,7 +12,7 @@ use fcp_prelude::FcpError;
 use fcp_redis::client::{RedisAuth, RedisClient};
 use fcp_redis::connector::RedisConnector;
 use fcp_redis::error::RedisError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -92,8 +92,20 @@ async fn string_hash_list_set_and_ttl_commands_use_upstash_contracts() {
     expect_command(&server, json!(["DEL", "cache:key"]), json!({ "result": 1 })).await;
     expect_command(
         &server,
+        json!(["EXISTS", "cache:key"]),
+        json!({ "result": 1 }),
+    )
+    .await;
+    expect_command(
+        &server,
         json!(["HSET", "hash:key", "field", "value"]),
         json!({ "result": 1 }),
+    )
+    .await;
+    expect_command(
+        &server,
+        json!(["HGET", "hash:key", "field"]),
+        json!({ "result": "value" }),
     )
     .await;
     expect_command(
@@ -124,6 +136,12 @@ async fn string_hash_list_set_and_ttl_commands_use_upstash_contracts() {
         &server,
         json!(["SMEMBERS", "set:key"]),
         json!({ "result": ["member-a", "member-b"] }),
+    )
+    .await;
+    expect_command(
+        &server,
+        json!(["INCR", "counter:key"]),
+        json!({ "result": 42 }),
     )
     .await;
 
@@ -159,6 +177,9 @@ async fn string_hash_list_set_and_ttl_commands_use_upstash_contracts() {
     let deleted = invoke(&connector, "redis.del", json!({ "keys": ["cache:key"] })).await;
     assert_eq!(deleted["deleted"], 1);
 
+    let exists = invoke(&connector, "redis.exists", json!({ "keys": ["cache:key"] })).await;
+    assert_eq!(exists["count"], 1);
+
     let hset = invoke(
         &connector,
         "redis.hset",
@@ -166,6 +187,14 @@ async fn string_hash_list_set_and_ttl_commands_use_upstash_contracts() {
     )
     .await;
     assert_eq!(hset["result"], 1);
+
+    let hget = invoke(
+        &connector,
+        "redis.hget",
+        json!({ "key": "hash:key", "field": "field" }),
+    )
+    .await;
+    assert_eq!(hget["value"], "value");
 
     let hgetall = invoke(&connector, "redis.hgetall", json!({ "key": "hash:key" })).await;
     assert_eq!(hgetall["fields"]["field"], "value");
@@ -191,6 +220,54 @@ async fn string_hash_list_set_and_ttl_commands_use_upstash_contracts() {
 
     let smembers = invoke(&connector, "redis.smembers", json!({ "key": "set:key" })).await;
     assert_eq!(smembers["members"], json!(["member-a", "member-b"]));
+
+    let incr = invoke(&connector, "redis.incr", json!({ "key": "counter:key" })).await;
+    assert_eq!(incr["value"], 42);
+}
+
+#[fcp_async_core::test]
+async fn nullable_and_default_command_shapes_match_upstash_contracts() {
+    tracing::info!(
+        scenario = "redis_nullable_default_contracts",
+        "starting Redis nullable/default command-shape integration proof",
+    );
+
+    let server = MockServer::start().await;
+
+    expect_command(
+        &server,
+        json!(["GET", "missing"]),
+        json!({ "result": null }),
+    )
+    .await;
+    expect_command(
+        &server,
+        json!(["SET", "cache:key", "value", "XX"]),
+        json!({ "result": null }),
+    )
+    .await;
+    expect_command(
+        &server,
+        json!(["LRANGE", "queue:key", "0", "-1"]),
+        json!({ "result": ["tail"] }),
+    )
+    .await;
+
+    let connector = configured_connector(&server).await;
+
+    let missing = invoke(&connector, "redis.get", json!({ "key": "missing" })).await;
+    assert!(missing["value"].is_null());
+
+    let xx_set = invoke(
+        &connector,
+        "redis.set",
+        json!({ "key": "cache:key", "value": "value", "xx": true }),
+    )
+    .await;
+    assert!(xx_set["result"].is_null());
+
+    let default_range = invoke(&connector, "redis.lrange", json!({ "key": "queue:key" })).await;
+    assert_eq!(default_range["values"], json!(["tail"]));
 }
 
 #[fcp_async_core::test]
@@ -214,12 +291,32 @@ async fn auth_rate_command_and_malformed_json_failures_are_typed() {
 
     Mock::given(method("POST"))
         .and(header("Authorization", format!("Bearer {TEST_TOKEN}")))
+        .and(body_json(json!(["GET", "forbidden"])))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": "forbidden"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(header("Authorization", format!("Bearer {TEST_TOKEN}")))
         .and(body_json(json!(["GET", "rate"])))
         .respond_with(
             ResponseTemplate::new(429)
                 .insert_header("retry-after", "3")
                 .set_body_json(json!({ "error": "too many requests" })),
         )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(header("Authorization", format!("Bearer {TEST_TOKEN}")))
+        .and(body_json(json!(["GET", "server"])))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": "Internal server error"
+        })))
         .expect(1)
         .mount(&server)
         .await;
@@ -261,6 +358,23 @@ async fn auth_rate_command_and_malformed_json_failures_are_typed() {
         } if service == "redis"
     ));
 
+    let forbidden = connector
+        .handle_invoke(json!({
+            "operation_id": "redis.get",
+            "input": { "key": "forbidden" }
+        }))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        forbidden,
+        FcpError::External {
+            service,
+            status_code: Some(403),
+            retryable: false,
+            ..
+        } if service == "redis"
+    ));
+
     let rate_limited = connector
         .handle_invoke(json!({
             "operation_id": "redis.get",
@@ -280,6 +394,23 @@ async fn auth_rate_command_and_malformed_json_failures_are_typed() {
     if let FcpError::External { retry_after, .. } = rate_limited {
         assert_eq!(retry_after, Some(Duration::from_secs(3)));
     }
+
+    let server_error = connector
+        .handle_invoke(json!({
+            "operation_id": "redis.get",
+            "input": { "key": "server" }
+        }))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        server_error,
+        FcpError::External {
+            service,
+            status_code: Some(500),
+            retryable: true,
+            ..
+        } if service == "redis"
+    ));
 
     let malformed = connector
         .handle_invoke(json!({

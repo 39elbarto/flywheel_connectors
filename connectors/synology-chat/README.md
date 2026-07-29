@@ -2,6 +2,7 @@
 
 > **Status**: accepted first-slice contract
 > **Bead**: `flywheel_connectors-j05nu.1.16.1`
+> **Verification script**: `scripts/e2e/synology_chat_connector_verification.sh`
 > **Unblocks**:
 > - `flywheel_connectors-j05nu.1.16.2`
 > - `flywheel_connectors-j05nu.1.16.6`
@@ -13,6 +14,10 @@
 > **Primary upstreams**:
 > - https://www.synology.com/en-id/dsm/7.2/software_spec/chat
 > - https://www.synology.com
+
+## Verification Handoff
+
+Verification script: `scripts/e2e/synology_chat_connector_verification.sh`
 
 ## Purpose
 
@@ -143,6 +148,35 @@ These are excluded on purpose:
 - Keep `outgoing_token` scoped to the explicit forwarded ingest path; do not silently widen it into a general inbound runtime guarantee.
 - Keep `send_message` and `send_payload` distinct: one is a constrained ergonomic helper, the other is a raw provider passthrough.
 - If live health probes are added later, make that a deliberate expansion of the contract instead of changing `health` semantics invisibly.
+
+## Verification Bundle
+
+Verification script: `scripts/e2e/synology_chat_connector_verification.sh`
+
+The tracked verifier runs the Synology Chat crate check, formatting check,
+deterministic loopback integration suite, full connector test suite, clippy, and
+a redaction scan over JSONL/log artifacts. The script requires accepted `rch`
+remote worker execution for each Cargo step; local fallback is classified as
+`infra_blocked` rather than proof.
+
+Current deterministic local coverage lives in
+`connectors/synology-chat/tests/integration.rs`. It exercises loopback incoming
+webhook delivery, safe file URL dispatch and SSRF policy decisions, forwarded
+outgoing-webhook token/sender/body/rate policy, manifest operation schemas, and
+device-lab structured skip evidence without live Synology credentials. Batch 4
+graduation still stops at `local_non_mock` until this coverage is promoted into
+the dedicated `connectors/synology-chat/tests/local_non_mock.rs` acceptance
+surface.
+
+Focused proof for this connector:
+
+```bash
+OUT_ROOT=/tmp/fcp-synology-chat-e2e bash scripts/e2e/synology_chat_connector_verification.sh
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-synology-chat-readme cargo test -p fcp-synology-chat --test integration -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-synology-chat-readme cargo test -p fcp-synology-chat --tests -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-synology-chat-readme cargo clippy -p fcp-synology-chat --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-synology-chat-readme cargo fmt -p fcp-synology-chat -- --check
+```
 
 ## Source Notes
 

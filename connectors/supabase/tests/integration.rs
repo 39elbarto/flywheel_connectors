@@ -51,7 +51,11 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &'static str,
+) -> CapabilityToken {
     let capability = match op {
         OP_QUERY | OP_SCHEMA_TABLES => "supabase.read",
         OP_INSERT | OP_RPC => "supabase.write",
@@ -72,8 +76,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("valid constraints")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -270,7 +276,7 @@ async fn query_invokes_postgrest_filters() {
                 "order": [{"column": "id", "ascending": false}],
                 "limit": 5
             }),
-            generate_valid_token(&signing_key, OP_QUERY),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_QUERY),
         ))
         .await
         .unwrap();
@@ -300,7 +306,7 @@ async fn insert_posts_rows() {
                 "table": "todos",
                 "rows": [{"title": "Ship connector"}]
             }),
-            generate_valid_token(&signing_key, OP_INSERT),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_INSERT),
         ))
         .await
         .unwrap();
@@ -329,7 +335,7 @@ async fn rpc_posts_args() {
                 "function": "search_todos",
                 "args": {"q": "connector"}
             }),
-            generate_valid_token(&signing_key, OP_RPC),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_RPC),
         ))
         .await
         .unwrap();
@@ -359,7 +365,7 @@ async fn schema_tables_reads_openapi_root() {
         .invoke(invoke_req(
             OP_SCHEMA_TABLES,
             json!({}),
-            generate_valid_token(&signing_key, OP_SCHEMA_TABLES),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_SCHEMA_TABLES),
         ))
         .await
         .unwrap();
@@ -395,7 +401,7 @@ async fn storage_upload_posts_object() {
                 "content_type": "text/plain",
                 "upsert": true
             }),
-            generate_valid_token(&signing_key, OP_STORAGE_UPLOAD),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_STORAGE_UPLOAD),
         ))
         .await
         .unwrap();
@@ -425,7 +431,7 @@ async fn storage_delete_preserves_artifact_evidence() {
                 "bucket": "artifacts",
                 "path": "reports/out.txt"
             }),
-            generate_valid_token(&signing_key, OP_STORAGE_DELETE),
+            generate_valid_token(&signing_key, connector.instance_id(), OP_STORAGE_DELETE),
         ))
         .await
         .unwrap();

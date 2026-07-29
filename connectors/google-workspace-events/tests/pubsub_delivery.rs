@@ -1,9 +1,15 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 
+use fcp_google_discovery::auth::{
+    FCP_CREDENTIAL_ID_HEADER, GOOGLE_AUTHORIZATION_HEADER, GoogleAuthSourceKind,
+    GoogleMaterializedAuth,
+};
+use fcp_google_workspace_events::client::WorkspaceEventsClient;
 use fcp_google_workspace_events::connector::WorkspaceEventsConnector;
 use fcp_prelude::FcpError;
 use serde_json::{Value, json};
-use wiremock::matchers::{body_string_contains, method, path, query_param};
+use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn run_async_test<F>(future: F) -> F::Output
@@ -97,6 +103,17 @@ fn manifest_operation_network_constraints<'a>(
         .expect("operation should define network_constraints")
 }
 
+fn manifest_operation_ai_hints<'a>(
+    manifest: &'a toml::Value,
+    operation_id: &str,
+) -> &'a toml::Table {
+    manifest_operations(manifest)
+        .get(operation_id)
+        .and_then(|operation| operation.get("ai_hints"))
+        .and_then(toml::Value::as_table)
+        .expect("operation should define ai_hints")
+}
+
 fn network_string_array<'a>(network_constraints: &'a toml::Table, key: &str) -> Vec<&'a str> {
     network_constraints
         .get(key)
@@ -119,6 +136,82 @@ fn network_integer_array(network_constraints: &toml::Table, key: &str) -> Vec<i6
                 .expect("network constraint should be integer")
         })
         .collect()
+}
+
+#[test]
+fn bearer_token_requests_use_authorization_header() {
+    run_async_test(async {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/subscriptions"))
+            .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "subscriptions": [
+                    { "name": "subscriptions/auth-header", "state": "ACTIVE" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+            access_token: "test-token".into(),
+            source: GoogleAuthSourceKind::AccessToken,
+            granted_scopes: Vec::new(),
+            quota_project_id: None,
+        })
+        .expect("client")
+        .with_base_urls(
+            format!("{}/v1", server.uri()),
+            format!("{}/v1", server.uri()),
+        );
+
+        let subscriptions = client
+            .list_subscriptions(None, None)
+            .await
+            .expect("subscription list should succeed");
+        assert_eq!(
+            subscriptions.subscriptions[0].name,
+            "subscriptions/auth-header"
+        );
+    });
+}
+
+#[test]
+fn credential_reference_requests_use_fcp_credential_header() {
+    run_async_test(async {
+        let server = MockServer::start().await;
+        let credential_id = fcp_core::CredentialId::new();
+        Mock::given(method("GET"))
+            .and(path("/v1/subscriptions"))
+            .and(header(FCP_CREDENTIAL_ID_HEADER, credential_id.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "subscriptions": [
+                    { "name": "subscriptions/credential-header", "state": "ACTIVE" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client =
+            WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::CredentialReference {
+                credential_id,
+                quota_project_id: None,
+            })
+            .expect("client")
+            .with_base_urls(
+                format!("{}/v1", server.uri()),
+                format!("{}/v1", server.uri()),
+            );
+
+        let subscriptions = client
+            .list_subscriptions(None, None)
+            .await
+            .expect("subscription list should succeed");
+        assert_eq!(
+            subscriptions.subscriptions[0].name,
+            "subscriptions/credential-header"
+        );
+    });
 }
 
 fn assert_network_bool(network_constraints: &toml::Table, key: &str, expected: bool) {
@@ -194,12 +287,8 @@ fn assert_schema_accepts(schema: &Value, payload: &Value) {
 
 fn assert_schema_rejects(schema: &Value, payload: &Value) {
     let validator = jsonschema::validator_for(schema).expect("schema should compile");
-    let errors = validator
-        .iter_errors(payload)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
     assert!(
-        !errors.is_empty(),
+        !validator.is_valid(payload),
         "schema should reject payload {payload:#}"
     );
 }
@@ -507,6 +596,81 @@ async fn assert_introspection_matches_manifest(connector: &WorkspaceEventsConnec
         manifest.contains("Pub/Sub-backed event delivery"),
         "manifest should describe Pub/Sub-backed Workspace Events delivery"
     );
+}
+
+#[test]
+fn manifest_ai_hints_cover_all_operations() {
+    let manifest = workspace_events_manifest();
+    let operations = manifest_operations(&manifest);
+    let expected = SCHEMA_OPERATION_IDS.into_iter().collect::<BTreeSet<_>>();
+    let actual = operations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual, expected,
+        "manifest operation inventory changed; update ai_hints coverage expectations"
+    );
+
+    for operation_id in SCHEMA_OPERATION_IDS {
+        let ai_hints = manifest_operation_ai_hints(&manifest, operation_id);
+        let when_to_use = ai_hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        assert!(
+            !when_to_use.is_empty(),
+            "operation {operation_id} should explain when to use it"
+        );
+
+        let common_mistakes = ai_hints
+            .get("common_mistakes")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        assert!(
+            common_mistakes.len() >= 2
+                && common_mistakes
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .all(|mistake| !mistake.trim().is_empty()),
+            "operation {operation_id} should document at least two common mistakes"
+        );
+
+        let examples = ai_hints
+            .get("examples")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        assert!(
+            !examples.is_empty(),
+            "operation {operation_id} should include at least one JSON example"
+        );
+        for example in examples {
+            let example_text = example
+                .as_str()
+                .expect("operation example should be a string")
+                .trim();
+            assert!(
+                !example_text.is_empty(),
+                "operation {operation_id} should not contain empty examples"
+            );
+            let parsed_example = serde_json::from_str::<Value>(example_text);
+            assert!(
+                parsed_example.is_ok(),
+                "operation {operation_id} example must be JSON: {parsed_example:?}"
+            );
+
+            let lower = example_text.to_ascii_lowercase();
+            for forbidden in ["api_key", "bearer", "password", "secret", "token"] {
+                assert!(
+                    !lower.contains(forbidden),
+                    "operation {operation_id} example contains secret-shaped text: {forbidden}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

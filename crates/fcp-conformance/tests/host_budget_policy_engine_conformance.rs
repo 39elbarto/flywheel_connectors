@@ -10,7 +10,7 @@
 //!   `Option<...>` so a zone WITHOUT a configured policy is silently
 //!   a no-op (admins must explicitly enable enforcement),
 //! - sorted multi-zone reporting (`report` orders snapshots by
-//!   zone_id so CLI output is deterministic), and
+//!   `zone_id` so CLI output is deterministic), and
 //! - optional zone filtering on report.
 //!
 //! These tests pin the lifecycle + reporting contract callers
@@ -211,7 +211,7 @@ async fn report_returns_snapshots_sorted_by_zone_id() {
     assert_eq!(report.zones.len(), 3);
     let ids: Vec<&str> = report.zones.iter().map(|z| z.zone_id.as_str()).collect();
     let mut sorted = ids.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     assert_eq!(
         ids, sorted,
         "report MUST return zones sorted by zone_id; got {ids:?}"

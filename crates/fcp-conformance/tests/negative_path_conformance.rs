@@ -1,13 +1,13 @@
 //! Negative-path conformance harness.
 //!
 //! This file covers three concrete gaps in the existing conformance
-//! surface (datagram_golden_vectors, capability interop, object header
+//! surface (`datagram_golden_vectors`, capability interop, object header
 //! round-trips) that together make up the "tamper-rejection" contract:
 //!
 //! 1. Capability golden tokens must reject any single-byte signature
 //!    mutation (Ed25519 is a MUST-REJECT for `InvalidSignature`).
 //! 2. Capability golden tokens must reject any single-byte payload
-//!    (CWT claims) mutation: signature covers the full tbs_data, so
+//!    (CWT claims) mutation: signature covers the full `tbs_data`, so
 //!    flipping a payload byte invalidates the signature even though
 //!    the bytes re-parse as CBOR.
 //! 3. `ObjectHeader` with every optional field populated must round-trip
@@ -107,7 +107,7 @@ fn try_verify_token(bytes: &[u8], pubkey_hex: &str) -> Result<(), String> {
 fn capability_golden_signature_single_byte_tamper_is_rejected() {
     let vectors = CapabilityTokenGoldenVector::load_all();
     let mut total_mutations = 0usize;
-    let mut all_rejected = true;
+    let all_rejected = true;
 
     for v in &vectors {
         let baseline = hex_to_bytes(&v.expected_token_cbor);
@@ -127,15 +127,14 @@ fn capability_golden_signature_single_byte_tamper_is_rejected() {
             total_mutations += 1;
 
             let verdict = try_verify_token(&tampered, &v.expected_public_key);
-            if verdict.is_ok() {
-                all_rejected = false;
-                panic!(
-                    "vector '{}': flipping signature byte at offset {} did \
-                     NOT invalidate verification — Ed25519 is supposed to \
-                     reject any single-byte mutation",
-                    v.description, sig_byte
-                );
-            }
+            assert!(
+                verdict.is_err(),
+                "vector '{}': flipping signature byte at offset {} did \
+                 NOT invalidate verification — Ed25519 is supposed to \
+                 reject any single-byte mutation",
+                v.description,
+                sig_byte
+            );
         }
     }
 
@@ -162,7 +161,7 @@ fn capability_golden_signature_single_byte_tamper_is_rejected() {
 fn capability_golden_payload_byte_tamper_is_rejected() {
     let vectors = CapabilityTokenGoldenVector::load_all();
     let mut total_mutations = 0usize;
-    let mut all_rejected = true;
+    let all_rejected = true;
 
     for v in &vectors {
         let baseline = hex_to_bytes(&v.expected_token_cbor);
@@ -185,15 +184,14 @@ fn capability_golden_payload_byte_tamper_is_rejected() {
             total_mutations += 1;
 
             let verdict = try_verify_token(&tampered, &v.expected_public_key);
-            if verdict.is_ok() {
-                all_rejected = false;
-                panic!(
-                    "vector '{}': flipping payload byte at offset {} did NOT \
-                     invalidate verification — the signature must cover the \
-                     entire COSE_Sign1 tbs_data, including every payload byte",
-                    v.description, offset
-                );
-            }
+            assert!(
+                verdict.is_err(),
+                "vector '{}': flipping payload byte at offset {} did NOT \
+                 invalidate verification — the signature must cover the \
+                 entire COSE_Sign1 tbs_data, including every payload byte",
+                v.description,
+                offset
+            );
         }
     }
 
@@ -481,7 +479,7 @@ fn capability_token_cbor_roundtrip_preserves_signature() {
 
     // And the inverse: a truncated token must not decode, and if it
     // does, it must not verify. Strip the last byte of the signature.
-    let mut truncated = bytes.clone();
+    let mut truncated = bytes;
     truncated.pop();
     let verdict = CoseToken::from_cbor(&truncated).and_then(|t| t.verify(&issuer.verifying_key()));
     assert!(

@@ -30,12 +30,13 @@ pub mod types;
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
     use fcp_prelude::{CredentialId, FcpError};
     use serde_json::json;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::client::{DEFAULT_BASE_URL, WhisperAuth, WhisperClient};
     use crate::connector::WhisperConnector;
@@ -45,6 +46,148 @@ mod tests {
         TranscriptionSegment, TranslateRequest, TranslationResult, VerboseTranscription,
         WhisperModel, WordTimestamp,
     };
+
+    struct LoopbackHttpResponse {
+        status: u16,
+        headers: Vec<(&'static str, &'static str)>,
+        body: Vec<u8>,
+    }
+
+    impl LoopbackHttpResponse {
+        fn json(status: u16, body: &serde_json::Value) -> Self {
+            Self {
+                status,
+                headers: vec![("content-type", "application/json")],
+                body: body.to_string().into_bytes(),
+            }
+        }
+
+        fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.headers.push((name, value));
+            self
+        }
+    }
+
+    struct LoopbackHttpServer {
+        base_url: String,
+        _join: JoinHandle<()>,
+    }
+
+    impl LoopbackHttpServer {
+        fn once(
+            expected_method: &'static str,
+            expected_path: &'static str,
+            response: LoopbackHttpResponse,
+        ) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback HTTP listener");
+            let addr = listener
+                .local_addr()
+                .expect("loopback HTTP listener address");
+            let join = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept loopback HTTP request");
+                handle_loopback_request(&mut stream, expected_method, expected_path, &response);
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                _join: join,
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.base_url
+        }
+    }
+
+    fn handle_loopback_request(
+        stream: &mut TcpStream,
+        expected_method: &str,
+        expected_path: &str,
+        response: &LoopbackHttpResponse,
+    ) {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone loopback HTTP stream"));
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read loopback HTTP request line");
+        let mut parts = request_line.split_whitespace();
+        assert_eq!(parts.next(), Some(expected_method));
+        assert_eq!(parts.next(), Some(expected_path));
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("read loopback HTTP header");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().expect("parse content-length");
+                }
+            }
+        }
+
+        if content_length > 0 {
+            let mut body = vec![0u8; content_length];
+            reader
+                .read_exact(&mut body)
+                .expect("read loopback HTTP request body");
+        }
+
+        write_loopback_response(stream, response);
+    }
+
+    fn write_loopback_response(stream: &mut TcpStream, response: &LoopbackHttpResponse) {
+        let reason = match response.status {
+            200 => "OK",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            _ => "OK",
+        };
+        let mut raw = format!(
+            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            response.status,
+            reason,
+            response.body.len()
+        );
+        for (name, value) in &response.headers {
+            raw.push_str(name);
+            raw.push_str(": ");
+            raw.push_str(value);
+            raw.push_str("\r\n");
+        }
+        raw.push_str("\r\n");
+        stream
+            .write_all(raw.as_bytes())
+            .expect("write loopback HTTP response headers");
+        stream
+            .write_all(&response.body)
+            .expect("write loopback HTTP response body");
+    }
+
+    async fn connector_with_loopback_response(
+        method: &'static str,
+        path: &'static str,
+        api_key: &'static str,
+        response: LoopbackHttpResponse,
+    ) -> WhisperConnector {
+        let server = LoopbackHttpServer::once(method, path, response);
+        let mut c = WhisperConnector::new();
+        c.handle_configure(json!({
+            "api_key": api_key,
+            "base_url": server.uri()
+        }))
+        .await
+        .unwrap();
+        c.handle_handshake(json!({ "session_id": "s1" }))
+            .await
+            .unwrap();
+        c
+    }
 
     // ===== Config parsing tests =====
 
@@ -1200,34 +1343,27 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ===== Wiremock integration tests for each operation =====
+    // ===== Loopback HTTP tests for each operation =====
 
     #[test]
-    fn wiremock_transcribe_success() {
+    fn loopback_transcribe_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "text": "Hello world",
                     "language": "en",
                     "duration": 2.5,
                     "segments": []
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -1242,31 +1378,24 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_transcribe_with_language() {
+    fn loopback_transcribe_with_language() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "text": "Bonjour le monde",
                     "language": "fr",
                     "duration": 3.0,
                     "segments": []
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -1284,31 +1413,24 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_transcribe_with_url() {
+    fn loopback_transcribe_with_url() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "text": "Audio from URL",
                     "language": "en",
                     "duration": 5.0,
                     "segments": []
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -1324,30 +1446,23 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_translate_success() {
+    fn loopback_translate_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/translations"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/translations",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "text": "Hello world",
                     "language": "fr",
                     "duration": 2.5
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -1361,30 +1476,23 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_detect_language_success() {
+    fn loopback_detect_language_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "text": "Hola",
                     "language": "es",
                     "confidence": 0.95
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -1398,13 +1506,16 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_transcribe_verbose_success() {
+    fn loopback_transcribe_verbose_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "text": "Hello world",
                     "language": "en",
                     "duration": 2.5,
@@ -1423,20 +1534,10 @@ mod tests {
                         "start": 1.0,
                         "end": 2.5
                     }]
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -1453,7 +1554,7 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_list_models() {
+    fn loopback_list_models() {
         let rt = tokio_runtime();
         rt.block_on(async {
             let mut c = WhisperConnector::new();
@@ -1479,28 +1580,21 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_health_check_success() {
+    fn loopback_health_check_success() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/models"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "GET",
+                "/models",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "data": [{"id": "whisper-1"}]
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -1515,28 +1609,21 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_health_check_failure() {
+    fn loopback_health_check_failure() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/models"))
-                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "GET",
+                "/models",
+                "sk-bad",
+                LoopbackHttpResponse::json(
+                    401,
+                    &json!({
                     "error": {"message": "Invalid API key", "type": "invalid_request_error"}
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-bad",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -1551,7 +1638,7 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_usage() {
+    fn loopback_usage() {
         let rt = tokio_runtime();
         rt.block_on(async {
             let mut c = WhisperConnector::new();
@@ -1575,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_formats() {
+    fn loopback_formats() {
         let rt = tokio_runtime();
         rt.block_on(async {
             let mut c = WhisperConnector::new();
@@ -1608,31 +1695,24 @@ mod tests {
         });
     }
 
-    // ===== Wiremock error handling tests =====
+    // ===== Loopback HTTP error handling tests =====
 
     #[test]
-    fn wiremock_transcribe_401_error() {
+    fn loopback_transcribe_401_error() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-bad",
+                LoopbackHttpResponse::json(
+                    401,
+                    &json!({
                     "error": {"message": "Invalid API key", "type": "invalid_request_error"}
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-bad",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let result = c
                 .handle_invoke(json!({
@@ -1645,32 +1725,22 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_transcribe_429_error() {
+    fn loopback_transcribe_429_error() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(
-                    ResponseTemplate::new(429)
-                        .set_body_json(json!({
-                            "error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}
-                        }))
-                        .insert_header("retry-after", "30"),
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    429,
+                    &json!({
+                        "error": {"message": "Rate limit exceeded", "type": "rate_limit_error"}
+                    }),
                 )
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                .with_header("retry-after", "30"),
+            )
+            .await;
 
             let result = c
                 .handle_invoke(json!({
@@ -1683,28 +1753,21 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_transcribe_500_error() {
+    fn loopback_transcribe_500_error() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    500,
+                    &json!({
                     "error": {"message": "Internal server error", "type": "server_error"}
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let result = c
                 .handle_invoke(json!({
@@ -1717,28 +1780,21 @@ mod tests {
     }
 
     #[test]
-    fn wiremock_translate_401_error() {
+    fn loopback_translate_401_error() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/translations"))
-                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/translations",
+                "sk-bad",
+                LoopbackHttpResponse::json(
+                    401,
+                    &json!({
                     "error": {"message": "Invalid API key", "type": "invalid_request_error"}
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-bad",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let result = c
                 .handle_invoke(json!({
@@ -2270,7 +2326,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // list_models does not need mock, it's hardcoded
+            // list_models is handled locally by the connector.
             c.handle_invoke(json!({
                 "operation_id": "whisper.list_models",
                 "input": {}
@@ -2330,13 +2386,16 @@ mod tests {
     // ===== Transcribe with segments response =====
 
     #[test]
-    fn wiremock_transcribe_with_segments() {
+    fn loopback_transcribe_with_segments() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/transcriptions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/transcriptions",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "text": "First. Second.",
                     "language": "en",
                     "duration": 5.0,
@@ -2344,20 +2403,10 @@ mod tests {
                         {"id": 0, "start": 0.0, "end": 2.5, "text": "First."},
                         {"id": 1, "start": 2.5, "end": 5.0, "text": "Second."}
                     ]
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({
@@ -2374,30 +2423,23 @@ mod tests {
     // ===== Additional coverage tests =====
 
     #[test]
-    fn wiremock_translate_with_url() {
+    fn loopback_translate_with_url() {
         let rt = tokio_runtime();
         rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/audio/translations"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let c = connector_with_loopback_response(
+                "POST",
+                "/audio/translations",
+                "sk-key",
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
                     "text": "Hello from URL",
                     "language": "de",
                     "duration": 4.0
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = WhisperConnector::new();
-            c.handle_configure(json!({
-                "api_key": "sk-key",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
+                    }),
+                ),
+            )
+            .await;
 
             let resp = c
                 .handle_invoke(json!({

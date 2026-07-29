@@ -5,7 +5,7 @@ use std::sync::Arc;
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -131,6 +131,12 @@ impl PineconeConnector {
             verifier: None,
             session_id: None,
         }
+    }
+
+    /// Return this connector instance's stable runtime identifier.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {
@@ -1046,9 +1052,14 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
+    use fcp_prelude::CapabilityConstraints;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &InstanceId,
+        op: &str,
+    ) -> CapabilityToken {
         let cap = match op {
             "pinecone.list_indexes"
             | "pinecone.describe_index"
@@ -1059,6 +1070,12 @@ mod tests {
             _ => "pinecone.indexes.read",
         };
         let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
@@ -1066,6 +1083,9 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
+            .target_instance(instance_id.as_str())
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -1112,7 +1132,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "pinecone.list_indexes");
+        let token = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "pinecone.list_indexes",
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "pinecone.list_indexes",
@@ -1137,7 +1161,11 @@ mod tests {
             .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "pinecone.list_indexes");
+        let token = generate_valid_token(
+            &signing_key,
+            connector.instance_id(),
+            "pinecone.list_indexes",
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "pinecone.list_indexes",
@@ -1176,7 +1204,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "pinecone.query");
+        let token = generate_valid_token(&signing_key, connector.instance_id(), "pinecone.query");
         let result = connector
             .handle_invoke(json!({
                 "operation": "pinecone.query",

@@ -1,16 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/br-tools",
     "crates/fcp-async-core",
     "crates/fcp-async-core-macros",
     "crates/fcp-audit",
     "crates/fcp-auth-schema",
+    "crates/fcp-bench",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",
+    "crates/fcp-chaos",
     "crates/fwc",
     "crates/fcp-core",
     "crates/fcp-conformance",
     "crates/fcp-crypto",
+    "crates/fcp-crypto-hw",
     "crates/fcp-crypto-pq",
     "crates/fcp-e2e",
     "crates/fcp-google-discovery",
@@ -18,6 +22,7 @@ members = [
     "crates/fcp-host",
     "crates/fcp-kernel",
     "crates/fcp-manifest",
+    "crates/fcp-migrate",
     "crates/fcp-mesh",
     "crates/fcp-openai-compat",
     "crates/fcp-policy",
@@ -38,6 +43,7 @@ members = [
     "crates/fcp-testkit",
     "crates/fcp-voice-call",
     "crates/fcp-webhook",
+    "connectors/_adversarial",
     "connectors/anthropic",
     "connectors/anthropic-vertex",
     "connectors/aws",
@@ -195,6 +201,7 @@ members = [
     "connectors/square",
     "connectors/calendly",
     "connectors/coda",
+    "connectors/comfyui",
     "connectors/mastodon",
     "connectors/hackernews",
     "connectors/obsidian",
@@ -219,15 +226,18 @@ members = [
 default-members = [
     "crates/fcp-async-core",
     "crates/fcp-audit",
+    "crates/fcp-bench",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",
     "crates/fcp-core",
     "crates/fcp-crypto",
+    "crates/fcp-crypto-hw",
     "crates/fwc",
     "crates/fcp-google-discovery",
     "crates/fcp-graphql",
     "crates/fcp-host",
     "crates/fcp-manifest",
+    "crates/fcp-migrate",
     "crates/fcp-mesh",
     "crates/fcp-protocol",
     "crates/fcp-raptorq",
@@ -240,7 +250,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -333,13 +343,16 @@ url = "2.5"
 fcp-async-core = { path = "crates/fcp-async-core" }
 fcp-audit = { path = "crates/fcp-audit" }
 fcp-auth-schema = { path = "crates/fcp-auth-schema" }
+fcp-bench = { path = "crates/fcp-bench" }
 fcp-bootstrap = { path = "crates/fcp-bootstrap" }
 fcp-cbor = { path = "crates/fcp-cbor" }
 fcp-core = { path = "crates/fcp-core" }
 fcp-conformance = { path = "crates/fcp-conformance" }
 fcp-crypto = { path = "crates/fcp-crypto" }
+fcp-crypto-hw = { path = "crates/fcp-crypto-hw" }
 fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
+fcp-adversarial = { path = "connectors/_adversarial" }
 fcp-cerebras = { path = "connectors/cerebras" }
 fcp-deepseek = { path = "connectors/deepseek" }
 fcp-duckduckgo = { path = "connectors/duckduckgo" }
@@ -359,6 +372,7 @@ fcp-voyage = { path = "connectors/voyage" }
 fcp-xai = { path = "connectors/xai" }
 fcp-kernel = { path = "crates/fcp-kernel" }
 fcp-manifest = { path = "crates/fcp-manifest" }
+fcp-migrate = { path = "crates/fcp-migrate" }
 fcp-mesh = { path = "crates/fcp-mesh" }
 fcp-openai-compat = { path = "crates/fcp-openai-compat" }
 fcp-oauth = { path = "crates/fcp-oauth" }
@@ -386,9 +400,13 @@ fwc = { path = "crates/fwc" }
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
-nursery = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# The connector protocol loop awaits every JSON-RPC handler uniformly
+# (configure/handshake/health/...), so handlers keep `async fn` signatures
+# even when a given handler body has no await points.
+unused_async_trait_impl = "allow"
 
 [profile.release]
 opt-level = "z"

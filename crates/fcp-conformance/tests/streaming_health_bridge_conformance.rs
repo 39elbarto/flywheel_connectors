@@ -17,7 +17,7 @@
 //!    `Connected → Healthy`, `Degraded → Degraded`,
 //!    `Reconnecting → Degraded` (NOT Healthy — important!),
 //!    `Unhealthy → Unavailable`.
-//! 3. **JSON wire form** for `StreamHealthState` (snake_case rename)
+//! 3. **JSON wire form** for `StreamHealthState` (`snake_case` rename)
 //!    and `StreamHealthSnapshot` (`skip_serializing_if=None` on the
 //!    optional time fields). Drift here breaks every existing
 //!    consumer of streaming-health JSON.
@@ -28,7 +28,7 @@ use fcp_streaming::{
 };
 use std::time::Duration;
 
-fn fast_config() -> StreamHealthConfig {
+const fn fast_config() -> StreamHealthConfig {
     StreamHealthConfig {
         heartbeat_timeout: Duration::from_millis(20),
         zombie_timeout: Duration::from_millis(80),

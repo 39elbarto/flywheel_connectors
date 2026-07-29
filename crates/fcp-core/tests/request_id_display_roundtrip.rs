@@ -1,4 +1,4 @@
-//! Pin `RequestId` Display + FromStr round-trip stability across the
+//! Pin `RequestId` `Display` + `FromStr` round-trip stability across the
 //! documented format variants (flywheel_connectors-abr7b).
 //!
 //! `RequestId(String)` (protocol.rs:34) is the wire-level correlation
@@ -11,21 +11,21 @@
 //! > to echo it back.
 //!
 //! Documented variants (and a few real-world shapes) all MUST
-//! Display→FromStr round-trip identically, since the underlying
+//! `Display`→`FromStr` round-trip identically, since the underlying
 //! storage is a free-form String. This test pins:
 //!
-//! 1. Display emits the constructor input verbatim across every
+//! 1. `Display` emits the constructor input verbatim across every
 //!    documented variant: random monotonic (`req_<20-zero-padded>`),
 //!    short user-supplied (`req_123`), UUID hyphenated, UUID simple,
 //!    arbitrary opaque strings.
-//! 2. Display → FromStr round-trip preserves Eq + Hash (FromStr is
+//! 2. `Display` → `FromStr` round-trip preserves `Eq` + `Hash` (`FromStr` is
 //!    Infallible so it always succeeds).
-//! 3. Equality + Hash agree across construction paths
+//! 3. Equality + `Hash` agree across construction paths
 //!    (`new` / `From<&str>` / `From<String>` / `FromStr` / `random`
 //!    where applicable / `clone`).
 //! 4. `RequestId::random()` produces monotonically-distinct ids that
 //!    round-trip cleanly.
-//! 5. Distinct inputs are distinct RequestIds.
+//! 5. Distinct inputs are distinct `RequestId`s.
 //! 6. HashMap-key correctness across construction paths.
 //! 7. Serde JSON round-trip — JSON form is the quoted string.
 

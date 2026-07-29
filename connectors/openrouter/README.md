@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented; manifest/introspection/API drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/openrouter_connector_verification.sh`
 > **OpenRouter API overview upstream**: https://openrouter.ai/docs/api-reference/overview
 > **OpenRouter chat completions upstream**: https://openrouter.ai/docs/api-reference/chat-completion
 > **OpenRouter models upstream**: https://openrouter.ai/docs/api/api-reference/models/get-models
@@ -116,7 +116,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime request/error counters increment only through `handle_invoke()`.
 - Runtime video generation downloads the completed asset into memory and returns base64, so large generated videos are bounded only by `max_download_bytes` and process memory.
 - Runtime polling can occupy a request for up to `poll_interval_ms * max_poll_attempts`; defaults are 5000 ms and 120 attempts.
-- No dedicated tracked verification shell script exists for this connector.
+- A dedicated tracked verification shell script exists at `scripts/e2e/openrouter_connector_verification.sh`; it records manifest, build, test, local evidence, redaction, and clippy artifacts under `artifacts/e2e/openrouter/<run-id>/`.
 
 A follow-up parity bead should add typed FCP handshake and capability verification, implement or remove `credential_id` mode, decide whether streaming chat should be supported through an event surface, widen chat parameter forwarding where safe, add provider-scope/billing/model availability diagnostics, expose generation metadata reads if needed, and avoid returning large video assets inline when the host has a better blob path.
 
@@ -164,19 +164,19 @@ The current OpenRouter README slice documents the existing runtime surface:
 
 ## Verification
 
-README-only changes do not require Cargo or `rch` verification. Before committing this file, run:
+Run the tracked verifier from the repository root:
 
 ```bash
-git diff --check -- connectors/openrouter/README.md
-LC_ALL=C rg -n '[^ -~]' connectors/openrouter/README.md
-rg -n '\bmaster\b' connectors/openrouter/README.md
-ubs connectors/openrouter/README.md
+RUN_ID=openrouter-local-$(date -u +%Y%m%dT%H%M%SZ) scripts/e2e/openrouter_connector_verification.sh
 ```
 
-For code changes in this connector, use the workspace-required proof lane from the root `AGENTS.md`:
+The verifier writes a replay bundle and summary:
 
 ```bash
-rch exec -- cargo check --workspace --all-targets
-rch exec -- cargo clippy --workspace --all-targets -- -D warnings
-rch exec -- cargo fmt --check
+OPENROUTER_E2E_JSONL=artifacts/e2e/openrouter/<run-id>/evidence/local_non_mock.jsonl
+OPENROUTER_E2E_SUMMARY=artifacts/e2e/openrouter/<run-id>/summary.json
 ```
+
+The required local evidence contract is two redaction-safe `local_non_mock` JSONL records covering `models_list` and `chat_completions` through a loopback HTTP boundary. The extracted evidence must not contain the local API key, loopback socket, prompt text, or completion text.
+
+For README-only changes, also run `git diff --check -- connectors/openrouter/README.md scripts/e2e/openrouter_connector_verification.sh` and `ubs --files connectors/openrouter/README.md,scripts/e2e/openrouter_connector_verification.sh --format=json --ci`.

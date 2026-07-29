@@ -129,7 +129,7 @@ impl InworldError {
     }
 }
 
-impl fcp_sdk::migration::ConnectorErrorMapping for InworldError {
+impl fcp_sdk::ConnectorErrorMapping for InworldError {
     fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
         match error {
             fcp_async_core::AsyncError::Timeout { timeout_ms } => Self::Api {

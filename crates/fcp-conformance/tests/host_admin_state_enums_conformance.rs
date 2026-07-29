@@ -8,20 +8,20 @@
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. **`ConnectorInventoryMutationKind`** — 2 snake_case variants
+//! 1. **`ConnectorInventoryMutationKind`** — 2 `snake_case` variants
 //!    (`install` / `update`).
-//! 2. **`LifecycleAction`** — 6 snake_case variants (`enable` /
+//! 2. **`LifecycleAction`** — 6 `snake_case` variants (`enable` /
 //!    `disable` / `restart` / `reload` / `uninstall` / `promote`).
 //!    These ARE the operator verbs; renaming any one breaks
 //!    automation scripts.
-//! 3. **`LogSeverity`** — 4 snake_case variants
+//! 3. **`LogSeverity`** — 4 `snake_case` variants
 //!    (`debug` / `info` / `warn` / `error`). Standard syslog-style
 //!    levels; operator alerting filters depend on these strings.
-//! 4. **`HostEventKind`** — 7 snake_case variants
+//! 4. **`HostEventKind`** — 7 `snake_case` variants
 //!    (`lifecycle_transition` / `health_check` / `config_revision` /
 //!    `rollout_decision` / `supply_chain_verification` /
 //!    `drift_detected` / `connector_state_change`).
-//! 5. **`SimulatePhase`** — 4 snake_case variants
+//! 5. **`SimulatePhase`** — 4 `snake_case` variants
 //!    (`preflight_only` / `connector_reached` /
 //!    `connector_unsupported` / `timed_out`). Drives operator
 //!    visibility into how far simulation got.

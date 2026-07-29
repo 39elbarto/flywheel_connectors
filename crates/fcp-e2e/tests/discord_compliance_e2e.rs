@@ -50,6 +50,10 @@ impl DiscordConnectorAdapter {
             id: ConnectorId::from_static("discord"),
         }
     }
+
+    fn instance_id(&self) -> &str {
+        self.connector.instance_id().as_str()
+    }
 }
 
 fcp_core::impl_fcp_sealed!(DiscordConnectorAdapter);
@@ -208,7 +212,12 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        // dja9u typestate ratchet: connector verifier binds to this id; the
+        // capability token's target_instance must match it (see build_token).
+        requested_instance_id: Some(
+            InstanceId::try_from("inst_e2e_test_fixture".to_string())
+                .expect("valid test instance id"),
+        ),
     }
 }
 
@@ -216,6 +225,7 @@ fn build_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &str,
 ) -> CapabilityToken {
     let now = Utc::now();
     let constraints = fcp_core::CapabilityConstraints {
@@ -232,7 +242,11 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        // dja9u typestate ratchet: the connector verifies bound tokens against
+        // its own base.instance_id, so target_instance must be that id.
+        .target_instance(instance_id)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -347,7 +361,12 @@ async fn discord_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["discord.read"]);
     // Token grants "discord.read" but invoke targets "discord.send_message" -> denial
-    let token = build_token(&signing_key, "discord.read", &["discord.read"]);
+    let token = build_token(
+        &signing_key,
+        "discord.read",
+        &["discord.read"],
+        connector.instance_id(),
+    );
     let invoke = invoke_request(
         "discord.send_message",
         json!({
@@ -406,7 +425,12 @@ async fn discord_allow_valid_token_connector_suite_passes() {
     let mut connector = DiscordConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["discord.send"]);
-    let token = build_token(&signing_key, "discord.send", &["discord.send_message"]);
+    let token = build_token(
+        &signing_key,
+        "discord.send",
+        &["discord.send_message"],
+        connector.instance_id(),
+    );
     let invoke = invoke_request(
         "discord.send_message",
         json!({
@@ -659,7 +683,12 @@ async fn discord_rate_limit_surfaces_correctly() {
         .expect("handshake should succeed");
 
     // Build valid token and invoke -- should get rate limited
-    let token = build_token(&signing_key, "discord.send", &["discord.send_message"]);
+    let token = build_token(
+        &signing_key,
+        "discord.send",
+        &["discord.send_message"],
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "discord.send_message",

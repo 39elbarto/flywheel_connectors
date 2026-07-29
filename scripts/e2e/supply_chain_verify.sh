@@ -13,6 +13,9 @@ CONNECTOR_ID="fcp.telegram:base:v1"
 ZONE_ID="z:work"
 TARGET_DIR="${SUPPLY_CHAIN_VERIFY_TARGET_DIR:-/tmp/fcp-supply-chain-verify}"
 HOST_OVERRIDE_TEST="fcp_host_binary_supply_chain_verify_route_honors_dev_override_env"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 usage() {
   cat <<'EOF'
@@ -72,15 +75,62 @@ now_ms() {
 run_cargo() {
   (
     cd "${REPO_ROOT}"
-    rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
+    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+      CARGO_TARGET_DIR="${TARGET_DIR}" "${RCH_BIN}" exec -- cargo "$@"
   )
+}
+
+rch_remote_summary_present() {
+  local execution_logs=("$@")
+  local accepted=0
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  for execution_log in "${execution_logs[@]}"; do
+    if [[ ! -f "${execution_log}" ]]; then
+      continue
+    fi
+    if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+      echo "Missing accepted remote rch summary in ${execution_logs[*]}" >&2
+      echo "rch remote proof is required; refusing local fallback" >&2
+      return 2
+    fi
+    if grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}"; then
+      accepted=1
+    fi
+  done
+
+  if (( accepted )); then
+    return 0
+  fi
+
+  echo "Missing accepted remote rch summary in ${execution_logs[*]}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
 }
 
 run_fcp_json() {
   local stdout_path="$1"
   local stderr_path="$2"
   shift 2
+  local rc remote_error errexit_was_set=0
+  [[ $- == *e* ]] && errexit_was_set=1
+  set +e
   run_cargo run -q -p fcp-cli --bin fcp -- "$@" >"${stdout_path}" 2>"${stderr_path}"
+  rc=$?
+  if [[ "${errexit_was_set}" == "1" ]]; then
+    set -e
+  else
+    set +e
+  fi
+  if ! remote_error="$(rch_remote_summary_present "${stdout_path}" "${stderr_path}" 2>&1)"; then
+    printf '%s\n' "${remote_error}" >> "${stderr_path}"
+    printf '%s\n' "${remote_error}" >&2
+    return 2
+  fi
+  return "${rc}"
 }
 
 run_exact_test() {
@@ -88,8 +138,23 @@ run_exact_test() {
   local integration_test="$2"
   local test_name="$3"
   local log_path="$4"
+  local rc remote_error errexit_was_set=0
+  [[ $- == *e* ]] && errexit_was_set=1
+  set +e
   run_cargo test -p "${package}" --test "${integration_test}" "${test_name}" -- --exact --nocapture \
     >"${log_path}" 2>&1
+  rc=$?
+  if [[ "${errexit_was_set}" == "1" ]]; then
+    set -e
+  else
+    set +e
+  fi
+  if ! remote_error="$(rch_remote_summary_present "${log_path}" 2>&1)"; then
+    printf '%s\n' "${remote_error}" >> "${log_path}"
+    printf '%s\n' "${remote_error}" >&2
+    return 2
+  fi
+  return "${rc}"
 }
 
 record_step() {
@@ -279,7 +344,7 @@ INVALID_ATTESTATION="${FIXTURE_DIR}/attestation.invalid.json"
 VALID_SBOM="${FIXTURE_DIR}/sbom.valid.json"
 
 require_cmd jq
-require_cmd rch
+require_cmd "${RCH_BIN}"
 require_cmd bash
 
 mkdir -p "${RAW_DIR}" "${FIXTURE_DIR}"

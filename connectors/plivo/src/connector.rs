@@ -30,6 +30,7 @@ use fcp_voice_call::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 use url::Url;
 
@@ -51,6 +52,7 @@ const PLIVO_WEBHOOK_INGRESS_CONCURRENCY_LIMIT: u64 = 32;
 const PLIVO_WEBHOOK_INGRESS_RATE_LIMIT_MAX: u64 = 200;
 const PLIVO_WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
 const PLIVO_SESSION_TTL_MINUTES: i64 = 60;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 #[derive(Debug, Clone)]
 struct PlivoConfig {
@@ -248,6 +250,12 @@ impl PlivoConnector {
         self.base.instance_id.as_str()
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
@@ -310,12 +318,12 @@ impl PlivoConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:fcp-plivo-manifest".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: request.nonce,
             event_caps: Some(EventCaps::default()),
             auth_caps: None,
             op_catalog_hash: Some(stable_redacted_hash(
-                &serde_json::to_string(&Self::operations()).unwrap_or_default(),
+                &serde_json::to_string(&Self::operations_info()).unwrap_or_default(),
             )),
         })
     }
@@ -372,7 +380,7 @@ impl PlivoConnector {
     /// Introspection.
     pub async fn handle_introspect(&self) -> FcpResult<Value> {
         serialize_result(Introspection {
-            operations: Self::operations(),
+            operations: Self::operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -1033,7 +1041,7 @@ impl PlivoConnector {
     }
 
     async fn operation_metadata(&self, operation: &str) -> FcpResult<(CapabilityId, Value)> {
-        let op = Self::operations()
+        let op = Self::operations_info()
             .into_iter()
             .find(|operation_info| operation_info.id.as_str() == operation)
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1060,7 +1068,9 @@ impl PlivoConnector {
         Ok(())
     }
 
-    fn operations() -> Vec<OperationInfo> {
+    /// Build the connector operation metadata exposed through introspection.
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
         vec![
             op_info(
                 "plivo.call.initiate",
@@ -1854,6 +1864,17 @@ mod tests {
 
     const TEST_AUTH_SECRET: &str = "plivo_test_auth_secret";
 
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = PlivoConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:fcp-plivo-manifest");
+    }
+
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
         instance_id: &str,
@@ -1973,6 +1994,31 @@ mod tests {
             "plivo.webhook.ingest_request",
         ] {
             assert!(ids.contains(&id), "{id} missing");
+        }
+    }
+
+    #[test]
+    fn operations_info_exposes_full_voice_and_webhook_catalog() {
+        let ops = PlivoConnector::operations_info();
+        assert_eq!(ops.len(), 11);
+        let ids = ops
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<Vec<_>>();
+        for id in [
+            "plivo.call.initiate",
+            "plivo.call.continue",
+            "plivo.call.speak",
+            "plivo.call.end",
+            "plivo.call.status",
+            "plivo.call.transfer",
+            "plivo.call.gather",
+            "plivo.webhook.validate_signature",
+            "plivo.webhook.evaluate_inbound_policy",
+            "plivo.webhook.parse_event",
+            "plivo.webhook.ingest_request",
+        ] {
+            assert!(ids.contains(&id), "{id} missing from operations_info");
         }
     }
 

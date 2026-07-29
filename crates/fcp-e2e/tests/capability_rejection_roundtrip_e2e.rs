@@ -69,7 +69,8 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(nbf, exp)
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)

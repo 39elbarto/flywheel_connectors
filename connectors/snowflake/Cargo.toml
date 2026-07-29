@@ -23,6 +23,7 @@ workspace = true
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
+fcp-manifest = { workspace = true }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 anyhow.workspace = true
 async-trait.workspace = true
@@ -34,4 +35,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+fcp-testkit.workspace = true
 wiremock.workspace = true

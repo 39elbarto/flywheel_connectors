@@ -27,7 +27,7 @@
 //! - `InMemoryControlPlaneHandler::new()` starts with count=0, no
 //!   epochs, get returns None
 //! - `handle(Required)` stores, increments count, exposes via
-//!   list_epochs + fetch_epoch
+//!   `list_epochs` + `fetch_epoch`
 //! - `handle(Ephemeral)` does NOT store, count stays unchanged
 //! - `list_epochs(zone, since=Some(N))` returns only epochs > N
 //!   (strict, not ≥)
@@ -98,7 +98,7 @@ fn retention_class_required_and_ephemeral_are_distinct() {
 fn retention_class_implements_copy_clone_eq() {
     let a = RetentionClass::Required;
     let b = a; // Copy
-    let c = a.clone(); // Clone
+    let c = a; // Clone
     assert_eq!(a, b);
     assert_eq!(a, c);
 }
@@ -108,7 +108,7 @@ fn retention_class_eq_distinguishes_variants_in_collections() {
     // RetentionClass derives PartialEq/Eq but not Hash. Pin via Vec
     // membership semantics (operator tooling iterates lists, doesn't
     // hash).
-    let v = vec![RetentionClass::Required, RetentionClass::Ephemeral];
+    let v = [RetentionClass::Required, RetentionClass::Ephemeral];
     assert!(v.contains(&RetentionClass::Required));
     assert!(v.contains(&RetentionClass::Ephemeral));
 }
@@ -123,9 +123,9 @@ fn envelope_new_preserves_all_seven_fields() {
     let env = ControlPlaneEnvelope::new(
         b"some-payload".to_vec(),
         [9u8; 32],
-        oid.clone(),
+        oid,
         zone.clone(),
-        zone_key.clone(),
+        zone_key,
         42,
         RetentionClass::Ephemeral,
     );
@@ -165,7 +165,7 @@ fn handler_starts_empty() {
 fn handler_stores_required_envelope() {
     let h = InMemoryControlPlaneHandler::new();
     let env = fake_envelope(b"required-1", RetentionClass::Required);
-    let oid = env.object_id.clone();
+    let oid = env.object_id;
     h.handle(env).expect("handler accepts Required");
     assert_eq!(
         h.count(),
@@ -180,7 +180,7 @@ fn handler_stores_required_envelope() {
 fn handler_does_not_store_ephemeral_envelope() {
     let h = InMemoryControlPlaneHandler::new();
     let env = fake_envelope(b"ephemeral-1", RetentionClass::Ephemeral);
-    let oid = env.object_id.clone();
+    let oid = env.object_id;
     h.handle(env)
         .expect("handler accepts Ephemeral without error");
     assert_eq!(

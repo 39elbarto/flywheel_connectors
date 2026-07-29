@@ -23,7 +23,7 @@ The contract answers two questions:
 
 ### MUST
 
-- Connector struct holds a `ConnectorRuntime` field (from `fcp_sdk::migration`), initialized during `configure()` via `ConnectorRuntime::new()`.
+- Connector struct holds a `ConnectorRuntime` field (from `fcp_sdk`), initialized during `configure()` via `ConnectorRuntime::new()`.
 - Every invoke/request path creates a context via `runtime.request_context()` or `runtime.request_context_with_timeout()`.
 - Long-lived operations (streaming, polling, webhook listeners) use `runtime.background_context()`.
 - Connector `shutdown()` handler calls `runtime.shutdown()` to propagate cancellation to all outstanding contexts.
@@ -58,7 +58,7 @@ The contract answers two questions:
 
 ### MUST
 
-- Connector error type implements `ConnectorErrorMapping` (from `fcp_sdk::migration`):
+- Connector error type implements `ConnectorErrorMapping` (from `fcp_sdk`):
   ```rust
   impl ConnectorErrorMapping for YourError {
       fn from_async_error(error: AsyncError) -> Self;

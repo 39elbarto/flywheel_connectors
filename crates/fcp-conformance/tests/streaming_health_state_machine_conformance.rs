@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use fcp_streaming::{StreamHealthConfig, StreamHealthState, StreamHealthTracker};
 
-fn fast_config() -> StreamHealthConfig {
+const fn fast_config() -> StreamHealthConfig {
     StreamHealthConfig {
         heartbeat_timeout: Duration::from_millis(30),
         zombie_timeout: Duration::from_millis(90),

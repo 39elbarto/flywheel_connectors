@@ -17,6 +17,9 @@ use crate::error::DecodeError;
 use crate::oti::ObjectTransmissionInformation;
 
 const COOPERATIVE_YIELD_INTERVAL: usize = 32;
+const FCP_SOURCE_BLOCKS: u8 = 1;
+const FCP_SUB_BLOCKS: u16 = 1;
+const FCP_SYMBOL_ALIGNMENT: u8 = 8;
 
 /// `RaptorQ` decoder for reconstructing payload from symbols.
 pub struct RaptorQDecoder {
@@ -28,6 +31,12 @@ pub struct RaptorQDecoder {
     transfer_length: u64,
     /// Symbol size in bytes.
     symbol_size: u16,
+    /// Number of source blocks declared by the OTI.
+    source_blocks: u8,
+    /// Number of sub-blocks declared by the OTI.
+    sub_blocks: u16,
+    /// Symbol alignment declared by the OTI.
+    alignment: u8,
     /// Optional end-to-end payload hash carried by the encoder.
     payload_hash: Option<[u8; 32]>,
     config: RaptorQConfig,
@@ -116,6 +125,9 @@ impl RaptorQDecoder {
             k,
             transfer_length: oti.transfer_length(),
             symbol_size: oti.symbol_size(),
+            source_blocks: oti.source_blocks(),
+            sub_blocks: oti.sub_blocks(),
+            alignment: oti.symbol_alignment(),
             payload_hash: oti.payload_hash(),
             config: config.clone(),
             started_at: Instant::now(),
@@ -137,6 +149,9 @@ impl RaptorQDecoder {
             k,
             transfer_length,
             symbol_size,
+            source_blocks: FCP_SOURCE_BLOCKS,
+            sub_blocks: FCP_SUB_BLOCKS,
+            alignment: FCP_SYMBOL_ALIGNMENT,
             payload_hash: None,
             config: config.clone(),
             started_at: Instant::now(),
@@ -626,6 +641,8 @@ impl RaptorQDecoder {
     }
 
     fn validate_decode_bounds(&self) -> Result<(), DecodeError> {
+        self.validate_transmission_info()?;
+
         let max_object_size = self.config.max_object_size as usize;
         let transfer_len = usize::try_from(self.transfer_length).map_err(|_| {
             DecodeError::MemoryLimitExceeded {
@@ -663,6 +680,39 @@ impl RaptorQDecoder {
             });
         }
 
+        Ok(())
+    }
+
+    fn validate_transmission_info(&self) -> Result<(), DecodeError> {
+        if self.symbol_size == 0 {
+            return Err(DecodeError::InvalidTransmissionInfo {
+                reason: "symbol_size must be non-zero".into(),
+            });
+        }
+        if self.source_blocks != FCP_SOURCE_BLOCKS {
+            return Err(DecodeError::InvalidTransmissionInfo {
+                reason: format!(
+                    "FCP decoder supports exactly {FCP_SOURCE_BLOCKS} source block, got {}",
+                    self.source_blocks
+                ),
+            });
+        }
+        if self.sub_blocks != FCP_SUB_BLOCKS {
+            return Err(DecodeError::InvalidTransmissionInfo {
+                reason: format!(
+                    "FCP decoder supports exactly {FCP_SUB_BLOCKS} sub-block, got {}",
+                    self.sub_blocks
+                ),
+            });
+        }
+        if self.alignment != FCP_SYMBOL_ALIGNMENT {
+            return Err(DecodeError::InvalidTransmissionInfo {
+                reason: format!(
+                    "FCP decoder requires {FCP_SYMBOL_ALIGNMENT}-byte symbol alignment, got {}",
+                    self.alignment
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -2010,6 +2060,55 @@ mod tests {
         assert_eq!(decoder.expected_k(), 1024);
     }
 
+    #[test]
+    fn decoder_rejects_invalid_transmission_info_zero_symbol_size_before_buffering() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(1024, 0, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        let err = decoder
+            .add_symbol(0, Vec::new())
+            .expect_err("zero-size OTI must fail before accepting symbols");
+
+        assert!(
+            matches!(err, DecodeError::InvalidTransmissionInfo { .. }),
+            "unexpected decode error: {err:?}"
+        );
+        assert_eq!(decoder.received_count(), 0);
+    }
+
+    #[test]
+    fn decoder_rejects_invalid_transmission_info_non_fcp_shape_before_buffering() {
+        let config = test_config();
+        let cases = [
+            (
+                "source_blocks",
+                ObjectTransmissionInformation::new(1024, 64, 2, 1, 8),
+            ),
+            (
+                "sub_blocks",
+                ObjectTransmissionInformation::new(1024, 64, 1, 2, 8),
+            ),
+            (
+                "alignment",
+                ObjectTransmissionInformation::new(1024, 64, 1, 1, 4),
+            ),
+        ];
+
+        for (label, oti) in cases {
+            let mut decoder = RaptorQDecoder::new(oti, &config);
+            let err = decoder
+                .add_symbol(0, vec![0u8; 64])
+                .expect_err("non-FCP OTI shape must fail before accepting symbols");
+
+            assert!(
+                matches!(err, DecodeError::InvalidTransmissionInfo { .. }),
+                "{label}: unexpected decode error: {err:?}"
+            );
+            assert_eq!(decoder.received_count(), 0, "{label}");
+        }
+    }
+
     // ── Additional decode tests ───────────────────────────────────────────
 
     #[test]
@@ -2175,15 +2274,13 @@ mod tests {
         // and short-circuit further buffering.
         let mut capped = None;
         for esi in 0..1200_u32 {
-            match decoder.add_symbol(esi, vec![0xAA; 64]) {
-                Err(
-                    e @ (DecodeError::MemoryLimitExceeded { .. }
-                    | DecodeError::SymbolBufferExceeded { .. }),
-                ) => {
-                    capped = Some(e);
-                    break;
-                }
-                _ => continue,
+            if let Err(
+                e @ (DecodeError::MemoryLimitExceeded { .. }
+                | DecodeError::SymbolBufferExceeded { .. }),
+            ) = decoder.add_symbol(esi, vec![0xAA; 64])
+            {
+                capped = Some(e);
+                break;
             }
         }
         assert!(
@@ -2886,18 +2983,18 @@ mod tests {
         let encoder = RaptorQEncoder::new(&payload, &config).expect("encode");
         let oti = encoder.transmission_info();
         let mut decoder = RaptorQDecoder::new(oti, &config);
-        let mut decoded: Option<Vec<u8>> = None;
+        let mut result_payload: Option<Vec<u8>> = None;
         for (esi, data) in encoder.encode_all() {
             match decoder.add_symbol(esi, data) {
                 Ok(Some(p)) => {
-                    decoded = Some(p);
+                    result_payload = Some(p);
                     break;
                 }
-                Ok(None) => continue,
+                Ok(None) => {}
                 Err(e) => panic!("decode failed under coalescer: {e:?}"),
             }
         }
-        let decoded = decoded.expect("backoff coalescer must still reach a decode");
-        assert_eq!(decoded, payload);
+        let result_payload = result_payload.expect("backoff coalescer must still reach a decode");
+        assert_eq!(result_payload, payload);
     }
 }

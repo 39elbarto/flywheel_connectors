@@ -80,6 +80,17 @@ impl FcpConnector for GitLabConnectorAdapter {
         );
 
         let response = self.connector.handle_handshake(request).await?;
+        // The GitLab connector re-verifies tokens with its OWN instance_id
+        // (base.instance_id, fixed at construction). Adopt it for the adapter's
+        // verifier too so both enforcement points agree (instance-binding
+        // pattern, commit 16171621d).
+        if let Some(inst) = response
+            .get("instance_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| s.parse::<InstanceId>().ok())
+        {
+            self.instance_id = inst;
+        }
         let protocol_version = response
             .get("protocol_version")
             .and_then(serde_json::Value::as_str)
@@ -204,7 +215,7 @@ impl FcpConnector for GitLabConnectorAdapter {
             message: "GitLab verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        verifier.verify_bound(
             &req.capability_token,
             &required_capability,
             &req.operation,
@@ -217,6 +228,10 @@ impl FcpConnector for GitLabConnectorAdapter {
             .handle_invoke(json!({
                 "operation_id": req.operation.as_str(),
                 "input": req.input,
+                // The GitLab connector re-parses the capability token from its
+                // invoke params (parse_capability_token); forward it so the
+                // connector's own enforcement path can run.
+                "capability_token": req.capability_token,
             }))
             .await?;
         Ok(InvokeResponse::ok(request_id, value))
@@ -227,7 +242,7 @@ impl FcpConnector for GitLabConnectorAdapter {
             message: "GitLab verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        verifier.verify_bound(
             &req.capability_token,
             &required_capability,
             &req.operation,
@@ -337,6 +352,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -352,9 +368,14 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: adapter verifies with `verify_bound`,
+        // which requires an INSTANCE_ID claim; bind to the adapter instance
+        // (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)
@@ -465,8 +486,20 @@ async fn gitlab_default_deny_compliance_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["gitlab.projects.read"],
     );
+    // Pre-handshake so the adapter adopts the GitLab connector's stable
+    // instance_id; the token must bind to it (the connector re-verifies with
+    // verify_bound). The suite re-runs configure/handshake harmlessly.
+    connector
+        .configure(gitlab_config(&mock.base_url()))
+        .await
+        .expect("configure");
+    connector
+        .handshake(handshake.clone())
+        .await
+        .expect("handshake");
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "gitlab.projects.read",
         &["gitlab.projects.list"],
     );
@@ -514,8 +547,20 @@ async fn gitlab_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["gitlab.projects.read"],
     );
+    // Pre-handshake so the adapter adopts the GitLab connector's stable
+    // instance_id; the token must bind to it (the connector re-verifies with
+    // verify_bound). The suite re-runs configure/handshake harmlessly.
+    connector
+        .configure(gitlab_config(&mock.base_url()))
+        .await
+        .expect("configure");
+    connector
+        .handshake(handshake.clone())
+        .await
+        .expect("handshake");
     let token = build_token(
         &signing_key,
+        connector.instance_id.as_str(),
         "gitlab.projects.read",
         &["gitlab.projects.list"],
     );

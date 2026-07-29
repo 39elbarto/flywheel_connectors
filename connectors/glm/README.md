@@ -3,7 +3,7 @@
 > **Status**: manifest/runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/glm_connector_verification.sh`
 > **Primary upstream**: https://docs.z.ai/api-reference/
 
 ## Purpose
@@ -45,6 +45,7 @@ Important runtime truths the contract preserves:
 - Chat input rejects empty messages, duplicate `max_tokens` plus `max_completion_tokens`, and zero `n` before network dispatch.
 - Embedding input rejects empty strings, empty batches, empty batch entries, and zero `dimensions` before network dispatch.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `glm.chat.completions_stream`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 
@@ -168,7 +169,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/glm_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated `scripts/e2e/glm_connector_verification.sh` bundle records the closeout surface for this connector.
 
 The verification surface captures:
 
@@ -176,6 +177,7 @@ The verification surface captures:
 - deterministic WireMock integration coverage
 - JWT auth, base URL, chat, streaming, embeddings, static catalog, error mapping, and redaction tests
 - formatting, check, and clippy proof through `rch`
+- extracted local non-mock JSONL evidence with prompt, response, API key, embedding input, and loopback endpoint redaction checks
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -213,6 +215,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID=manual-glm OUT_ROOT=/Volumes/trj-data/fcp-artifacts/glm/manual-glm CARGO_TARGET_PREFIX=/Volumes/trj-data/tmp/fcp-glm-manual scripts/e2e/glm_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-glm-e2e cargo check -p fcp-glm --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-glm-e2e cargo test -p fcp-glm --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-glm-e2e cargo clippy -p fcp-glm --all-targets --no-deps -- -D warnings`

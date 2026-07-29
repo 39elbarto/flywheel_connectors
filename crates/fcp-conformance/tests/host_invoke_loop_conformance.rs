@@ -4,8 +4,8 @@
 //! by composing the same real components the production gateway uses:
 //!
 //! - `CapabilityVerifier` (gateway-side capability validation) from fcp-core
-//! - `CapabilityToken` typestate ladder (Unverified → UnboundVerified
-//!   → BoundVerified → ConstraintsEnforced) from fcp-core
+//! - `CapabilityToken` typestate ladder (Unverified → `UnboundVerified`
+//!   → `BoundVerified` → `ConstraintsEnforced`) from fcp-core
 //! - `DefaultConstraintEnforcer` from fcp-policy
 //! - `RevocationRegistry` from fcp-core (revocation propagation)
 //! - `InvokeAuditChain` from fcp-host (per-invocation hash-linked audit)
@@ -29,12 +29,14 @@
 //! | C   | Zone-mismatch capability rejection           | MUST: zone binding     |
 //! | D   | Audit chain hash linkage across N appends    | MUST: prev hash + seq  |
 //! | E   | Backpressure shed under saturated load       | MUST: shed at hard cap |
-//! | F   | Emergency revocation propagation             | MUST: is_revoked check |
+//! | F   | Emergency revocation propagation             | MUST: `is_revoked` check |
 //!
 //! Each scenario is a separate `#[test]` so a failure surfaces with a
 //! specific scenario id in CI output. Per-phase tracing spans emit
 //! structured events tagged with `scenario_id` so a failed run can be
 //! grep'd for the exact phase that diverged.
+
+#![allow(clippy::used_underscore_binding, clippy::items_after_statements)]
 
 use std::time::Instant;
 

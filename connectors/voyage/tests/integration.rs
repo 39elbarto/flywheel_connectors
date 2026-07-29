@@ -162,7 +162,7 @@ async fn embeddings_request_uses_voyage_endpoint_and_redacts_auth() {
     );
     let response = client
         .embeddings(
-            &fcp_async_core::Cx::for_testing(),
+            &fcp_async_core::compatibility_cx(),
             embeddings_request_from_value(
                 json!({
                     "model": DEFAULT_EMBEDDING_MODEL,
@@ -230,7 +230,7 @@ async fn rerank_and_multimodal_use_direct_voyage_endpoints() {
     );
     let rerank = client
         .rerank(
-            &fcp_async_core::Cx::for_testing(),
+            &fcp_async_core::compatibility_cx(),
             rerank_request_from_value(
                 json!({
                     "query": "private query",
@@ -248,7 +248,7 @@ async fn rerank_and_multimodal_use_direct_voyage_endpoints() {
 
     let multimodal = client
         .multimodal_embeddings(
-            &fcp_async_core::Cx::for_testing(),
+            &fcp_async_core::compatibility_cx(),
             multimodal_request_from_value(
                 json!({
                     "inputs": [{"content": [{"type": "text", "text": "private chart"}]}],

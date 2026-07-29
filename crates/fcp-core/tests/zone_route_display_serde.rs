@@ -7,11 +7,11 @@
 //! request reach this zone?" — is split across two types in
 //! `policy.rs`:
 //!
-//!  - `TransportMode` (policy.rs:31) — the 3-variant snake_case
+//!  - `TransportMode` (policy.rs:31) — the 3-variant `snake_case`
 //!    classifier (Lan / Derp / Funnel) that policy decisions and
 //!    audit logs dispatch on.
 //!  - `ZoneTransportPolicy` (policy.rs:42) — the per-zone struct
-//!    holding three booleans (allow_lan / allow_derp / allow_funnel)
+//!    holding three booleans (`allow_lan` / `allow_derp` / `allow_funnel`)
 //!    that gate which transports are permitted.
 //!
 //! Neither type implements `Display`, so the bead's "Display
@@ -21,16 +21,16 @@
 //!
 //! Targets:
 //!
-//!   1. **`TransportMode` per-variant JSON tag form** — snake_case
+//!   1. **`TransportMode` per-variant JSON tag form** — `snake_case`
 //!      `lan` / `derp` / `funnel`.
 //!   2. **JSON + CBOR round-trip** preserves variant identity for
 //!      every variant.
-//!   3. **PascalCase + unknown variants rejected** — drift sentinel.
+//!   3. **`PascalCase` + unknown variants rejected** — drift sentinel.
 //!   4. **3-variant count + pairwise distinctness**.
 //!   5. **`ZoneTransportPolicy::allows()` truth table** for every
 //!      (policy × mode) combination — 8 policies × 3 modes = 24 cases.
-//!   6. **Default policy values** pinned (allow_lan=true,
-//!      allow_derp=false, allow_funnel=false) — the "LAN-only by
+//!   6. **Default policy values** pinned (`allow_lan=true`,
+//!      `allow_derp=false`, `allow_funnel=false`) — the "LAN-only by
 //!      default" posture is operator-visible.
 //!   7. **`ZoneTransportPolicy` JSON shape** — 3-field object with
 //!      explicit booleans.
@@ -121,13 +121,9 @@ fn transport_mode_variants_pairwise_distinct() {
     }
     assert_eq!(seen_tokens.len(), 3);
 
-    for i in 0..TRANSPORT_MODE_CASES.len() {
-        for j in (i + 1)..TRANSPORT_MODE_CASES.len() {
-            assert_ne!(
-                TRANSPORT_MODE_CASES[i].0, TRANSPORT_MODE_CASES[j].0,
-                "{:?} and {:?} MUST be distinct",
-                TRANSPORT_MODE_CASES[i].0, TRANSPORT_MODE_CASES[j].0
-            );
+    for (i, &(left, _)) in TRANSPORT_MODE_CASES.iter().enumerate() {
+        for &(right, _) in TRANSPORT_MODE_CASES.iter().skip(i + 1) {
+            assert_ne!(left, right, "{left:?} and {right:?} MUST be distinct");
         }
     }
 }

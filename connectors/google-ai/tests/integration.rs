@@ -20,12 +20,11 @@ use std::time::Duration as StdDuration;
 use asupersync::net::websocket::{CloseReason, Message, ServerWebSocket, WebSocketAcceptor};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{Duration, Utc};
-use fcp_async_core::Cx;
 use fcp_async_core::io::{AsyncRead, ReadBuf};
 use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_async_core::task;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, CredentialId, FcpError};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -33,7 +32,7 @@ use wiremock::{
 };
 
 use fcp_google_ai::{
-    client::GoogleAiClient,
+    client::{GoogleAiAuth, GoogleAiClient},
     connector::GoogleAiConnector,
     error::GoogleAiError,
     realtime::{
@@ -156,7 +155,7 @@ async fn accept_live_websocket(mut stream: TcpStream) -> (String, TestLiveServer
         .expect("read websocket handshake");
     let request_text = String::from_utf8_lossy(&request).into_owned();
     let ws = WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket");
     (request_text, ws)
@@ -175,7 +174,7 @@ fn expect_live_text(message: Message, context: &str) -> String {
 
 async fn recv_live_json(ws: &mut TestLiveServerWebSocket, context: &str) -> serde_json::Value {
     let message = ws
-        .recv(&Cx::for_testing())
+        .recv(&fcp_async_core::compatibility_cx())
         .await
         .expect(context)
         .expect("live websocket message missing");
@@ -183,19 +182,27 @@ async fn recv_live_json(ws: &mut TestLiveServerWebSocket, context: &str) -> serd
 }
 
 async fn send_live_json(ws: &mut TestLiveServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&Cx::for_testing(), Message::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        Message::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn send_live_text(ws: &mut TestLiveServerWebSocket, value: &str, context: &str) {
-    ws.send(&Cx::for_testing(), Message::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        Message::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn close_live_websocket(ws: &mut TestLiveServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
 }
 
 fn assert_realtime_report_has_steps(report: &GoogleLiveRealtimeRunReport, expected: &[&str]) {
@@ -448,6 +455,28 @@ async fn error_403_maps_to_unauthorized() {
     ));
     let fcp_err = err.to_fcp_error();
     assert!(matches!(fcp_err, FcpError::Unauthorized { .. }));
+}
+
+/// Credential ID mode must preserve caller query parameters without injecting a key.
+#[fcp_async_core::runtime::test]
+async fn list_models_credential_id_uses_proper_query_separator() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .and(query_param("pageSize", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": []
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = GoogleAiClient::new_with_auth(GoogleAiAuth::CredentialId(CredentialId::new()))
+        .unwrap()
+        .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+
+    let response = client.list_models(Some(5), None).await.unwrap();
+    assert!(response.models.is_empty());
 }
 
 /// 429 Rate Limited maps to `FcpError::RateLimited`.
@@ -1800,6 +1829,31 @@ async fn self_check_success_returns_ok() {
 
     let result = connector.handle_self_check().await.unwrap();
     assert_eq!(result["status"], "ok");
+}
+
+/// Self-check maps authentication failures into a failed readiness report.
+#[fcp_async_core::runtime::test]
+async fn self_check_auth_failure_returns_failed() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "bad-key",
+            "base_url": format!("{}/v1beta", mock_server.uri())
+        }))
+        .await
+        .unwrap();
+
+    let result = connector.handle_self_check().await.unwrap();
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["reason_code"], "self_check_failed");
 }
 
 /// Shutdown returns status and connector can be re-invoked after re-configure.

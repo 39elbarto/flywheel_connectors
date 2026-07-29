@@ -1,18 +1,20 @@
 //! Cloudflare connector implementation.
 
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::json;
@@ -42,6 +44,23 @@ const OP_PAGES_DEPLOY: &str = "cloudflare.pages.create_deployment";
 const OP_KV_GET: &str = "cloudflare.kv.get";
 const OP_KV_PUT: &str = "cloudflare.kv.put";
 const OP_KV_DELETE: &str = "cloudflare.kv.delete";
+const OPERATION_ORDER: [&str; 15] = [
+    OP_ZONES_LIST,
+    OP_HEALTH,
+    OP_DNS_LIST,
+    OP_DNS_CREATE,
+    OP_DNS_UPDATE,
+    OP_DNS_DELETE,
+    OP_WORKERS_LIST,
+    OP_WORKERS_GET,
+    OP_WORKERS_DEPLOY,
+    OP_WORKERS_DELETE,
+    OP_PAGES_LIST,
+    OP_PAGES_DEPLOY,
+    OP_KV_GET,
+    OP_KV_PUT,
+    OP_KV_DELETE,
+];
 
 const CAP_ZONES_READ: &str = "cloudflare.zones.read";
 const CAP_DNS_READ: &str = "cloudflare.dns.read";
@@ -363,6 +382,12 @@ impl CloudflareConnector {
         }
     }
 
+    /// Stable connector instance identity used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_prelude::InstanceId {
+        &self.base.instance_id
+    }
+
     fn manifest_hash() -> String {
         let mut h = Sha256::new();
         h.update(MANIFEST_TOML.as_bytes());
@@ -574,564 +599,63 @@ impl Default for CloudflareConnector {
     }
 }
 
-fn zone_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["id", "name", "status"],
-        "properties": {
-            "id": { "type": "string", "description": "Cloudflare zone identifier." },
-            "name": { "type": "string", "description": "DNS zone name, such as example.com." },
-            "status": { "type": "string" },
-            "type": { "type": ["string", "null"] },
-            "paused": { "type": ["boolean", "null"] },
-            "development_mode": { "type": ["integer", "null"] },
-            "plan": {
-                "type": ["object", "null"],
-                "properties": {
-                    "id": { "type": "string" },
-                    "name": { "type": "string" }
-                }
-            }
-        }
-    })
+fn typed_operations_info() -> Vec<OperationInfo> {
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
 }
 
-fn dns_record_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["id", "type", "name", "content"],
-        "properties": {
-            "id": { "type": "string" },
-            "type": { "type": "string" },
-            "name": { "type": "string" },
-            "content": { "type": "string" },
-            "proxied": { "type": ["boolean", "null"] },
-            "ttl": { "type": ["integer", "null"] },
-            "priority": { "type": ["integer", "null"] },
-            "comment": { "type": ["string", "null"] },
-            "created_on": { "type": ["string", "null"] },
-            "modified_on": { "type": ["string", "null"] }
-        }
-    })
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Cloudflare manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
 }
 
-fn worker_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["id"],
-        "properties": {
-            "id": { "type": "string" },
-            "default_environment": {
-                "type": ["object", "null"],
-                "properties": {
-                    "environment": { "type": ["string", "null"] },
-                    "created_on": { "type": ["string", "null"] },
-                    "modified_on": { "type": ["string", "null"] }
-                }
-            },
-            "created_on": { "type": ["string", "null"] },
-            "modified_on": { "type": ["string", "null"] },
-            "etag": { "type": ["string", "null"] }
-        }
-    })
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
 }
 
-fn worker_script_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["id"],
-        "properties": {
-            "id": { "type": "string" },
-            "etag": { "type": ["string", "null"] },
-            "size": { "type": ["integer", "null"] },
-            "modified_on": { "type": ["string", "null"] }
-        }
-    })
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
 }
 
-fn pages_deployment_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["id"],
-        "properties": {
-            "id": { "type": "string" },
-            "url": { "type": ["string", "null"] },
-            "environment": { "type": ["string", "null"] },
-            "created_on": { "type": ["string", "null"] },
-            "project_name": { "type": ["string", "null"] }
-        }
-    })
-}
-
-fn pages_project_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["id", "name"],
-        "properties": {
-            "id": { "type": "string" },
-            "name": { "type": "string" },
-            "subdomain": { "type": ["string", "null"] },
-            "created_on": { "type": ["string", "null"] },
-            "production_branch": { "type": ["string", "null"] },
-            "latest_deployment": {
-                "type": ["object", "null"],
-                "properties": pages_deployment_schema()["properties"].clone()
-            }
-        }
-    })
-}
-
-fn generic_delete_result_schema(resource: &str) -> serde_json::Value {
-    json!({
-        "type": "object",
-        "description": format!(
-            "Cloudflare delete response for {resource}. The API commonly returns an id/deleted pair but may include extra fields."
-        ),
-        "properties": {
-            "id": { "type": ["string", "null"] },
-            "deleted": { "type": ["boolean", "null"] }
-        }
-    })
-}
-
-fn generic_mutation_result_schema(summary: &str) -> serde_json::Value {
-    json!({
-        "type": "object",
-        "description": summary
-    })
-}
-
-#[allow(clippy::too_many_lines)]
-fn operations_info() -> Vec<OperationInfo> {
-    let hint = |when: &str,
-                mistakes: Vec<String>,
-                examples: Vec<String>,
-                related: Vec<&'static str>|
-     -> AgentHint {
-        AgentHint {
-            when_to_use: when.into(),
-            common_mistakes: mistakes,
-            examples,
-            related: related.into_iter().map(CapabilityId::from_static).collect(),
-        }
-    };
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_ZONES_LIST),
-            summary: "List all zones".into(),
-            description: Some(
-                "Enumerate Cloudflare zones visible to the configured identity so later DNS operations can use stable zone IDs."
-                    .into(),
-            ),
-            input_schema: json!({"type":"object","properties":{}}),
-            output_schema: json!({"type":"array","items": zone_schema()}),
-            capability: CapabilityId::from_static(CAP_ZONES_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Get zone IDs", vec![], vec![], vec![CAP_DNS_READ]),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_HEALTH),
-            summary: "Verify API token".into(),
-            description: Some(
-                "Verify that the configured Cloudflare credentials are active and return a compact readiness payload."
-                    .into(),
-            ),
-            input_schema: json!({"type":"object","properties":{}}),
-            output_schema: json!({
-                "type":"object",
-                "required":["status","token_id","healthy"],
-                "properties":{
-                    "status":{"type":"string"},
-                    "token_id":{"type":"string"},
-                    "healthy":{"type":"boolean"}
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_ZONES_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Check credentials", vec![], vec![], vec![]),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_DNS_LIST),
-            summary: "List DNS records for a zone".into(),
-            description: Some(
-                "List DNS records in a specific zone. Use this before mutation operations to confirm record IDs and the current record shape."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["zone_id"],
-                "properties":{
-                    "zone_id":{"type":"string","description":"Cloudflare zone identifier returned by cloudflare.zones.list."}
-                }
-            }),
-            output_schema: json!({"type":"array","items": dns_record_schema()}),
-            capability: CapabilityId::from_static(CAP_DNS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "See existing DNS records",
-                vec!["Use zone ID not domain name".into()],
-                vec![],
-                vec![CAP_ZONES_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_DNS_CREATE),
-            summary: "Create DNS record".into(),
-            description: Some(
-                "Create a DNS record inside a zone and return the created Cloudflare DNS record."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["zone_id","type","name","content"],
-                "properties":{
-                    "zone_id":{"type":"string"},
-                    "type":{"type":"string"},
-                    "name":{"type":"string"},
-                    "content":{"type":"string"},
-                    "proxied":{"type":"boolean"},
-                    "ttl":{"type":"integer"},
-                    "priority":{"type":"integer"},
-                    "comment":{"type":"string"}
-                }
-            }),
-            output_schema: dns_record_schema(),
-            capability: CapabilityId::from_static(CAP_DNS_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: hint(
-                "Add new DNS record",
-                vec!["MX needs priority".into()],
-                vec![],
-                vec![CAP_DNS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_DNS_UPDATE),
-            summary: "Update DNS record".into(),
-            description: Some(
-                "Replace a DNS record definition in Cloudflare and return the updated record payload."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["zone_id","record_id","type","name","content"],
-                "properties":{
-                    "zone_id":{"type":"string"},
-                    "record_id":{"type":"string"},
-                    "type":{"type":"string"},
-                    "name":{"type":"string"},
-                    "content":{"type":"string"},
-                    "proxied":{"type":"boolean"},
-                    "ttl":{"type":"integer"},
-                    "comment":{"type":"string"}
-                }
-            }),
-            output_schema: dns_record_schema(),
-            capability: CapabilityId::from_static(CAP_DNS_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Modify existing DNS record",
-                vec![],
-                vec![],
-                vec![CAP_DNS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_DNS_DELETE),
-            summary: "Delete DNS record".into(),
-            description: Some(
-                "Delete a DNS record from a zone. This is destructive and should only be used after confirming the exact record ID."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["zone_id","record_id"],
-                "properties":{
-                    "zone_id":{"type":"string"},
-                    "record_id":{"type":"string"}
-                }
-            }),
-            output_schema: generic_delete_result_schema("DNS record"),
-            capability: CapabilityId::from_static(CAP_DNS_WRITE),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Remove DNS record (irreversible)",
-                vec!["Verify record_id first".into()],
-                vec![],
-                vec![CAP_DNS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Interactive),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_WORKERS_LIST),
-            summary: "List Workers scripts".into(),
-            description: Some(
-                "List Workers scripts in the configured Cloudflare account."
-                    .into(),
-            ),
-            input_schema: json!({"type":"object","properties":{}}),
-            output_schema: json!({"type":"array","items": worker_schema()}),
-            capability: CapabilityId::from_static(CAP_WORKERS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("Discover deployed Workers", vec![], vec![], vec![]),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_WORKERS_GET),
-            summary: "Get Worker details".into(),
-            description: Some(
-                "Fetch metadata for a specific Workers script by script name."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["script_name"],
-                "properties":{
-                    "script_name":{"type":"string"}
-                }
-            }),
-            output_schema: worker_script_schema(),
-            capability: CapabilityId::from_static(CAP_WORKERS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Check if Worker exists",
-                vec![],
-                vec![],
-                vec![CAP_WORKERS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_WORKERS_DEPLOY),
-            summary: "Deploy Workers script".into(),
-            description: Some(
-                "Create or update a Workers script from JavaScript source and return the deployed script metadata."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["script_name","script_content"],
-                "properties":{
-                    "script_name":{"type":"string"},
-                    "script_content":{"type":"string"}
-                }
-            }),
-            output_schema: worker_script_schema(),
-            capability: CapabilityId::from_static(CAP_WORKERS_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Deploy or update Worker",
-                vec!["Test before deploying".into()],
-                vec![],
-                vec![CAP_WORKERS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_WORKERS_DELETE),
-            summary: "Delete Workers script".into(),
-            description: Some(
-                "Delete a Workers script from the configured account. This is destructive and may affect live traffic."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["script_name"],
-                "properties":{
-                    "script_name":{"type":"string"}
-                }
-            }),
-            output_schema: generic_delete_result_schema("Workers script"),
-            capability: CapabilityId::from_static(CAP_WORKERS_WRITE),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Permanently remove Worker",
-                vec!["May still serve traffic".into()],
-                vec![],
-                vec![CAP_WORKERS_READ],
-            ),
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Interactive),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_PAGES_LIST),
-            summary: "List Pages projects".into(),
-            description: Some(
-                "Enumerate Cloudflare Pages projects owned by the configured account."
-                    .into(),
-            ),
-            input_schema: json!({"type":"object","properties":{}}),
-            output_schema: json!({"type":"array","items": pages_project_schema()}),
-            capability: CapabilityId::from_static(CAP_PAGES_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint("See Pages projects", vec![], vec![], vec![]),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_PAGES_DEPLOY),
-            summary: "Trigger Pages deployment".into(),
-            description: Some(
-                "Trigger a Pages deployment from a specific branch and return the created deployment metadata."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["project_name","branch"],
-                "properties":{
-                    "project_name":{"type":"string"},
-                    "branch":{"type":"string"}
-                }
-            }),
-            output_schema: pages_deployment_schema(),
-            capability: CapabilityId::from_static(CAP_PAGES_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: hint(
-                "Deploy Pages from branch",
-                vec!["Branch must exist".into()],
-                vec![],
-                vec![CAP_PAGES_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_KV_GET),
-            summary: "Read KV value".into(),
-            description: Some(
-                "Read a single Workers KV value from the configured account and namespace."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["namespace_id","key"],
-                "properties":{
-                    "namespace_id":{"type":"string"},
-                    "key":{"type":"string"}
-                }
-            }),
-            output_schema: json!({
-                "type":"object",
-                "required":["value"],
-                "properties":{
-                    "value":{"type":"string"}
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_KV_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Read from KV",
-                vec!["Check namespace ID".into()],
-                vec![],
-                vec![CAP_KV_WRITE],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_KV_PUT),
-            summary: "Write KV value".into(),
-            description: Some(
-                "Write a Workers KV value. Cloudflare may return a minimal success object rather than a full typed resource."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["namespace_id","key","value"],
-                "properties":{
-                    "namespace_id":{"type":"string"},
-                    "key":{"type":"string"},
-                    "value":{"type":"string"}
-                }
-            }),
-            output_schema: generic_mutation_result_schema(
-                "Cloudflare KV write response. The service may return a minimal object or an envelope-derived object depending on the endpoint behavior.",
-            ),
-            capability: CapabilityId::from_static(CAP_KV_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Store data in KV",
-                vec!["Eventually consistent".into()],
-                vec![],
-                vec![CAP_KV_READ],
-            ),
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_KV_DELETE),
-            summary: "Delete KV key".into(),
-            description: Some(
-                "Delete a Workers KV entry. This is destructive and should be used only after confirming the namespace and key."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type":"object",
-                "required":["namespace_id","key"],
-                "properties":{
-                    "namespace_id":{"type":"string"},
-                    "key":{"type":"string"}
-                }
-            }),
-            output_schema: generic_mutation_result_schema(
-                "Cloudflare KV delete response. The service may return a minimal object or an envelope-derived object depending on the endpoint behavior.",
-            ),
-            capability: CapabilityId::from_static(CAP_KV_WRITE),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Dangerous,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: hint(
-                "Remove KV entry (irreversible)",
-                vec!["Workers may depend on key".into()],
-                vec![],
-                vec![CAP_KV_READ],
-            ),
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Interactive),
-        },
-    ]
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 fcp_core::impl_fcp_sealed!(CloudflareConnector);
@@ -1336,7 +860,7 @@ impl FcpConnector for CloudflareConnector {
 
     fn introspect(&self) -> Introspection {
         Introspection {
-            operations: operations_info(),
+            operations: typed_operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -1656,7 +1180,8 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
+    use fcp_manifest::ConnectorManifest;
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, SafetyTier, ZoneId};
 
     fn tc() -> serde_json::Value {
         json!({"mode": "api_token", "api_token": "t", "account_id": "a"})
@@ -1697,6 +1222,7 @@ mod tests {
 
     fn signed_capability_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         op: &'static str,
     ) -> CapabilityToken {
         let constraints = CapabilityConstraints {
@@ -1712,6 +1238,7 @@ mod tests {
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
@@ -1942,8 +1469,100 @@ mod tests {
     }
     #[test]
     fn introspect_ops() {
-        assert_eq!(CloudflareConnector::new().introspect().operations.len(), 15);
+        let operations = CloudflareConnector::new().introspect().operations;
+        let op_ids: Vec<_> = operations.iter().map(|op| op.id.as_str()).collect();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(op_ids, OPERATION_ORDER);
     }
+
+    fn strict_cloudflare_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_cloudflare_manifest()?;
+        let operations = typed_operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn operations_info_json_exposes_manifest_approval_modes() {
+        let result = serde_json::to_value(CloudflareConnector::new().introspect()).unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let dns_delete = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_DNS_DELETE))
+            .unwrap();
+        let workers_delete = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_WORKERS_DELETE))
+            .unwrap();
+        let kv_delete = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_KV_DELETE))
+            .unwrap();
+
+        assert_eq!(dns_delete["requires_approval"], "interactive");
+        assert_eq!(workers_delete["requires_approval"], "interactive");
+        assert_eq!(kv_delete["requires_approval"], "interactive");
+    }
+
     #[test]
     fn introspect_exposes_typed_schemas_for_key_operations() {
         let introspection = CloudflareConnector::new().introspect();
@@ -1981,13 +1600,13 @@ mod tests {
     }
     #[test]
     fn ops_all_have_hints() {
-        for op in operations_info() {
+        for op in typed_operations_info() {
             assert!(!op.ai_hints.when_to_use.is_empty(), "{}", op.id);
         }
     }
     #[test]
     fn dangerous_ops_need_approval() {
-        for op in operations_info() {
+        for op in typed_operations_info() {
             if op.safety_tier == SafetyTier::Dangerous {
                 assert!(op.requires_approval.is_some(), "{}", op.id);
             }
@@ -2023,7 +1642,7 @@ mod tests {
             c.invoke(invoke_req(
                 OP_DNS_LIST,
                 json!({}),
-                signed_capability_token(&signing_key, OP_DNS_LIST),
+                signed_capability_token(&signing_key, c.instance_id().as_str(), OP_DNS_LIST),
             ))
             .await
         })
@@ -2075,7 +1694,7 @@ mod tests {
                     "content": "1.2.3.4",
                     "ttl": -1
                 }),
-                signed_capability_token(&signing_key, OP_DNS_CREATE),
+                signed_capability_token(&signing_key, c.instance_id().as_str(), OP_DNS_CREATE),
             ))
             .await
         })
@@ -2107,7 +1726,7 @@ mod tests {
                     "content": "1.2.3.4",
                     "proxied": "true"
                 }),
-                signed_capability_token(&signing_key, OP_DNS_UPDATE),
+                signed_capability_token(&signing_key, c.instance_id().as_str(), OP_DNS_UPDATE),
             ))
             .await
         })

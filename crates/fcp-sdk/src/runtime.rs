@@ -35,9 +35,15 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use fcp_async_core::channel::{mpsc, watch};
+use fcp_async_core::{
+    ExecutionContext,
+    channel::{mpsc, watch},
+};
+use fcp_manifest::{ConnectorManifest, ManifestTimeouts};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "connector-http")]
+use crate::migration::HostEgressProxyClient;
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_cbor::CanonicalSerializer;
 use fcp_prelude::{
@@ -45,7 +51,10 @@ use fcp_prelude::{
     ObjectHeader, ObjectId, Signature, ZoneId,
 };
 #[cfg(feature = "cursor-store-object-store")]
-use fcp_prelude::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
+use fcp_prelude::{
+    ConnectorStateAppendOutcome, ConnectorStateStore, ConnectorStateWriteAuthorization,
+    ObjectIdKey, RetentionClass, StorageMeta, StoredObject,
+};
 
 /// Produce a pseudo-random jitter factor in [0.0, 1.0) using stdlib hashing.
 ///
@@ -67,6 +76,363 @@ fn pseudo_random_jitter(attempt: u32) -> f64 {
     #[allow(clippy::cast_precision_loss)]
     let jitter = (h % 1_000_000) as f64 / 1_000_000.0;
     jitter
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ConnectorRuntime
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Shared connector runtime providing lifecycle management.
+///
+/// Each connector instance creates one `ConnectorRuntime` during `configure()`.
+/// The runtime provides:
+/// - Request-scoped `ExecutionContext` creation with configurable timeouts
+/// - Background context for long-lived operations (streaming, polling)
+/// - Graceful shutdown coordination
+#[derive(Debug, Clone)]
+pub struct ConnectorRuntime {
+    config: ConnectorRuntimeConfig,
+    background_ctx: ExecutionContext,
+    request_ctx_root: ExecutionContext,
+}
+
+const MANIFEST_REQUEST_TIMEOUT_ENV_VAR: &str = "FCP_REQUEST_TIMEOUT_MS";
+const HOST_EGRESS_PROXY_URL_ENV_VAR: &str = "FCP_HOST_EGRESS_PROXY_URL";
+const ALLOW_AMBIENT_TIMEOUT_OVERRIDE_ENV_VAR: &str = "FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE";
+
+fn opt_in_value_allows_override(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "yes"))
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TestEnvOverride {
+    Inherit,
+    Set(Option<String>),
+}
+
+#[cfg(test)]
+thread_local! {
+    static AMBIENT_OPT_IN_TEST_VALUE:
+        std::cell::RefCell<TestEnvOverride> =
+            const { std::cell::RefCell::new(TestEnvOverride::Inherit) };
+
+    static REQUEST_TIMEOUT_TEST_VALUE:
+        std::cell::RefCell<TestEnvOverride> =
+            const { std::cell::RefCell::new(TestEnvOverride::Inherit) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_ambient_opt_in_test_value(value: TestEnvOverride) {
+    AMBIENT_OPT_IN_TEST_VALUE.with(|cell| {
+        *cell.borrow_mut() = value;
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn set_request_timeout_test_value(value: TestEnvOverride) {
+    REQUEST_TIMEOUT_TEST_VALUE.with(|cell| {
+        *cell.borrow_mut() = value;
+    });
+}
+
+fn ambient_timeout_override_allowed() -> bool {
+    #[cfg(test)]
+    {
+        let test_override = AMBIENT_OPT_IN_TEST_VALUE.with(|cell| cell.borrow().clone());
+        if let TestEnvOverride::Set(value) = test_override {
+            return opt_in_value_allows_override(value.as_deref());
+        }
+    }
+    let real = std::env::var_os(ALLOW_AMBIENT_TIMEOUT_OVERRIDE_ENV_VAR);
+    let owned = real.map(|value| value.to_string_lossy().into_owned());
+    opt_in_value_allows_override(owned.as_deref())
+}
+
+fn ambient_request_timeout_env_value() -> Option<String> {
+    #[cfg(test)]
+    {
+        let test_override = REQUEST_TIMEOUT_TEST_VALUE.with(|cell| cell.borrow().clone());
+        if let TestEnvOverride::Set(value) = test_override {
+            return value;
+        }
+    }
+    std::env::var_os(MANIFEST_REQUEST_TIMEOUT_ENV_VAR)
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+/// Errors produced while loading runtime settings from an embedded manifest.
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectorRuntimeConfigError {
+    /// The connector manifest could not be parsed or validated.
+    #[error(transparent)]
+    Manifest(#[from] fcp_manifest::ManifestError),
+
+    /// The request-timeout override env var was present but unusable.
+    #[error("{env_var} must be a positive integer number of milliseconds, got `{value}`")]
+    InvalidRequestTimeoutEnvVar {
+        /// The env var name.
+        env_var: &'static str,
+        /// The invalid value observed at load time.
+        value: String,
+    },
+}
+
+/// Configuration for [`ConnectorRuntime`].
+#[derive(Debug, Clone)]
+pub struct ConnectorRuntimeConfig {
+    /// Default timeout for request-scoped operations.
+    pub request_timeout: Duration,
+    /// Default timeout for establishing outbound connections.
+    pub connect_timeout: Duration,
+    /// Default wall-clock budget for a single operation.
+    pub wall_clock_timeout: Duration,
+    /// Timeout for graceful shutdown.
+    pub shutdown_timeout: Duration,
+    /// Connector-facing host egress endpoint. When present, SDK egress helpers
+    /// use `/rpc/egress/*` instead of opening direct sockets.
+    pub host_egress_proxy_url: Option<String>,
+}
+
+impl Default for ConnectorRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(120),
+            connect_timeout: Duration::from_secs(10),
+            wall_clock_timeout: Duration::from_secs(120),
+            shutdown_timeout: Duration::from_secs(30),
+            host_egress_proxy_url: None,
+        }
+    }
+}
+
+impl ConnectorRuntimeConfig {
+    /// Manifest-aligned defaults used by newly scaffolded connectors.
+    #[must_use]
+    pub const fn manifest_defaults() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(5),
+            wall_clock_timeout: Duration::from_secs(60),
+            shutdown_timeout: Duration::from_secs(30),
+            host_egress_proxy_url: None,
+        }
+    }
+
+    /// Build runtime settings from a manifest `[timeouts]` section.
+    #[must_use]
+    pub const fn from_manifest_timeouts(timeouts: &ManifestTimeouts) -> Self {
+        Self::manifest_defaults()
+            .with_request_timeout(Duration::from_millis(timeouts.request_timeout_ms))
+            .with_connect_timeout(Duration::from_millis(timeouts.connect_timeout_ms))
+            .with_wall_clock_timeout(Duration::from_millis(timeouts.wall_clock_timeout_ms))
+    }
+
+    /// Build runtime settings from a parsed connector manifest.
+    ///
+    /// If the manifest omits `[timeouts]`, scaffold defaults are used. An
+    /// `FCP_REQUEST_TIMEOUT_MS` env var overrides the request timeout only when
+    /// the operator explicitly opts in with
+    /// `FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE=1`.
+    ///
+    /// # Errors
+    /// Returns an error when the opt-in is set and `FCP_REQUEST_TIMEOUT_MS` is
+    /// present but invalid.
+    pub fn from_manifest(
+        manifest: &ConnectorManifest,
+    ) -> Result<Self, ConnectorRuntimeConfigError> {
+        let request_timeout_override = if ambient_timeout_override_allowed() {
+            ambient_request_timeout_env_value()
+        } else {
+            None
+        };
+        Self::from_manifest_with_request_timeout_override(
+            manifest,
+            request_timeout_override.as_deref(),
+        )
+    }
+
+    /// Build runtime settings from embedded manifest TOML.
+    ///
+    /// # Errors
+    /// Returns an error when the manifest is invalid or the request-timeout
+    /// env override cannot be parsed.
+    pub fn from_manifest_str(manifest_toml: &str) -> Result<Self, ConnectorRuntimeConfigError> {
+        let manifest = ConnectorManifest::parse_str(manifest_toml)?;
+        Self::from_manifest(&manifest)
+    }
+
+    /// Builder: set request timeout.
+    #[must_use]
+    pub const fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Builder: set connect timeout.
+    #[must_use]
+    pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Builder: set wall-clock timeout.
+    #[must_use]
+    pub const fn with_wall_clock_timeout(mut self, timeout: Duration) -> Self {
+        self.wall_clock_timeout = timeout;
+        self
+    }
+
+    /// Builder: set shutdown timeout.
+    #[must_use]
+    pub const fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
+        self
+    }
+
+    /// Builder: set the host egress proxy base URL.
+    #[must_use]
+    pub fn with_host_egress_proxy_url(mut self, url: impl Into<String>) -> Self {
+        self.host_egress_proxy_url = Some(url.into());
+        self
+    }
+
+    /// Builder: read the host egress proxy base URL from the launch
+    /// environment the host gives strict host-proxy connectors.
+    #[must_use]
+    pub fn with_host_egress_proxy_url_from_env(mut self) -> Self {
+        if let Some(url) = std::env::var_os(HOST_EGRESS_PROXY_URL_ENV_VAR)
+            .map(|value| value.to_string_lossy().trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            self.host_egress_proxy_url = Some(url);
+        }
+        self
+    }
+
+    pub(crate) fn from_manifest_with_request_timeout_override(
+        manifest: &ConnectorManifest,
+        request_timeout_override: Option<&str>,
+    ) -> Result<Self, ConnectorRuntimeConfigError> {
+        let mut config = manifest
+            .timeouts
+            .as_ref()
+            .map_or_else(Self::manifest_defaults, Self::from_manifest_timeouts);
+
+        if let Some(timeout) = parse_request_timeout_override(request_timeout_override)? {
+            config = config.with_request_timeout(timeout);
+        }
+
+        Ok(config)
+    }
+}
+
+fn parse_request_timeout_override(
+    request_timeout_override: Option<&str>,
+) -> Result<Option<Duration>, ConnectorRuntimeConfigError> {
+    let Some(raw) = request_timeout_override else {
+        return Ok(None);
+    };
+
+    let timeout_ms: u64 =
+        raw.parse().map_err(
+            |_| ConnectorRuntimeConfigError::InvalidRequestTimeoutEnvVar {
+                env_var: MANIFEST_REQUEST_TIMEOUT_ENV_VAR,
+                value: raw.to_string(),
+            },
+        )?;
+    if timeout_ms == 0 {
+        return Err(ConnectorRuntimeConfigError::InvalidRequestTimeoutEnvVar {
+            env_var: MANIFEST_REQUEST_TIMEOUT_ENV_VAR,
+            value: raw.to_string(),
+        });
+    }
+
+    Ok(Some(Duration::from_millis(timeout_ms)))
+}
+
+impl ConnectorRuntime {
+    /// Create a new connector runtime.
+    #[must_use]
+    pub fn new(config: ConnectorRuntimeConfig) -> Self {
+        Self {
+            config,
+            background_ctx: ExecutionContext::background(),
+            request_ctx_root: ExecutionContext::request_scoped(Duration::MAX),
+        }
+    }
+
+    /// Create a request-scoped execution context with the configured timeout.
+    #[must_use]
+    pub fn request_context(&self) -> ExecutionContext {
+        self.request_ctx_root
+            .child()
+            .with_deadline(self.config.request_timeout)
+    }
+
+    /// Create a request-scoped context with a custom timeout.
+    #[must_use]
+    pub fn request_context_with_timeout(&self, timeout: Duration) -> ExecutionContext {
+        self.request_ctx_root.child().with_deadline(timeout)
+    }
+
+    /// Get a child of the background context for long-lived operations.
+    #[must_use]
+    pub fn background_context(&self) -> ExecutionContext {
+        self.background_ctx.child()
+    }
+
+    /// Trigger graceful shutdown of all contexts.
+    pub fn shutdown(&self) {
+        self.background_ctx.cancel();
+        self.request_ctx_root.cancel();
+    }
+
+    /// Whether shutdown has been requested.
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        self.background_ctx.is_cancelled()
+    }
+
+    /// The configured request timeout.
+    #[must_use]
+    pub const fn request_timeout(&self) -> Duration {
+        self.config.request_timeout
+    }
+
+    /// The configured connect timeout.
+    #[must_use]
+    pub const fn connect_timeout(&self) -> Duration {
+        self.config.connect_timeout
+    }
+
+    /// The configured wall-clock timeout.
+    #[must_use]
+    pub const fn wall_clock_timeout(&self) -> Duration {
+        self.config.wall_clock_timeout
+    }
+
+    /// The configured shutdown timeout.
+    #[must_use]
+    pub const fn shutdown_timeout(&self) -> Duration {
+        self.config.shutdown_timeout
+    }
+
+    /// Host egress proxy URL used by SDK network helpers, if configured.
+    #[must_use]
+    pub fn host_egress_proxy_url(&self) -> Option<&str> {
+        self.config.host_egress_proxy_url.as_deref()
+    }
+
+    /// Build a connector-facing client for host-mediated HTTP/TCP egress.
+    ///
+    /// The helper is only available with `connector-http`, matching the rest of
+    /// the SDK HTTP client surface.
+    #[cfg(feature = "connector-http")]
+    #[must_use]
+    pub fn host_egress_proxy_client(&self) -> Option<HostEgressProxyClient> {
+        self.host_egress_proxy_url().map(HostEgressProxyClient::new)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -233,10 +599,23 @@ impl SupervisorConfig {
     }
 
     /// Get heartbeat timeout as a Duration (or None if disabled).
+    ///
+    /// `Duration::from_secs_f64` panics on NaN, negative, and non-finite or
+    /// overflowing input, and this struct is `#[derive(Deserialize)]` — it is
+    /// already embedded in externally-supplied connector config. `validate()`
+    /// cannot catch the dangerous values on its own because
+    /// `heartbeat_timeout_multiplier <= 1.0` is *false* for both `NaN` and
+    /// `1e308`, so a deserialized config could reach the supervisor loop and
+    /// abort it. Saturate instead of panicking.
     #[must_use]
     pub fn heartbeat_timeout(&self) -> Option<Duration> {
         self.heartbeat_interval().map(|interval| {
-            Duration::from_secs_f64(interval.as_secs_f64() * self.heartbeat_timeout_multiplier)
+            let seconds = interval.as_secs_f64() * self.heartbeat_timeout_multiplier;
+            if seconds.is_finite() && seconds >= 0.0 {
+                Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX)
+            } else {
+                Duration::MAX
+            }
         })
     }
 
@@ -257,7 +636,14 @@ impl SupervisorConfig {
         if self.max_consecutive_failures == 0 {
             errors.push("max_consecutive_failures must be > 0".to_string());
         }
-        if self.heartbeat_timeout_multiplier <= 1.0 {
+        // `<= 1.0` is FALSE for NaN, so the finiteness check has to be
+        // explicit — otherwise a deserialized `NaN` passes validation and then
+        // reaches `heartbeat_timeout()`. (Overflow to +inf is handled there by
+        // saturating rather than panicking, so it does not need a second check
+        // here.)
+        if !self.heartbeat_timeout_multiplier.is_finite() {
+            errors.push("heartbeat_timeout_multiplier must be finite".to_string());
+        } else if self.heartbeat_timeout_multiplier <= 1.0 {
             errors.push("heartbeat_timeout_multiplier must be > 1.0".to_string());
         }
 
@@ -664,6 +1050,7 @@ pub struct CursorStore<B: CursorStoreBackend> {
     connector_id: ConnectorId,
     zone_id: ZoneId,
     instance_id: Option<InstanceId>,
+    writer_public_key: [u8; 32],
     head: Option<ObjectId>,
     seq: u64,
     last_cursor: Option<CursorState>,
@@ -678,6 +1065,7 @@ impl<B: CursorStoreBackend> CursorStore<B> {
             connector_id,
             zone_id,
             instance_id: None,
+            writer_public_key: [0u8; 32],
             head: None,
             seq: 0,
             last_cursor: None,
@@ -689,6 +1077,13 @@ impl<B: CursorStoreBackend> CursorStore<B> {
     #[must_use]
     pub fn with_instance_id(mut self, instance_id: InstanceId) -> Self {
         self.instance_id = Some(instance_id);
+        self
+    }
+
+    /// Attach the Ed25519 writer key whose signature is stored on state objects.
+    #[must_use]
+    pub const fn with_writer_public_key(mut self, writer_public_key: [u8; 32]) -> Self {
+        self.writer_public_key = writer_public_key;
         self
     }
 
@@ -762,6 +1157,7 @@ impl<B: CursorStoreBackend> CursorStore<B> {
             updated_at,
             lease_seq: lease.lease_seq,
             lease_object_id: lease.lease_object_id,
+            writer_public_key: self.writer_public_key,
             signature,
         };
 
@@ -907,7 +1303,9 @@ pub struct ObjectStoreCursorBackend {
     object_id_key: ObjectIdKey,
     connector_id: ConnectorId,
     zone_id: ZoneId,
+    instance_id: Option<InstanceId>,
     retention: RetentionClass,
+    write_authorization: Option<ConnectorStateWriteAuthorization>,
 }
 
 #[cfg(feature = "cursor-store-object-store")]
@@ -925,8 +1323,17 @@ impl ObjectStoreCursorBackend {
             object_id_key,
             connector_id,
             zone_id,
+            instance_id: None,
             retention: RetentionClass::Pinned,
+            write_authorization: None,
         }
+    }
+
+    /// Scope canonical reads and writes to one connector instance.
+    #[must_use]
+    pub fn with_instance_id(mut self, instance_id: InstanceId) -> Self {
+        self.instance_id = Some(instance_id);
+        self
     }
 
     /// Override retention class for stored state objects.
@@ -934,6 +1341,44 @@ impl ObjectStoreCursorBackend {
     pub const fn with_retention(mut self, retention: RetentionClass) -> Self {
         self.retention = retention;
         self
+    }
+
+    /// Route writes through canonical connector-state storage.
+    ///
+    /// Without an authorization witness this backend preserves the legacy raw
+    /// object-store behavior for tests and local development. Supplying a
+    /// verified witness makes commits advance the `ConnectorStateRoot` that host
+    /// and mesh explain paths read from `fcp-store`.
+    #[must_use]
+    pub fn with_write_authorization(
+        mut self,
+        authorization: ConnectorStateWriteAuthorization,
+    ) -> Self {
+        self.write_authorization = Some(authorization);
+        self
+    }
+
+    fn connector_state_store(&self) -> fcp_store::FcpStoreConnectorStateStore {
+        let mut store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&self.object_store),
+            self.object_id_key,
+            self.connector_id.clone(),
+            self.zone_id.clone(),
+        )
+        .with_retention(self.retention);
+
+        // Pin canonical reads to the verified append writer so a zone member
+        // holding the shared object-id key cannot plant a self-signed chain
+        // that this backend would then trust as canonical state.
+        if let Some(authorization) = &self.write_authorization {
+            store = store.with_trusted_writer_keys([authorization.writer_public_key()]);
+        }
+
+        if let Some(instance_id) = &self.instance_id {
+            store.with_instance_id(instance_id.clone())
+        } else {
+            store
+        }
     }
 
     #[allow(clippy::missing_const_for_fn)]
@@ -948,6 +1393,17 @@ impl ObjectStoreCursorBackend {
     fn block_on_store<T>(
         fut: impl std::future::Future<Output = Result<T, fcp_store::ObjectStoreError>>,
     ) -> Result<T, CursorStoreError> {
+        fcp_async_core::runtime::block_on_sync(fut)
+            .map_err(|err| CursorStoreError::Storage(err.to_string()))
+            .and_then(|result| result.map_err(|err| CursorStoreError::Storage(err.to_string())))
+    }
+
+    fn block_on_connector_state<T, E>(
+        fut: impl std::future::Future<Output = Result<T, E>>,
+    ) -> Result<T, CursorStoreError>
+    where
+        E: std::fmt::Display,
+    {
         fcp_async_core::runtime::block_on_sync(fut)
             .map_err(|err| CursorStoreError::Storage(err.to_string()))
             .and_then(|result| result.map_err(|err| CursorStoreError::Storage(err.to_string())))
@@ -1001,11 +1457,37 @@ impl ObjectStoreCursorBackend {
 
         Ok(())
     }
-}
 
-#[cfg(feature = "cursor-store-object-store")]
-impl CursorStoreBackend for ObjectStoreCursorBackend {
-    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+    fn load_canonical_head(
+        &self,
+    ) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        let state_store = self.connector_state_store();
+        let Some((_root_id, root)) = Self::block_on_connector_state(state_store.read_root())?
+        else {
+            return Ok(None);
+        };
+        let Some(head_id) = root.head else {
+            return Ok(None);
+        };
+
+        let stored = Self::block_on_store(self.object_store.get(&head_id))?;
+        if stored.header.schema != Self::schema_id() {
+            return Err(CursorStoreError::Storage(
+                "canonical connector state root points at a non-state object".into(),
+            ));
+        }
+        let state = Self::decode_state_object(&stored)?;
+        self.validate_loaded_state_object(head_id, &stored, &state)?;
+        if state.connector_id != self.connector_id || state.zone_id != self.zone_id {
+            return Err(CursorStoreError::Storage(
+                "canonical connector state root points at a foreign state object".into(),
+            ));
+        }
+
+        Ok(Some((head_id, state)))
+    }
+
+    fn load_raw_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
         let object_ids =
             Self::block_on_store(async { Ok(self.object_store.list_zone(&self.zone_id).await) })?;
 
@@ -1037,6 +1519,16 @@ impl CursorStoreBackend for ObjectStoreCursorBackend {
                 continue;
             }
 
+            if let Some(authorization) = &self.write_authorization
+                && state.writer_public_key != authorization.writer_public_key()
+            {
+                tracing::warn!(
+                    object_id = %object_id,
+                    "Rejecting connector state object signed by untrusted writer"
+                );
+                continue;
+            }
+
             if state.connector_id != self.connector_id || state.zone_id != self.zone_id {
                 continue;
             }
@@ -1057,7 +1549,7 @@ impl CursorStoreBackend for ObjectStoreCursorBackend {
         Ok(best)
     }
 
-    fn store_state_object(
+    fn store_raw_state_object(
         &self,
         state_obj: ConnectorStateObject,
     ) -> Result<ObjectId, CursorStoreError> {
@@ -1090,6 +1582,54 @@ impl CursorStoreBackend for ObjectStoreCursorBackend {
 
         Self::block_on_store(self.object_store.put(stored))?;
         Ok(object_id)
+    }
+
+    fn store_canonical_state_object(
+        &self,
+        authorization: &ConnectorStateWriteAuthorization,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        let state_store = self.connector_state_store();
+        let outcome = Self::block_on_connector_state(ConnectorStateStore::append_object(
+            &state_store,
+            &self.connector_id,
+            authorization,
+            state_obj,
+        ))?;
+
+        match outcome {
+            ConnectorStateAppendOutcome::Committed { object_id, .. } => Ok(object_id),
+            ConnectorStateAppendOutcome::Conflict {
+                canonical_head,
+                canonical_seq,
+            } => Err(CursorStoreError::Storage(format!(
+                "canonical connector state append conflict: head {}, seq {}",
+                canonical_head.map_or_else(|| "<none>".to_string(), |head| head.to_string()),
+                canonical_seq.map_or_else(|| "<none>".to_string(), |seq| seq.to_string())
+            ))),
+        }
+    }
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+impl CursorStoreBackend for ObjectStoreCursorBackend {
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        if let Some(head) = self.load_canonical_head()? {
+            return Ok(Some(head));
+        }
+
+        self.load_raw_head()
+    }
+
+    fn store_state_object(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        if let Some(authorization) = &self.write_authorization {
+            self.store_canonical_state_object(authorization, state_obj)
+        } else {
+            self.store_raw_state_object(state_obj)
+        }
     }
 }
 
@@ -2021,17 +2561,22 @@ impl<C: PollingCursor> PollingSupervisor<C> {
 
     /// Compute the next backoff delay, respecting rate-limit hints.
     ///
-    /// If `retry_after_ms` is provided and greater than the computed backoff,
-    /// it takes precedence.
+    /// A `retry_after_ms` hint raises the delay but never above
+    /// `max_backoff_ms`. The hint originates from an upstream `Retry-After`
+    /// header (`PollResult::rate_limited`), so it is attacker-controlled;
+    /// letting it win outright broke the documented guarantee that "backoff
+    /// will not exceed this value regardless of attempt count" and let a
+    /// single hostile 429 park the polling loop for as long as it asked
+    /// (`sleep_or_shutdown` only wakes on shutdown).
     fn compute_delay(&self, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
         let jitter = pseudo_random_jitter(attempt);
         let backoff = self.config.compute_backoff_with_jitter(attempt, jitter);
 
-        // Respect rate-limit Retry-After if present and larger
-        let delay_ms = match retry_after_ms {
-            Some(retry_after) if retry_after > backoff => retry_after,
-            _ => backoff,
-        };
+        let delay_ms = retry_after_ms.map_or(backoff, |retry_after| {
+            retry_after
+                .max(backoff)
+                .min(self.config.max_backoff_ms.max(backoff))
+        });
 
         Duration::from_millis(delay_ms)
     }
@@ -2285,6 +2830,572 @@ mod tests {
 
     fn boxed_err(message: &str) -> StreamingError {
         Box::new(io::Error::other(message))
+    }
+
+    /// br-3a3r6: scope-bound test override of the opt-in env value.
+    /// Crate forbids `unsafe_code` so tests can't `std::env::set_var`;
+    /// instead this RAII guard sets the per-thread override and clears
+    /// it on drop. Tests run in parallel on different threads, so the
+    /// thread-local keeps each scenario isolated.
+    struct OptInOverrideGuard;
+    impl OptInOverrideGuard {
+        fn set(value: Option<&str>) -> Self {
+            set_ambient_opt_in_test_value(TestEnvOverride::Set(value.map(str::to_owned)));
+            Self
+        }
+    }
+    impl Drop for OptInOverrideGuard {
+        fn drop(&mut self) {
+            set_ambient_opt_in_test_value(TestEnvOverride::Inherit);
+        }
+    }
+
+    struct RequestTimeoutOverrideGuard;
+    impl RequestTimeoutOverrideGuard {
+        fn set(value: Option<&str>) -> Self {
+            set_request_timeout_test_value(TestEnvOverride::Set(value.map(str::to_owned)));
+            Self
+        }
+    }
+    impl Drop for RequestTimeoutOverrideGuard {
+        fn drop(&mut self) {
+            set_request_timeout_test_value(TestEnvOverride::Inherit);
+        }
+    }
+
+    fn manifest_toml_with_optional_timeouts(timeouts: Option<&str>) -> String {
+        let placeholder = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+        let timeouts_block = timeouts.unwrap_or_default();
+        let raw = format!(
+            r#"[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 1200
+interface_hash = "{placeholder}"
+
+[connector]
+id = "fcp.test"
+name = "Test Connector"
+version = "0.1.0"
+description = "runtime config test manifest"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+
+[zones]
+home = "z:project:test"
+allowed_sources = ["z:project:test"]
+allowed_targets = ["z:project:test"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.outbound", "test.placeholder"]
+optional = []
+forbidden = ["system.exec"]
+
+[provides.operations.placeholder_operation]
+description = "Placeholder operation"
+capability = "test.placeholder"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = {{ type = "object", properties = {{ }} }}
+output_schema = {{ type = "object", properties = {{ }} }}
+
+[provides.operations.placeholder_operation.network_constraints]
+host_allow = ["example.invalid"]
+port_allow = [443]
+require_sni = true
+
+{timeouts_block}
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#
+        );
+        let unchecked = ConnectorManifest::parse_str_unchecked(&raw).unwrap();
+        let interface_hash = unchecked.compute_interface_hash().unwrap();
+        raw.replace(placeholder, &interface_hash.to_string())
+    }
+
+    #[test]
+    fn runtime_default_config() {
+        let config = ConnectorRuntimeConfig::default();
+        assert_eq!(config.request_timeout, Duration::from_secs(120));
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(120));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+        assert!(config.host_egress_proxy_url.is_none());
+    }
+
+    #[test]
+    fn runtime_creates_request_context() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let ctx = runtime.request_context();
+        assert!(!ctx.is_cancelled());
+        assert!(ctx.remaining_budget().is_some());
+        assert_eq!(ctx.scope(), fcp_async_core::ContextScope::Request);
+    }
+
+    #[test]
+    fn runtime_creates_background_context() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let ctx = runtime.background_context();
+        assert!(!ctx.is_cancelled());
+        assert!(ctx.remaining_budget().is_none());
+    }
+
+    #[test]
+    fn runtime_shutdown_propagates() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let bg = runtime.background_context();
+        let req = runtime.request_context();
+        assert!(!runtime.is_shutting_down());
+        assert!(!bg.is_cancelled());
+        assert!(!req.is_cancelled());
+
+        runtime.shutdown();
+
+        assert!(runtime.is_shutting_down());
+        assert!(bg.is_cancelled());
+        assert!(req.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_custom_timeout() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(60)),
+        );
+        assert_eq!(runtime.request_timeout(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn br_d9us6_runtime_config_exposes_host_egress_proxy_url() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_host_egress_proxy_url("http://127.0.0.1:7878/"),
+        );
+        assert_eq!(
+            runtime.host_egress_proxy_url(),
+            Some("http://127.0.0.1:7878/")
+        );
+    }
+
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn br_d9us6_host_egress_client_routes_helpers_to_host_rpc_paths() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_host_egress_proxy_url("http://127.0.0.1:7878/"),
+        );
+        let client = runtime
+            .host_egress_proxy_client()
+            .expect("configured host egress proxy client");
+        assert_eq!(
+            client.http_endpoint(),
+            "http://127.0.0.1:7878/rpc/egress/http"
+        );
+        assert_eq!(
+            client.tcp_endpoint(),
+            "http://127.0.0.1:7878/rpc/egress/tcp"
+        );
+    }
+
+    #[test]
+    fn runtime_connect_and_wall_clock_accessors() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default()
+                .with_connect_timeout(Duration::from_secs(7))
+                .with_wall_clock_timeout(Duration::from_secs(75)),
+        );
+        assert_eq!(runtime.connect_timeout(), Duration::from_secs(7));
+        assert_eq!(runtime.wall_clock_timeout(), Duration::from_secs(75));
+    }
+
+    #[test]
+    fn config_with_shutdown_timeout() {
+        let config =
+            ConnectorRuntimeConfig::default().with_shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(10));
+        assert_eq!(config.request_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn config_builder_chain_both() {
+        let config = ConnectorRuntimeConfig::default()
+            .with_request_timeout(Duration::from_secs(60))
+            .with_shutdown_timeout(Duration::from_secs(5));
+        assert_eq!(config.request_timeout, Duration::from_secs(60));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn config_manifest_defaults_match_scaffold_expectations() {
+        let config = ConnectorRuntimeConfig::manifest_defaults();
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(60));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn config_from_manifest_timeouts_uses_manifest_values() {
+        let config = ConnectorRuntimeConfig::from_manifest_timeouts(&ManifestTimeouts {
+            request_timeout_ms: 45_000,
+            connect_timeout_ms: 7_000,
+            wall_clock_timeout_ms: 90_000,
+        });
+        assert_eq!(config.request_timeout, Duration::from_secs(45));
+        assert_eq!(config.connect_timeout, Duration::from_secs(7));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(90));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn config_from_manifest_without_timeouts_uses_manifest_defaults() {
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
+            .expect("manifest should parse");
+        let config =
+            ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(&manifest, None)
+                .expect("manifest defaults should load");
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.connect_timeout, Duration::from_secs(5));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn config_from_manifest_with_timeouts_uses_manifest_section() {
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config =
+            ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(&manifest, None)
+                .expect("manifest timeouts should load");
+        assert_eq!(config.request_timeout, Duration::from_secs(48));
+        assert_eq!(config.connect_timeout, Duration::from_secs(8));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
+    }
+
+    #[test]
+    fn config_from_manifest_override_uses_request_timeout_env_value() {
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config = ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(
+            &manifest,
+            Some("61000"),
+        )
+        .expect("override should parse");
+        assert_eq!(config.request_timeout, Duration::from_secs(61));
+        assert_eq!(config.connect_timeout, Duration::from_secs(8));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
+    }
+
+    #[test]
+    fn config_from_manifest_override_rejects_invalid_env_value() {
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
+            .expect("manifest should parse");
+        let err = ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(
+            &manifest,
+            Some("invalid"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("FCP_REQUEST_TIMEOUT_MS must be a positive integer")
+        );
+    }
+
+    #[test]
+    fn config_from_manifest_str_parses_embedded_manifest() {
+        // br-3a3r6: from_manifest_str now ignores the ambient
+        // FCP_REQUEST_TIMEOUT_MS unless FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE
+        // is also set. The manifest value (52s) is the expected outcome.
+        let _opt_in = OptInOverrideGuard::set(None);
+        let config = ConnectorRuntimeConfig::from_manifest_str(
+            &manifest_toml_with_optional_timeouts(Some(
+                "[timeouts]\nrequest_timeout_ms = 52000\nconnect_timeout_ms = 6000\nwall_clock_timeout_ms = 88000\n\n",
+            )),
+        )
+        .expect("embedded manifest should parse");
+        assert_eq!(config.request_timeout, Duration::from_secs(52));
+        assert_eq!(config.connect_timeout, Duration::from_secs(6));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(88));
+    }
+
+    #[test]
+    fn from_manifest_ignores_ambient_timeout_env_without_opt_in() {
+        // br-3a3r6: ambient FCP_REQUEST_TIMEOUT_MS must NOT override the
+        // manifest's pinned [timeouts] section unless the operator has
+        // explicitly opted in.
+        let _opt_in = OptInOverrideGuard::set(None);
+        let _timeout = RequestTimeoutOverrideGuard::set(Some("99000"));
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config = ConnectorRuntimeConfig::from_manifest(&manifest)
+            .expect("manifest precedence path should succeed");
+        assert_eq!(
+            config.request_timeout,
+            Duration::from_secs(48),
+            "manifest must win without explicit opt-in"
+        );
+    }
+
+    #[test]
+    fn from_manifest_honors_ambient_timeout_env_with_opt_in() {
+        // br-3a3r6: when the operator explicitly sets
+        // FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE=1, the env override is
+        // honored and replaces the manifest request_timeout.
+        let _opt_in = OptInOverrideGuard::set(Some("1"));
+        let _timeout = RequestTimeoutOverrideGuard::set(Some("99000"));
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config =
+            ConnectorRuntimeConfig::from_manifest(&manifest).expect("opt-in path should succeed");
+        assert_eq!(
+            config.request_timeout,
+            Duration::from_secs(99),
+            "explicit opt-in must let env override the manifest request timeout"
+        );
+        assert_eq!(config.connect_timeout, Duration::from_secs(8));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
+    }
+
+    #[test]
+    fn from_manifest_invalid_env_with_opt_in_returns_error() {
+        // br-3a3r6: when opt-in is on, an unparseable
+        // FCP_REQUEST_TIMEOUT_MS surfaces as an error (was the existing
+        // contract before the gate). Without opt-in the env is never
+        // consulted, so a malformed value is silently irrelevant -- that
+        // behavior is documented on `from_manifest`.
+        let _opt_in = OptInOverrideGuard::set(Some("1"));
+        let _timeout = RequestTimeoutOverrideGuard::set(Some("not-a-number"));
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
+            .expect("manifest should parse");
+        let err = ConnectorRuntimeConfig::from_manifest(&manifest).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("FCP_REQUEST_TIMEOUT_MS must be a positive integer")
+        );
+    }
+
+    #[test]
+    fn from_manifest_invalid_env_without_opt_in_is_ignored() {
+        // br-3a3r6: malformed FCP_REQUEST_TIMEOUT_MS in the absence of
+        // opt-in must NOT cause a startup error -- the value is never
+        // consulted, so the manifest path completes cleanly.
+        let _opt_in = OptInOverrideGuard::set(None);
+        let _timeout = RequestTimeoutOverrideGuard::set(Some("garbage"));
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config = ConnectorRuntimeConfig::from_manifest(&manifest)
+            .expect("malformed env must be ignored without opt-in");
+        assert_eq!(config.request_timeout, Duration::from_secs(48));
+    }
+
+    #[test]
+    fn config_debug() {
+        let config = ConnectorRuntimeConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("ConnectorRuntimeConfig"));
+    }
+
+    #[test]
+    fn config_clone() {
+        let config =
+            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(77));
+        let moved = config;
+        assert_eq!(moved.request_timeout, Duration::from_secs(77));
+    }
+
+    #[test]
+    fn runtime_request_context_with_custom_timeout() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let ctx = runtime.request_context_with_timeout(Duration::from_secs(5));
+        assert!(!ctx.is_cancelled());
+        assert!(ctx.remaining_budget().is_some());
+    }
+
+    #[test]
+    fn runtime_shutdown_timeout_accessor() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_shutdown_timeout(Duration::from_secs(15)),
+        );
+        assert_eq!(runtime.shutdown_timeout(), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn runtime_multiple_background_contexts_independent() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let bg1 = runtime.background_context();
+        let bg2 = runtime.background_context();
+        assert!(!bg1.is_cancelled());
+        assert!(!bg2.is_cancelled());
+        runtime.shutdown();
+        assert!(bg1.is_cancelled());
+        assert!(bg2.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_shutdown_idempotent() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        runtime.shutdown();
+        assert!(runtime.is_shutting_down());
+        runtime.shutdown();
+        assert!(runtime.is_shutting_down());
+    }
+
+    #[test]
+    fn runtime_debug() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let debug = format!("{runtime:?}");
+        assert!(debug.contains("ConnectorRuntime"));
+    }
+
+    #[test]
+    fn runtime_clone() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(42)),
+        );
+        let moved = runtime;
+        assert_eq!(moved.request_timeout(), Duration::from_secs(42));
+    }
+
+    #[test]
+    fn runtime_request_context_not_cancelled() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let ctx = runtime.request_context();
+        assert!(!ctx.is_cancelled());
+        let budget = ctx.remaining_budget();
+        assert!(budget.is_some());
+        assert!(budget.unwrap() <= Duration::from_secs(120));
+    }
+
+    #[test]
+    fn runtime_custom_timeout_propagates_to_context() {
+        let timeout = Duration::from_millis(500);
+        let runtime =
+            ConnectorRuntime::new(ConnectorRuntimeConfig::default().with_request_timeout(timeout));
+        let ctx = runtime.request_context();
+        let budget = ctx.remaining_budget().unwrap();
+        assert!(budget <= timeout);
+    }
+
+    #[test]
+    fn runtime_background_context_has_no_deadline() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let bg = runtime.background_context();
+        assert!(bg.remaining_budget().is_none());
+    }
+
+    #[test]
+    fn runtime_shutdown_cancels_all_background_children() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let bg1 = runtime.background_context();
+        let bg2 = runtime.background_context();
+        let bg3 = runtime.background_context();
+        assert!(!bg1.is_cancelled());
+        assert!(!bg2.is_cancelled());
+        assert!(!bg3.is_cancelled());
+        runtime.shutdown();
+        assert!(bg1.is_cancelled());
+        assert!(bg2.is_cancelled());
+        assert!(bg3.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_request_context_is_cancelled_by_shutdown() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let ctx_before = runtime.request_context();
+        assert!(!ctx_before.is_cancelled());
+        runtime.shutdown();
+        assert!(ctx_before.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_request_context_created_after_shutdown_starts_cancelled() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        runtime.shutdown();
+
+        let ctx = runtime.request_context();
+        assert!(ctx.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_with_zero_request_timeout() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_request_timeout(Duration::ZERO),
+        );
+        assert_eq!(runtime.request_timeout(), Duration::ZERO);
+        let ctx = runtime.request_context();
+        assert!(ctx.remaining_budget().is_some());
+    }
+
+    #[test]
+    fn runtime_with_large_timeout() {
+        let timeout = Duration::from_secs(86_400);
+        let runtime =
+            ConnectorRuntime::new(ConnectorRuntimeConfig::default().with_request_timeout(timeout));
+        assert_eq!(runtime.request_timeout(), timeout);
+    }
+
+    #[test]
+    fn runtime_config_clone_preserves_values() {
+        let config = ConnectorRuntimeConfig::default()
+            .with_request_timeout(Duration::from_secs(42))
+            .with_shutdown_timeout(Duration::from_secs(7));
+        let cloned = config.clone();
+        assert_eq!(config.request_timeout, Duration::from_secs(42));
+        assert_eq!(cloned.shutdown_timeout, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn runtime_clone_shares_background_ctx() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let cloned = runtime.clone();
+        assert!(!runtime.is_shutting_down());
+        assert!(!cloned.is_shutting_down());
+        runtime.shutdown();
+        assert!(cloned.is_shutting_down());
+    }
+
+    #[test]
+    fn opt_in_value_allows_override_recognises_truthy_values() {
+        for value in ["1", "true", "yes"] {
+            assert!(
+                opt_in_value_allows_override(Some(value)),
+                "{value:?} should be treated as opt-in"
+            );
+        }
+        for value in ["0", "false", "no", "", "True", "YES", "TRUE", " 1", "1 "] {
+            assert!(
+                !opt_in_value_allows_override(Some(value)),
+                "{value:?} should NOT be treated as opt-in (case-sensitive exact match required)"
+            );
+        }
+        assert!(
+            !opt_in_value_allows_override(None),
+            "unset env must default to opt-in disabled"
+        );
     }
 
     #[derive(Clone, Default)]
@@ -3814,6 +4925,7 @@ mod tests {
             updated_at: 1_000_000,
             lease_seq: 1,
             lease_object_id: ObjectId::from_bytes([99; 32]),
+            writer_public_key: [0u8; 32],
             signature: Signature::from_bytes([0u8; 64]),
         };
 
@@ -5297,7 +6409,7 @@ mod tests {
         let lease = test_lease(1);
         let sig = Signature::from_bytes([0u8; 64]);
         let oid = store.commit_cursor(cursor, header, lease, sig).unwrap();
-        assert!(store.head() == Some(oid));
+        assert_eq!(store.head(), Some(oid));
     }
 
     // ── NEW: Polling supervisor successful poll with items ──────────────

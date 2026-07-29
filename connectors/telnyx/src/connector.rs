@@ -19,6 +19,7 @@ use fcp_voice_call::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 use url::Url;
 
@@ -41,6 +42,7 @@ const TELNYX_WEBHOOK_INGRESS_RATE_LIMIT_MAX: u64 = 200;
 const TELNYX_WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
 const TELNYX_SESSION_TTL_MINUTES: i64 = 60;
 const DEFAULT_TELNYX_SIGNATURE_TOLERANCE_SECONDS: i64 = 300;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 #[derive(Debug, Clone)]
 struct TelnyxConfig {
@@ -227,6 +229,12 @@ impl TelnyxConnector {
         self.base.instance_id.as_str()
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
@@ -289,12 +297,12 @@ impl TelnyxConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:fcp-telnyx-manifest".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: request.nonce,
             event_caps: Some(EventCaps::default()),
             auth_caps: None,
             op_catalog_hash: Some(stable_redacted_hash(
-                &serde_json::to_string(&Self::operations()).unwrap_or_default(),
+                &serde_json::to_string(&Self::operations_info()).unwrap_or_default(),
             )),
         })
     }
@@ -353,7 +361,7 @@ impl TelnyxConnector {
     /// Introspection.
     pub async fn handle_introspect(&self) -> FcpResult<Value> {
         serialize_result(Introspection {
-            operations: Self::operations(),
+            operations: Self::operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -1033,7 +1041,7 @@ impl TelnyxConnector {
     }
 
     async fn operation_metadata(&self, operation: &str) -> FcpResult<(CapabilityId, Value)> {
-        let op = Self::operations()
+        let op = Self::operations_info()
             .into_iter()
             .find(|operation_info| operation_info.id.as_str() == operation)
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1060,7 +1068,9 @@ impl TelnyxConnector {
         Ok(())
     }
 
-    fn operations() -> Vec<OperationInfo> {
+    /// Build the connector operation metadata exposed through introspection.
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
         vec![
             op_info(
                 "telnyx.call.initiate",
@@ -1754,6 +1764,17 @@ mod tests {
     use fcp_crypto::{CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_prelude::{CapabilityConstraints, ZoneId};
 
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = TelnyxConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:fcp-telnyx-manifest");
+    }
+
     fn public_key_config() -> String {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]);
         STANDARD.encode(signing_key.verifying_key().to_bytes())
@@ -1864,6 +1885,31 @@ mod tests {
             "telnyx.webhook.ingest_request",
         ] {
             assert!(ids.contains(&id), "{id} missing");
+        }
+    }
+
+    #[test]
+    fn operations_info_exposes_full_voice_and_webhook_catalog() {
+        let ops = TelnyxConnector::operations_info();
+        assert_eq!(ops.len(), 11);
+        let ids = ops
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<Vec<_>>();
+        for id in [
+            "telnyx.call.initiate",
+            "telnyx.call.continue",
+            "telnyx.call.speak",
+            "telnyx.call.end",
+            "telnyx.call.status",
+            "telnyx.call.transfer",
+            "telnyx.call.gather",
+            "telnyx.webhook.validate_signature",
+            "telnyx.webhook.evaluate_inbound_policy",
+            "telnyx.webhook.parse_event",
+            "telnyx.webhook.ingest_request",
+        ] {
+            assert!(ids.contains(&id), "{id} missing from operations_info");
         }
     }
 

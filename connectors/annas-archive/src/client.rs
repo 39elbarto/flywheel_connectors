@@ -2,7 +2,7 @@ use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -13,6 +13,23 @@ use crate::{
 
 /// Default Anna's Archive API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://annas-archive.org";
+
+/// Sanitize a path segment to prevent path traversal.
+fn sanitize_path_segment(segment: &str) -> AnnasArchiveResult<&str> {
+    if segment.trim().is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains("..")
+        || segment.contains('\0')
+        || segment.contains('?')
+        || segment.contains('#')
+    {
+        return Err(AnnasArchiveError::InvalidInput(
+            "Invalid path segment: contains illegal characters".into(),
+        ));
+    }
+    Ok(segment)
+}
 
 /// Anna's Archive API client.
 pub struct AnnasArchiveClient {
@@ -58,7 +75,10 @@ impl AnnasArchiveClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
+            if status == StatusCode::NO_CONTENT {
+                return Ok(serde_json::json!({}));
+            }
+            if body.trim().is_empty() {
                 return Ok(serde_json::json!({}));
             }
             Ok(serde_json::from_str(&body)?)
@@ -136,16 +156,19 @@ impl AnnasArchiveClient {
 
     /// Get book metadata by MD5 hash.
     pub async fn get_metadata(&self, md5: &str) -> AnnasArchiveResult<serde_json::Value> {
+        let md5 = sanitize_path_segment(md5)?;
         self.get(&format!("/md5/{md5}"), None).await
     }
 
     /// Look up a book by ISBN.
     pub async fn lookup_isbn(&self, isbn: &str) -> AnnasArchiveResult<serde_json::Value> {
+        let isbn = sanitize_path_segment(isbn)?;
         self.get(&format!("/isbn/{isbn}"), None).await
     }
 
     /// Look up a book by MD5 hash.
     pub async fn lookup_md5(&self, md5: &str) -> AnnasArchiveResult<serde_json::Value> {
+        let md5 = sanitize_path_segment(md5)?;
         self.get(&format!("/md5/{md5}"), None).await
     }
 }
@@ -157,6 +180,24 @@ mod tests {
     #[test]
     fn default_base_url_correct() {
         assert_eq!(DEFAULT_BASE_URL, "https://annas-archive.org");
+    }
+
+    #[test]
+    fn sanitize_path_segment_valid() {
+        assert!(sanitize_path_segment("d41d8cd98f00b204e9800998ecf8427e").is_ok());
+        assert!(sanitize_path_segment("978-3-16-148410-0").is_ok());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../etc/passwd").is_err());
+        assert!(sanitize_path_segment("foo/bar").is_err());
+        assert!(sanitize_path_segment("foo\\bar").is_err());
+        assert!(sanitize_path_segment("").is_err());
+        assert!(sanitize_path_segment("   ").is_err());
+        assert!(sanitize_path_segment("foo\0bar").is_err());
+        assert!(sanitize_path_segment("foo?bar=1").is_err());
+        assert!(sanitize_path_segment("foo#frag").is_err());
     }
 
     #[test]

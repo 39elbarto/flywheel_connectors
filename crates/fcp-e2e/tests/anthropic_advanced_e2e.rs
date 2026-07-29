@@ -44,7 +44,9 @@ struct ConfiguredAnthropic {
 async fn anthropic_connector_emits_redacted_advanced_e2e_evidence() {
     let mut records = Vec::new();
     run_fixture_script(&mut records).await;
-    run_live_script_or_record_skip(&mut records).await;
+    run_live_script_or_record_skip(&mut records)
+        .await
+        .expect("live Anthropic script should either skip cleanly or pass");
 
     let jsonl = write_jsonl_artifact(&records);
     for event in [
@@ -210,7 +212,9 @@ async fn run_fixture_script(records: &mut Vec<Value>) {
         json!({
             "reason": "manual_diagnostic",
             "auth_method": refresh["auth_method"],
-            "refreshable": refresh["refreshable"],
+            "connector_refreshable": refresh["refreshable"],
+            "host_managed": refresh["host_managed"],
+            "expires_after": refresh["expires_after"],
             "refreshed": refresh["refreshed"]
         }),
     ));
@@ -313,7 +317,7 @@ async fn record_cli_auth_boundary(records: &mut Vec<Value>) {
     ));
 }
 
-async fn run_live_script_or_record_skip(records: &mut Vec<Value>) {
+async fn run_live_script_or_record_skip(records: &mut Vec<Value>) -> Result<(), String> {
     let env_name = ["ANTHROPIC", "API", "KEY"].join("_");
     let live_credential = std::env::var(&env_name)
         .ok()
@@ -331,7 +335,7 @@ async fn run_live_script_or_record_skip(records: &mut Vec<Value>) {
                 "skip_reason": "missing_live_credentials"
             }),
         ));
-        return;
+        return Ok(());
     };
 
     let mut configured = configured_connector(
@@ -358,7 +362,7 @@ async fn run_live_script_or_record_skip(records: &mut Vec<Value>) {
     )
     .await;
 
-    match response {
+    let live_error = match response {
         Ok(value) => {
             records.push(evidence_record(
                 "anthropic_request_built",
@@ -388,8 +392,12 @@ async fn run_live_script_or_record_skip(records: &mut Vec<Value>) {
                     "has_thinking": value["provenance"]["has_thinking"]
                 }),
             ));
+            None
         }
         Err(err) => {
+            let error_message = format!(
+                "live Anthropic invocation failed after live credentials were provided: {err}"
+            );
             records.push(evidence_record(
                 "anthropic_response_decoded",
                 "live",
@@ -401,12 +409,9 @@ async fn run_live_script_or_record_skip(records: &mut Vec<Value>) {
                     "provider_returned_error": true
                 }),
             ));
-            assert!(
-                false,
-                "live Anthropic invocation failed after live credentials were provided: {err}"
-            );
+            Some(error_message)
         }
-    }
+    };
 
     let cleanup_result = configured
         .connector
@@ -427,6 +432,10 @@ async fn run_live_script_or_record_skip(records: &mut Vec<Value>) {
             "cleanup_result": cleanup_result
         }),
     ));
+    if let Some(error) = live_error {
+        return Err(error);
+    }
+    Ok(())
 }
 
 async fn mount_fixture_message(server: &MockServer) {

@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
@@ -139,10 +140,7 @@ impl HubSpotClient {
 
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -622,6 +620,16 @@ impl HubSpotClient {
     }
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> HubSpotResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +723,32 @@ mod tests {
         assert!(!dbg.contains("super-secret-pat"));
         assert!(dbg.contains("redacted"));
         assert!(dbg.contains("HubSpotClient"));
+    }
+
+    #[test]
+    fn decode_success_body_coerces_empty_ok_to_empty_object() {
+        // Contract (commit 506b45904): a 2xx with an empty body is a successful
+        // no-content response and decodes to `{}` rather than failing closed.
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "").unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_coerces_whitespace_ok_to_empty_object() {
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "  \n\t").unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

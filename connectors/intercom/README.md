@@ -1,6 +1,6 @@
 # Intercom Connector V3 Contract
 
-> **Status**: runtime contract documented with contact-delete capability and regional-host drift
+> **Status**: runtime contract documented with manifest-derived metadata; regional-host drift remains
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -47,6 +47,9 @@ Important runtime truths the contract preserves:
 - Runtime reqwest timeout is `30 seconds`.
 - Runtime request-context timeout is `30 seconds`.
 - Runtime stores a retry config with `max_retries = 3`, but normal GET/POST/DELETE helpers currently send one reqwest request and do not run a retry loop.
+- Runtime operation metadata is derived from `manifest.toml`.
+- Manifest interface hash is `blake3-256:fcp.interface.v2:d08f67f0c141966ba956221b0d022797bf43e1ae4b69aaf6e9b53452a8114eb7`.
+- Runtime introspection reports manifest-derived approval and rate-limit metadata.
 - Provider error bodies are truncated to 2048 bytes before API errors are surfaced.
 - HTTP 401 maps to unauthorized, 403 maps to forbidden, 404 maps to not-found, and 429 maps to rate-limited with `Retry-After` support.
 - `contact_id` and `conversation_id` path segments are allow-listed to ASCII alphanumeric, `-`, and `_`, with a 256-byte maximum.
@@ -62,7 +65,6 @@ Important runtime truths the contract preserves:
 This README documents runtime truth and keeps current drift visible:
 
 - Runtime `BaseConnector` ID is `intercom`, while the manifest and handshake use `fcp.intercom`.
-- Runtime handshake and introspection use a dedicated `intercom.contacts.delete` capability for destructive delete, but the manifest operation, optional capabilities, and rate-limit operation pool still place `intercom.contacts.delete` under `intercom.contacts.write`.
 - Runtime host policy accepts official EU and AU regional API hosts, while each manifest operation currently allows only `api.intercom.io`.
 - Runtime `health` treats a handshake without `session_id` as not handshaken because it checks `session_id.is_some()`, while `BaseConnector` readiness is set during handshake regardless of `session_id`.
 - Runtime `doctor` does not include auth-mode, endpoint-policy, or credential-injection diagnostics; `self_check` carries those details.
@@ -71,9 +73,9 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime `conversations.reply` always sends an admin-shaped body with `"type": "admin"` and defaults `admin_id` to `"0"` when omitted. Current Intercom docs support multiple reply variants with explicit admin or contact fields.
 - Runtime `invoke` does not verify bound capability tokens for reads, writes, replies, or deletes.
 - Runtime `simulate` can allow a known operation before configuration or handshake because it only checks the static operation inventory.
-- Runtime operation metadata sets `requires_approval = None` in introspection, while the manifest marks create/reply as policy-gated and delete as interactive.
+- Runtime introspection now reports approval modes and rate-limit metadata, but runtime execution does not enforce approval tokens or connector-side rate-limit pools.
 
-A follow-up parity bead should align connector ID spelling, reconcile the destructive delete capability across runtime, manifest, and rate-limit pools, add regional hosts to manifest network constraints or remove runtime regional allowance, make health and BaseConnector handshake semantics agree, route HTTP through the retry policy, implement contacts search or remove the schema hint, tighten conversation reply variant handling, and add bound capability-token verification.
+A follow-up parity bead should align connector ID spelling, add regional hosts to manifest network constraints or remove runtime regional allowance, make health and BaseConnector handshake semantics agree, route HTTP through the retry policy, implement contacts search or remove the schema hint, tighten conversation reply variant handling, enforce approval and rate-limit policy, and add bound capability-token verification.
 
 ## First-Slice Scope
 
@@ -85,7 +87,7 @@ The current Intercom README slice documents the existing runtime surface:
 - tags list operation
 - regional base URL policy, path-segment validation, provider error mapping, and rate-limit handling
 - local provisioning recipe, doctor, health, self-check, simulate, introspect, invoke, and shutdown surfaces
-- runtime/manifest drift around destructive-delete capability, regional hosts, retry, approval metadata, and capability-token verification
+- runtime/manifest drift around regional hosts, retry, approval/rate-limit enforcement, and capability-token verification
 - mock-only WireMock integration tests
 
 ## Auth And Zone Boundary
@@ -104,7 +106,7 @@ The current Intercom README slice documents the existing runtime surface:
   - `intercom.conversations.read`
   - `intercom.conversations.write`
   - `intercom.tags.read`
-- Manifest optional capabilities currently omit `intercom.contacts.delete`, even though runtime advertises and introspects it.
+- Manifest optional capabilities include the dedicated destructive-delete capability `intercom.contacts.delete`.
 - The connector does not persist contacts, conversations, replies, tags, tokens, credential IDs beyond configuration metadata, provider payloads, provider error bodies, pagination cursors, or support transcripts.
 - Intercom data can include customer names, email addresses, support conversation bodies, tags, internal notes, and operational customer context. Treat all live reads and writes as work-zone data.
 
@@ -128,8 +130,8 @@ The current Intercom README slice documents the existing runtime surface:
 | Capability | Purpose |
 |-----------|---------|
 | `intercom.contacts.read` | List contacts. |
-| `intercom.contacts.write` | Create contacts in the current manifest; runtime uses this for create only. |
-| `intercom.contacts.delete` | Runtime-only dedicated destructive delete capability in this checkout. |
+| `intercom.contacts.write` | Create contacts. |
+| `intercom.contacts.delete` | Delete contacts through the dedicated destructive-delete capability. |
 | `intercom.conversations.read` | List conversations. |
 | `intercom.conversations.write` | Reply to conversations. |
 | `intercom.tags.read` | List tags. |
@@ -140,7 +142,7 @@ The current Intercom README slice documents the existing runtime surface:
 |-----------|----------------|------------|------------|-----------|-------------|-----------|
 | `intercom.contacts.list` | `GET /contacts` | `intercom.contacts.read` | `Safe` | `Low` | `Strict` | Reads paginated contacts with optional cursor. |
 | `intercom.contacts.create` | `POST /contacts` | `intercom.contacts.write` | `Risky` | `Medium` | `None` | Creates a lead or user contact. |
-| `intercom.contacts.delete` | `DELETE /contacts/{contact_id}` | `intercom.contacts.delete` in runtime, `intercom.contacts.write` in manifest | `Dangerous` | `High` | `Strict` | Deletes one Intercom contact and returns `{ "deleted": true }` on success. |
+| `intercom.contacts.delete` | `DELETE /contacts/{contact_id}` | `intercom.contacts.delete` | `Dangerous` | `High` | `Strict` | Deletes one Intercom contact and returns `{ "deleted": true }` on success. |
 | `intercom.conversations.list` | `GET /conversations` | `intercom.conversations.read` | `Safe` | `Low` | `Strict` | Reads paginated conversation metadata. |
 | `intercom.conversations.reply` | `POST /conversations/{conversation_id}/reply` | `intercom.conversations.write` | `Risky` | `Medium` | `None` | Sends an admin-shaped reply or note body to a conversation. |
 | `intercom.tags.list` | `GET /tags` | `intercom.tags.read` | `Safe` | `Low` | `Strict` | Reads workspace tags. |
@@ -171,7 +173,7 @@ These are excluded on purpose:
 - auth mode as bearer token or credential ID through self-check provisioning details
 - base URL policy status through self-check provisioning details
 - credential-injection requirement for credential-id mode
-- known operation metadata, schemas, capability IDs, risk levels, safety tiers, idempotency, and AI hints
+- known operation metadata, schemas, capability IDs, risk levels, safety tiers, idempotency, approval modes, rate-limit metadata, and AI hints
 - provider error mapping for auth, forbidden, not-found, rate-limit, server-error, invalid-input, and JSON errors
 
 The deterministic integration evidence is anchored on connector-local tests covering:
@@ -196,10 +198,21 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 There is no dedicated tracked `scripts/e2e/intercom_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
 
+`connectors/intercom/tests/live_verification.rs` uses `EnvironmentManifest::sandbox(...)` with this environment contract:
+
+- Required gate: `FCP_LIVE_SANDBOX=1`.
+- Required secret: `INTERCOM_SANDBOX_TOKEN`.
+- Required non-secrets: `INTERCOM_SANDBOX_WORKSPACE_ID`, `FCP_SANDBOX_RUN_NAMESPACE`.
+- Defaulted endpoint: `INTERCOM_SANDBOX_BASE_URL=https://api.intercom.io`.
+- Live flow: `intercom.contacts.list`, then one namespaced synthetic `intercom.contacts.create`, then `intercom.contacts.delete` for the created contact.
+- JSONL prefix: `INTERCOM_LIVE_SANDBOX_JSONL`.
+- Redaction: the suite does not log the token, workspace id, synthetic contact email, created contact id, base URL, or raw provider payload.
+
 The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - deterministic WireMock coverage for Intercom REST paths
+- sandbox live verification for one read/list plus one create/delete cleanup pair
 - auth, endpoint policy, provider error, lifecycle, simulation, introspection, self-check, and doctor coverage
 - destructive-delete capability and path-segment hardening regressions
 - formatting, check, test, and clippy proof through `rch`
@@ -215,7 +228,7 @@ The verification surface captures:
 
 **Dedicated environment**:
 
-- Keep live contacts synthetic and clearly marked as test data.
+- Keep live contacts synthetic and clearly marked as test data. The live verification suite creates one `fcp-sandbox-...@example.com` contact and deletes the provider-assigned contact id before passing.
 - Avoid deleting real customer contacts.
 - Use conversation replies only in disposable conversations or internal test workspaces.
 - Provide explicit `admin_id` for conversation replies instead of relying on the runtime default.
@@ -232,6 +245,7 @@ The verification surface captures:
 - If self-check reports `credential_injection_required`, use direct token mode or wire host-side injection.
 - If contact delete rejects `contact_id`, use the Intercom-assigned ASCII ID and avoid emails, external IDs with punctuation, slashes, dots, or query characters.
 - If `contacts.list` does not honor a `query` object, use the implemented pagination fields only; contact search is not in this runtime slice.
+- If the live suite fails after contact creation, inspect the `cleanup_result` field in `INTERCOM_LIVE_SANDBOX_JSONL`; it reports whether cleanup did not start or delete failed without logging the contact id.
 - If conversation reply fails, provide `conversation_id`, `body`, `message_type`, and a valid `admin_id` for live Intercom calls.
 - If `simulate` allows an operation but policy should deny it, remember that current simulation only checks operation ID.
 

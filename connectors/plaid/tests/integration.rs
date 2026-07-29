@@ -37,7 +37,11 @@ fn capability_for_operation(op: &str) -> &str {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> CapabilityToken {
     let cap = capability_for_operation(op);
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -53,8 +57,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .unwrap()
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -471,7 +477,7 @@ async fn access_token_not_in_invoke_errors() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.accounts_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.accounts_get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.accounts_get");
 
     let err = connector
         .handle_invoke(json!({
@@ -619,7 +625,7 @@ async fn dispatch_accounts_get_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.accounts_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.accounts_get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.accounts_get");
 
     let result = connector
         .handle_invoke(json!({
@@ -664,7 +670,11 @@ async fn dispatch_transactions_sync_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.transactions_sync"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.transactions_sync");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.transactions_sync",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -702,7 +712,11 @@ async fn dispatch_link_token_create_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.link_token_create"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.link_token_create");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.link_token_create",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1141,7 +1155,7 @@ async fn dispatch_auth_get_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.auth_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.auth_get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.auth_get");
 
     let result = connector
         .handle_invoke(json!({
@@ -1180,7 +1194,7 @@ async fn dispatch_identity_get_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.identity_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.identity_get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.identity_get");
 
     let result = connector
         .handle_invoke(json!({
@@ -1243,7 +1257,11 @@ async fn dispatch_investments_holdings_get_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.investments_holdings_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.investments_holdings_get");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.investments_holdings_get",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1292,7 +1310,11 @@ async fn dispatch_liabilities_get_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.liabilities_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.liabilities_get");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.liabilities_get",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1336,7 +1358,11 @@ async fn dispatch_transactions_get_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.transactions_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.transactions_get");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.transactions_get",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1385,7 +1411,11 @@ async fn dispatch_accounts_balance_get_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.accounts_balance_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.accounts_balance_get");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.accounts_balance_get",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1417,7 +1447,11 @@ async fn dispatch_token_exchange_through_invoke() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.token_exchange"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.token_exchange");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.token_exchange",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1730,7 +1764,7 @@ async fn invoke_auth_get_missing_access_token() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.auth_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.auth_get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.auth_get");
 
     let result = connector
         .handle_invoke(json!({
@@ -1755,7 +1789,7 @@ async fn invoke_identity_get_missing_access_token() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.identity_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.identity_get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.identity_get");
 
     let result = connector
         .handle_invoke(json!({
@@ -1780,7 +1814,11 @@ async fn invoke_investments_holdings_get_missing_access_token() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.investments_holdings_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.investments_holdings_get");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.investments_holdings_get",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1805,7 +1843,11 @@ async fn invoke_liabilities_get_missing_access_token() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.liabilities_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.liabilities_get");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.liabilities_get",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1830,7 +1872,11 @@ async fn invoke_transactions_get_missing_start_date() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.transactions_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.transactions_get");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.transactions_get",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1855,7 +1901,11 @@ async fn invoke_transactions_get_missing_end_date() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.transactions_get"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.transactions_get");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.transactions_get",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1880,7 +1930,11 @@ async fn invoke_link_token_create_missing_client_name() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.link_token_create"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.link_token_create");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.link_token_create",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1909,7 +1963,11 @@ async fn invoke_token_exchange_missing_public_token() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.token_exchange"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.token_exchange");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.token_exchange",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -2119,7 +2177,11 @@ async fn invoke_unknown_operation() {
     let mut connector = PlaidConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["plaid.nonexistent_op"]).await;
-    let token = generate_valid_token(&signing_key, "plaid.nonexistent_op");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "plaid.nonexistent_op",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -2143,7 +2205,7 @@ async fn invoke_without_handshake() {
     setup_configure(&mut connector, &mock.base_url()).await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "plaid.accounts_get");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "plaid.accounts_get");
 
     let result = connector
         .handle_invoke(json!({

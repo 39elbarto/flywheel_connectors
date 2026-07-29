@@ -22,6 +22,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -30,6 +31,7 @@ use crate::{
 };
 
 const DEFAULT_HISTORY_CURSOR_FILE: &str = "fcp-gmail-history-cursor.json";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 #[derive(Debug, Clone)]
 struct GmailConfig {
@@ -110,6 +112,12 @@ impl GmailConnector {
     #[must_use]
     pub fn instance_id(&self) -> &InstanceId {
         &self.base.instance_id
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     /// Handle configure method.
@@ -243,7 +251,7 @@ impl GmailConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:gmail-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -536,13 +544,8 @@ impl GmailConnector {
         })
     }
 
-    /// Handle introspect method.
-    ///
-    /// # Errors
-    /// Returns [`FcpError`] if serialization of the introspection data fails.
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let introspection = Introspection {
-            operations: vec![
+    fn operations_info() -> Vec<OperationInfo> {
+        vec![
                 op_info(
                     "gmail.send_message",
                     "Send an email message",
@@ -865,7 +868,16 @@ impl GmailConnector {
                         ],
                     },
                 ),
-            ],
+        ]
+    }
+
+    /// Handle introspect method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization of the introspection data fails.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: Self::operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -1966,10 +1978,26 @@ fn op_info(
     }
 }
 
+/// Reject a header field value that would break out of its RFC 2822 header
+/// line. A `\r`, `\n`, or NUL in `to`/`subject` lets a caller inject extra
+/// headers (e.g. a hidden `Bcc:`) or a forged message body, so such values
+/// are refused before the message is assembled.
+fn validate_header_field(field: &str, value: &str) -> FcpResult<()> {
+    if value.contains(['\r', '\n', '\0']) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Field `{field}` must not contain CR, LF, or NUL characters"),
+        });
+    }
+    Ok(())
+}
+
 fn build_raw_message_from_fields(input: &serde_json::Value) -> FcpResult<String> {
     let to = require_str(input, "to")?;
     let subject = require_str(input, "subject")?;
     let body = require_str(input, "body")?;
+    validate_header_field("to", to)?;
+    validate_header_field("subject", subject)?;
     let normalized_body = body
         .replace("\r\n", "\n")
         .replace('\r', "\n")
@@ -1988,10 +2016,126 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::CapabilityConstraints;
     use fcp_prelude::CredentialId;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path, query_param},
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        thread::{self, JoinHandle},
+        time::Duration as StdDuration,
     };
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        query: Vec<(&'static str, &'static str)>,
+        status: u16,
+        body: Vec<u8>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            query: Vec<(&'static str, &'static str)>,
+            body: &serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                query,
+                status: 200,
+                body: serde_json::to_vec(body).expect("serialize response json"),
+            }
+        }
+    }
+
+    struct TestHttpServer {
+        base_url: String,
+        _handle: JoinHandle<()>,
+    }
+
+    impl TestHttpServer {
+        fn respond(response: TestHttpResponse) -> Self {
+            Self::respond_sequence(vec![response])
+        }
+
+        fn respond_sequence(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test HTTP server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().expect("accept test HTTP request");
+                    handle_test_http_request(stream, &response);
+                }
+            });
+            Self {
+                base_url,
+                _handle: handle,
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+    }
+
+    fn handle_test_http_request(mut stream: TcpStream, response: &TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("request method");
+        let target = parts.next().expect("request target");
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        assert_eq!(method, response.method);
+        assert_eq!(path, response.path);
+        for (name, value) in &response.query {
+            let expected = format!("{name}={value}");
+            assert!(query.split('&').any(|part| part == expected), "{expected}");
+        }
+
+        let status_text = match response.status {
+            200 => "OK",
+            404 => "Not Found",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response.status,
+            status_text,
+            response.body.len(),
+        )
+        .expect("write response header");
+        if stream.write_all(&response.body).is_ok() {
+            let _ = stream.flush();
+        }
+    }
 
     fn generate_token_with_cap(
         signing_key: &Ed25519SigningKey,
@@ -2698,6 +2842,44 @@ mod tests {
         assert!(message.ends_with("\r\n\r\nHello,\r\nworld!"));
     }
 
+    #[test]
+    fn build_raw_message_rejects_header_injection_via_to() {
+        let err = build_raw_message_from_fields(&json!({
+            "to": "victim@example.com\r\nBcc: attacker@evil.com",
+            "subject": "Hi",
+            "body": "ok"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { code: 1003, .. }));
+    }
+
+    #[test]
+    fn build_raw_message_rejects_header_injection_via_subject() {
+        let err = build_raw_message_from_fields(&json!({
+            "to": "victim@example.com",
+            "subject": "Hi\nInjected: header",
+            "body": "ok"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { code: 1003, .. }));
+    }
+
+    #[test]
+    fn build_raw_message_allows_multiline_body() {
+        // CRLF in the body is legitimate and must still be accepted.
+        let raw = build_raw_message_from_fields(&json!({
+            "to": "recipient@example.com",
+            "subject": "Test Subject",
+            "body": "line1\r\nline2\nline3"
+        }))
+        .unwrap();
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(raw)
+            .unwrap();
+        let message = String::from_utf8(decoded).unwrap();
+        assert!(message.ends_with("\r\n\r\nline1\r\nline2\r\nline3"));
+    }
+
     // ── determine_effective_start_history_id ────────────────────────
 
     #[test]
@@ -3114,12 +3296,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn configure_with_token_rejects_raw_secret() {
-        let mock_server = MockServer::start().await;
         let mut connector = GmailConnector::new();
         let result = connector
             .handle_configure(json!({
                 "token": "ya29.test-token",
-                "base_url": mock_server.uri()
+                "base_url": "http://localhost:9999"
             }))
             .await;
 
@@ -3222,12 +3403,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn health_shows_scopes_after_configure() {
-        let mock_server = MockServer::start().await;
         let mut connector = GmailConnector::new();
         connector
             .handle_configure(json!({
                 "credential_id": CredentialId::new().to_string(),
-                "base_url": mock_server.uri(),
+                "base_url": "http://localhost:9999",
                 "required_scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
             }))
             .await
@@ -3484,34 +3664,34 @@ mod tests {
         let state_path =
             std::env::temp_dir().join(format!("fcp-gmail-history-{}.json", uuid::Uuid::new_v4()));
 
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/users/me/history"))
-            .and(query_param("startHistoryId", "100"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "history": [
-                    { "id": "101", "messagesAdded": [{ "message": { "id": "m1" } }] }
-                ],
-                "historyId": "101"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/users/me/history"))
-            .and(query_param("startHistoryId", "101"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "history": [],
-                "historyId": "101"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestHttpServer::respond_sequence(vec![
+            TestHttpResponse::json(
+                "GET",
+                "/users/me/history",
+                vec![("startHistoryId", "100")],
+                &json!({
+                    "history": [
+                        { "id": "101", "messagesAdded": [{ "message": { "id": "m1" } }] }
+                    ],
+                    "historyId": "101"
+                }),
+            ),
+            TestHttpResponse::json(
+                "GET",
+                "/users/me/history",
+                vec![("startHistoryId", "101")],
+                &json!({
+                    "history": [],
+                    "historyId": "101"
+                }),
+            ),
+        ]);
 
         let mut connector = GmailConnector::new();
         connector
             .handle_configure(json!({
                 "credential_id": CredentialId::new().to_string(),
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "history_cursor_path": state_path.to_string_lossy().to_string()
             }))
             .await
@@ -3535,7 +3715,7 @@ mod tests {
         restarted
             .handle_configure(json!({
                 "credential_id": CredentialId::new().to_string(),
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "history_cursor_path": state_path.to_string_lossy().to_string()
             }))
             .await
@@ -3560,22 +3740,21 @@ mod tests {
         let state_path =
             std::env::temp_dir().join(format!("fcp-gmail-history-{}.json", uuid::Uuid::new_v4()));
 
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/users/me/history"))
-            .and(query_param("startHistoryId", "200"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let server = TestHttpServer::respond(TestHttpResponse::json(
+            "GET",
+            "/users/me/history",
+            vec![("startHistoryId", "200")],
+            &json!({
                 "history": [],
                 "historyId": "200"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let mut connector = GmailConnector::new();
         connector
             .handle_configure(json!({
                 "credential_id": CredentialId::new().to_string(),
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "history_cursor_path": state_path.to_string_lossy().to_string()
             }))
             .await
@@ -3627,5 +3806,17 @@ mod tests {
         assert!(op_ids.contains(&"gmail.create_draft"));
         assert!(op_ids.contains(&"gmail.send_draft"));
         assert_eq!(ops.len(), 11);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = GmailConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:gmail-connector-v1");
     }
 }

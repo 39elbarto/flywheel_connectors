@@ -1,0 +1,340 @@
+{
+  "schema": "fcp.proof-bundle-registry.v1",
+  "registry_id": "proof-status-all-cases",
+  "generated_at_unix_ms": 1750000000000,
+  "sources": [
+    {
+      "source_id": "proof-status-fixture",
+      "path": "crates/fwc/tests/fixtures/proof_status/all_cases_registry.json",
+      "purpose": "Deterministic proof status fixture covering green, stale, missing, mismatch, skip, and replay rows",
+      "source_kind": "other",
+      "default_proof_class": "host_backed",
+      "owning_bead": "flywheel_connectors-8fhsm.4"
+    }
+  ],
+  "proofs": [
+    {
+      "proof_id": "fixture.fresh.green",
+      "owning_bead": "flywheel_connectors-8fhsm.4",
+      "claim_text": "Fresh live proof row remains green",
+      "source_document": {
+        "source_id": "proof-status-fixture",
+        "section": "fixture",
+        "row_label": "fresh"
+      },
+      "proof_class": "live",
+      "rerun": {
+        "argv": ["cargo", "test", "-p", "fcp-evidence"],
+        "working_dir": ".",
+        "requires_rch": true,
+        "required_env_keys": [],
+        "expected_exit_codes": [0]
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/fresh.json",
+          "kind": "manifest",
+          "required": true,
+          "digest": {
+            "algorithm": "blake3",
+            "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          "produced_by": "proof_status_fixture"
+        }
+      ],
+      "git_revision_under_test": "abcdef0",
+      "generated_at_unix_ms": 1750000000000,
+      "freshness_policy": {
+        "max_age_ms": 86400000,
+        "required_for_green": true,
+        "stale_action": "fail_closed"
+      },
+      "verifier": {
+        "command": {
+          "argv": ["cargo", "test", "-p", "fcp-evidence"],
+          "working_dir": ".",
+          "requires_rch": true,
+          "required_env_keys": [],
+          "expected_exit_codes": [0]
+        },
+        "result": "passed",
+        "observed_at_unix_ms": 1750000000000,
+        "log_path": "target/proof/fresh.log",
+        "live_claim": true
+      },
+      "redaction": {
+        "classification": "public"
+      }
+    },
+    {
+      "proof_id": "fixture.stale.red",
+      "owning_bead": "flywheel_connectors-8fhsm.4",
+      "claim_text": "Stale required proof row fails closed",
+      "source_document": {
+        "source_id": "proof-status-fixture",
+        "section": "fixture",
+        "row_label": "stale"
+      },
+      "proof_class": "host_backed",
+      "rerun": {
+        "argv": ["cargo", "test", "-p", "fcp-evidence"],
+        "working_dir": ".",
+        "requires_rch": true,
+        "required_env_keys": [],
+        "expected_exit_codes": [0]
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/stale.json",
+          "kind": "manifest",
+          "required": true,
+          "digest": {
+            "algorithm": "blake3",
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "produced_by": "proof_status_fixture"
+        }
+      ],
+      "git_revision_under_test": "abcdef0",
+      "generated_at_unix_ms": 1749827200000,
+      "freshness_policy": {
+        "max_age_ms": 86400000,
+        "required_for_green": true,
+        "stale_action": "fail_closed"
+      },
+      "verifier": {
+        "command": {
+          "argv": ["cargo", "test", "-p", "fcp-evidence"],
+          "working_dir": ".",
+          "requires_rch": true,
+          "required_env_keys": [],
+          "expected_exit_codes": [0]
+        },
+        "result": "passed",
+        "observed_at_unix_ms": 1749827200000,
+        "log_path": "target/proof/stale.log",
+        "live_claim": true
+      },
+      "redaction": {
+        "classification": "public"
+      }
+    },
+    {
+      "proof_id": "fixture.missing.red",
+      "owning_bead": "flywheel_connectors-8fhsm.4",
+      "claim_text": "Missing required artifact fails closed",
+      "source_document": {
+        "source_id": "proof-status-fixture",
+        "section": "fixture",
+        "row_label": "missing"
+      },
+      "proof_class": "host_backed",
+      "rerun": {
+        "argv": ["cargo", "test", "-p", "fcp-evidence"],
+        "working_dir": ".",
+        "requires_rch": true,
+        "required_env_keys": [],
+        "expected_exit_codes": [0]
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/missing.json",
+          "kind": "manifest",
+          "required": true,
+          "digest": {
+            "algorithm": "blake3",
+            "value": "2222222222222222222222222222222222222222222222222222222222222222"
+          },
+          "produced_by": "proof_status_fixture"
+        }
+      ],
+      "git_revision_under_test": "abcdef0",
+      "generated_at_unix_ms": 1750000000000,
+      "freshness_policy": {
+        "max_age_ms": 86400000,
+        "required_for_green": true,
+        "stale_action": "fail_closed"
+      },
+      "verifier": {
+        "command": {
+          "argv": ["cargo", "test", "-p", "fcp-evidence"],
+          "working_dir": ".",
+          "requires_rch": true,
+          "required_env_keys": [],
+          "expected_exit_codes": [0]
+        },
+        "result": "passed",
+        "observed_at_unix_ms": 1750000000000,
+        "log_path": "target/proof/missing.log",
+        "live_claim": true
+      },
+      "redaction": {
+        "classification": "public"
+      }
+    },
+    {
+      "proof_id": "fixture.mismatch.red",
+      "owning_bead": "flywheel_connectors-8fhsm.4",
+      "claim_text": "Digest mismatch fails closed",
+      "source_document": {
+        "source_id": "proof-status-fixture",
+        "section": "fixture",
+        "row_label": "mismatch"
+      },
+      "proof_class": "host_backed",
+      "rerun": {
+        "argv": ["cargo", "test", "-p", "fcp-evidence"],
+        "working_dir": ".",
+        "requires_rch": true,
+        "required_env_keys": [],
+        "expected_exit_codes": [0]
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/mismatch.json",
+          "kind": "manifest",
+          "required": true,
+          "digest": {
+            "algorithm": "blake3",
+            "value": "3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "produced_by": "proof_status_fixture"
+        }
+      ],
+      "git_revision_under_test": "abcdef0",
+      "generated_at_unix_ms": 1750000000000,
+      "freshness_policy": {
+        "max_age_ms": 86400000,
+        "required_for_green": true,
+        "stale_action": "fail_closed"
+      },
+      "verifier": {
+        "command": {
+          "argv": ["cargo", "test", "-p", "fcp-evidence"],
+          "working_dir": ".",
+          "requires_rch": true,
+          "required_env_keys": [],
+          "expected_exit_codes": [0]
+        },
+        "result": "passed",
+        "observed_at_unix_ms": 1750000000000,
+        "log_path": "target/proof/mismatch.log",
+        "live_claim": true
+      },
+      "redaction": {
+        "classification": "public"
+      }
+    },
+    {
+      "proof_id": "fixture.structured-skip.yellow",
+      "owning_bead": "flywheel_connectors-8fhsm.4",
+      "claim_text": "Structured skip remains reviewable but non-green",
+      "source_document": {
+        "source_id": "proof-status-fixture",
+        "section": "fixture",
+        "row_label": "structured_skip"
+      },
+      "proof_class": "structured_skip",
+      "rerun": {
+        "argv": ["cargo", "test", "-p", "fcp-evidence"],
+        "working_dir": ".",
+        "requires_rch": true,
+        "required_env_keys": [],
+        "expected_exit_codes": [0]
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/skip.json",
+          "kind": "structured_skip",
+          "required": true,
+          "digest": {
+            "algorithm": "blake3",
+            "value": "4444444444444444444444444444444444444444444444444444444444444444"
+          },
+          "produced_by": "proof_status_fixture"
+        }
+      ],
+      "git_revision_under_test": "abcdef0",
+      "generated_at_unix_ms": 1750000000000,
+      "freshness_policy": {
+        "max_age_ms": 86400000,
+        "required_for_green": true,
+        "stale_action": "fail_closed"
+      },
+      "verifier": {
+        "command": {
+          "argv": ["cargo", "test", "-p", "fcp-evidence"],
+          "working_dir": ".",
+          "requires_rch": true,
+          "required_env_keys": [],
+          "expected_exit_codes": [0]
+        },
+        "result": "skipped",
+        "observed_at_unix_ms": 1750000000000,
+        "log_path": "target/proof/skip.log",
+        "live_claim": false
+      },
+      "structured_skip": {
+        "allowed": true,
+        "reason_code": "missing_live_fixture",
+        "evidence_path": "target/proof/skip.json"
+      },
+      "redaction": {
+        "classification": "public"
+      }
+    },
+    {
+      "proof_id": "fixture.replay-only.yellow",
+      "owning_bead": "flywheel_connectors-8fhsm.4",
+      "claim_text": "Replay-only proof remains non-authoritative for live green",
+      "source_document": {
+        "source_id": "proof-status-fixture",
+        "section": "fixture",
+        "row_label": "replay_only"
+      },
+      "proof_class": "replay",
+      "rerun": {
+        "argv": ["bash", "scripts/e2e/e2e_unified_validation_report.sh", "--dry-run"],
+        "working_dir": ".",
+        "requires_rch": false,
+        "required_env_keys": [],
+        "expected_exit_codes": [0]
+      },
+      "expected_artifacts": [
+        {
+          "path": "artifacts/replay.json",
+          "kind": "bundle_manifest",
+          "required": true,
+          "digest": {
+            "algorithm": "blake3",
+            "value": "5555555555555555555555555555555555555555555555555555555555555555"
+          },
+          "produced_by": "proof_status_fixture"
+        }
+      ],
+      "git_revision_under_test": "abcdef0",
+      "generated_at_unix_ms": 1750000000000,
+      "freshness_policy": {
+        "max_age_ms": 86400000,
+        "required_for_green": false,
+        "stale_action": "warn_only"
+      },
+      "verifier": {
+        "command": {
+          "argv": ["bash", "scripts/e2e/e2e_unified_validation_report.sh", "--dry-run"],
+          "working_dir": ".",
+          "requires_rch": false,
+          "required_env_keys": [],
+          "expected_exit_codes": [0]
+        },
+        "result": "passed",
+        "observed_at_unix_ms": 1750000000000,
+        "log_path": "target/proof/replay.log",
+        "live_claim": false
+      },
+      "redaction": {
+        "classification": "public"
+      }
+    }
+  ]
+}

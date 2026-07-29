@@ -5,11 +5,11 @@
 //! operation progress with throttled emission. Zero conformance
 //! coverage today. The contract callers depend on:
 //!
-//! 1. `start_tracking` initializes state for an operation_id.
+//! 1. `start_tracking` initializes state for an `operation_id`.
 //! 2. `record_update` on an unknown operation returns `false` (no
 //!    panic) and does NOT allocate a new tracking entry.
 //! 3. The FIRST update for a tracked operation always emits
-//!    (last_emitted is None — there is no prior emission to
+//!    (`last_emitted` is None — there is no prior emission to
 //!    throttle against).
 //! 4. A second update WITHIN the configured throttle interval
 //!    returns `false` (throttled), but `latest_update` still
@@ -32,7 +32,7 @@ use fcp_host::{
     ProgressController, ProgressOptions, ProgressPayload, ProgressUnit, ProgressUpdate,
 };
 
-fn options(interval_ms: u64) -> ProgressOptions {
+const fn options(interval_ms: u64) -> ProgressOptions {
     ProgressOptions {
         stream_progress: true,
         progress_interval_ms: interval_ms,

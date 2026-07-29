@@ -1,5 +1,5 @@
 //! Pin `DeviceSelector` + `ObjectPlacementPolicy` serde shape — the
-//! closest analogues to "ConnectorTopology"
+//! closest analogues to "`ConnectorTopology`"
 //! (flywheel_connectors-xmri2).
 //!
 //! Bead asks for `ConnectorTopology serde JSON+CBOR roundtrip`. No
@@ -11,8 +11,8 @@
 //!    tagged enum (Tag/Class/NodeId/Zone/HasCapability) selecting
 //!    nodes by attribute. NOT yet pinned for serde shape.
 //!  - `ObjectPlacementPolicy` (object.rs:180) — placement struct
-//!    (min_nodes / max_node_fraction_bps / preferred_devices /
-//!    excluded_devices / target_coverage_bps / min_source_diversity).
+//!    (`min_nodes` / `max_node_fraction_bps` / `preferred_devices` /
+//!    `excluded_devices` / `target_coverage_bps` / `min_source_diversity`).
 //!    NOT yet pinned for serde.
 //!  - `MeshPlacementHint` (object.rs:165) — preference hint
 //!    classifier, already pinned by
@@ -22,12 +22,12 @@
 //!
 //!   1. **`DeviceSelector` per-variant JSON shape** — externally-
 //!      tagged single-key form `{"VariantName": <payload>}` with
-//!      PascalCase variant names (no rename_all).
+//!      `PascalCase` variant names (no `rename_all`).
 //!   2. **JSON round-trip** preserves variant + payload for all 5
 //!      variants.
 //!   3. **CBOR round-trip** preserves variant + payload (externally-
 //!      tagged, so no Content-shim quirk).
-//!   4. **PascalCase canonical, snake_case rejected** — drift
+//!   4. **`PascalCase` canonical, `snake_case` rejected** — drift
 //!      sentinel.
 //!   5. **`ObjectPlacementPolicy` JSON shape** — 6-field struct
 //!      with defaults on `preferred_devices`, `excluded_devices`,
@@ -36,8 +36,8 @@
 //!   7. **Default values** for unset fields when deserializing
 //!      partial JSON — `min_source_diversity` default 0,
 //!      preferred/excluded devices default to empty Vecs.
-//!   8. **Nested DeviceSelector list preserved** through round-trip
-//!      inside an ObjectPlacementPolicy.
+//!   8. **Nested `DeviceSelector` list preserved** through round-trip
+//!      inside an `ObjectPlacementPolicy`.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::{DeviceSelector, ObjectPlacementPolicy, ZoneId};
@@ -53,7 +53,7 @@ fn ts_node_zone() -> ZoneId {
 #[test]
 fn device_selector_tag_variant_json_shape_pinned() {
     let value =
-        serde_json::to_value(&DeviceSelector::Tag("trusted".to_string())).expect("serialize");
+        serde_json::to_value(DeviceSelector::Tag("trusted".to_string())).expect("serialize");
     assert_eq!(
         value,
         serde_json::json!({"Tag": "trusted"}),
@@ -63,19 +63,19 @@ fn device_selector_tag_variant_json_shape_pinned() {
 
 #[test]
 fn device_selector_class_variant_json_shape_pinned() {
-    let value = serde_json::to_value(&DeviceSelector::Class("hub".to_string())).expect("serialize");
+    let value = serde_json::to_value(DeviceSelector::Class("hub".to_string())).expect("serialize");
     assert_eq!(value, serde_json::json!({"Class": "hub"}));
 }
 
 #[test]
 fn device_selector_node_id_variant_json_shape_pinned() {
-    let value = serde_json::to_value(&DeviceSelector::NodeId(123)).expect("serialize");
+    let value = serde_json::to_value(DeviceSelector::NodeId(123)).expect("serialize");
     assert_eq!(value, serde_json::json!({"NodeId": 123}));
 }
 
 #[test]
 fn device_selector_zone_variant_json_shape_pinned() {
-    let value = serde_json::to_value(&DeviceSelector::Zone(ts_node_zone())).expect("serialize");
+    let value = serde_json::to_value(DeviceSelector::Zone(ts_node_zone())).expect("serialize");
     assert_eq!(
         value,
         serde_json::json!({"Zone": "z:work"}),
@@ -85,7 +85,7 @@ fn device_selector_zone_variant_json_shape_pinned() {
 
 #[test]
 fn device_selector_has_capability_variant_json_shape_pinned() {
-    let value = serde_json::to_value(&DeviceSelector::HasCapability("oauth".to_string()))
+    let value = serde_json::to_value(DeviceSelector::HasCapability("oauth".to_string()))
         .expect("serialize");
     assert_eq!(value, serde_json::json!({"HasCapability": "oauth"}));
 }

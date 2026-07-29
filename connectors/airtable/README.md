@@ -55,6 +55,7 @@ Important runtime truths the contract preserves:
 - Reconfiguration clears the schema cache and resets handshake state.
 - Invocations use `operation`, `input`, and `capability_token`, and require bound capability-token verification.
 - Handshake grants requested capabilities and advertises event caps: streaming true, replay true, min buffer events 50, requires ack false.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - The schema cache TTL is 300 seconds per base.
 - Table, view, and field selectors accept stable IDs or exact names; ambiguous exact names are rejected.
 - `filter_by_formula` must be a non-empty string and must not contain control characters.

@@ -11,6 +11,7 @@ struct BootstrapErrorDisplayCase {
 
 const BOOTSTRAP_ERROR_VARIANT_COUNT: usize = 27;
 
+#[allow(clippy::too_many_lines)]
 fn display_cases() -> Vec<BootstrapErrorDisplayCase> {
     vec![
         BootstrapErrorDisplayCase {

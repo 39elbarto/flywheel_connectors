@@ -28,6 +28,8 @@ use fcp_browser::client::{BrowserClient, BrowserLauncherConfig};
 use fcp_browser::connector::BrowserConnector;
 use fcp_browser::types::ProxyConfig;
 
+const BROWSER_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -87,21 +89,21 @@ fn generate_execution_approval(
 /// Generate a valid execution-scope approval token for a method pattern.
 fn generate_execution_approval_with_pattern(method_pattern: &str) -> fcp_core::ApprovalToken {
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    fcp_core::ApprovalToken {
-        token_id: format!("approval-{method_pattern}-{now_ms}"),
-        issued_at_ms: now_ms.saturating_sub(1_000),
-        expires_at_ms: now_ms + 300_000,
-        issuer: "owner:test".into(),
-        scope: fcp_core::ApprovalScope::Execution(fcp_core::ExecutionScope {
+    fcp_core::ApprovalToken::approved(
+        format!("approval-{method_pattern}-{now_ms}"),
+        now_ms.saturating_sub(1_000),
+        now_ms + 300_000,
+        "owner:test",
+        fcp_core::ApprovalScope::Execution(fcp_core::ExecutionScope {
             connector_id: "fcp.browser".into(),
             method_pattern: method_pattern.into(),
             request_object_id: None,
             input_hash: None,
             input_constraints: vec![],
         }),
-        zone_id: fcp_core::ZoneId::work(),
-        signature: None,
-    }
+        fcp_core::ZoneId::work(),
+        None,
+    )
 }
 
 /// Perform handshake on a connector, returning the signing key for token generation.
@@ -584,6 +586,144 @@ fn request_header(request: &wiremock::Request, name: &str) -> String {
 
 fn json_len(value: &serde_json::Value) -> u64 {
     serde_json::to_vec(value).map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+}
+
+fn browser_manifest_schema(operation: &str, field: &str) -> Result<serde_json::Value, String> {
+    let manifest: toml::Value = toml::from_str(BROWSER_MANIFEST_TOML)
+        .map_err(|error| format!("browser manifest TOML should parse: {error}"))?;
+    let schema = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(|operations| operations.get(operation))
+        .and_then(|operation| operation.get(field))
+        .ok_or_else(|| format!("{operation} should declare {field}"))?;
+    serde_json::to_value(schema)
+        .map_err(|error| format!("manifest schema should convert to JSON: {error}"))
+}
+
+fn assert_schema_accepts(
+    schema: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let validator = jsonschema::validator_for(schema)
+        .map_err(|error| format!("schema should compile: {error}"))?;
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "schema should accept {payload}; errors: {errors:?}"
+        ))
+    }
+}
+
+fn assert_schema_rejects(
+    schema: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let validator = jsonschema::validator_for(schema)
+        .map_err(|error| format!("schema should compile: {error}"))?;
+    if validator.iter_errors(payload).next().is_some() {
+        Ok(())
+    } else {
+        Err(format!("schema should reject {payload}"))
+    }
+}
+
+type InvokeResult = Result<serde_json::Value, fcp_core::FcpError>;
+
+fn assert_conflict_contains(result: InvokeResult, needle: &str) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(fcp_core::FcpError::Conflict { message }) if message.contains(needle)
+        ),
+        "expected Conflict containing {needle:?}, got {error:?}"
+    );
+}
+
+fn assert_rate_limited_retry_after(result: InvokeResult, expected_retry_after_ms: u64) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(fcp_core::FcpError::RateLimited { retry_after_ms, .. })
+                if *retry_after_ms == expected_retry_after_ms
+        ),
+        "expected RateLimited retry_after_ms={expected_retry_after_ms}, got {error:?}"
+    );
+}
+
+fn assert_external_retryable_for_service(
+    result: InvokeResult,
+    expected_service: &str,
+    expected_retryable: bool,
+) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(fcp_core::FcpError::External { retryable, service, .. })
+                if *retryable == expected_retryable && service.as_str() == expected_service
+        ),
+        "expected External retryable={expected_retryable} service={expected_service:?}, got {error:?}"
+    );
+}
+
+fn assert_external_non_retryable_contains(result: InvokeResult, needle: &str) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(fcp_core::FcpError::External { message, retryable, .. })
+                if !*retryable && message.contains(needle)
+        ),
+        "expected non-retryable External containing {needle:?}, got {error:?}"
+    );
+}
+
+fn assert_capability_denied_contains(
+    result: InvokeResult,
+    expected_capability: &str,
+    reason_needle: &str,
+) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(fcp_core::FcpError::CapabilityDenied { capability, reason })
+                if capability.as_str() == expected_capability && reason.contains(reason_needle)
+        ),
+        "expected CapabilityDenied capability={expected_capability:?} containing {reason_needle:?}, got {error:?}"
+    );
+}
+
+fn assert_operation_not_granted(result: InvokeResult, expected_operation: &str) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(fcp_core::FcpError::OperationNotGranted { operation })
+                if operation.as_str() == expected_operation
+        ),
+        "expected OperationNotGranted operation={expected_operation:?}, got {error:?}"
+    );
+}
+
+fn assert_invalid_request_contains(result: InvokeResult, needle: &str) {
+    let error = result.err();
+    assert!(
+        matches!(
+            &error,
+            Some(fcp_core::FcpError::InvalidRequest { message, .. })
+                if message.contains(needle)
+        ),
+        "expected InvalidRequest containing {needle:?}, got {error:?}"
+    );
 }
 
 // ============================================================================
@@ -2103,6 +2243,77 @@ async fn test_extract_text_applies_readable_content_guardrails() {
     assert_eq!(result["guardrails"]["requested_max_chars"], 28);
 }
 
+#[test]
+fn test_manifest_extraction_schemas_cover_runtime_guardrails() -> Result<(), String> {
+    let extract_input = browser_manifest_schema("browser.extract_text", "input_schema")?;
+    let extract_output = browser_manifest_schema("browser.extract_text", "output_schema")?;
+    let pdf_input = browser_manifest_schema("browser.render_pdf", "input_schema")?;
+    let pdf_output = browser_manifest_schema("browser.render_pdf", "output_schema")?;
+
+    assert_schema_accepts(
+        &extract_input,
+        &json!({
+            "selector": "article",
+            "include_hidden": false,
+            "output_mode": "markdown",
+            "max_chars": 2_000
+        }),
+    )?;
+    assert_schema_rejects(&extract_input, &json!({ "output_mode": "html" }))?;
+    assert_schema_rejects(&extract_input, &json!({ "max_chars": 0 }))?;
+    assert_schema_rejects(&extract_input, &json!({ "max_chars": 1_000_001 }))?;
+
+    assert_schema_accepts(
+        &extract_output,
+        &json!({
+            "text": "Readable body",
+            "word_count": 2,
+            "output_mode": "markdown",
+            "guardrails": {
+                "requested_max_chars": 2_000,
+                "truncated": false
+            },
+            "external_content": {
+                "untrusted": true,
+                "kind": "page_text"
+            },
+            "readability": {
+                "decision": "adopted_for_active_page_text"
+            }
+        }),
+    )?;
+    assert_schema_rejects(&extract_output, &json!({ "word_count": 2 }))?;
+
+    assert_schema_accepts(
+        &pdf_input,
+        &json!({
+            "format": "a4",
+            "landscape": false,
+            "print_background": true,
+            "max_pages": 10
+        }),
+    )?;
+    assert_schema_rejects(&pdf_input, &json!({ "max_pages": 0 }))?;
+
+    assert_schema_accepts(
+        &pdf_output,
+        &json!({
+            "pdf_data": "JVBERg==",
+            "page_count": 1,
+            "external_content": {
+                "untrusted": true,
+                "kind": "rendered_pdf"
+            },
+            "document_extraction": {
+                "decision": "deferred",
+                "pdf_text_cap_chars": 200_000
+            }
+        }),
+    )?;
+    assert_schema_rejects(&pdf_output, &json!({ "pdf_data": "JVBERg==" }))?;
+    Ok(())
+}
+
 #[fcp_async_core::runtime::test]
 async fn test_render_pdf_rejects_page_count_over_requested_cap() {
     let _ctx = AsyncTestContext::for_scenario("browser-render-pdf-page-cap");
@@ -2586,13 +2797,7 @@ async fn test_session_restore_rejects_stale_lease_seq() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::Conflict { message } => {
-            assert!(message.contains("stale lease_seq"));
-        }
-        e => panic!("Expected Conflict, got: {e:?}"),
-    }
+    assert_conflict_contains(result, "stale lease_seq");
 }
 
 #[fcp_async_core::runtime::test]
@@ -2704,11 +2909,7 @@ async fn test_error_429_rate_limited() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 5_000),
-        e => panic!("Expected RateLimited, got: {e:?}"),
-    }
+    assert_rate_limited_retry_after(result, 5_000);
 }
 
 #[fcp_async_core::runtime::test]
@@ -2735,16 +2936,7 @@ async fn test_error_500_server_error() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::External {
-            retryable, service, ..
-        } => {
-            assert!(retryable);
-            assert_eq!(service, "browser");
-        }
-        e => panic!("Expected External(retryable), got: {e:?}"),
-    }
+    assert_external_retryable_for_service(result, "browser", true);
 }
 
 #[fcp_async_core::runtime::test]
@@ -2773,16 +2965,7 @@ async fn test_error_400_client_error() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::External {
-            message, retryable, ..
-        } => {
-            assert!(!retryable);
-            assert!(message.contains("Element not found"));
-        }
-        e => panic!("Expected External(not retryable), got: {e:?}"),
-    }
+    assert_external_non_retryable_contains(result, "Element not found");
 }
 
 // ============================================================================
@@ -2854,14 +3037,7 @@ async fn test_dangerous_operation_requires_approval_token() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::CapabilityDenied { capability, reason } => {
-            assert_eq!(capability, "browser.evaluate_js");
-            assert!(reason.contains("ApprovalToken"));
-        }
-        e => panic!("Expected CapabilityDenied, got: {e:?}"),
-    }
+    assert_capability_denied_contains(result, "browser.evaluate_js", "ApprovalToken");
 }
 
 #[fcp_async_core::runtime::test]
@@ -2928,16 +3104,7 @@ async fn test_all_execution_scoped_ops_require_approval_token() {
             result.is_err(),
             "operation should require approval: {operation}"
         );
-        match result.unwrap_err() {
-            fcp_core::FcpError::CapabilityDenied { capability, reason } => {
-                assert_eq!(capability, operation);
-                assert!(
-                    reason.contains("ApprovalToken"),
-                    "operation should mention ApprovalToken requirement: {operation}"
-                );
-            }
-            e => panic!("Expected CapabilityDenied for {operation}, got: {e:?}"),
-        }
+        assert_capability_denied_contains(result, operation, "ApprovalToken");
     }
 }
 
@@ -2996,14 +3163,7 @@ async fn test_dangerous_operation_approval_scope_mismatch() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::CapabilityDenied { capability, reason } => {
-            assert_eq!(capability, "browser.evaluate_js");
-            assert!(reason.contains("does not allow"));
-        }
-        e => panic!("Expected CapabilityDenied, got: {e:?}"),
-    }
+    assert_capability_denied_contains(result, "browser.evaluate_js", "does not allow");
 }
 
 #[fcp_async_core::runtime::test]
@@ -3024,13 +3184,7 @@ async fn test_invoke_unknown_operation() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::OperationNotGranted { operation } => {
-            assert_eq!(operation, "browser.nonexistent");
-        }
-        e => panic!("Expected OperationNotGranted, got: {e:?}"),
-    }
+    assert_operation_not_granted(result, "browser.nonexistent");
 }
 
 // ============================================================================
@@ -3113,13 +3267,7 @@ async fn test_navigate_missing_url() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("url"));
-        }
-        e => panic!("Expected InvalidRequest about 'url', got: {e:?}"),
-    }
+    assert_invalid_request_contains(result, "url");
 }
 
 #[fcp_async_core::runtime::test]
@@ -3140,13 +3288,7 @@ async fn test_click_missing_selector() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("selector"));
-        }
-        e => panic!("Expected InvalidRequest about 'selector', got: {e:?}"),
-    }
+    assert_invalid_request_contains(result, "selector");
 }
 
 #[fcp_async_core::runtime::test]
@@ -3169,13 +3311,7 @@ async fn test_evaluate_js_missing_expression() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("expression"));
-        }
-        e => panic!("Expected InvalidRequest about 'expression', got: {e:?}"),
-    }
+    assert_invalid_request_contains(result, "expression");
 }
 
 #[fcp_async_core::runtime::test]
@@ -3198,13 +3334,7 @@ async fn test_fill_form_missing_fields() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("fields"));
-        }
-        e => panic!("Expected InvalidRequest about 'fields', got: {e:?}"),
-    }
+    assert_invalid_request_contains(result, "fields");
 }
 
 #[fcp_async_core::runtime::test]
@@ -3227,13 +3357,7 @@ async fn test_set_cookies_missing_cookies() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("cookies"));
-        }
-        e => panic!("Expected InvalidRequest about 'cookies', got: {e:?}"),
-    }
+    assert_invalid_request_contains(result, "cookies");
 }
 
 #[fcp_async_core::runtime::test]
@@ -3256,13 +3380,7 @@ async fn test_session_save_missing_lease_fields() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("lease_seq"));
-        }
-        e => panic!("Expected InvalidRequest about 'lease_seq', got: {e:?}"),
-    }
+    assert_invalid_request_contains(result, "lease_seq");
 }
 
 #[fcp_async_core::runtime::test]
@@ -3283,11 +3401,5 @@ async fn test_wait_for_selector_missing_selector() {
         }))
         .await;
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("selector"));
-        }
-        e => panic!("Expected InvalidRequest about 'selector', got: {e:?}"),
-    }
+    assert_invalid_request_contains(result, "selector");
 }

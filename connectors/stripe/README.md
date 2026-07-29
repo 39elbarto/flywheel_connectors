@@ -1,9 +1,9 @@
 # Stripe Connector V3 Contract
 
-> **Status**: runtime contract documented with approval, webhook, form-encoding, and manifest-hash drift
+> **Status**: runtime contract documented; operation metadata is manifest-derived
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/stripe_connector_verification.sh`
 > **Stripe API upstream**: https://docs.stripe.com/api
 > **Stripe auth upstream**: https://docs.stripe.com/api/authentication
 > **Stripe idempotency upstream**: https://docs.stripe.com/api/idempotent_requests
@@ -65,26 +65,26 @@ Important runtime truths the contract preserves:
 - Side-effect operations accept explicit `idempotency_key`, or derive one from top-level `operation_id` or `request_id`.
 - `stripe.ingest_webhook_event` requires the original raw payload string, `stripe_signature`, configured `webhook_signing_secret`, and optional `received_at`/`delivery_id`.
 - Webhook replay protection is process-local and keyed by Stripe `event.id`, not the optional host `delivery_id`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `health()` is local state and metrics only.
 - `self_check()` calls `GET /balance` only in direct-secret mode and degrades in `credential_id` mode.
 - `handle_shutdown()` shuts down the client runtime but does not clear connector configuration.
 
-## Drift Visible In This Checkout
+## Remaining Drift Visible In This Checkout
 
 This README documents runtime truth and keeps current drift visible:
 
-- Runtime handshake returns placeholder manifest hash `sha256:stripe-connector-v1`.
 - Runtime handshake advertises streaming/replay event caps, while introspection exposes no events and no event caps.
-- Manifest marks mutating payment/customer operations as `policy` or `interactive`, but runtime introspection sets `requires_approval = None` for every operation and invoke checks no approval token.
+- Manifest marks mutating payment/customer operations as `policy` or `interactive`, and runtime introspection now reports those manifest approval modes. The invoke path still checks no approval token.
 - Official Stripe examples use form-style request parameters for API calls; this runtime currently sends JSON bodies for create/update/confirm/capture/cancel/refund/subscription operations.
 - Official Stripe idempotency guidance says all `POST` requests accept idempotency keys and `GET`/`DELETE` idempotency keys have no effect. Runtime derives or forwards idempotency keys for some delete operations as well.
 - `stripe.ingest_webhook_event` validates Stripe signatures inside the connector, but the connector does not open an HTTP listener, register Stripe webhook endpoints, or persist delivery state.
 - Webhook replay protection stores only in-memory event IDs and evicts by tolerance window and cache size.
 - List operations expose only narrow filters and `limit`; they do not expose full Stripe pagination cursors, search endpoints, expand parameters, or API version selection.
 - Manifest says connector format is `wasi`; the current Rust crate is a normal package/bin using reqwest and the FCP runtime helpers.
-- There is no tracked verification shell script for this connector.
+- `connectors/stripe/tests/local_non_mock.rs` exercises the production connector invoke path against a deterministic loopback Stripe fixture for read, write, and payment/refund operations.
 
-A follow-up parity bead should replace the placeholder manifest hash, align approval metadata and runtime enforcement, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and add a tracked deterministic verification bundle.
+A follow-up enforcement bead should add approval-token checks, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and decide whether the loopback acceptance fixture should grow into Stripe CLI replay.
 
 ## First-Slice Scope
 
@@ -95,7 +95,7 @@ The current Stripe README slice documents the existing runtime surface:
 - customer, payment intent, refund, subscription, invoice, balance, and webhook-ingest operations
 - bound capability-token verification and resource URI binding during both `invoke` and `simulate`
 - doctor, health, self-check, simulate, introspect, shutdown, redaction posture, and deterministic tests
-- runtime/manifest drift around approvals, event caps, form encoding, idempotency, manifest hash, and webhook persistence
+- runtime/manifest drift around approvals, event caps, form encoding, idempotency, and webhook persistence
 
 ## Auth And Zone Boundary
 
@@ -236,13 +236,25 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - `connectors/stripe/src/error.rs` defines connector error classes and FCP error conversion.
 - `connectors/stripe/src/limits.rs` defines webhook payload and replay-cache bounds.
 - `connectors/stripe/manifest.toml` defines the operation catalog, network constraints, sandbox boundary, zone policy, event caps, and rate-limit pools.
-- `connectors/stripe/tests/integration.rs`, `connectors/stripe/tests/conformance_contract.rs`, and `connectors/stripe/tests/live_verification.rs` cover deterministic HTTP behavior, contract assertions, and opt-in live proof.
+- `connectors/stripe/tests/integration.rs`, `connectors/stripe/tests/conformance_contract.rs`, `connectors/stripe/tests/local_non_mock.rs`, and `connectors/stripe/tests/live_verification.rs` cover deterministic HTTP behavior, contract assertions, local loopback acceptance, and opt-in live proof.
 
 ## Verification Bundle
+
+The closeout surface is the verifier, crate-local test suite, and fail-closed
+`fwc proof run` evidence for Cargo-backed `rch` proof commands. The verifier
+writes proof-governor artifacts under `${OUT_ROOT}/proof`. Only
+`accepted_remote_proof` rows in `*.rch_remote_proof.jsonl` are green closeout
+evidence for Cargo-backed steps. `refused_local_fallback`, `infra_blocked`,
+`remote_command_failed`, `failed_closed`, `not_proof`, or a missing proof row
+keep the batch bead open. `format_check` is a source-state check, not accepted
+remote Cargo proof.
 
 Run these after changing this connector contract:
 
 ```bash
+scripts/e2e/stripe_connector_verification.sh
+PROOF_GOVERNOR=1 scripts/e2e/stripe_connector_verification.sh
+FWC_BIN=/path/to/current/target/debug/fwc PROOF_GOVERNOR=1 scripts/e2e/stripe_connector_verification.sh
 git diff --check -- connectors/stripe/README.md
 ubs connectors/stripe/README.md
 LC_ALL=C rg -n '[^ -~]' connectors/stripe/README.md
@@ -260,7 +272,16 @@ rch exec -- cargo fmt --check
 
 For opt-in live verification, inspect `connectors/stripe/tests/live_verification.rs` and run only against a dedicated Stripe test-mode account.
 
+The tracked verifier skips live Stripe tests by default. To include that lane, set `STRIPE_RUN_LIVE_TESTS=1` and provision `STRIPE_SECRET_KEY` in the worker environment; the script passes only `FCP_LIVE_SANDBOX=1` on the command line so secret keys do not appear in proof argv.
+
 ## Operator Guidance
+
+Rerun commands:
+
+```bash
+scripts/e2e/stripe_connector_verification.sh
+scripts/graduation/run_gauntlet.sh connectors/stripe
+```
 
 - Use a Stripe test-mode account for mutation proof.
 - Prefer `credential_id` mode when host policy should own the secret key.

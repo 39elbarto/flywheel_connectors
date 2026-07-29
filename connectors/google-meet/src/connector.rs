@@ -21,6 +21,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::client::{
@@ -46,6 +47,7 @@ const MEET_LIVE_JOIN_CAP: &str = "meeting.live_join";
 const MEET_LIVE_READ_CAP: &str = "meeting.live_read";
 const MEET_LIVE_LEAVE_CAP: &str = "meeting.live_leave";
 const MEET_LIVE_SPEAK_CAP: &str = "meeting.live_speak";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const SPACE_GET_OP: &str = "gmeet.space.get";
 const SPACE_CREATE_OP: &str = "gmeet.space.create";
 const SPACE_END_ACTIVE_CONFERENCE_OP: &str = "gmeet.space.end_active_conference";
@@ -851,6 +853,19 @@ impl GoogleMeetConnector {
         }
     }
 
+    /// Runtime instance identifier used for host-minted capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -924,7 +939,7 @@ impl GoogleMeetConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-meet-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -4000,8 +4015,6 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use fcp_prelude::{CapabilityConstraints, RequestId, ZoneId};
-
-    const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
     #[derive(Debug, Clone)]
     struct StubResponse {
@@ -8659,6 +8672,19 @@ mod tests {
         assert_eq!(
             unchecked.manifest.interface_hash, computed,
             "update manifest.interface_hash to {computed}"
+        );
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(GoogleMeetConnector::manifest_hash(), expected);
+        assert_ne!(
+            GoogleMeetConnector::manifest_hash(),
+            "sha256:google-meet-connector-v1"
         );
     }
 

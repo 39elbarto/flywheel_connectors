@@ -1,7 +1,7 @@
 //! Pin the externally-tagged serde shape on the closest analogue to
-//! "RetainedSnapshot" (flywheel_connectors-x2yxk).
+//! "`RetainedSnapshot`" (flywheel_connectors-x2yxk).
 //!
-//! Bead asks for "RetainedSnapshot serde tag". No type literally
+//! Bead asks for "`RetainedSnapshot` serde tag". No type literally
 //! named `RetainedSnapshot` exists in fcp-core. The retention surface
 //! splits across two types:
 //!
@@ -10,7 +10,7 @@
 //!    that decides retention for stored objects (Pinned / Lease /
 //!    Ephemeral). It is the "tag" the bead points at: an
 //!    externally-tagged serde enum carrying the retention class.
-//!  - `ConnectorStateSnapshot` (connector_state.rs:477) — the actual
+//!  - `ConnectorStateSnapshot` (`connector_state.rs:477`) — the actual
 //!    "snapshot" type for state compaction. (Already covered by
 //!    `connector_state_golden_vectors.rs`.)
 //!
@@ -28,12 +28,12 @@
 //!   4. **CBOR encoding shape per variant** — unit variants as
 //!      Text, struct variant as Map (the only-key form).
 //!   5. **Lease payload survives `expires_at` boundary values**
-//!      (0, u64::MAX).
+//!      (0, `u64::MAX`).
 //!   6. **`RetentionClass` alias agrees byte-for-byte** with
 //!      `EvictionPolicy`.
 //!   7. **Wrapped in `StorageMeta`** the externally-tagged form
 //!      lives inside the `retention` field — pin that nested shape.
-//!   8. **PascalCase is canonical, snake_case rejected** — drift
+//!   8. **`PascalCase` is canonical, `snake_case` rejected** — drift
 //!      sentinel for any future `rename_all` swap.
 
 use ciborium::value::Value as CborValue;
@@ -47,7 +47,7 @@ const LEASE_EXPIRES_AT: u64 = 1_700_000_000;
 
 #[test]
 fn pinned_serializes_as_bare_string() {
-    let json = serde_json::to_value(&EvictionPolicy::Pinned).expect("serialize");
+    let json = serde_json::to_value(EvictionPolicy::Pinned).expect("serialize");
     assert_eq!(
         json,
         serde_json::json!("Pinned"),
@@ -57,7 +57,7 @@ fn pinned_serializes_as_bare_string() {
 
 #[test]
 fn ephemeral_serializes_as_bare_string() {
-    let json = serde_json::to_value(&EvictionPolicy::Ephemeral).expect("serialize");
+    let json = serde_json::to_value(EvictionPolicy::Ephemeral).expect("serialize");
     assert_eq!(
         json,
         serde_json::json!("Ephemeral"),
@@ -67,7 +67,7 @@ fn ephemeral_serializes_as_bare_string() {
 
 #[test]
 fn lease_serializes_as_externally_tagged_object_with_expires_at() {
-    let json = serde_json::to_value(&EvictionPolicy::Lease {
+    let json = serde_json::to_value(EvictionPolicy::Lease {
         expires_at: LEASE_EXPIRES_AT,
     })
     .expect("serialize");
@@ -160,7 +160,7 @@ fn cbor_unit_variants_encode_as_text_strings() {
         let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         match value {
             CborValue::Text(s) => {
-                assert_eq!(s, expected_text, "CBOR Text mismatch for {variant:?}")
+                assert_eq!(s, expected_text, "CBOR Text mismatch for {variant:?}");
             }
             other => panic!("{variant:?} MUST encode as CBOR Text, got {other:?}"),
         }

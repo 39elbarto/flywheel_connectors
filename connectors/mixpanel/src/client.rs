@@ -9,9 +9,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -131,10 +130,7 @@ impl MixpanelClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -178,17 +174,26 @@ impl MixpanelClient {
         }
     }
 
+    /// Issue a request with retry.
+    ///
+    /// br-kxd3e: replay safety is derived from the verb. Only POST ingests, and
+    /// a replay after a 5xx DOUBLE-COUNTS the event in every downstream
+    /// dashboard and funnel. These providers offer a per-event dedup id
+    /// (`messageId` / `$insert_id`) that would make the retry genuinely safe,
+    /// but the events are caller-supplied here so the key may be absent —
+    /// recorded as a follow-up rather than assumed present.
     async fn request_with_retry(
         &self,
         http_method: &'static str,
         url: &str,
         body: Option<&serde_json::Value>,
     ) -> MixpanelResult<serde_json::Value> {
+        let replay_safe = http_method != "POST";
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, method = http_method, url = %redact_url(&url), "mixpanel request");
+            debug!(attempt, method = http_method, url = %redact_url(url), "mixpanel request");
 
             let req = match http_method {
                 "GET" => self.client.get(url),
@@ -201,22 +206,18 @@ impl MixpanelClient {
             match req.send().await {
                 Ok(resp) => match self.handle_response(resp).await {
                     Ok(val) => AttemptOutcome::Success(val),
-                    Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
-                        retry_after: err.retry_after(),
-                        error: err,
-                    },
+                    Err(err) if err.is_retryable() => {
+                        let replayable = replay_safe || err.replay_is_safe();
+                        let retry_after = err.retry_after();
+                        AttemptOutcome::retryable_if_replayable(err, retry_after, replayable)
+                    }
                     Err(err) => AttemptOutcome::Terminal(err),
                 },
                 Err(err) => {
                     let err = MixpanelError::Http(err);
-                    if err.is_retryable() {
-                        AttemptOutcome::Retryable {
-                            retry_after: err.retry_after(),
-                            error: err,
-                        }
-                    } else {
-                        AttemptOutcome::Terminal(err)
-                    }
+                    let replayable = replay_safe || err.replay_is_safe();
+                    let retry_after = err.retry_after();
+                    AttemptOutcome::retryable_if_replayable(err, retry_after, replayable)
                 }
             }
         })
@@ -305,6 +306,19 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> MixpanelResult<&'a 
     Ok(trimmed)
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> MixpanelResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(MixpanelError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +363,38 @@ mod tests {
         let cred = MixpanelAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
         assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            MixpanelError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            MixpanelError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

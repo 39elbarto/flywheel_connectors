@@ -1,0 +1,19 @@
+name = "packet_duplication"
+blast_radius = 2
+recovery_objective_secs = 45
+
+[[rollback_steps]]
+name = "clear_packet_duplication"
+action = "clear_tc_netem"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+duplicate_pct = "10"
+
+[[rollback_steps]]
+name = "verify_duplication_normalized"
+action = "wait_for_duplication_below_threshold"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+threshold_pct = "0.1"

@@ -5,7 +5,7 @@ use std::time::Duration;
 use fcp_async_core::AsyncError;
 use fcp_async_core::http::HttpClientError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_streaming::StreamError;
 use thiserror::Error;
 
@@ -154,6 +154,30 @@ impl DiscordError {
             Self::Api { code, .. } => *code >= 500 || *code == 429,
             Self::RateLimited { .. } => true,
             Self::Gateway(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether replaying the request after this error cannot duplicate a side
+    /// effect — regardless of whether the operation is idempotent.
+    ///
+    /// This is the axis that decides retry safety for an operation with side
+    /// effects. Two distinct situations qualify:
+    /// - the request provably never left the client (a connect-phase failure);
+    /// - Discord refused it without performing it (429 / rate limit).
+    ///
+    /// A 5xx does NOT qualify: Discord received the request and the message may
+    /// already have been posted. Neither does a timeout, which covers the total
+    /// request timeout and can fire after the body was fully written.
+    ///
+    /// Conservative by construction: anything not in the two cases above
+    /// returns `false`. See br-kxd3e.
+    #[must_use]
+    pub const fn replay_is_safe(&self) -> bool {
+        match self {
+            Self::Http(info) => info.is_connect,
+            Self::RateLimited { .. } => true,
+            Self::Api { code, .. } => *code == 429,
             _ => false,
         }
     }

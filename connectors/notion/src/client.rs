@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, header};
 use tracing::debug;
@@ -259,7 +260,8 @@ impl NotionClient {
     pub async fn health_check(&self) -> NotionResult<()> {
         let url = format!("{}/search", self.api_url);
         let body = serde_json::json!({ "page_size": 1 });
-        self.post(&url, Some(body)).await?;
+        // `/search` with no query — read-only POST.
+        self.post(&url, Some(body), true).await?;
         Ok(())
     }
 
@@ -293,7 +295,8 @@ impl NotionClient {
     /// Create a page.
     pub async fn create_page(&self, body: serde_json::Value) -> NotionResult<Page> {
         let url = format!("{}/pages", self.api_url);
-        let data = self.post(&url, Some(body)).await?;
+        // NOT replay-safe: POST /pages creates a page.
+        let data = self.post(&url, Some(body), false).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -311,7 +314,7 @@ impl NotionClient {
         validate_notion_id(page_id, "page_id")?;
         let seg = encode_path_segment(page_id);
         let url = format!("{}/pages/{seg}", self.api_url);
-        let data = self.patch(&url, body).await?;
+        let data = self.patch(&url, body, true).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -321,7 +324,7 @@ impl NotionClient {
         let seg = encode_path_segment(page_id);
         let url = format!("{}/pages/{seg}", self.api_url);
         let body = serde_json::json!({ "archived": true });
-        let data = self.patch(&url, body).await?;
+        let data = self.patch(&url, body, true).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -345,7 +348,8 @@ impl NotionClient {
             validate_pagination_cursor(cursor, "start_cursor")?;
             body["start_cursor"] = serde_json::Value::String(cursor.into());
         }
-        let data = self.post(&url, Some(body)).await?;
+        // Read-only POST: Notion models database query this way.
+        let data = self.post(&url, Some(body), true).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -363,7 +367,8 @@ impl NotionClient {
         body: serde_json::Value,
     ) -> NotionResult<serde_json::Value> {
         let url = format!("{}/databases", self.api_url);
-        self.post(&url, Some(body)).await
+        // NOT replay-safe: POST /databases creates a database.
+        self.post(&url, Some(body), false).await
     }
 
     /// Update a database (PATCH title/properties/description).
@@ -375,7 +380,7 @@ impl NotionClient {
         validate_notion_id(database_id, "database_id")?;
         let seg = encode_path_segment(database_id);
         let url = format!("{}/databases/{seg}", self.api_url);
-        self.patch(&url, body).await
+        self.patch(&url, body, true).await
     }
 
     // ── Search ────────────────────────────────────────────────────
@@ -394,7 +399,8 @@ impl NotionClient {
         if let Some(f) = filter {
             body["filter"] = f;
         }
-        let data = self.post(&url, Some(body)).await?;
+        // `/search` is a read-only POST.
+        let data = self.post(&url, Some(body), true).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -426,7 +432,7 @@ impl NotionClient {
         validate_notion_id(block_id, "block_id")?;
         let seg = encode_path_segment(block_id);
         let url = format!("{}/blocks/{seg}", self.api_url);
-        self.patch(&url, body).await
+        self.patch(&url, body, true).await
     }
 
     /// Archive (soft-delete) a block.
@@ -435,7 +441,7 @@ impl NotionClient {
         let seg = encode_path_segment(block_id);
         let url = format!("{}/blocks/{seg}", self.api_url);
         let body = serde_json::json!({ "archived": true });
-        self.patch(&url, body).await
+        self.patch(&url, body, true).await
     }
 
     /// Append child blocks to a page or block.
@@ -448,7 +454,9 @@ impl NotionClient {
         let seg = encode_path_segment(block_id);
         let url = format!("{}/blocks/{seg}/children", self.api_url);
         let body = serde_json::json!({ "children": children });
-        let data = self.patch(&url, body).await?;
+        // NOT replay-safe: PATCH /blocks/{id}/children APPENDS —
+        // a PATCH that is not idempotent. Replaying adds the blocks twice.
+        let data = self.patch(&url, body, false).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -457,7 +465,8 @@ impl NotionClient {
     /// Add a comment to a page.
     pub async fn add_comment(&self, body: serde_json::Value) -> NotionResult<serde_json::Value> {
         let url = format!("{}/comments", self.api_url);
-        self.post(&url, Some(body)).await
+        // NOT replay-safe: POST /comments creates a comment.
+        self.post(&url, Some(body), false).await
     }
 
     /// List comments on a block or page.
@@ -472,31 +481,53 @@ impl NotionClient {
     // ── HTTP helpers ──────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> NotionResult<serde_json::Value> {
-        self.execute(|| self.http.get(url)).await
+        self.execute(|| self.http.get(url), true).await
     }
 
+    /// POST with retry.
+    ///
+    /// `replay_safe` states whether repeating this request can duplicate a
+    /// side effect (br-kxd3e). Notion has no idempotency key, and it models
+    /// several READ-ONLY operations as POSTs (`/search`, `/databases/{id}/
+    /// query`), so the verb decides nothing here in either direction.
     async fn post(
         &self,
         url: &str,
         body: Option<serde_json::Value>,
+        replay_safe: bool,
     ) -> NotionResult<serde_json::Value> {
-        self.execute(|| {
-            let mut req = self.http.post(url);
-            if let Some(b) = &body {
-                req = req.json(b);
-            }
-            req
-        })
+        self.execute(
+            || {
+                let mut req = self.http.post(url);
+                if let Some(b) = &body {
+                    req = req.json(b);
+                }
+                req
+            },
+            replay_safe,
+        )
         .await
     }
 
-    async fn patch(&self, url: &str, body: serde_json::Value) -> NotionResult<serde_json::Value> {
-        self.execute(|| self.http.patch(url).json(&body)).await
+    /// PATCH with retry.
+    ///
+    /// `replay_safe` is required rather than assumed: most Notion PATCHes set
+    /// named properties and converge, but `PATCH /blocks/{id}/children`
+    /// APPENDS, so replaying it adds the blocks a second time.
+    async fn patch(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+        replay_safe: bool,
+    ) -> NotionResult<serde_json::Value> {
+        self.execute(|| self.http.patch(url).json(&body), replay_safe)
+            .await
     }
 
     async fn execute(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
+        replay_safe: bool,
     ) -> NotionResult<serde_json::Value> {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -542,13 +573,19 @@ impl NotionClient {
                         if status.is_server_error() {
                             let body = response.text().await.unwrap_or_default();
                             let body = truncate_body(body, 500);
-                            return AttemptOutcome::Retryable {
-                                error: NotionError::Api {
+                            // br-kxd3e: a 5xx means Notion RECEIVED the
+                            // request and may already have created the page,
+                            // database, comment, or appended the blocks. The
+                            // 429 arm above stays ahead of this one because a
+                            // rate limit was refused WITHOUT executing.
+                            return AttemptOutcome::retryable_if_replayable(
+                                NotionError::Api {
                                     message: format!("Server error {status}: {body}"),
                                     status_code: Some(status.as_u16()),
                                 },
-                                retry_after: None,
-                            };
+                                None,
+                                replay_safe,
+                            );
                         }
 
                         if !status.is_success() {
@@ -571,22 +608,26 @@ impl NotionClient {
                                 Ok(data) => AttemptOutcome::Success(data),
                                 Err(error) => AttemptOutcome::Terminal(NotionError::Json(error)),
                             },
-                            Err(error) if error.is_timeout() || error.is_connect() => {
-                                AttemptOutcome::Retryable {
-                                    error: NotionError::Http(error),
-                                    retry_after: None,
-                                }
-                            }
-                            Err(error) => AttemptOutcome::Terminal(NotionError::Http(error)),
+                            // A body-read failure lands after the request was
+                            // fully sent, so it is never proof of non-delivery.
+                            Err(error) => AttemptOutcome::retryable_if_replayable(
+                                NotionError::Http(error),
+                                None,
+                                replay_safe,
+                            ),
                         }
                     }
-                    Err(error) if error.is_timeout() || error.is_connect() => {
-                        AttemptOutcome::Retryable {
-                            error: NotionError::Http(error),
-                            retry_after: None,
-                        }
+                    // br-kxd3e: `is_timeout()` is the TOTAL request timeout and
+                    // fires after the body was written; only a connect-phase
+                    // failure proves Notion never saw the request.
+                    Err(error) => {
+                        let replayable = replay_safe || !transport_error_reached_service(&error);
+                        AttemptOutcome::retryable_if_replayable(
+                            NotionError::Http(error),
+                            None,
+                            replayable,
+                        )
                     }
-                    Err(error) => AttemptOutcome::Terminal(NotionError::Http(error)),
                 }
             }
         })
@@ -597,35 +638,6 @@ impl NotionClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_page() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/pages/page-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "page-1",
-                "object": "page",
-                "archived": false,
-                "url": "https://notion.so/page-1",
-                "properties": {}
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let page = client.get_page("page-1").await.unwrap();
-        assert_eq!(page.id, "page-1");
-        assert!(!page.archived);
-    }
 
     #[test]
     fn test_default_notion_version_value() {
@@ -647,427 +659,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.notion_version(), "2025-09-03");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_page() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/pages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "page-2",
-                "object": "page",
-                "archived": false,
-                "properties": {}
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let page = client
-            .create_page(serde_json::json!({
-                "parent": { "database_id": "db-1" },
-                "properties": { "Name": { "title": [{ "text": { "content": "Test" } }] } }
-            }))
-            .await
-            .unwrap();
-        assert_eq!(page.id, "page-2");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_query_database() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/databases/db-1/query"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "object": "list",
-                "results": [
-                    { "id": "p1", "object": "page" },
-                    { "id": "p2", "object": "page" }
-                ],
-                "has_more": false,
-                "next_cursor": null
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let result = client.query_database("db-1", None, None).await.unwrap();
-        assert_eq!(result.results.len(), 2);
-        assert!(!result.has_more);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_search() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "object": "list",
-                "results": [
-                    { "id": "p1", "object": "page" }
-                ],
-                "has_more": false,
-                "next_cursor": null
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let result = client.search(Some("meeting notes"), None).await.unwrap();
-        assert_eq!(result.results.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_block_children() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/blocks/block-1/children"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "object": "list",
-                "results": [
-                    { "id": "b1", "object": "block", "type": "paragraph" }
-                ],
-                "has_more": false,
-                "next_cursor": null
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let result = client.get_block_children("block-1").await.unwrap();
-        assert_eq!(result.results.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_comments() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/comments"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "object": "list",
-                "results": [
-                    { "id": "c1", "object": "comment", "rich_text": [] }
-                ],
-                "has_more": false,
-                "next_cursor": null
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let result = client.list_comments("page-1").await.unwrap();
-        assert_eq!(result.results.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_database() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/databases/db-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "db-1",
-                "object": "database",
-                "title": [{"text": {"content": "Tasks"}, "plain_text": "Tasks"}],
-                "properties": {
-                    "Name": {"type": "title", "title": {}},
-                    "Status": {"type": "select", "select": {}}
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let db = client.get_database("db-1").await.unwrap();
-        assert_eq!(db["id"], "db-1");
-        assert_eq!(db["object"], "database");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_database() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/databases"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "db-new",
-                "object": "database",
-                "title": [{"text": {"content": "New DB"}, "plain_text": "New DB"}],
-                "properties": {"Name": {"type": "title", "title": {}}}
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let db = client
-            .create_database(serde_json::json!({
-                "parent": {"page_id": "page-1"},
-                "title": [{"text": {"content": "New DB"}}],
-                "properties": {"Name": {"title": {}}}
-            }))
-            .await
-            .unwrap();
-        assert_eq!(db["id"], "db-new");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_update_database() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("PATCH"))
-            .and(path("/v1/databases/db-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "db-1",
-                "object": "database",
-                "title": [{"text": {"content": "Updated"}, "plain_text": "Updated"}],
-                "properties": {"Name": {"type": "title", "title": {}}}
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let db = client
-            .update_database(
-                "db-1",
-                serde_json::json!({"title": [{"text": {"content": "Updated"}}]}),
-            )
-            .await
-            .unwrap();
-        assert_eq!(db["id"], "db-1");
-        assert_eq!(db["title"][0]["plain_text"], "Updated");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_block() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/blocks/block-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "block-1",
-                "object": "block",
-                "type": "paragraph",
-                "has_children": false,
-                "archived": false,
-                "paragraph": {
-                    "rich_text": [{"text": {"content": "Hello"}, "plain_text": "Hello"}]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let block = client.get_block("block-1").await.unwrap();
-        assert_eq!(block["id"], "block-1");
-        assert_eq!(block["type"], "paragraph");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_update_block() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("PATCH"))
-            .and(path("/v1/blocks/block-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "block-1",
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [{"text": {"content": "Updated"}, "plain_text": "Updated"}]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let block = client
-            .update_block(
-                "block-1",
-                serde_json::json!({
-                    "paragraph": {"rich_text": [{"text": {"content": "Updated"}}]}
-                }),
-            )
-            .await
-            .unwrap();
-        assert_eq!(block["id"], "block-1");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_delete_block() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("PATCH"))
-            .and(path("/v1/blocks/block-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "block-1",
-                "object": "block",
-                "type": "paragraph",
-                "archived": true
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
-
-        let block = client.delete_block("block-1").await.unwrap();
-        assert_eq!(block["id"], "block-1");
-        assert_eq!(block["archived"], true);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_database_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/databases/missing"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "object": "error",
-                "status": 404,
-                "code": "object_not_found",
-                "message": "Could not find database"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.get_database("missing").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::NotFound { .. }));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_block_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/blocks/missing"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "object": "error",
-                "status": 404,
-                "code": "object_not_found",
-                "message": "Could not find block"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.get_block("missing").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::NotFound { .. }));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/pages/page-1"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("bad-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.get_page("page-1").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::Unauthorized));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/pages/missing"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
-                "object": "error",
-                "status": 404,
-                "code": "object_not_found",
-                "message": "Could not find page"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.get_page("missing").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), NotionError::NotFound { .. }));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/pages/page-1"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
-
-        let client = NotionClient::new("test-token")
-            .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.get_page("page-1").await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            NotionError::RateLimited { .. }
-        ));
     }
 
     // ─── URL injection prevention tests ──────────────────────────────

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4793b702c6a6eb0f6fe3fc2c3c742b4f2e3029e476683db07150f97825526f4e"
+interface_hash = "blake3-256:fcp.interface.v2:27d29e7c20874b43d6f211941ac4de5bbbf2341aff7ccf0967251c98792a08f6"
 
 [connector]
 id = "fcp.anthropic"
@@ -331,7 +331,7 @@ related = [
 ]
 
 [provides.operations."anthropic.auth.refresh_oauth"]
-description = "Report whether the configured Claude Code OAuth credential path is refreshable by the host"
+description = "Report connector-local refresh status for Claude Code OAuth/setup-token credentials"
 capability = "anthropic.auth"
 risk_level = "low"
 safety_tier = "safe"
@@ -364,10 +364,11 @@ total_timeout_ms = 30000
 max_response_bytes = 65536
 
 [provides.operations."anthropic.auth.refresh_oauth".ai_hints]
-when_to_use = "Use when an agent needs to check whether the host can refresh the configured Claude Code OAuth credential instead of using a static API key."
+when_to_use = "Use when an agent needs to check whether the connector can refresh the configured Claude Code OAuth/setup-token credential, and what rotation boundary applies."
 common_mistakes = [
-    "Expecting the connector to mint or persist OAuth tokens; refresh is host-owned and this operation only reports refreshability.",
-    "Calling refresh_oauth for API-key setups where no Claude Code OAuth credential path is configured.",
+    "Expecting the connector to mint, persist, or refresh Claude Code OAuth tokens; setup-token output must be generated and rotated outside the connector.",
+    "Treating the one-year setup-token lifetime as automatic refresh support.",
+    "Calling refresh_oauth for API-key or bearer-token setups where no Claude Code OAuth/setup-token credential path is configured.",
     "Logging credential paths or token material while diagnosing refresh status.",
 ]
 examples = [

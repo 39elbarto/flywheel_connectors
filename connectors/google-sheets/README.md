@@ -1,9 +1,9 @@
 # Google Sheets Connector V3 Contract
 
-> **Status**: runtime contract documented; simulation and retry drift documented
+> **Status**: PROVEN runtime contract documented with simulation and retry drift called out
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/google_sheets_connector_verification.sh`
 > **Sheets API upstream**: https://developers.google.com/sheets/api/reference/rest
 > **Values resource upstream**: https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets.values
 > **Values update upstream**: https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets.values/update
@@ -44,6 +44,7 @@ Important runtime truths the contract preserves:
 - `sheets.append_values` writes with `valueInputOption=USER_ENTERED` and `insertDataOption=INSERT_ROWS`.
 - `sheets.update_values` and `sheets.append_values` require a two-dimensional `values` array.
 - Runtime handshake installs a `CapabilityVerifier`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime `invoke` requires `capability_token`, computes `google-sheets:spreadsheet:{spreadsheet_id}`, and verifies a bound token before provider execution.
 - `health()`, `doctor()`, and `self_check()` are local configuration checks only. They do not probe Google Sheets.
 
@@ -52,13 +53,12 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google_sheets`, while runtime `BaseConnector` ID is `google-sheets`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-sheets-connector-v1` even though the manifest carries a concrete `interface_hash`.
 - Runtime `handle_simulate` is permissive. It returns `would_execute = true` for any supplied operation string and does not validate operation inventory, configured state, handshake state, input, capability, or capability token.
 - `SheetsClient` stores an `HttpRetryConfig`, but the current HTTP helpers call `reqwest` directly and do not execute the shared retry loop.
 - Runtime `handle_shutdown` shuts down the client runtime and sets `client = None`, but it does not clear verifier, session, configured flag, or handshaken flag.
-- There is no dedicated tracked verification shell script for this connector.
+- The dedicated tracked verification shell script is `scripts/e2e/google_sheets_connector_verification.sh`.
 
-A follow-up parity bead should make `simulate` enforce the same operation/input/capability rules as `invoke`, wire the stored retry config or remove it, replace the placeholder handshake hash, and reset lifecycle state consistently on shutdown.
+A follow-up parity bead should make `simulate` enforce the same operation/input/capability rules as `invoke`, wire the stored retry config or remove it, and reset lifecycle state consistently on shutdown.
 
 ## First-Slice Scope
 
@@ -72,6 +72,7 @@ The current Google Sheets README slice documents the existing runtime surface:
 - provider error mapping, range/path encoding, redaction posture, and health behavior
 - lifecycle, doctor, health, self-check, introspection, simulation, invoke, and shutdown surfaces
 - deterministic WireMock tests and direct proof commands
+- the tracked pre-promotion verifier bundle that ties gauntlet, manifest, Cargo, local non-mock JSONL, redaction, and replay evidence together
 
 ## Auth And Scope Boundary
 
@@ -173,7 +174,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/google_sheets_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked `scripts/e2e/google_sheets_connector_verification.sh` bundle is the closeout surface for this connector, alongside the crate-local test suite and direct `rch` proof commands.
 
 The verification surface captures:
 
@@ -212,6 +213,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `scripts/e2e/google_sheets_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-sheets-readme cargo check -p fcp-google-sheets --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-sheets-readme cargo test -p fcp-google-sheets --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-sheets-readme cargo clippy -p fcp-google-sheets --all-targets --no-deps -- -D warnings`

@@ -1,0 +1,42 @@
+{
+  "artifacts/fresh.json": {
+    "path": "artifacts/fresh.json",
+    "exists": true,
+    "digest": {
+      "algorithm": "blake3",
+      "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  },
+  "artifacts/stale.json": {
+    "path": "artifacts/stale.json",
+    "exists": true,
+    "digest": {
+      "algorithm": "blake3",
+      "value": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "artifacts/mismatch.json": {
+    "path": "artifacts/mismatch.json",
+    "exists": true,
+    "digest": {
+      "algorithm": "blake3",
+      "value": "9999999999999999999999999999999999999999999999999999999999999999"
+    }
+  },
+  "artifacts/skip.json": {
+    "path": "artifacts/skip.json",
+    "exists": true,
+    "digest": {
+      "algorithm": "blake3",
+      "value": "4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  },
+  "artifacts/replay.json": {
+    "path": "artifacts/replay.json",
+    "exists": true,
+    "digest": {
+      "algorithm": "blake3",
+      "value": "5555555555555555555555555555555555555555555555555555555555555555"
+    }
+  }
+}

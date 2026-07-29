@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = ["streaming"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:cerebras-oai-compat"
+interface_hash = "blake3-256:fcp.interface.v2:9b4ec26ab49322d749e53fd56ce6706282d7ce300d98668dd210c8006c2813db"
 
 [connector]
 id = "fcp.cerebras"
 name = "Cerebras"
 version = "0.1.0"
 description = "Cerebras Inference connector using the OpenAI-compatible chat, streaming, and model APIs"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]
@@ -28,7 +28,7 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = ["cerebras.chat", "cerebras.models.read", "cerebras.health.read"]
+optional = ["cerebras.chat", "cerebras.models.read", "cerebras.health.read", "cerebras.embeddings"]
 forbidden = ["system.exec", "network.listen"]
 
 [sandbox]
@@ -114,7 +114,6 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-availability = "not_supported"
 input_schema = { type = "object", properties = {} }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["api.cerebras.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }

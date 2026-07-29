@@ -1,10 +1,10 @@
-//! Pin `DegradedModeReason` Display+serde divergence + `DegradedModeState`
-//! shape — the closest analogue to "SelectorMode variant matrix"
+//! Pin `DegradedModeReason` `Display`+serde divergence + `DegradedModeState`
+//! shape — the closest analogue to "`SelectorMode` variant matrix"
 //! (flywheel_connectors-wik35).
 //!
-//! Bead asks for `SelectorMode` variants Display + serde tag pinning. No
+//! Bead asks for `SelectorMode` variants `Display` + serde tag pinning. No
 //! type literally named `SelectorMode` exists in fcp-core. The closest
-//! "Mode" enum NOT yet pinned for variant Display+serde is
+//! "Mode" enum NOT yet pinned for variant `Display`+serde is
 //! [`DegradedModeReason`] at `crates/fcp-core/src/quorum.rs:452`. Existing
 //! pinned "Mode" enums:
 //!   * `ApprovalMode` → `approval_reason_variant_display.rs`,
@@ -13,24 +13,24 @@
 //!   * `ConnectorStateModel` → `connector_topology_serde.rs`.
 //!
 //! `DegradedModeReason` is critical: it has NO `rename_all` annotation,
-//! so its serde form is **PascalCase by default** while Display via
-//! `as_str()` is **snake_case**. This is the loud divergence sentinel
-//! to pin: Display and serde return DIFFERENT strings for every variant.
-//! Operator dashboards filter on Display tokens; wire payloads use
+//! so its serde form is **`PascalCase` by default** while `Display` via
+//! `as_str()` is **`snake_case`**. This is the loud divergence sentinel
+//! to pin: `Display` and serde return DIFFERENT strings for every variant.
+//! Operator dashboards filter on `Display` tokens; wire payloads use
 //! the serde form. Accidentally adding `rename_all = "snake_case"` (or
-//! removing the snake_case mapping in `as_str`) would silently merge
+//! removing the `snake_case` mapping in `as_str`) would silently merge
 //! the two streams.
 //!
 //! Coverage:
-//!   * 5-variant DegradedModeReason snake_case Display matrix,
-//!   * 5-variant DegradedModeReason DEFAULT PascalCase serde matrix,
-//!   * Loud Display ≠ serde divergence sentinel per variant,
-//!   * JSON + CBOR round-trip (PascalCase wire form survives both),
-//!   * snake_case input rejection sentinel (the inverse: Display strings
+//!   * 5-variant `DegradedModeReason` `snake_case` `Display` matrix,
+//!   * 5-variant `DegradedModeReason` DEFAULT `PascalCase` serde matrix,
+//!   * Loud `Display` ≠ serde divergence sentinel per variant,
+//!   * JSON + CBOR round-trip (`PascalCase` wire form survives both),
+//!   * `snake_case` input rejection sentinel (the inverse: `Display` strings
 //!     MUST NOT deserialize as the variant — pin so the divergence
 //!     stays loud),
-//!   * `DegradedModeState` shape with embedded reason Option,
-//!   * Distinct-variant distinct-Display + distinct-JSON sentinels.
+//!   * `DegradedModeState` shape with embedded reason `Option`,
+//!   * Distinct-variant distinct-`Display` + distinct-JSON sentinels.
 
 use ciborium::Value as CborValue;
 use fcp_core::{DegradedModeReason, DegradedModeState};

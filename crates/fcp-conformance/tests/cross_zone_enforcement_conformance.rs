@@ -14,18 +14,18 @@
 //! Each test name is tagged with the expected `DecisionReasonCode`
 //! from the cross-zone surface.
 //!
-//! Scope: the following DecisionReasonCode variants exist in the
+//! Scope: the following `DecisionReasonCode` variants exist in the
 //! policy surface but are NOT emitted from `evaluate_invoke` for the
 //! cross-zone flow — they are filter-outputs applied inside
 //! `apply_declassification` / `apply_elevation` that silently drop
 //! the token and fall through to the generic "missing approval"
 //! code:
 //!
-//!   DecisionReasonCode::ApprovalExpired
-//!   DecisionReasonCode::ApprovalZoneMismatch
+//!   `DecisionReasonCode::ApprovalExpired`
+//!   `DecisionReasonCode::ApprovalZoneMismatch`
 //!
 //! An expired or zone-mismatched token is not exposed with a distinct
-//! code from evaluate_invoke itself — it surfaces as
+//! code from `evaluate_invoke` itself — it surfaces as
 //! `ApprovalMissingDeclassification` after being filtered out. The
 //! tests below pin that exact fall-through so a future change that
 //! wants to surface the distinct codes can't silently flip the
@@ -87,11 +87,11 @@ fn engine_for(zone: ZoneId) -> PolicyEngine {
 /// Build an invocation input rooted in `source_zone` heading to
 /// `target_zone`. `approval_tokens` lives outside the input so its
 /// reference lifetime tracks the caller's scope.
-fn cross_zone_input<'a>(
+fn cross_zone_input(
     source_zone: ZoneId,
     target_zone: ZoneId,
-    approval_tokens: &'a [ApprovalToken],
-) -> PolicyDecisionInput<'a> {
+    approval_tokens: &[ApprovalToken],
+) -> PolicyDecisionInput<'_> {
     static EMPTY_RECEIPTS: &[SanitizerReceipt] = &[];
     static EMPTY_OBJECTS: &[ObjectId] = &[];
     PolicyDecisionInput {
@@ -126,20 +126,20 @@ fn declassification_token(
     issued_at_ms: u64,
     expires_at_ms: u64,
 ) -> ApprovalToken {
-    ApprovalToken {
-        token_id: "decl-test".into(),
+    ApprovalToken::approved(
+        "decl-test",
         issued_at_ms,
         expires_at_ms,
-        issuer: "issuer:cross-zone".into(),
-        scope: ApprovalScope::Declassification(DeclassificationScope {
+        "issuer:cross-zone",
+        ApprovalScope::Declassification(DeclassificationScope {
             from_zone,
             to_zone,
             object_ids,
             target_confidentiality,
         }),
-        zone_id: token_zone,
-        signature: None,
-    }
+        token_zone,
+        None,
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -179,19 +179,19 @@ fn cross_zone_elevation_scoped_token_does_not_satisfy_declassification_requireme
     // Present an Elevation-scoped token when the flow requires
     // Declassification. The scope filter in apply_declassification
     // drops the token and the fall-through is MissingDeclassification.
-    let elevation = ApprovalToken {
-        token_id: "elev-wrongscope".into(),
-        issued_at_ms: NOW_MS.saturating_sub(1_000),
-        expires_at_ms: NOW_MS.saturating_add(TOKEN_TTL_MS),
-        issuer: "issuer".into(),
-        scope: ApprovalScope::Elevation(ElevationScope {
+    let elevation = ApprovalToken::approved(
+        "elev-wrongscope",
+        NOW_MS.saturating_sub(1_000),
+        NOW_MS.saturating_add(TOKEN_TTL_MS),
+        "issuer",
+        ApprovalScope::Elevation(ElevationScope {
             operation_id: "op.cross_zone".into(),
             original_provenance_id: ObjectId::from_unscoped_bytes(b"crr6l-req"),
             target_integrity: IntegrityLevel::Work,
         }),
-        zone_id: ZoneId::community(),
-        signature: None,
-    };
+        ZoneId::community(),
+        None,
+    );
     let approvals = vec![elevation];
     let engine = engine_for(ZoneId::community());
     let input = cross_zone_input(ZoneId::work(), ZoneId::community(), &approvals);

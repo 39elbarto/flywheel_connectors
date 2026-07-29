@@ -624,6 +624,26 @@ async fn error_500_server_error() {
     assert!(result.is_err());
 }
 
+#[fcp_async_core::runtime::test]
+async fn error_200_empty_body_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/_cluster/health"))
+        .and(header("Authorization", "ApiKey test-api-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "elasticsearch.cluster.health",
+            "input": {}
+        }))
+        .await;
+    assert!(result.is_ok());
+}
+
 // ── Unknown operation ────────────────────────────────────────────────
 
 #[fcp_async_core::runtime::test]

@@ -218,6 +218,11 @@ required = ["message"]
 type = "object"
 [provides.operations."chat.send_message".output_schema.properties.message]
 type = "object"
+[provides.operations."chat.send_message".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+[provides.operations."chat.send_message".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."chat.send_message".network_constraints]
 host_allow = ["chat.googleapis.com"]
@@ -269,6 +274,11 @@ enum = ["REPLY_MESSAGE_OR_FAIL", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"]
 required = ["message"]
 type = "object"
 [provides.operations."chat.reply_message".output_schema.properties.message]
+type = "object"
+[provides.operations."chat.reply_message".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+[provides.operations."chat.reply_message".output_schema.properties.coordination.items]
 type = "object"
 
 [provides.operations."chat.reply_message".network_constraints]
@@ -331,6 +341,11 @@ type = "object"
 [provides.operations."chat.send_media_message".output_schema.properties.message]
 type = "object"
 [provides.operations."chat.send_media_message".output_schema.properties.media]
+type = "object"
+[provides.operations."chat.send_media_message".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+[provides.operations."chat.send_media_message".output_schema.properties.coordination.items]
 type = "object"
 
 [provides.operations."chat.send_media_message".network_constraints]

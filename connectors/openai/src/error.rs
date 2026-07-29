@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Result type for OpenAI operations.
@@ -62,6 +62,15 @@ pub enum OpenAIError {
         message: String,
         /// HTTP status code
         status_code: Option<u16>,
+    },
+
+    /// Caller-supplied input rejected before any request was sent
+    /// (e.g. an id carrying path-traversal characters or a pagination
+    /// cursor that would smuggle additional query parameters).
+    #[error("Invalid input: {message}")]
+    InvalidInput {
+        /// Error message
+        message: String,
     },
 }
 
@@ -128,6 +137,10 @@ impl OpenAIError {
             Self::Json(e) => FcpError::MalformedFrame {
                 code: 2004,
                 message: format!("JSON parsing error: {e}"),
+            },
+            Self::InvalidInput { message } => FcpError::InvalidRequest {
+                code: 2005,
+                message: message.clone(),
             },
             Self::Overloaded { retry_after_ms } => FcpError::External {
                 service: "openai".into(),

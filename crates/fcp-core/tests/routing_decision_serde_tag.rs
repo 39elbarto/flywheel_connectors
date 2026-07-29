@@ -1,5 +1,5 @@
 //! Pin `DecisionReceipt` JSON+CBOR serde matrix — the closest analogue to
-//! "RoutingDecision serde tag" (flywheel_connectors-hw4hi).
+//! "`RoutingDecision` serde tag" (flywheel_connectors-hw4hi).
 //!
 //! Bead asks for `RoutingDecision` JSON+CBOR roundtrip + serde tag pinning.
 //! No type literally named `RoutingDecision` exists in fcp-core. The closest
@@ -11,24 +11,24 @@
 //! IS an Allow/Deny decision keyed by a request and a reason — this is the
 //! fcp-core wire form for that semantic.
 //!
-//! Existing `audit_chain_golden_vectors.rs` covers DecisionReceipt
-//! construction + is_allow/is_deny predicates. `policy_decision_serde_tag_matrix.rs`
+//! Existing `audit_chain_golden_vectors.rs` covers `DecisionReceipt`
+//! construction + `is_allow/is_deny` predicates. `policy_decision_serde_tag_matrix.rs`
 //! covers the bare Decision enum (Allow/Deny lowercase serde). This pin
 //! adds the residual full-struct serde matrix.
 //!
 //! Coverage:
-//!   * 7-field JSON shape pinned (header, request_object_id, decision,
-//!     reason_code, evidence, explanation, signature) — explanation
+//!   * 7-field JSON shape pinned (header, `request_object_id`, decision,
+//!     `reason_code`, evidence, explanation, signature) — explanation
 //!     omitted when None,
 //!   * skip-when-None for explanation,
 //!   * Embedded Decision lowercase serde tag inside the receipt,
-//!   * Empty evidence Vec serializes as [] (no skip_serializing_if —
+//!   * Empty evidence Vec serializes as [] (no `skip_serializing_if` —
 //!     pin so a future skip-when-empty silently dropping evidence is
 //!     caught loudly),
-//!   * JSON + CBOR round-trip preserves decision/reason_code/evidence,
-//!   * is_allow / is_deny survives JSON round-trip,
+//!   * JSON + CBOR round-trip preserves `decision/reason_code/evidence`,
+//!   * `is_allow` / `is_deny` survives JSON round-trip,
 //!   * Distinct decisions produce distinct JSON,
-//!   * Distinct reason_codes produce distinct JSON.
+//!   * Distinct `reason_codes` produce distinct JSON.
 
 use fcp_cbor::SchemaId;
 use fcp_core::{

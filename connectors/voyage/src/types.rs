@@ -333,3 +333,88 @@ fn invalid<T>(message: impl Into<String>) -> FcpResult<T> {
         message: message.into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn embeddings_request_flattens_voyage_options_into_provider_extensions() {
+        let request = embeddings_request_from_value(
+            json!({
+                "input": "hello",
+                "input_type": "query",
+                "truncation": true,
+                "output_dimension": 512,
+                "output_dtype": "int8"
+            }),
+            "   ",
+        )
+        .expect("embeddings request should decode");
+
+        assert_eq!(request.model, DEFAULT_EMBEDDING_MODEL);
+        assert_eq!(request.provider_extensions["input_type"], json!("query"));
+        assert_eq!(request.provider_extensions["truncation"], json!(true));
+        assert_eq!(request.provider_extensions["output_dimension"], json!(512));
+        assert_eq!(request.provider_extensions["output_dtype"], json!("int8"));
+    }
+
+    #[test]
+    fn invalid_embeddings_input_type_is_rejected() {
+        let error = embeddings_request_from_value(
+            json!({
+                "input": "hello",
+                "input_type": "classification"
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("invalid input_type should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn invalid_output_dimension_is_rejected() {
+        let error = embeddings_request_from_value(
+            json!({
+                "input": "hello",
+                "output_dimension": 768
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("invalid output_dimension should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn multimodal_request_uses_default_model_and_preserves_encoding() {
+        let request = multimodal_request_from_value(
+            json!({
+                "inputs": [{"content": [{"type": "text", "text": "diagram"}]}],
+                "output_encoding": "base64"
+            }),
+            "   ",
+        )
+        .expect("multimodal request should decode");
+
+        assert_eq!(request.model, DEFAULT_MULTIMODAL_MODEL);
+        assert_eq!(request.output_encoding.as_deref(), Some("base64"));
+    }
+
+    #[test]
+    fn rerank_top_k_cannot_exceed_document_count() {
+        let error = rerank_request_from_value(
+            json!({
+                "query": "best evidence",
+                "documents": ["alpha", "beta"],
+                "top_k": 3
+            }),
+            DEFAULT_RERANK_MODEL,
+        )
+        .expect_err("top_k beyond document count should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+}

@@ -4,7 +4,8 @@ use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -15,6 +16,35 @@ use crate::{
 
 /// Default `Retool` API base URL template.
 pub const DEFAULT_BASE_URL_TEMPLATE: &str = "https://{subdomain}.retool.com/api/v1";
+
+/// Validate a caller-supplied Retool subdomain before it is interpolated into
+/// the request host (`https://{subdomain}.retool.com`).
+///
+/// The subdomain becomes part of the URL authority, so an unvalidated value can
+/// change the effective host entirely — e.g. `evil.com/` parses as host
+/// `evil.com` with the rest pushed into the path, and `@`/`:` can graft on
+/// userinfo or a port. A DNS label is `[A-Za-z0-9-]` (no leading/trailing
+/// hyphen), which keeps the host pinned under `*.retool.com` while rejecting
+/// every authority-injection vector.
+fn validate_subdomain(subdomain: &str) -> RetoolResult<&str> {
+    let trimmed = subdomain.trim();
+    if trimmed.is_empty() {
+        return Err(RetoolError::InvalidInput(
+            "subdomain must not be empty".into(),
+        ));
+    }
+    if trimmed.starts_with('-')
+        || trimmed.ends_with('-')
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(RetoolError::InvalidInput(format!(
+            "subdomain '{trimmed}' must be a DNS label (letters, digits, hyphens)"
+        )));
+    }
+    Ok(trimmed)
+}
 
 /// `Retool` authentication credentials.
 #[derive(Clone)]
@@ -71,7 +101,7 @@ impl RetoolClient {
         let url = if let Some(u) = base_url {
             u.trim_end_matches('/').to_string()
         } else {
-            let sub = subdomain.unwrap_or("app");
+            let sub = validate_subdomain(subdomain.unwrap_or("app"))?;
             format!("https://{sub}.retool.com/api/v1")
         };
 
@@ -102,10 +132,7 @@ impl RetoolClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -185,6 +212,19 @@ impl RetoolClient {
     }
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> RetoolResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(RetoolError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +247,38 @@ mod tests {
         let label = auth.redacted_label();
         assert!(label.contains("redacted"));
         assert!(!label.contains("secret"));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            RetoolError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            RetoolError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]
@@ -235,6 +307,35 @@ mod tests {
         };
         let client = RetoolClient::new(auth, None, None).unwrap();
         assert_eq!(client.base_url, "https://app.retool.com/api/v1");
+    }
+
+    #[test]
+    fn validate_subdomain_accepts_dns_labels() {
+        assert_eq!(validate_subdomain("myorg").unwrap(), "myorg");
+        assert_eq!(validate_subdomain("my-org-1").unwrap(), "my-org-1");
+        assert_eq!(validate_subdomain("  myorg  ").unwrap(), "myorg");
+    }
+
+    #[test]
+    fn validate_subdomain_rejects_authority_injection() {
+        // host hijack via `/`, userinfo via `@`, port via `:`, extra labels
+        // via `.`, query/fragment via `?`/`#`.
+        assert!(validate_subdomain("evil.com/").is_err());
+        assert!(validate_subdomain("app.evil.com").is_err());
+        assert!(validate_subdomain("app@evil.com").is_err());
+        assert!(validate_subdomain("app:8080").is_err());
+        assert!(validate_subdomain("app#frag").is_err());
+        assert!(validate_subdomain("").is_err());
+        assert!(validate_subdomain("-app").is_err());
+        assert!(validate_subdomain("app-").is_err());
+    }
+
+    #[test]
+    fn client_new_rejects_malicious_subdomain() {
+        let auth = RetoolAuth {
+            api_token: "tok".into(),
+        };
+        assert!(RetoolClient::new(auth, Some("evil.com/"), None).is_err());
     }
 
     #[test]

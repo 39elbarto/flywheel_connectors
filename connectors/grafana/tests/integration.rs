@@ -7,7 +7,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// br-uh9e9: bearer-token auth-header value used by the test fixture.
 ///
-/// Every Mock::given chain that hits a `configured_connector(...)` route MUST
+/// Every `Mock::given` chain that hits a `configured_connector(...)` route MUST
 /// assert this Authorization header. Otherwise a regression that dropped the
 /// `bearer_auth(token)` call in `connectors/grafana/src/client.rs` would still
 /// pass every integration test.
@@ -542,6 +542,26 @@ async fn invoke_rate_limited_error() {
         }))
         .await;
     assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_200_empty_body_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/datasources"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&server.uri()).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "grafana.datasources.list",
+            "input": {}
+        }))
+        .await;
+    assert!(result.is_ok());
 }
 
 #[fcp_async_core::runtime::test]

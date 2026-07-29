@@ -100,6 +100,7 @@ pub fn connector_state_explain_payload(
         "command": "connector",
         "subcommand": "state explain",
         "schema_version": CONNECTOR_STATE_EXPLAIN_SCHEMA_VERSION,
+        "_truth_source": "offline",
         "source": "local-cache-markers",
         "message": format!(
             "Explained connector state storage for `{}` from local cache markers and workspace manifests.",

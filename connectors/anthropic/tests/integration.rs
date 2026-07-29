@@ -1915,12 +1915,16 @@ async fn error_non_json_response_body() {
 async fn error_529_via_connector_invoke() {
     let mock = MockApiServer::start().await;
 
-    mock.expect_error(
-        "/v1/messages",
-        529,
-        anthropic_error("overloaded_error", "API overloaded"),
-    )
-    .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(529)
+                .set_body_json(anthropic_error("overloaded_error", "API overloaded"))
+                .insert_header("content-type", "application/json")
+                .insert_header("retry-after", "0"),
+        )
+        .mount(mock.inner())
+        .await;
 
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;

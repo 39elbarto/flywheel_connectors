@@ -1,4 +1,4 @@
-//! Pin ObjectId collision detection on `MemoryObjectStore`
+//! Pin `ObjectId` collision detection on `MemoryObjectStore`
 //! (flywheel_connectors-mt6ac).
 //!
 //! `MemoryObjectStore::put` uses the claimed `object_id` as the key in
@@ -13,13 +13,14 @@
 //!      `AlreadyExists` and MUST NOT mutate stored state — `get(id)`
 //!      still returns the original.
 //!   3. **Error payload identifies the conflict**: the `AlreadyExists`
-//!      payload carries the conflicting `object_id`, and the Display
-//!      message includes it.
-//!
+
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::needless_update)]
+
 //! Distinct `object_id`s for distinct content remain insertable in the
 //! same store — the collision check is keyed on `object_id` alone.
 //!
-//! Background: `MemoryObjectStore::put` (object_store.rs:474) and the
+//! Background: `MemoryObjectStore::put` (`object_store.rs:474`) and the
 //! `ObjectStoreError::AlreadyExists` Display format
 //! (`"object already exists: {0}"`, error.rs:13) are NORMATIVE.
 

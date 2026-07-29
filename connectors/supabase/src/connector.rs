@@ -14,7 +14,7 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::json;
@@ -446,6 +446,12 @@ impl SupabaseConnector {
             started_at: Instant::now(),
             verifier: None,
         }
+    }
+
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     fn manifest_hash() -> String {

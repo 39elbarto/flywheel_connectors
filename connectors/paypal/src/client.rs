@@ -8,7 +8,8 @@ use reqwest::{Client, RequestBuilder};
 use serde_json::json;
 use tracing::debug;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 
 use crate::error::{PayPalError, PayPalResult};
 use crate::types::*;
@@ -413,7 +414,9 @@ impl PayPalClient {
     ) -> PayPalResult<InvoiceSendResponse> {
         let invoice_id = sanitize_path_segment(invoice_id, "invoice_id")?;
         let url = format!("{}/v2/invoicing/invoices/{invoice_id}/send", self.base_url);
-        let idempotency_key = idempotency_key.map(String::from);
+        // See `post_json`: sending an invoice is a side effect PayPal will
+        // repeat if the request is replayed without a stable request id.
+        let idempotency_key = resolve_request_id(idempotency_key);
         let mut force_refresh = false;
 
         loop {
@@ -431,10 +434,11 @@ impl PayPalClient {
                 let idempotency_key = idempotency_key.clone();
                 async move {
                     debug!(attempt, url = %redact_url(&url), "POST invoice send");
-                    let mut req = client.post(&url).bearer_auth(&token).json(&json!({}));
-                    if let Some(key) = &idempotency_key {
-                        req = req.header("PayPal-Request-Id", key.as_str());
-                    }
+                    let req = client
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .json(&json!({}))
+                        .header("PayPal-Request-Id", idempotency_key.as_str());
                     let resp = match req.send().await {
                         Ok(r) => r,
                         Err(e) => {
@@ -550,7 +554,18 @@ impl PayPalClient {
     ) -> PayPalResult<T> {
         let url = url.to_string();
         let body = body.clone();
-        let idempotency_key = idempotency_key.map(String::from);
+        // EVERY POST carries a PayPal-Request-Id (br-kxd3e).
+        //
+        // `handle_response` retries on 5xx and on transport errors, both of
+        // which can be reported after PayPal already created the order, took
+        // the capture, or issued the refund. PayPal deduplicates on this header
+        // for the endpoints reached here (orders create/capture, payments
+        // refund, invoicing create), so generating one when the caller supplied
+        // none makes the retry genuinely safe rather than merely refused.
+        //
+        // Resolved ONCE, outside the retry closure, so every attempt presents
+        // the same value — a per-attempt id would provide exactly nothing.
+        let idempotency_key = resolve_request_id(idempotency_key);
         let mut force_refresh = false;
 
         loop {
@@ -569,10 +584,11 @@ impl PayPalClient {
                 let idempotency_key = idempotency_key.clone();
                 async move {
                     debug!(attempt, url = %redact_url(&url), "POST");
-                    let mut req = client.post(&url).bearer_auth(&token).json(&body);
-                    if let Some(key) = &idempotency_key {
-                        req = req.header("PayPal-Request-Id", key.as_str());
-                    }
+                    let req = client
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .header("PayPal-Request-Id", idempotency_key.as_str());
                     handle_response::<T>(req, attempt).await
                 }
             })
@@ -586,6 +602,19 @@ impl PayPalClient {
             }
         }
     }
+}
+
+/// Resolve the `PayPal-Request-Id` for one logical call.
+///
+/// Returns the caller's key when there is one, otherwise a fresh id. Callers
+/// MUST invoke this outside their retry loop so every attempt of the same call
+/// presents the same value — that identity is the entire mechanism by which
+/// PayPal deduplicates a replayed order, capture, refund, or invoice send.
+fn resolve_request_id(idempotency_key: Option<&str>) -> String {
+    idempotency_key.map_or_else(
+        || format!("fcp2-retry-{}", uuid::Uuid::new_v4()),
+        String::from,
+    )
 }
 
 async fn handle_response<T: serde::de::DeserializeOwned>(
@@ -665,11 +694,11 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_sdk::migration::ConnectorRuntimeConfig;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
+    use fcp_sdk::ConnectorRuntimeConfig;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
 
     fn test_runtime() -> ConnectorRuntime {
         ConnectorRuntime::new(
@@ -695,6 +724,191 @@ mod tests {
             access_token: token.into(),
             expires_at,
         });
+    }
+
+    enum TestHttpBody {
+        Json(serde_json::Value),
+        Text(&'static str),
+        Empty,
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: TestHttpBody,
+        required_header: Option<(&'static str, &'static str)>,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Json(body),
+                required_header: None,
+            }
+        }
+
+        fn text(method: &'static str, path: &'static str, status: u16, body: &'static str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Text(body),
+                required_header: None,
+            }
+        }
+
+        const fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Empty,
+                required_header: None,
+            }
+        }
+
+        const fn with_required_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.required_header = Some((name, value));
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = StdInstant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        StdInstant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        let mut saw_required_header = response.required_header.is_none();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap();
+                }
+                if let Some((required_name, required_value)) = response.required_header
+                    && name.eq_ignore_ascii_case(required_name)
+                    && value.trim() == required_value
+                {
+                    saw_required_header = true;
+                }
+            }
+        }
+        assert!(saw_required_header, "required header was not sent");
+        if content_length > 0 {
+            let mut request_body = vec![0u8; content_length];
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let (body, is_json_body) = match response.body {
+            TestHttpBody::Json(body) => (body.to_string(), true),
+            TestHttpBody::Text(body) => (body.to_string(), false),
+            TestHttpBody::Empty => (String::new(), false),
+        };
+        let reason = match response.status {
+            200 => "OK",
+            204 => "No Content",
+            401 => "Unauthorized",
+            404 => "Not Found",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        if is_json_body {
+            write!(stream, "content-type: application/json\r\n").unwrap();
+        }
+        write!(stream, "\r\n{body}").unwrap();
+        stream.flush().unwrap();
     }
 
     #[test]
@@ -825,28 +1039,29 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn health_check_refreshes_expired_token_before_request() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/oauth2/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "fresh-token",
-                "token_type": "Bearer",
-                "expires_in": 3600
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v2/checkout/orders"))
-            .and(header("authorization", "Bearer fresh-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "orders": []
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/oauth2/token",
+                200,
+                serde_json::json!({
+                    "access_token": "fresh-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                }),
+            ),
+            TestHttpResponse::json(
+                "GET",
+                "/v2/checkout/orders",
+                200,
+                serde_json::json!({
+                    "orders": []
+                }),
+            )
+            .with_required_header("authorization", "Bearer fresh-token"),
+        ]);
 
-        let client = test_client(&server.uri()).await;
+        let client = test_client(server.uri()).await;
         set_cached_token(
             &client,
             "expired-token",
@@ -867,36 +1082,32 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn get_order_retries_once_after_unauthorized() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/checkout/orders/order-123"))
-            .and(header("authorization", "Bearer stale-token"))
-            .respond_with(ResponseTemplate::new(401))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/v1/oauth2/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "fresh-token",
-                "token_type": "Bearer",
-                "expires_in": 3600
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v2/checkout/orders/order-123"))
-            .and(header("authorization", "Bearer fresh-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::empty("GET", "/v2/checkout/orders/order-123", 401)
+                .with_required_header("authorization", "Bearer stale-token"),
+            TestHttpResponse::json(
+                "POST",
+                "/v1/oauth2/token",
+                200,
+                serde_json::json!({
+                    "access_token": "fresh-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                }),
+            ),
+            TestHttpResponse::json(
+                "GET",
+                "/v2/checkout/orders/order-123",
+                200,
+                serde_json::json!({
                 "id": "order-123",
                 "status": "COMPLETED"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+                }),
+            )
+            .with_required_header("authorization", "Bearer fresh-token"),
+        ]);
 
-        let client = test_client(&server.uri()).await;
+        let client = test_client(server.uri()).await;
         set_cached_token(
             &client,
             "stale-token",
@@ -913,16 +1124,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_invoice_reports_sent_on_no_content() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v2/invoicing/invoices/INV-123/send"))
-            .and(header("authorization", "Bearer cached-token"))
-            .respond_with(ResponseTemplate::new(204))
-            .expect(1)
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::empty("POST", "/v2/invoicing/invoices/INV-123/send", 204)
+                .with_required_header("authorization", "Bearer cached-token"),
+        ]);
 
-        let client = test_client(&server.uri()).await;
+        let client = test_client(server.uri()).await;
         set_cached_token(
             &client,
             "cached-token",
@@ -938,16 +1145,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn health_check_rejects_not_found() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/checkout/orders"))
-            .and(header("authorization", "Bearer cached-token"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("missing"))
-            .expect(1)
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::text("GET", "/v2/checkout/orders", 404, "missing")
+                .with_required_header("authorization", "Bearer cached-token"),
+        ]);
 
-        let client = test_client(&server.uri()).await;
+        let client = test_client(server.uri()).await;
         set_cached_token(
             &client,
             "cached-token",

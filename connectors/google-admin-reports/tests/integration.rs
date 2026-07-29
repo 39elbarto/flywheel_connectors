@@ -15,7 +15,7 @@ use fcp_google_discovery::auth::{
     GOOGLE_AUTHORIZATION_HEADER, GoogleAuthSourceKind, GoogleMaterializedAuth,
 };
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

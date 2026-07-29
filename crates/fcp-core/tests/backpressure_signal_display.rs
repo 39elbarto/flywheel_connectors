@@ -2,36 +2,36 @@
 //! (flywheel_connectors-yaan6).
 //!
 //! Bead asks for `BackpressureSignal Display formatting`. Neither
-//! `BackpressureSignal` (ratelimit.rs:280) nor `BackpressureLevel`
-//! (ratelimit.rs:37) implements `Display`, so the bead's "Display
+//! `BackpressureSignal` (`ratelimit.rs:280`) nor `BackpressureLevel`
+//! (`ratelimit.rs:37`) implements `Display`, so the bead's "`Display`
 //! formatting" ask has no direct analogue. Pinning targets the
 //! serde wire form — which is what audit logs / dashboards filter
 //! on — plus the struct shape with its `skip_serializing_if`
 //! semantics on `retry_after_ms`.
 //!
 //! `BackpressureLevel` carries `#[serde(rename_all = "snake_case")]`
-//! with 4 variants (Normal / Warning / SoftLimit / HardLimit).
+//! with 4 variants (`Normal` / `Warning` / `SoftLimit` / `HardLimit`).
 //! `BackpressureSignal` is a 3-field struct with the level, an
-//! `utilization_bps: u16` (0..=10_000 basis points), and an
+//! `utilization_bps: u16` (`0..=10_000` basis points), and an
 //! optional `retry_after_ms`.
 //!
 //! Targets:
 //!
-//!   1. **`BackpressureLevel` per-variant JSON tag** (snake_case).
+//!   1. **`BackpressureLevel` per-variant JSON tag** (`snake_case`).
 //!   2. **JSON + CBOR round-trip** preserves variant.
 //!   3. **CBOR encodes as Text** (not integer discriminant) for
 //!      cross-language consumers.
-//!   4. **PascalCase + unknown rejected** — drift sentinel.
-//!   5. **Multi-word variants use underscore** (soft_limit /
-//!      hard_limit, not soft-limit / hardlimit).
+//!   4. **`PascalCase` + unknown rejected** — drift sentinel.
+//!   5. **Multi-word variants use underscore** (`soft_limit` /
+//!      `hard_limit`, not `soft-limit` / `hardlimit`).
 //!   6. **4-variant count + pairwise distinctness**.
 //!   7. **`BackpressureSignal` 3-field JSON shape** pinned.
 //!   8. **`retry_after_ms` omitted when None** via
 //!      `skip_serializing_if = "Option::is_none"`.
 //!   9. **`BackpressureSignal` JSON + CBOR round-trip** preserves
 //!      all 3 fields including nested `BackpressureLevel`.
-//!  10. **Boundary `utilization_bps`** values (0 and 10_000) round-trip.
-//!  11. **`retry_after_ms` boundary** (0 and u64::MAX) round-trip.
+//!  10. **Boundary `utilization_bps`** values (0 and `10_000`) round-trip.
+//!  11. **`retry_after_ms` boundary** (0 and `u64::MAX`) round-trip.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::{BackpressureLevel, BackpressureSignal};
@@ -162,13 +162,9 @@ fn backpressure_level_documented_count_is_four() {
 
 #[test]
 fn backpressure_level_variants_pairwise_unequal() {
-    for i in 0..ALL_LEVELS.len() {
-        for j in (i + 1)..ALL_LEVELS.len() {
-            assert_ne!(
-                ALL_LEVELS[i].0, ALL_LEVELS[j].0,
-                "{:?} and {:?} MUST be distinct",
-                ALL_LEVELS[i].0, ALL_LEVELS[j].0
-            );
+    for (i, (left, _)) in ALL_LEVELS.iter().enumerate() {
+        for (right, _) in ALL_LEVELS.iter().skip(i + 1) {
+            assert_ne!(left, right, "{left:?} and {right:?} MUST be distinct");
         }
     }
 }
@@ -239,7 +235,8 @@ fn retry_after_ms_present_in_wire_form_when_some() {
     let value = serde_json::to_value(&signal).expect("serialize");
     let obj = value.as_object().expect("object");
     assert_eq!(
-        obj.get("retry_after_ms").and_then(|v| v.as_u64()),
+        obj.get("retry_after_ms")
+            .and_then(serde_json::Value::as_u64),
         Some(0),
         "retry_after_ms MUST appear as 0 when Some(0) — distinguishable from None"
     );

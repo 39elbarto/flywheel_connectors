@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener as StdTcpListener;
+use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -22,10 +23,13 @@ use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::JoinHandle as AsyncJoinHandle;
 use fcp_core::{
     AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityConstraints,
-    CapabilityToken, CorrelationId, DecisionReceiptPolicy, ObjectHeader, Provenance, RollbackRules,
-    RolloutPolicy, SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent,
-    SbomDependency, SuccessThresholds, TransitionReason, ZoneId, ZonePolicyObject,
-    ZoneTransportPolicy,
+    CapabilityToken, CapabilityVerifier, ConnectorStateAppendOutcome, ConnectorStateStore,
+    CorrelationId, DecisionReceiptPolicy, EvictionPolicy, InstanceId, Lease as CoreLease,
+    LeasePurpose as CoreLeasePurpose, NodeSignature, ObjectHeader, ObjectId, ObjectIdKey,
+    Provenance, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
+    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency, SignatureSet,
+    StorageMeta, StoredObject, SuccessThresholds, TailscaleNodeId, TransitionReason, ZoneId,
+    ZonePolicyObject, ZoneTransportPolicy,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -116,6 +120,8 @@ const TEST_CAPABILITY_ID: &str = "cap.test.echo";
 const TEST_ADMIN_BEARER_TOKEN: &str = "host-test-admin-bearer";
 const TRUSTED_CAPABILITY_SIGNING_KEY_HEX: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
+const CONNECTOR_STATE_DIR_ENV: &str = "FCP_CONNECTOR_STATE";
+const CONNECTOR_STATE_OBJECT_ID_KEY_ENV: &str = "FCP_CONNECTOR_STATE_OBJECT_ID_KEY";
 
 fn test_zone_policy(zone_id: ZoneId) -> ZonePolicyObject {
     ZonePolicyObject {
@@ -868,7 +874,8 @@ async fn http_get_status(
     client: reqwest::Client,
     url: String,
 ) -> Result<reqwest::StatusCode, Box<dyn std::error::Error>> {
-    let status = client.get(url).send().await?.status();
+    let headers = with_admin_auth_if_needed(&reqwest::Method::GET, &url, None).unwrap_or_default();
+    let status = client.get(url).headers(headers).send().await?.status();
     Ok(status)
 }
 
@@ -1135,8 +1142,9 @@ async fn wait_for_host_readiness(
     stderr_logs: &StderrLogs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_error = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
 
-    for _ in 0..40 {
+    while Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
             let raw_stderr = stderr_logs
                 .lock()
@@ -1153,7 +1161,9 @@ async fn wait_for_host_readiness(
         )
         .await
         {
-            Ok(Ok(status)) if status.is_success() => return Ok(()),
+            Ok(Ok(status)) if status.is_success() || status == reqwest::StatusCode::FORBIDDEN => {
+                return Ok(());
+            }
             Ok(Ok(status)) => {
                 last_error = Some(format!("health returned {status}"));
                 fcp_async_core::time::sleep(Duration::from_millis(50)).await;
@@ -1821,6 +1831,7 @@ fn test_connector_config_with_env(
         "description": "Binary-level host integration test connector",
         "config": {},
         "categories": categories,
+        "allowed_zones": [ZoneId::work().as_str()],
         "env": env,
     })
 }
@@ -1835,6 +1846,421 @@ fn test_connector_config(
         .map(|category| (*category).to_string())
         .collect::<Vec<_>>();
     test_connector_config_with_env(connector_id, name, &categories, &[])
+}
+
+fn singleton_writer_test_connector_config(
+    connector_id: &ConnectorId,
+    name: &str,
+) -> serde_json::Value {
+    let mut config = test_connector_config(connector_id, name, &["test", "hrw"]);
+    let config_object = config
+        .as_object_mut()
+        .expect("test connector config should be a JSON object");
+    config_object.insert(
+        "config".to_string(),
+        json!({ "state": { "model": "singleton_writer" } }),
+    );
+    config_object.insert(
+        "allowed_zones".to_string(),
+        json!([ZoneId::work().as_str()]),
+    );
+    config
+}
+
+fn singleton_writer_test_connector_config_with_state(
+    connector_id: &ConnectorId,
+    name: &str,
+    state_root: &Path,
+    object_id_key: &ObjectIdKey,
+) -> serde_json::Value {
+    let mut config = singleton_writer_test_connector_config(connector_id, name);
+    let config_object = config
+        .as_object_mut()
+        .expect("test connector config should be a JSON object");
+    let env = config_object
+        .entry("env")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("test connector env should be a JSON object");
+    env.insert(
+        CONNECTOR_STATE_DIR_ENV.to_string(),
+        json!(state_root.display().to_string()),
+    );
+    env.insert(
+        CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+        json!(hex::encode(object_id_key.as_bytes())),
+    );
+    env.insert(
+        "FCP_CONNECTOR_STATE_MODEL".to_string(),
+        json!("singleton_writer"),
+    );
+    config
+}
+
+fn sanitize_connector_state_path_segment(value: &str) -> String {
+    let segment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if segment.is_empty() || segment == "." || segment == ".." {
+        "_".to_string()
+    } else {
+        segment
+    }
+}
+
+fn connector_state_canonical_object_store_dir(
+    root: &Path,
+    connector_id: &ConnectorId,
+) -> std::path::PathBuf {
+    root.join(sanitize_connector_state_path_segment(connector_id.as_str()))
+        .join("store")
+        .join("objects")
+}
+
+fn connector_state_write_authorization_for_test_with_key(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> (
+    fcp_core::ConnectorStateWriteAuthorization,
+    Ed25519SigningKey,
+) {
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec![fcp_core::connector_state_resource_uri(connector_id)],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("test connector-state constraints should serialize");
+    let now = Utc::now();
+    let token = CapabilityToken::from_raw(
+        CapabilityTokenBuilder::new()
+            .capability_id(fcp_core::CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+            .zone_id(zone_id.as_str())
+            .target_instance(instance_id.as_str())
+            .principal("principal:test")
+            .operations(&[fcp_core::CONNECTOR_STATE_APPEND_OPERATION_ID])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("test connector-state constraints should be accepted")
+            .sign(&signing_key)
+            .expect("test connector-state token should sign"),
+    );
+    let verifier = CapabilityVerifier::new(
+        signing_key.verifying_key().to_bytes(),
+        zone_id.clone(),
+        instance_id,
+    );
+
+    let authorization = fcp_core::ConnectorStateWriteAuthorization::verify_append_token(
+        &verifier,
+        token,
+        connector_id,
+        zone_id,
+    )
+    .expect("test connector-state write token should authorize append");
+    (authorization, signing_key)
+}
+
+fn durable_connector_state_object_for_test(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    seq: u64,
+    prev: Option<ObjectId>,
+    lease_object_id: ObjectId,
+) -> fcp_core::ConnectorStateObject {
+    let seq_byte = u8::try_from(seq).expect("test sequence should fit in CBOR byte");
+    fcp_core::ConnectorStateObject {
+        header: ObjectHeader {
+            schema: fcp_store::FcpStoreConnectorStateStore::state_object_schema_id(),
+            zone_id: zone_id.clone(),
+            created_at: 1_800_200_000 + seq,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![lease_object_id],
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        },
+        connector_id: connector_id.clone(),
+        instance_id: None,
+        zone_id: zone_id.clone(),
+        prev,
+        seq,
+        state_cbor: vec![0xa1, 0x61, b'n', seq_byte],
+        updated_at: 1_800_200_000 + seq,
+        lease_seq: seq + 10,
+        lease_object_id,
+        writer_public_key: [0u8; 32],
+        signature: fcp_core::Signature::zero(),
+    }
+}
+
+fn sign_durable_connector_state_object_for_test(
+    mut state: fcp_core::ConnectorStateObject,
+    signing_key: &Ed25519SigningKey,
+) -> fcp_core::ConnectorStateObject {
+    state
+        .sign_with(signing_key)
+        .expect("test connector state should sign");
+    state
+}
+
+struct SeededConnectorState {
+    root_object_id: ObjectId,
+    head_object_id: ObjectId,
+    lease_object_id: ObjectId,
+    lease_seq: u64,
+    lease_expiry_unix_secs: u64,
+}
+
+fn update_len_prefixed_for_test(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn singleton_writer_connector_lease_subject_id_for_test(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> ObjectId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FCP-HOST-SINGLETON-WRITER-HRW-LEASE-V2");
+    update_len_prefixed_for_test(&mut hasher, connector_id.as_str().as_bytes());
+    update_len_prefixed_for_test(&mut hasher, zone_id.as_str().as_bytes());
+    ObjectId::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn host_integration_signature_set(signers: &[&str]) -> SignatureSet {
+    let mut signatures = SignatureSet::new();
+    for (idx, signer) in signers.iter().enumerate() {
+        let signature_byte = u8::try_from(idx).unwrap_or(u8::MAX);
+        signatures.add(NodeSignature::new(
+            fcp_core::NodeId::new(*signer),
+            [signature_byte; 64],
+            1_800_200_000 + u64::try_from(idx).unwrap_or(u64::MAX),
+        ));
+    }
+    signatures
+}
+
+fn durable_core_lease_for_test(
+    zone_id: &ZoneId,
+    subject_object_id: ObjectId,
+    holder: TailscaleNodeId,
+    lease_seq: u64,
+    exp: u64,
+    quorum_signatures: SignatureSet,
+) -> CoreLease {
+    CoreLease {
+        header: ObjectHeader {
+            schema: fcp_cbor::SchemaId::new("fcp.lease", "lease", semver::Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: exp.saturating_sub(300),
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![subject_object_id],
+            foreign_refs: Vec::new(),
+            ttl_secs: Some(300),
+            placement: None,
+        },
+        holder,
+        lease_seq,
+        exp,
+        subject_object_id,
+        purpose: CoreLeasePurpose::ConnectorStateWrite,
+        quorum_signatures,
+    }
+}
+
+fn stored_core_lease_for_test(lease: &CoreLease, object_id_key: &ObjectIdKey) -> StoredObject {
+    let body = fcp_cbor::CanonicalSerializer::serialize(lease, &lease.header.schema)
+        .expect("test core lease should serialize");
+    let object_id =
+        StoredObject::derive_id(&lease.header, &body, object_id_key).expect("derive lease id");
+    StoredObject {
+        object_id,
+        header: lease.header.clone(),
+        body,
+        storage: StorageMeta {
+            retention: EvictionPolicy::Lease {
+                expires_at: lease.exp,
+            },
+        },
+    }
+}
+
+async fn seed_singleton_writer_connector_state(
+    state_root: &Path,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    object_id_key: ObjectIdKey,
+    lease_object_id: ObjectId,
+) -> Result<SeededConnectorState, Box<dyn std::error::Error>> {
+    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
+    let object_store: Arc<dyn fcp_store::ObjectStore> =
+        Arc::new(fcp_store::DurableObjectStore::open(
+            fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+        )?);
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        Arc::clone(&object_store),
+        object_id_key,
+        connector_id.clone(),
+        zone_id.clone(),
+    )
+    .with_snapshot_every_entries(0)
+    .with_snapshot_every_secs(0);
+    let (authorization, signing_key) =
+        connector_state_write_authorization_for_test_with_key(connector_id, zone_id);
+    let state_object = sign_durable_connector_state_object_for_test(
+        durable_connector_state_object_for_test(connector_id, zone_id, 0, None, lease_object_id),
+        &signing_key,
+    );
+    let lease_seq = state_object.lease_seq;
+    let append = ConnectorStateStore::append_object(
+        &state_store,
+        connector_id,
+        &authorization,
+        state_object,
+    )
+    .await?;
+
+    match append {
+        ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } => {
+            assert_eq!(seq, 0);
+            assert_eq!(snapshot_object_id, None);
+            Ok(SeededConnectorState {
+                root_object_id,
+                head_object_id: object_id,
+                lease_object_id,
+                lease_seq,
+                lease_expiry_unix_secs: 0,
+            })
+        }
+        ConnectorStateAppendOutcome::Conflict { .. } => {
+            Err("initial durable connector-state append should not conflict".into())
+        }
+    }
+}
+
+async fn seed_singleton_writer_connector_state_with_durable_lease(
+    state_root: &Path,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    object_id_key: ObjectIdKey,
+    holder: TailscaleNodeId,
+) -> Result<SeededConnectorState, Box<dyn std::error::Error>> {
+    seed_singleton_writer_connector_state_with_durable_lease_signers(
+        state_root,
+        connector_id,
+        zone_id,
+        object_id_key,
+        holder,
+        &["node-a", "node-b"],
+    )
+    .await
+}
+
+async fn seed_singleton_writer_connector_state_with_durable_lease_signers(
+    state_root: &Path,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    object_id_key: ObjectIdKey,
+    holder: TailscaleNodeId,
+    quorum_signers: &[&str],
+) -> Result<SeededConnectorState, Box<dyn std::error::Error>> {
+    let subject_object_id =
+        singleton_writer_connector_lease_subject_id_for_test(connector_id, zone_id);
+    let lease = durable_core_lease_for_test(
+        zone_id,
+        subject_object_id,
+        holder,
+        10,
+        1_800_200_300,
+        host_integration_signature_set(quorum_signers),
+    );
+    seed_singleton_writer_connector_state_with_durable_core_lease(
+        state_root,
+        connector_id,
+        zone_id,
+        object_id_key,
+        lease,
+    )
+    .await
+}
+
+async fn seed_singleton_writer_connector_state_with_durable_core_lease(
+    state_root: &Path,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    object_id_key: ObjectIdKey,
+    lease: CoreLease,
+) -> Result<SeededConnectorState, Box<dyn std::error::Error>> {
+    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
+    let object_store: Arc<dyn fcp_store::ObjectStore> =
+        Arc::new(fcp_store::DurableObjectStore::open(
+            fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+        )?);
+    let lease_expiry_unix_secs = lease.exp;
+    let lease_object = stored_core_lease_for_test(&lease, &object_id_key);
+    let lease_object_id = lease_object.object_id;
+    object_store.put(lease_object).await?;
+
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        Arc::clone(&object_store),
+        object_id_key,
+        connector_id.clone(),
+        zone_id.clone(),
+    )
+    .with_snapshot_every_entries(0)
+    .with_snapshot_every_secs(0);
+    let (authorization, signing_key) =
+        connector_state_write_authorization_for_test_with_key(connector_id, zone_id);
+    let state_object = sign_durable_connector_state_object_for_test(
+        durable_connector_state_object_for_test(connector_id, zone_id, 0, None, lease_object_id),
+        &signing_key,
+    );
+    let lease_seq = state_object.lease_seq;
+    let append = ConnectorStateStore::append_object(
+        &state_store,
+        connector_id,
+        &authorization,
+        state_object,
+    )
+    .await?;
+
+    match append {
+        ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } => {
+            assert_eq!(seq, 0);
+            assert_eq!(snapshot_object_id, None);
+            Ok(SeededConnectorState {
+                root_object_id,
+                head_object_id: object_id,
+                lease_object_id,
+                lease_seq,
+                lease_expiry_unix_secs,
+            })
+        }
+        ConnectorStateAppendOutcome::Conflict { .. } => {
+            Err("initial durable connector-state append should not conflict".into())
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2436,6 +2862,1161 @@ async fn fcp_host_binary_webhook_fixture_rejects_fake_artifact_input()
 
     assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
     assert!(body.contains("fake artifact provenance rejected"));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_coordination_allows_one_singleton_writer_launch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-launch:utility:1.0.0");
+    let connector_config =
+        singleton_writer_test_connector_config(&connector_id, "HRW Binary Launch");
+    let eligible_nodes = "node-a,node-b";
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in ["node-a", "node-b"] {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit exactly one singleton_writer host launch; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        1,
+        "HRW should refuse exactly one competing singleton_writer host launch"
+    );
+
+    let (refused_node, refusal) = &refusal_messages[0];
+    assert!(
+        refusal.contains("HRW lease routing refused singleton_writer launch"),
+        "refusal for {refused_node} should identify the HRW launch gate: {refusal}"
+    );
+    assert!(
+        refusal.contains("NotSelectedCoordinator"),
+        "refusal for {refused_node} should preserve the typed HRW error: {refusal}"
+    );
+    assert!(
+        refusal.contains("wrong_holder"),
+        "refusal for {refused_node} should report the wrong-holder transfer reason: {refusal}"
+    );
+    assert!(
+        refusal.contains(refused_node),
+        "refusal should name the refused local node {refused_node}: {refusal}"
+    );
+
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let discovery: DiscoveryResponse =
+        http_post_json(host.client.clone(), url("/rpc/discover"), json!({})).await?;
+    assert!(
+        discovery
+            .connectors
+            .iter()
+            .any(|connector| connector.id == connector_id),
+        "admitted HRW host {admitted_node} should serve the singleton_writer connector"
+    );
+
+    let lease_status: serde_json::Value = http_get_json(
+        host.client.clone(),
+        url(&format!(
+            "/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            connector_id.as_str()
+        )),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(lease_status["local_is_holder"], true);
+    assert!(lease_status["holder_node_id_hash"].as_str().is_some());
+    assert_eq!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .len(),
+        2
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_rejects_launch_without_quorum_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-quorum:utility:1.0.0");
+    let connector_config =
+        singleton_writer_test_connector_config(&connector_id, "HRW Binary Quorum");
+    let launch_error = match HttpHostProcess::spawn_with_env(
+        vec![connector_config],
+        &[
+            ("FCP_HOST_HRW_LEASE_LOCAL_NODE", "node-solo"),
+            ("FCP_HOST_HRW_LEASE_NODES", "node-solo"),
+            ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "1"),
+        ],
+    )
+    .await
+    {
+        Ok(_) => {
+            return Err(
+                "singleton_writer launch must refuse HRW configs below lease quorum".into(),
+            );
+        }
+        Err(error) => error,
+    };
+    let message = launch_error.to_string();
+    let unescaped_message = message.replace('\\', "");
+
+    assert!(
+        message.contains("HRW lease routing refused singleton_writer launch"),
+        "quorum refusal should identify the HRW launch gate: {message}"
+    );
+    assert!(
+        unescaped_message.contains(r#""code":"LeaseQuorumConfigInvalid""#),
+        "quorum refusal should preserve the typed HRW configuration error: {message}"
+    );
+    assert!(
+        unescaped_message.contains(r#""configured_eligible_nodes_count":1"#),
+        "quorum refusal should report the configured node count: {message}"
+    );
+    assert!(
+        unescaped_message.contains(r#""required_quorum_signers_count":2"#),
+        "quorum refusal should report the required signer count: {message}"
+    );
+    assert!(
+        message.contains("FCP_HOST_HRW_LEASE_NODES"),
+        "quorum refusal should point operators at the node-set env var: {message}"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_status_reports_invalid_below_quorum_durable_lease()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id =
+        ConnectorId::from_static("fcp.test.hrw-binary-invalid-lease-status:utility:1.0.0");
+    let zone_id = ZoneId::work();
+    let state_dir = tempfile::tempdir()?;
+    let state_root = state_dir.path().join("managed-state");
+    let object_id_key = ObjectIdKey::from_bytes([0xD7; 32]);
+    let all_nodes = ["node-a", "node-b", "node-c"];
+    let eligible_nodes = all_nodes.join(",");
+    let eligible_node_ids = all_nodes
+        .iter()
+        .map(|node| TailscaleNodeId::new(*node))
+        .collect::<Vec<_>>();
+    let subject_id = singleton_writer_connector_lease_subject_id_for_test(&connector_id, &zone_id);
+    let expected_holder =
+        fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_node_ids)
+            .expect("HRW holder should be selected");
+    let seeded_state = seed_singleton_writer_connector_state_with_durable_lease_signers(
+        &state_root,
+        &connector_id,
+        &zone_id,
+        object_id_key,
+        expected_holder.clone(),
+        &["node-a"],
+    )
+    .await?;
+    let connector_config = singleton_writer_test_connector_config_with_state(
+        &connector_id,
+        "HRW Binary Invalid Lease Status",
+        &state_root,
+        &object_id_key,
+    );
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in all_nodes {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes.as_str()),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "10"),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit one holder even when durable lease evidence is invalid; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        2,
+        "three-node HRW routing should refuse both non-holder launches"
+    );
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    assert_eq!(
+        admitted_node,
+        expected_holder.as_str(),
+        "real fcp-host launch should admit the HRW-selected holder"
+    );
+
+    let lease_status: Value = http_get_json(
+        host.client.clone(),
+        format!(
+            "{}/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            host.base_url,
+            connector_id.as_str()
+        ),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(lease_status["local_is_holder"], true);
+    assert_eq!(
+        lease_status["lease_evidence_source"],
+        "canonical-fcp-store-lease-object"
+    );
+    assert_eq!(
+        lease_status["lease_object_id"],
+        seeded_state.lease_object_id.to_string()
+    );
+    assert_eq!(lease_status["fencing_token"], seeded_state.lease_seq);
+    assert_eq!(lease_status["durable_lease_seq"], seeded_state.lease_seq);
+    assert_eq!(lease_status["quorum_signers_count"], 1);
+    assert_eq!(lease_status["required_quorum_signers_count"], 2);
+    assert_eq!(lease_status["quorum_satisfied"], false);
+    assert_eq!(lease_status["durable_validation"]["status"], "invalid");
+    assert!(
+        lease_status["durable_validation"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("insufficient quorum")),
+        "below-quorum durable lease should expose validation error: {lease_status}"
+    );
+    assert!(
+        lease_status["durable_validation"]["validated_at_unix_secs"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .len(),
+        3
+    );
+    let warnings = lease_status
+        .get("warnings")
+        .and_then(Value::as_array)
+        .expect("lease status warnings should be an array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("below the required 2"))),
+        "operator status should warn on below-quorum durable lease evidence: {lease_status}"
+    );
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("failed live lease validation"))),
+        "operator status should retain the durable validation failure warning: {lease_status}"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_status_reports_invalid_wrong_subject_durable_lease()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id =
+        ConnectorId::from_static("fcp.test.hrw-binary-wrong-subject-lease-status:utility:1.0.0");
+    let zone_id = ZoneId::work();
+    let state_dir = tempfile::tempdir()?;
+    let state_root = state_dir.path().join("managed-state");
+    let object_id_key = ObjectIdKey::from_bytes([0xD8; 32]);
+    let all_nodes = ["node-a", "node-b", "node-c"];
+    let eligible_nodes = all_nodes.join(",");
+    let eligible_node_ids = all_nodes
+        .iter()
+        .map(|node| TailscaleNodeId::new(*node))
+        .collect::<Vec<_>>();
+    let expected_subject =
+        singleton_writer_connector_lease_subject_id_for_test(&connector_id, &zone_id);
+    let wrong_subject = ObjectId::from_bytes([0xE1; 32]);
+    assert_ne!(wrong_subject, expected_subject);
+    let expected_holder =
+        fcp_mesh::planner::select_lease_holder(&zone_id, &expected_subject, &eligible_node_ids)
+            .expect("HRW holder should be selected");
+    let lease = durable_core_lease_for_test(
+        &zone_id,
+        wrong_subject,
+        expected_holder.clone(),
+        10,
+        1_800_200_300,
+        host_integration_signature_set(&["node-a", "node-b"]),
+    );
+    let seeded_state = seed_singleton_writer_connector_state_with_durable_core_lease(
+        &state_root,
+        &connector_id,
+        &zone_id,
+        object_id_key,
+        lease,
+    )
+    .await?;
+    let connector_config = singleton_writer_test_connector_config_with_state(
+        &connector_id,
+        "HRW Binary Wrong Subject Lease Status",
+        &state_root,
+        &object_id_key,
+    );
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in all_nodes {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes.as_str()),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "10"),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit one holder even when durable lease evidence has the wrong subject; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        2,
+        "three-node HRW routing should refuse both non-holder launches"
+    );
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    assert_eq!(
+        admitted_node,
+        expected_holder.as_str(),
+        "real fcp-host launch should admit the HRW-selected holder"
+    );
+
+    let lease_status: Value = http_get_json(
+        host.client.clone(),
+        format!(
+            "{}/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            host.base_url,
+            connector_id.as_str()
+        ),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(lease_status["local_is_holder"], true);
+    assert_eq!(
+        lease_status["lease_evidence_source"],
+        "canonical-fcp-store-lease-object"
+    );
+    assert_eq!(
+        lease_status["lease_object_id"],
+        seeded_state.lease_object_id.to_string()
+    );
+    assert_eq!(lease_status["fencing_token"], seeded_state.lease_seq);
+    assert_eq!(lease_status["durable_lease_seq"], seeded_state.lease_seq);
+    assert_eq!(lease_status["quorum_signers_count"], 2);
+    assert_eq!(lease_status["required_quorum_signers_count"], 2);
+    assert_eq!(lease_status["quorum_satisfied"], true);
+    assert_eq!(lease_status["durable_validation"]["status"], "invalid");
+    assert!(
+        lease_status["durable_validation"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("subject mismatch")),
+        "wrong-subject durable lease should expose validation error: {lease_status}"
+    );
+    assert!(
+        lease_status["durable_validation"]["validated_at_unix_secs"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .len(),
+        3
+    );
+    let warnings = lease_status
+        .get("warnings")
+        .and_then(Value::as_array)
+        .expect("lease status warnings should be an array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("failed live lease validation"))),
+        "operator status should warn on wrong-subject durable lease evidence: {lease_status}"
+    );
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("subject mismatch"))),
+        "operator status should retain the subject mismatch reason: {lease_status}"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_status_reports_invalid_stale_durable_lease_seq()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id =
+        ConnectorId::from_static("fcp.test.hrw-binary-stale-lease-status:utility:1.0.0");
+    let zone_id = ZoneId::work();
+    let state_dir = tempfile::tempdir()?;
+    let state_root = state_dir.path().join("managed-state");
+    let object_id_key = ObjectIdKey::from_bytes([0xD9; 32]);
+    let all_nodes = ["node-a", "node-b", "node-c"];
+    let eligible_nodes = all_nodes.join(",");
+    let eligible_node_ids = all_nodes
+        .iter()
+        .map(|node| TailscaleNodeId::new(*node))
+        .collect::<Vec<_>>();
+    let subject_id = singleton_writer_connector_lease_subject_id_for_test(&connector_id, &zone_id);
+    let expected_holder =
+        fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_node_ids)
+            .expect("HRW holder should be selected");
+    let stale_lease_seq = 9;
+    let lease = durable_core_lease_for_test(
+        &zone_id,
+        subject_id,
+        expected_holder.clone(),
+        stale_lease_seq,
+        1_800_200_300,
+        host_integration_signature_set(&["node-a", "node-b"]),
+    );
+    let seeded_state = seed_singleton_writer_connector_state_with_durable_core_lease(
+        &state_root,
+        &connector_id,
+        &zone_id,
+        object_id_key,
+        lease,
+    )
+    .await?;
+    assert_eq!(
+        seeded_state.lease_seq, 10,
+        "test fixture expects the connector-state head to advance past the durable lease"
+    );
+    let connector_config = singleton_writer_test_connector_config_with_state(
+        &connector_id,
+        "HRW Binary Stale Lease Status",
+        &state_root,
+        &object_id_key,
+    );
+    let current_lease_seq = seeded_state.lease_seq.to_string();
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in all_nodes {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes.as_str()),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", current_lease_seq.as_str()),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit one holder even when durable lease evidence is stale; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        2,
+        "three-node HRW routing should refuse both non-holder launches"
+    );
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    assert_eq!(
+        admitted_node,
+        expected_holder.as_str(),
+        "real fcp-host launch should admit the HRW-selected holder"
+    );
+
+    let lease_status: Value = http_get_json(
+        host.client.clone(),
+        format!(
+            "{}/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            host.base_url,
+            connector_id.as_str()
+        ),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(lease_status["local_is_holder"], true);
+    assert_eq!(
+        lease_status["lease_evidence_source"],
+        "canonical-fcp-store-lease-object"
+    );
+    assert_eq!(
+        lease_status["lease_object_id"],
+        seeded_state.lease_object_id.to_string()
+    );
+    assert_eq!(lease_status["fencing_token"], seeded_state.lease_seq);
+    assert_eq!(lease_status["durable_lease_seq"], stale_lease_seq);
+    assert_eq!(lease_status["quorum_signers_count"], 2);
+    assert_eq!(lease_status["required_quorum_signers_count"], 2);
+    assert_eq!(lease_status["quorum_satisfied"], true);
+    assert_eq!(lease_status["durable_validation"]["status"], "invalid");
+    assert!(
+        lease_status["durable_validation"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("lease sequence mismatch")),
+        "stale durable lease should expose validation error: {lease_status}"
+    );
+    assert!(
+        lease_status["durable_validation"]["validated_at_unix_secs"]
+            .as_u64()
+            .is_some()
+    );
+    let warnings = lease_status
+        .get("warnings")
+        .and_then(Value::as_array)
+        .expect("lease status warnings should be an array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("failed live lease validation"))),
+        "operator status should warn on stale durable lease evidence: {lease_status}"
+    );
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("lease sequence mismatch"))),
+        "operator status should retain the lease sequence mismatch reason: {lease_status}"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_fence_rejects_stale_singleton_writer_invoke()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-fence:utility:1.0.0");
+    let connector_config =
+        singleton_writer_test_connector_config(&connector_id, "HRW Binary Fence");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let eligible_nodes = "node-a,node-b,node-c";
+    let current_lease_seq = "11";
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in ["node-a", "node-b", "node-c"] {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", current_lease_seq),
+                (
+                    "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+                    capability_public_key.as_str(),
+                ),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit exactly one singleton_writer host launch; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        2,
+        "three-node HRW routing should refuse both non-holder launches"
+    );
+    for (refused_node, refusal) in &refusal_messages {
+        assert!(
+            refusal.contains("NotSelectedCoordinator"),
+            "refusal for {refused_node} should preserve the typed HRW error: {refusal}"
+        );
+    }
+
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let mut stale_request = build_invoke_request(connector_id.clone(), &capability_signing_key).0;
+    stale_request.input = json!({
+        "message": "stale write must be fenced before dispatch",
+        "lease_seq": 10_u64,
+    });
+    stale_request.lease_seq = Some(10);
+
+    let stale_response = host
+        .client
+        .post(url("/rpc/invoke"))
+        .json(&stale_request)
+        .send()
+        .await?;
+    let stale_status = stale_response.status();
+    let stale_body = stale_response.text().await?;
+    assert_eq!(stale_status, reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        stale_body.contains(r#""code":"LeaseFenced""#),
+        "stale invoke should be fenced with typed HRW evidence: {stale_body}"
+    );
+    assert!(
+        stale_body.contains(r#""current_lease_seq":11"#),
+        "stale invoke should report the current fence: {stale_body}"
+    );
+    assert!(
+        stale_body.contains(r#""provided_lease_seq":10"#),
+        "stale invoke should report the provided stale fence: {stale_body}"
+    );
+    assert!(
+        !stale_body.contains("stale write must be fenced before dispatch"),
+        "stale invoke body should not include connector echo output: {stale_body}"
+    );
+
+    let mut current_request = build_invoke_request(connector_id.clone(), &capability_signing_key).0;
+    current_request.input = json!({
+        "message": "current fence may dispatch",
+        "lease_seq": 11_u64,
+    });
+    current_request.lease_seq = Some(11);
+    let current_response: InvokeResponse =
+        http_post_json(host.client.clone(), url("/rpc/invoke"), current_request).await?;
+    assert_eq!(current_response.status, InvokeStatus::Ok);
+    assert_eq!(
+        current_response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("echo"))
+            .and_then(|echo| echo.get("message"))
+            .and_then(Value::as_str),
+        Some("current fence may dispatch")
+    );
+
+    let lease_status: serde_json::Value = http_get_json(
+        host.client.clone(),
+        url(&format!(
+            "/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            connector_id.as_str()
+        )),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(lease_status["local_is_holder"], true);
+    assert_eq!(lease_status["fencing_token"], 11);
+    assert_eq!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .len(),
+        3
+    );
+    assert!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .iter()
+            .any(|holder| holder["is_local_node"].as_bool() == Some(true)),
+        "admitted HRW host {admitted_node} should appear in the holder ladder"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_flush_before_yield_reports_durable_state_barrier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-flush:utility:1.0.0");
+    let zone_id = ZoneId::work();
+    let state_dir = tempfile::tempdir()?;
+    let state_root = state_dir.path().join("managed-state");
+    let object_id_key = ObjectIdKey::from_bytes([0xB5; 32]);
+    let seeded_state = seed_singleton_writer_connector_state(
+        &state_root,
+        &connector_id,
+        &zone_id,
+        object_id_key,
+        ObjectId::from_bytes([0x92; 32]),
+    )
+    .await?;
+    let connector_config = singleton_writer_test_connector_config_with_state(
+        &connector_id,
+        "HRW Binary Flush",
+        &state_root,
+        &object_id_key,
+    );
+    let eligible_nodes = "node-a,node-b,node-c";
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in ["node-a", "node-b", "node-c"] {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "10"),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit exactly one singleton_writer host launch; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        2,
+        "three-node HRW routing should refuse both non-holder launches"
+    );
+    for (refused_node, refusal) in &refusal_messages {
+        assert!(
+            refusal.contains("NotSelectedCoordinator"),
+            "refusal for {refused_node} should preserve the typed HRW error: {refusal}"
+        );
+    }
+
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let flush_response = host
+        .client
+        .post(url(&format!(
+            "/rpc/admin/connectors/{}/lease/flush-before-yield?zone=z%3Awork",
+            connector_id.as_str()
+        )))
+        .bearer_auth(TEST_ADMIN_BEARER_TOKEN)
+        .header("x-fcp-zone", "z:owner")
+        .json(&json!({}))
+        .send()
+        .await?;
+    let flush_status = flush_response.status();
+    let flush_body = flush_response.text().await?;
+    let flush_payload: Value = serde_json::from_str(&flush_body).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "flush-before-yield response should be JSON, got {flush_status}: {flush_body}: {error}"
+            ),
+        )
+    })?;
+
+    assert_eq!(
+        flush_status,
+        reqwest::StatusCode::OK,
+        "admitted HRW host {admitted_node} should expose live flush-before-yield payload: {flush_payload}"
+    );
+    assert_eq!(flush_payload["schema_version"], "1.0.0");
+    assert_eq!(flush_payload["source"], "host-canonical-state-flush");
+    assert_eq!(flush_payload["connector_id"], connector_id.to_string());
+    assert_eq!(flush_payload["zone_id"], zone_id.as_str());
+    assert_eq!(flush_payload["flush"]["root_present"], true);
+    assert_eq!(
+        flush_payload["flush"]["root_object_id"],
+        seeded_state.root_object_id.to_string()
+    );
+    assert_eq!(
+        flush_payload["flush"]["head_object_id"],
+        seeded_state.head_object_id.to_string()
+    );
+    assert_eq!(flush_payload["flush"]["last_canonical_seq"], 0);
+    assert_eq!(flush_payload["flush"]["lease_seq"], seeded_state.lease_seq);
+    assert_eq!(
+        flush_payload["flush"]["lease_object_id"],
+        seeded_state.lease_object_id.to_string()
+    );
+    assert_eq!(
+        flush_payload["telemetry"]["event_name"],
+        "fcp.lease.flushed_on_yield"
+    );
+
+    let explain_response = host
+        .client
+        .get(url(&format!(
+            "/rpc/admin/connectors/{}/state/explain?zone=z%3Awork",
+            connector_id.as_str()
+        )))
+        .bearer_auth(TEST_ADMIN_BEARER_TOKEN)
+        .header("x-fcp-zone", "z:owner")
+        .send()
+        .await?;
+    let explain_status = explain_response.status();
+    let explain_body = explain_response.text().await?;
+    let explain_payload: Value = serde_json::from_str(&explain_body).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "state explain response should be JSON, got {explain_status}: {explain_body}: {error}"
+            ),
+        )
+    })?;
+    assert_eq!(
+        explain_status,
+        reqwest::StatusCode::OK,
+        "admitted HRW host {admitted_node} should expose canonical state after flush: {explain_payload}"
+    );
+    assert_eq!(explain_payload["source"], "host-canonical-state");
+    assert_eq!(explain_payload["canonical_state"]["root_present"], true);
+    assert_eq!(
+        explain_payload["canonical_state"]["root_object_id"],
+        seeded_state.root_object_id.to_string()
+    );
+    assert_eq!(
+        explain_payload["canonical_state"]["head_object_id"],
+        seeded_state.head_object_id.to_string()
+    );
+    assert_eq!(explain_payload["last_canonical_seq"], 0);
+    assert_eq!(
+        explain_payload["canonical_state"]["model"],
+        "singleton_writer"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_reselects_holder_after_departure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-failover:utility:1.0.0");
+    let zone_id = ZoneId::work();
+    let state_dir = tempfile::tempdir()?;
+    let state_root = state_dir.path().join("managed-state");
+    let object_id_key = ObjectIdKey::from_bytes([0xC6; 32]);
+    let all_nodes = ["node-a", "node-b", "node-c"];
+    let initial_eligible_nodes = all_nodes.join(",");
+    let initial_eligible_node_ids = all_nodes
+        .iter()
+        .map(|node| TailscaleNodeId::new(*node))
+        .collect::<Vec<_>>();
+    let subject_id = singleton_writer_connector_lease_subject_id_for_test(&connector_id, &zone_id);
+    let expected_initial_holder =
+        fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &initial_eligible_node_ids)
+            .expect("initial HRW holder should be selected");
+    let seeded_state = seed_singleton_writer_connector_state_with_durable_lease(
+        &state_root,
+        &connector_id,
+        &zone_id,
+        object_id_key,
+        expected_initial_holder.clone(),
+    )
+    .await?;
+    let connector_config = singleton_writer_test_connector_config_with_state(
+        &connector_id,
+        "HRW Binary Failover",
+        &state_root,
+        &object_id_key,
+    );
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let mut initial_holder: Option<(String, HttpHostProcess)> = None;
+    let mut initial_refusals = Vec::new();
+
+    for local_node in all_nodes {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", initial_eligible_nodes.as_str()),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "10"),
+                (
+                    "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+                    capability_public_key.as_str(),
+                ),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    initial_holder.is_none(),
+                    "initial HRW routing admitted more than one singleton_writer host launch"
+                );
+                initial_holder = Some((local_node.to_string(), host));
+            }
+            Err(error) => initial_refusals.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        initial_holder.is_some(),
+        "initial HRW routing should admit one holder; refusals: {initial_refusals:?}"
+    );
+    assert_eq!(
+        initial_refusals.len(),
+        2,
+        "initial three-node HRW routing should refuse both non-holders"
+    );
+
+    let (departed_node, departed_host) =
+        initial_holder.expect("initial HRW routing should admit one holder");
+    assert_eq!(
+        departed_node,
+        expected_initial_holder.as_str(),
+        "real fcp-host launch should admit the same HRW holder as the durable lease fixture"
+    );
+    let departed_base_url = departed_host.base_url.clone();
+    let lease_status: Value = http_get_json(
+        departed_host.client.clone(),
+        format!(
+            "{}/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            departed_base_url,
+            connector_id.as_str()
+        ),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(
+        lease_status["lease_evidence_source"],
+        "canonical-fcp-store-lease-object"
+    );
+    assert_eq!(
+        lease_status["lease_object_id"],
+        seeded_state.lease_object_id.to_string()
+    );
+    assert_eq!(lease_status["fencing_token"], seeded_state.lease_seq);
+    assert_eq!(lease_status["durable_lease_seq"], seeded_state.lease_seq);
+    assert_eq!(
+        lease_status["expiry_unix_secs"],
+        seeded_state.lease_expiry_unix_secs
+    );
+    assert!(
+        lease_status["expiry"]
+            .as_str()
+            .is_some_and(|expiry| expiry.ends_with('Z')),
+        "real binary lease status should expose RFC3339 expiry: {lease_status}"
+    );
+    assert_eq!(lease_status["quorum_signers_count"], 2);
+    assert_eq!(lease_status["required_quorum_signers_count"], 2);
+    assert_eq!(lease_status["quorum_satisfied"], true);
+    assert_eq!(lease_status["durable_validation"]["status"], "valid");
+    assert!(
+        lease_status["durable_validation"]["validated_at_unix_secs"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(lease_status["local_is_holder"], true);
+
+    let flush_response = departed_host
+        .client
+        .post(format!(
+            "{}/rpc/admin/connectors/{}/lease/flush-before-yield?zone=z%3Awork",
+            departed_base_url,
+            connector_id.as_str()
+        ))
+        .bearer_auth(TEST_ADMIN_BEARER_TOKEN)
+        .header("x-fcp-zone", "z:owner")
+        .json(&json!({}))
+        .send()
+        .await?;
+    let flush_status = flush_response.status();
+    let flush_body = flush_response.text().await?;
+    let flush_payload: Value = serde_json::from_str(&flush_body).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "departing holder flush-before-yield response should be JSON, got {flush_status}: {flush_body}: {error}"
+            ),
+        )
+    })?;
+    assert_eq!(
+        flush_status,
+        reqwest::StatusCode::OK,
+        "departing holder {departed_node} should flush canonical state before removal: {flush_payload}"
+    );
+    assert_eq!(
+        flush_payload["flush"]["root_object_id"],
+        seeded_state.root_object_id.to_string()
+    );
+    assert_eq!(flush_payload["flush"]["lease_seq"], seeded_state.lease_seq);
+    drop(departed_host);
+
+    let remaining_nodes = all_nodes
+        .into_iter()
+        .filter(|node| *node != departed_node.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining_nodes.len(), 2);
+    let remaining_eligible_nodes = remaining_nodes.join(",");
+    let mut new_holder: Option<(String, HttpHostProcess)> = None;
+    let mut new_refusals = Vec::new();
+
+    for local_node in &remaining_nodes {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", *local_node),
+                (
+                    "FCP_HOST_HRW_LEASE_NODES",
+                    remaining_eligible_nodes.as_str(),
+                ),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "11"),
+                (
+                    "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+                    capability_public_key.as_str(),
+                ),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    new_holder.is_none(),
+                    "post-departure HRW routing admitted more than one singleton_writer host launch"
+                );
+                new_holder = Some(((*local_node).to_string(), host));
+            }
+            Err(error) => new_refusals.push(((*local_node).to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        new_holder.is_some(),
+        "post-departure HRW routing should admit one replacement holder; refusals: {new_refusals:?}"
+    );
+    assert_eq!(
+        new_refusals.len(),
+        1,
+        "two-node post-departure HRW routing should refuse one non-holder"
+    );
+    for (refused_node, refusal) in &new_refusals {
+        assert!(
+            refusal.contains("NotSelectedCoordinator"),
+            "post-departure refusal for {refused_node} should preserve the typed HRW error: {refusal}"
+        );
+    }
+
+    let (new_holder_node, new_host) =
+        new_holder.expect("post-departure HRW routing should admit one replacement holder");
+    assert_ne!(
+        new_holder_node, departed_node,
+        "replacement holder must come from the eligible set after removing the departed node"
+    );
+    let url = |path: &str| format!("{}{path}", new_host.base_url);
+    let mut stale_request = build_invoke_request(connector_id.clone(), &capability_signing_key).0;
+    stale_request.input = json!({
+        "message": "post-failover stale write must be fenced",
+        "lease_seq": 10_u64,
+    });
+    stale_request.lease_seq = Some(10);
+    let stale_response = new_host
+        .client
+        .post(url("/rpc/invoke"))
+        .json(&stale_request)
+        .send()
+        .await?;
+    let stale_status = stale_response.status();
+    let stale_body = stale_response.text().await?;
+    assert_eq!(stale_status, reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        stale_body.contains(r#""code":"LeaseFenced""#),
+        "replacement holder should fence stale pre-handoff writes: {stale_body}"
+    );
+    assert!(
+        stale_body.contains(r#""current_lease_seq":11"#),
+        "replacement holder should report the post-departure fence: {stale_body}"
+    );
+
+    let explain_response = new_host
+        .client
+        .get(url(&format!(
+            "/rpc/admin/connectors/{}/state/explain?zone=z%3Awork",
+            connector_id.as_str()
+        )))
+        .bearer_auth(TEST_ADMIN_BEARER_TOKEN)
+        .header("x-fcp-zone", "z:owner")
+        .send()
+        .await?;
+    let explain_status = explain_response.status();
+    let explain_body = explain_response.text().await?;
+    let explain_payload: Value = serde_json::from_str(&explain_body).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "replacement holder state explain response should be JSON, got {explain_status}: {explain_body}: {error}"
+            ),
+        )
+    })?;
+    assert_eq!(
+        explain_status,
+        reqwest::StatusCode::OK,
+        "replacement holder {new_holder_node} should expose canonical state after failover: {explain_payload}"
+    );
+    assert_eq!(
+        explain_payload["canonical_state"]["root_object_id"],
+        seeded_state.root_object_id.to_string()
+    );
+    assert_eq!(
+        explain_payload["canonical_state"]["head_object_id"],
+        seeded_state.head_object_id.to_string()
+    );
+    assert_eq!(
+        explain_payload["canonical_state"]["model"],
+        "singleton_writer"
+    );
 
     Ok(())
 }
@@ -3483,6 +5064,74 @@ async fn fcp_host_binary_batch_route_skips_dependents_after_failure()
             .and_then(Value::as_str),
         Some("independent")
     );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_batch_route_stop_on_first_error_short_circuits_same_tier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.batch-stop-first:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Batch Stop First Echo",
+            &["test", "batch"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let unknown_connector_id = ConnectorId::from_static("fcp.test.missing:utility:1.0.0");
+    let (mut failing_request, _) =
+        build_invoke_request(unknown_connector_id, &capability_signing_key);
+    failing_request.input = json!({ "message": "missing" });
+    let (mut second_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    second_request.input = json!({ "message": "second" });
+    let (mut third_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    third_request.input = json!({ "message": "third" });
+
+    // All three operations are independent (one tier); max_parallelism = 1
+    // splits the tier into three sequential chunks. With stop_on_first_error
+    // the failure in the first chunk must short-circuit the REMAINING CHUNKS
+    // OF THE SAME TIER, not just subsequent tiers.
+    let response: BatchInvokeResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/batch"),
+        json!({
+            "operations": [
+                batch_operation_json("op1", failing_request, &[]),
+                batch_operation_json("op2", second_request, &[]),
+                batch_operation_json("op3", third_request, &[]),
+            ],
+            "options": {
+                "max_parallelism": 1,
+                "stop_on_first_error": true,
+                "timeout_ms": 30_000,
+            }
+        }),
+    )
+    .await?;
+
+    assert_eq!(response.status, BatchStatus::Aborted);
+    assert_eq!(response.completed, 0);
+    assert_eq!(response.failed, 1);
+    assert_eq!(response.skipped, 2);
+    assert_eq!(response.results.len(), 3);
+    assert_eq!(response.results[0].id, "op1");
+    assert_eq!(response.results[0].status, OperationResultStatus::Error);
+    assert_eq!(response.results[1].id, "op2");
+    assert_eq!(response.results[1].status, OperationResultStatus::Skipped);
+    assert_eq!(response.results[2].id, "op3");
+    assert_eq!(response.results[2].status, OperationResultStatus::Skipped);
 
     Ok(())
 }

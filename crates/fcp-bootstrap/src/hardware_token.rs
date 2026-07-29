@@ -586,7 +586,7 @@ struct EnumerationSession {
 }
 
 impl EnumerationSession {
-    fn session(&self) -> &Session {
+    const fn session(&self) -> &Session {
         self.session
             .as_ref()
             .expect("enumeration session is still open")
@@ -1351,8 +1351,7 @@ impl<'a> CertificateSelectionIndex<'a> {
         };
 
         let selection_reason = format!(
-            "Ed25519 signing certificate with verified issuer chain selected among {} compatible pair(s)",
-            candidates_considered
+            "Ed25519 signing certificate with verified issuer chain selected among {candidates_considered} compatible pair(s)"
         );
 
         Ok(CertificateSelection {
@@ -1620,6 +1619,10 @@ fn acquire_provider_context_with_stage(
     Ok(pkcs11)
 }
 
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "the provider registry lock intentionally spans finalize to serialize PKCS#11 teardown"
+)]
 fn finalize_pkcs11_context(provider: &Path, pkcs11: Pkcs11) -> Result<(), TokenError> {
     // br-idk2k: hold the registry lock across the actual pkcs11.finalize()
     // call so no concurrent acquire_provider_context can observe the
@@ -3407,10 +3410,10 @@ mod tests {
         }
 
         let key_pair = KeyPair::generate().unwrap();
-        let cert = match signing_issuer {
-            Some(issuer) => params.signed_by(&key_pair, issuer).unwrap(),
-            None => params.self_signed(&key_pair).unwrap(),
-        };
+        let cert = signing_issuer.map_or_else(
+            || params.self_signed(&key_pair).unwrap(),
+            |issuer| params.signed_by(&key_pair, issuer).unwrap(),
+        );
 
         TokenCertificate {
             label: label.to_string(),
@@ -3422,6 +3425,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn test_x509_leaf_signed_by_ca(
         label: &str,
         id: &[u8],
@@ -4001,7 +4005,7 @@ mod tests {
         assert_eq!(material.pair.certificate.label, "slightly-future-leaf");
     }
 
-    /// REVIEW fresh-eyes pin (cc_1): the accept-within-skew test at
+    /// REVIEW fresh-eyes pin (`cc_1)`: the accept-within-skew test at
     /// `select_cert_accepts_leaf_and_ca_not_before_within_bootstrap_skew`
     /// would silently keep passing if a future commit widened
     /// `BOOTSTRAP_CERT_NOT_BEFORE_SKEW_SECS` to a large value (e.g.
@@ -4037,7 +4041,7 @@ mod tests {
             matches!(
                 err,
                 TokenError::CertificateSelectionFailed(
-                    CertificateSelectionRefusal::NoVerifiedIssuerChain { .. }
+                    CertificateSelectionRefusal::NoVerifiedIssuerChain
                 )
             ),
             "expected NoVerifiedIssuerChain for leaf with not_before 10× beyond skew, got {err:?}"

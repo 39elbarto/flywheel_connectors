@@ -15,9 +15,9 @@ fn err(message: impl Into<String>) -> Box<dyn Error> {
     std::io::Error::other(message.into()).into()
 }
 
-fn ensure_eq<T>(actual: T, expected: T, context: &str) -> TestResult
+fn ensure_eq<T>(actual: &T, expected: &T, context: &str) -> TestResult
 where
-    T: PartialEq + Debug,
+    T: PartialEq + Debug + ?Sized,
 {
     if actual == expected {
         Ok(())
@@ -69,27 +69,27 @@ fn preflight_check_display_and_serde_tags_are_pinned() -> TestResult {
     ];
 
     ensure_eq(
-        EnforcementCheckOrder::canonical_order(),
-        cases.map(|(check, _)| check),
+        &EnforcementCheckOrder::canonical_order(),
+        &cases.map(|(check, _)| check),
         "canonical preflight check order",
     )?;
 
     for (check, tag) in cases {
         ensure_eq(check.as_str(), tag, "as_str tag")?;
-        ensure_eq(check.to_string(), tag.to_string(), "Display tag")?;
+        ensure_eq(&check.to_string(), &tag.to_string(), "Display tag")?;
 
         let json = serde_json::to_value(check)?;
-        ensure_eq(json.clone(), serde_json::json!(tag), "JSON tag")?;
+        ensure_eq(&json, &serde_json::json!(tag), "JSON tag")?;
 
         let decoded_json: EnforcementCheckId = serde_json::from_value(json)?;
-        ensure_eq(decoded_json, check, "JSON roundtrip")?;
+        ensure_eq(&decoded_json, &check, "JSON roundtrip")?;
 
-        ensure_eq(cbor_tag(check)?, tag.to_string(), "CBOR tag")?;
+        ensure_eq(&cbor_tag(check)?, &tag.to_string(), "CBOR tag")?;
 
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&check, &mut bytes)?;
         let decoded_cbor: EnforcementCheckId = ciborium::de::from_reader(bytes.as_slice())?;
-        ensure_eq(decoded_cbor, check, "CBOR roundtrip")?;
+        ensure_eq(&decoded_cbor, &check, "CBOR roundtrip")?;
     }
 
     Ok(())

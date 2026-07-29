@@ -12,6 +12,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_BASE_URL, GoogleAiAuth, GoogleAiClient};
@@ -22,6 +23,7 @@ use crate::types::{
 };
 
 const GOOGLE_AI_ALLOWED_HOST: &str = "generativelanguage.googleapis.com";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn invalid_base_url(message: impl Into<String>) -> FcpError {
     FcpError::InvalidRequest {
@@ -208,6 +210,13 @@ impl GoogleAiConnector {
         self.base.instance_id.as_str()
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -242,6 +251,14 @@ impl GoogleAiConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -265,7 +282,7 @@ impl GoogleAiConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-ai-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1624,10 +1641,6 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::{ConnectorManifest, NetworkConstraints};
     use std::path::PathBuf;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
@@ -1725,6 +1738,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(GoogleAiConnector::manifest_hash(), expected);
+        assert_ne!(
+            GoogleAiConnector::manifest_hash(),
+            "sha256:google-ai-connector-v1"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -2021,87 +2047,6 @@ mod tests {
         let result = connector.handle_self_check().await.unwrap();
         assert_eq!(result["status"], "degraded");
         assert_eq!(result["reason_code"], "credential_injection_required");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "models": [{"name": "models/gemini-2.0-flash"}]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = GoogleAiConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "test-key",
-                "base_url": format!("{}/v1beta", mock_server.uri())
-            }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "ok");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_auth_failure() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = GoogleAiConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "bad-key",
-                "base_url": format!("{}/v1beta", mock_server.uri())
-            }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "failed");
-        assert_eq!(result["reason_code"], "self_check_failed");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_retryable_error() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = GoogleAiConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "test-key",
-                "base_url": format!("{}/v1beta", mock_server.uri())
-            }))
-            .await
-            .unwrap();
-
-        // Override retry config to avoid test slowness
-        if let Some(client) = &mut connector.client {
-            *client = GoogleAiClient::new_with_auth(GoogleAiAuth::ApiKey("test-key".into()))
-                .unwrap()
-                .with_base_url(&format!("{}/v1beta", mock_server.uri()))
-                .with_retry_config(0);
-        }
-
-        let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "degraded");
-        assert_eq!(result["reason_code"], "self_check_retryable");
     }
 
     // ── Original tests (invoke, introspect, manifest) ──────────────

@@ -143,7 +143,7 @@ fuzz_target!(|data: &[u8]| {
         body: body.to_vec(),
         storage: make_storage(),
     };
-    match verifier.verify(&genuine) {
+    match verifier.verify_bound(&genuine) {
         Ok(()) => assert!(
             input.install_key,
             "verify accepted but no key was installed for zone"
@@ -175,7 +175,7 @@ fuzz_target!(|data: &[u8]| {
             body: body.to_vec(),
             storage: make_storage(),
         };
-        match verifier.verify(&forged_obj) {
+        match verifier.verify_bound(&forged_obj) {
             Err(ObjectStoreError::ContentIdMismatch { claimed, computed }) => {
                 assert_eq!(claimed, forged_id);
                 assert_eq!(computed, genuine_id);
@@ -198,7 +198,7 @@ fuzz_target!(|data: &[u8]| {
                 body: tampered_body,
                 storage: make_storage(),
             };
-            match verifier.verify(&tampered) {
+            match verifier.verify_bound(&tampered) {
                 Err(ObjectStoreError::ContentIdMismatch { claimed, computed }) => {
                     assert_eq!(claimed, genuine_id);
                     assert_ne!(computed, genuine_id);
@@ -215,7 +215,7 @@ fuzz_target!(|data: &[u8]| {
     if input.correct_key != input.wrong_key {
         let mut wrong_verifier = KeyedObjectIdVerifier::default();
         install(&mut wrong_verifier, zone.clone(), wrong_key);
-        match wrong_verifier.verify(&genuine) {
+        match wrong_verifier.verify_bound(&genuine) {
             Err(ObjectStoreError::ContentIdMismatch { claimed, computed }) => {
                 assert_eq!(claimed, genuine_id);
                 assert_ne!(computed, genuine_id);

@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = ["streaming"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:groq-oai-compat"
+interface_hash = "blake3-256:fcp.interface.v2:c96bd68896b6140970de2296fe8ef276910cd821be13d288c33b8dee31247474"
 
 [connector]
 id = "fcp.groq"
 name = "Groq"
 version = "0.1.0"
 description = "Groq LPU inference connector using the OpenAI-compatible chat, streaming, model, and legacy completions API"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]
@@ -28,7 +28,7 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = ["groq.chat", "groq.models.read", "groq.health.read"]
+optional = ["groq.chat", "groq.models.read", "groq.health.read", "groq.embeddings"]
 forbidden = ["system.exec", "network.listen"]
 
 [sandbox]
@@ -114,7 +114,6 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-availability = "not_supported"
 input_schema = { type = "object", properties = {} }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["api.groq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
@@ -132,7 +131,6 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-availability = "deprecated"
 input_schema = { type = "object", required = ["prompt"], properties = { model = { type = "string", default = "llama-3.1-8b-instant" }, prompt = {}, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, provider_extensions = { type = "object" } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["api.groq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }

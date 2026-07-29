@@ -7,7 +7,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -18,6 +19,37 @@ use crate::{
 
 /// Default LinkedIn REST API v2 base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.linkedin.com/v2";
+
+/// Hex digits used by [`percent_encode_all`].
+const HEX_UPPER: [u8; 16] = *b"0123456789ABCDEF";
+
+/// Percent-encode every character outside the unreserved set
+/// (`A-Z a-z 0-9 - _ . ~`), including `%`.
+///
+/// LinkedIn URNs are interpolated as a single URL path segment
+/// (`/ugcPosts/{urn}`) and into query values (`organizationalEntity=`,
+/// `keywords=`). The previous `.replace(':', "%3A")` / `.replace(' ', "%20")`
+/// approach only handled a couple of characters, leaving `/` unencoded in the
+/// path (injecting extra segments / traversal) and `&`/`=` unencoded in query
+/// values (parameter smuggling). Encoding the full unreserved-complement closes
+/// both vectors; a normal `urn:li:share:123` still encodes to the same bytes
+/// LinkedIn expects.
+fn percent_encode_all(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push(HEX_UPPER[(byte >> 4) as usize] as char);
+                encoded.push(HEX_UPPER[(byte & 0x0F) as usize] as char);
+            }
+        }
+    }
+    encoded
+}
 
 /// LinkedIn REST-li protocol version header value.
 const RESTLI_PROTOCOL_VERSION: &str = "2.0.0";
@@ -120,10 +152,7 @@ impl LinkedInClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -249,13 +278,13 @@ impl LinkedInClient {
 
     /// Delete a UGC post by its URN.
     pub async fn delete_post(&self, post_urn: &str) -> LinkedInResult<serde_json::Value> {
-        let encoded = post_urn.replace(':', "%3A").replace('#', "%23");
+        let encoded = percent_encode_all(post_urn);
         self.delete(&format!("/ugcPosts/{encoded}")).await
     }
 
     /// Get a UGC post by its URN.
     pub async fn get_post(&self, post_urn: &str) -> LinkedInResult<serde_json::Value> {
-        let encoded = post_urn.replace(':', "%3A").replace('#', "%23");
+        let encoded = percent_encode_all(post_urn);
         self.get(&format!("/ugcPosts/{encoded}")).await
     }
 
@@ -263,7 +292,7 @@ impl LinkedInClient {
 
     /// Get share statistics for an organizational entity.
     pub async fn share_statistics(&self, share_urn: &str) -> LinkedInResult<serde_json::Value> {
-        let encoded = share_urn.replace(':', "%3A").replace('#', "%23");
+        let encoded = percent_encode_all(share_urn);
         self.get(&format!(
             "/organizationalEntityShareStatistics?q=organizationalEntity&organizationalEntity={encoded}"
         ))
@@ -274,7 +303,7 @@ impl LinkedInClient {
 
     /// Search for companies by keywords.
     pub async fn search_companies(&self, keywords: &str) -> LinkedInResult<serde_json::Value> {
-        let encoded_kw = keywords.replace(' ', "%20");
+        let encoded_kw = percent_encode_all(keywords);
         self.get(&format!(
             "/search/blended?q=all&keywords={encoded_kw}&types=List(COMPANY)"
         ))
@@ -282,9 +311,45 @@ impl LinkedInClient {
     }
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> LinkedInResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_encode_all_passes_unreserved() {
+        assert_eq!(percent_encode_all("technology"), "technology");
+        assert_eq!(percent_encode_all("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn percent_encode_all_encodes_urn_for_path() {
+        // A normal URN encodes to the same bytes the old `:`-only replace produced…
+        assert_eq!(
+            percent_encode_all("urn:li:share:12345"),
+            "urn%3Ali%3Ashare%3A12345"
+        );
+        // …but a `/` in the URN is now encoded instead of splitting the path.
+        assert!(percent_encode_all("urn:li:share:a/b").contains("%2F"));
+    }
+
+    #[test]
+    fn percent_encode_all_blocks_query_smuggling() {
+        let encoded = percent_encode_all("trending&types=List(ADMIN)");
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('='));
+        assert!(encoded.contains("%26"));
+        assert!(encoded.contains("%3D"));
+    }
 
     #[test]
     fn auth_debug_redacts_token() {
@@ -337,6 +402,32 @@ mod tests {
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn decode_success_body_coerces_empty_ok_to_empty_object() {
+        // Contract (commit 506b45904): a 2xx with an empty body is a successful
+        // no-content response and decodes to `{}` rather than failing closed.
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "").unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_coerces_whitespace_ok_to_empty_object() {
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "  \n\t").unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

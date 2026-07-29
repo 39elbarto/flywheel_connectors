@@ -40,6 +40,7 @@ Important runtime truths the contract preserves:
 - Chat validation accepts Fireworks extensions such as `reasoning_effort` and `context_length_exceeded_behavior`.
 - `fireworks.models.list` uses a Fireworks-aware in-memory model cache and supports `{"refresh": true}` to invalidate it.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `fireworks.chat.completions_stream`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

@@ -45,12 +45,190 @@ The connector prewarm lane uses `swarm-prewarm-cold-start/v2` JSONL records from
 `crates/fcp-e2e/tests/swarm_gauntlet_e2e.rs`. The v2 records carry the same
 latency and resource fields as v1 plus the host checkout boundary, sandbox
 profile/boundary, `CARGO_TARGET_DIR`, connector fixture id, pool size,
-admission decision, warm-checkout flag, error mapping, and cleanup result. That
-keeps cold-start comparisons tied to `fcp-host`/`fcp-sandbox` evidence instead
-of a latency-only artifact.
+admission decision, warm-checkout flag, execution mode, source kind, error
+mapping, and cleanup result. That keeps cold-start comparisons tied to the
+explicit evidence class instead of a latency-only artifact.
+Verifier-provided JSONL must use the same stable labels as the typed evidence:
+`execution_mode` is `smoke` or `soak`, and `source_kind` is `offline`,
+`host_backed`, or `live`. Numeric evidence fields are integer quantities:
+latencies and improvements are integer milliseconds, resource fields are
+integer bytes or counts, and fractional values are rejected instead of being
+rounded by downstream dashboards.
 The replayable top-level row exposes current p50/p95/p99 activation latency,
 baseline p50/p95/p99 activation latency, and per-percentile improvement deltas
 so before/after promotion gates do not need to parse nested evidence payloads.
+The nested typed `evidence.latency` and `evidence.baseline_latency` objects must
+still carry the full ordered p50/p95/p99/p999/max/mean shape required by
+`SwarmPrewarmColdStartEvidence::validate()`, and the verifier reports
+`nested_latency_shape_ok=false` when externally supplied evidence omits or
+misorders those fields. The top-level replay row and nested typed `evidence`
+object must also agree on `pool_size`, so provided bundles cannot report one
+configured prewarm pool capacity while embedding another.
+The command line must prove the Cargo lane ran through `rch exec --` instead of
+local Cargo so the artifact is usable as shared-worker evidence.
+The E2E JSONL bundle covers warm hit, empty pool, stale warm entry, crash before
+checkout, shutdown cleanup, concurrent swarm startup, burst exhaustion,
+sandbox-limit fallback, checkout cancellation before admit, and zygote rejection
+without a security proof.
+Run `scripts/e2e/connector_prewarm_cold_start_verification.sh` to produce the
+repeatable artifact bundle under `artifacts/e2e/connector-prewarm-cold-start/`.
+The script keeps Cargo execution behind `rch`, forces verbose RCH visibility,
+requires its embedded proof run to finish with an observed `[RCH] remote`
+summary, extracts the emitted JSONL proof, validates the required scenarios, and
+writes a structured skip artifact when a remote worker is unavailable. Operator
+provided run ids must be redaction-safe label tokens using only ASCII letters,
+digits, `.`, `_`, and `-`, so artifact paths cannot be shaped with slashes,
+traversal, or private-path fragments. A
+successful embedded run that reports `[RCH] local` or emits no RCH summary fails
+closed instead of being reusable shared-worker evidence. Worker identity uses
+the same redaction-safe label discipline: `worker_id` must be a stable ASCII
+label, 1 to 128 bytes, using only letters, digits, `.`, `_`, and `-`; it is not
+a free-form hostname, prose note, or path wrapper. Remote prerequisite skips
+are acceptable only for the default deterministic smoke lane, and their skip
+JSONL stores only the target-dir class, a `sha256:<64 lowercase hex>`
+target-dir fingerprint, and the relative test-log artifact name. It does not
+write raw target or local log paths into the skip evidence. The shell verifier
+uses the same private absolute target-root classification as the typed evidence
+helper before writing skip metadata; a private user, project, mounted-volume, or
+Windows user target directory fails closed instead of being downgraded to a
+generic absolute target class. Final
+production-soak gating fails closed when host-backed or live evidence cannot be
+collected. Operators can set `RCH_BIN=/path/to/rch` to validate a patched RCH
+binary, while `RCH_FORCE_REMOTE=1` is exported by the script so fallback stays
+refused. Verifier validation and the typed
+`SwarmPrewarmColdStartEvidence::validate()` contract both require
+`CARGO_TARGET_DIR` provenance and connector manifest identity to carry
+`blake3:<64 lowercase hex>` hashes, not just free-form labels or prefix-only
+markers. The same hash-shape rule applies to the exported `zone` field, so
+production artifacts identify the requested zone by a stable redaction-safe
+digest instead of leaking raw `z:project:*` labels. The typed validator also
+recomputes the `CARGO_TARGET_DIR` Blake3 hash from the recorded target
+directory before serialization succeeds, so replay rows cannot spoof target-dir
+provenance with an unrelated valid-looking digest. Target directories with
+parent traversal segments such as `..`, whether separated with `/` or `\`, are
+rejected before export so a proof cannot present a stable hash for a path that
+normalizes back to a shared root or outside the intended proof directory. They
+also enforce the same
+admission-decision shape: `admit_warm`
+must carry `warm_checkout=true`, `error_mapping="ok"`, and no fallback or
+unsafe-rejection reason; `fallback_on_demand` must carry
+`warm_checkout=false` plus a non-empty
+`fallback_reason` with `error_mapping="fallback_on_demand:<fallback_reason>"`,
+and `reject_unsafe` must carry `warm_checkout=false` plus a non-empty
+`unsafe_rejection_reason` with
+`error_mapping="reject_unsafe:<unsafe_rejection_reason>"`. Warm admissions must
+also report `pool_state="warm_hit"`. Pool-derived fallback and rejection reasons
+must preserve the host decision model in replayable evidence: `empty_pool`
+requires `pool_state="empty"`, `warm_entry_stale` requires
+`pool_state="stale"`, `crash_before_checkout` requires
+`pool_state="crash_before_checkout"`, `sandbox_limits_unavailable` requires
+`sandbox_layer="limits_unavailable"`, and `warm_entry_rejected` requires
+`pool_state="rejected"`. Its default lane is
+deterministic smoke
+evidence with `execution_mode=smoke` and `source_kind=offline`; final
+production-soak acceptance must run with
+`--require-production-soak` or
+`REQUIRE_PRODUCTION_SOAK=1`, which rejects offline policy records and requires
+host-backed or live soak evidence through production `fcp-host`/`fcp-sandbox`
+boundaries. Production-soak records must also omit `skip_reason`; a skipped
+remote-worker prerequisite is acceptable smoke evidence but cannot satisfy final
+promotion. Operators can validate an externally collected production-soak
+JSONL bundle without rerunning the smoke Cargo lane by passing
+`--evidence-jsonl <path>` together with `--require-production-soak`; this uses
+the same scenario coverage, boundary, resource, percentile, nested evidence, and
+redaction checks as the default verifier. Operators can also run a production
+producer directly with `--production-soak-command 'cargo test -p fcp-host --bin
+fcp-host production_prewarm_soak_evidence_emits_host_backed_measured_rejection_jsonl
+-- --nocapture'`; the verifier prepends `rch exec -- env`, passes the resolved
+git revision and dedicated `CARGO_TARGET_DIR`, records only a SHA-256 hash of
+the producer command, and requires replay callers to provide the redacted
+command again instead of baking local shell text into `replay.sh`. The verifier and typed bundle
+validator require exactly one record for each required prewarm scenario so
+evidence bundles cannot be stitched from duplicate scenario records. The typed
+record validator rejects non-canonical prewarm scenario ids before
+serialization, so single-row artifacts cannot bypass the same scenario
+allowlist that the bundle verifier enforces. The
+environment metadata records only the selected `RCH_BIN` basename plus a
+`sha256:<64 lowercase hex>` fingerprint of the configured value; private patched
+binary paths are redacted from the evidence JSON. `RUN_ID` is rejected before
+artifact directories are created if it contains the same secret or private-path
+markers used by artifact redaction, with stderr reporting only a hash of the
+rejected value. `replay.sh` is self-locating inside the artifact bundle, writes
+rerun output under a local `replay/` subdirectory, defaults to `RCH_BIN` from
+`PATH`, reuses the copied provided-evidence JSONL from the bundle when present,
+and requires `FCP_REPO_ROOT` only if it cannot infer the checkout from the
+default artifact layout; it is scanned with the same secret/private-path pattern
+before exit. The metadata artifacts and final verifier stdout follow the same
+rule for repository root, artifact root, `CARGO_TARGET_DIR`, and
+provided-evidence input paths: `environment.json` stores classes and
+`sha256:<64 lowercase hex>` fingerprints instead of absolute paths, while
+separately recording the `sha256:<64 lowercase hex>` content digest of the
+copied evidence JSONL bundle. `summary.json` is written after `replay.sh` has
+been generated and scanned, names bundle artifacts by relative path only, and
+repeats both the evidence JSONL and replay script content digests so reviewers
+can tie validation results to the exact replay inputs without exposing the
+operator's local source path. In provided-evidence mode, the test log records
+only a `sha256:<64 lowercase hex>` fingerprint for the input path and is scanned
+for the same private-path markers before the verifier exits. Both metadata JSON
+files are scanned for the same secret and private-path markers as the evidence
+rows before the verifier exits. The verifier resolves the checkout revision
+with a per-command Git safe-directory override, so NFS or shared-owner
+checkouts still emit a concrete git revision without changing global Git
+configuration.
+The verifier and typed serializer both require production-soak warm-hit,
+shutdown-cleanup, and concurrent-swarm-startup promotion scenarios to either
+show positive p50, p95, and p99 improvement deltas or record a non-warm
+`fallback_on_demand`/`reject_unsafe` decision with a measured rationale. Every provided
+evidence row must also keep p50 <= p95 <= p99 for both current and baseline
+latency, and current activation latency must not exceed the matching on-demand
+baseline. Its nested typed latency objects must also keep
+p50 <= p95 <= p99 <= p999 <= max and set a positive mean, so a provided JSONL
+bundle cannot pass with top-level summary fields while dropping the deeper
+typed latency contract. The top-level improvement fields must match
+baseline-minus-current latency exactly, and each row must explicitly set
+`shutdown_cleanup_verified=true` with `cleanup_result="verified"`. The typed
+validator and shell verifier also require the replay command to carry the same
+`CARGO_TARGET_DIR=<cargo_target_dir>` value exported in the evidence row, and
+reject unresolved `git_revision="unknown"` provenance, non-hex Git revision
+labels outside the 7-to-40 character short/full object-id range, unredacted
+live-token, bearer, authorization, access-token, refresh-token, ID-token,
+client-secret, API-key, private-key, secret-key, password, cookie, credential
+key/value markers, macOS/Linux/Windows private-user paths, Linux project
+checkout paths, private-var-path, mounted-volume-path, raw `operation:`,
+`principal:`, or `zone:` labels, raw `z:` zone labels, provider payload
+markers, reviewer private-contact markers, and `private_absolute` target-dir
+evidence before export. Evidence also cannot use shared target roots such as
+`/tmp`, `/private/tmp`, `target`, or `./target`, including trailing slash or
+`/.` variants of those roots, nor parent traversal forms that can escape a
+dedicated proof target directory;
+use a dedicated child directory so the target-dir hash identifies one proof run;
+`cargo_target_dir_class` must be one of the stable export labels `tmp`,
+`absolute`, or `relative`, so novel labels cannot bypass the redaction gate.
+`private_absolute` is reserved as an internal reject class for local user,
+project, mounted-volume, and Windows user target roots; it is not valid
+reusable evidence.
+`validation.json` records `redaction_scan_ok=true` when that final scan passes
+or `redaction_scan_ok=false` with a reason when it rejects the bundle. The
+verifier's environment and summary artifacts record `remote_proof_status`, the
+presence and `sha256:<64 lowercase hex>` fingerprint of the observed RCH
+summary, and any stable remote-proof failure reason so operators can distinguish
+remote execution from refused local fallback without copying a raw log line into
+reusable metadata. The verifier's
+`validation.json`
+also records a latency summary with the worst current p50/p95/p99, worst
+baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
+with no p99 improvement, plus the observed execution/source classes and
+`fcp-host::`/`fcp-sandbox::` boundary names. The typed evidence validator and
+shell verifier both require those production-soak boundary names to begin with
+the exact `fcp-host::` and `fcp-sandbox::` prefixes, include at least one
+alphanumeric component after the prefix, and use canonical machine-label
+characters only (`A-Z`, `a-z`, `0-9`, `_`, `-`, `.`, and `:`). Bare namespace
+prefixes, wrapper labels, or prose suffixes that merely embed those strings are
+rejected. That makes before/after promotion evidence auditable without scraping
+every JSONL row by hand. Synthetic checkout evidence from
+`ConnectorPrewarmConfig::decide_checkout` is rejected even when the boundary is
+padded or embedded inside a wrapper label, so fixture-derived smoke records
+cannot be reclassified as production soak input.
 
 ## Environment Capture For Final Review
 

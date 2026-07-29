@@ -480,7 +480,7 @@ fn coverage_evaluation_maps_to_fcps_durability() {
         let object_id = ObjectId::from_bytes([0xDD; 32]);
         let zone = test_zone();
 
-        let store_oti: ObjectTransmissionInfo = oti.into();
+        let store_oti: ObjectTransmissionInfo = oti;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone.clone(),
@@ -583,7 +583,7 @@ fn lifecycle_snapshot_captures_fcps_durability_state() {
         });
         store.put(object).await.unwrap();
 
-        let store_oti: ObjectTransmissionInfo = oti.into();
+        let store_oti: ObjectTransmissionInfo = oti;
         symbol_store
             .put_object_meta(ObjectSymbolMeta {
                 object_id,

@@ -1,7 +1,7 @@
-//! Pin the closest analogue to a "CapabilityType" serde tag matrix
+//! Pin the closest analogue to a "`CapabilityType`" serde tag matrix
 //! (flywheel_connectors-282xa).
 //!
-//! Bead asks for "CapabilityType serde tag JSON+CBOR roundtrip per
+//! Bead asks for "`CapabilityType` serde tag JSON+CBOR roundtrip per
 //! documented contract". No type literally named `CapabilityType`
 //! exists in fcp-core. The capability surface in fcp-core has
 //! several classifier enums, each with `#[serde(rename_all =
@@ -9,7 +9,7 @@
 //!
 //!  - `SafetyTier` (capability.rs:2240) — 5 variants
 //!    (Safe/Risky/Dangerous/Critical/Forbidden). Classifies
-//!    "can this agent do this?" — the closest "CapabilityType"
+//!    "can this agent do this?" — the closest "`CapabilityType`"
 //!    analogue and the one wired into `OperationMeta.safety_tier`,
 //!    `ToolDescriptor.safety_tier`, and CLI filters.
 //!  - `RiskLevel` (capability.rs:2217) — 4 variants
@@ -18,19 +18,19 @@
 //!    (None/BestEffort/Strict).
 //!
 //! This test pins the JSON+CBOR tag matrix for ALL THREE classifier
-//! enums (SafetyTier as the primary, RiskLevel + IdempotencyClass as
+//! enums (`SafetyTier` as the primary, `RiskLevel` + `IdempotencyClass` as
 //! the rest of the capability-typing surface), since drift in any of
 //! them silently breaks operator dashboards and audit-log filtering.
 //!
 //! Targets per enum:
 //!
-//!   1. **Per-variant JSON tag form** in snake_case.
+//!   1. **Per-variant JSON tag form** in `snake_case`.
 //!   2. **JSON round-trip** preserves variant identity.
 //!   3. **CBOR round-trip** preserves variant identity.
-//!   4. **CBOR encodes as Text(snake_case)**, not as integer/array.
-//!   5. **PascalCase + unknown rejected** — only documented snake_case
+//!   4. **CBOR encodes as `Text(snake_case)`**, not as integer/array.
+//!   5. **`PascalCase` + unknown rejected** — only documented `snake_case`
 //!      tokens are canonical wire input.
-//!   6. **All variants pairwise distinct** (Eq + serialized form).
+//!   6. **All variants pairwise distinct** (`Eq` + serialized form).
 
 use ciborium::value::Value as CborValue;
 use fcp_core::{IdempotencyClass, RiskLevel, SafetyTier};
@@ -91,7 +91,7 @@ fn safety_tier_cbor_encodes_as_text_not_integer() {
         let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         match value {
             CborValue::Text(s) => {
-                assert_eq!(s, *expected, "SafetyTier CBOR Text drift on {variant:?}")
+                assert_eq!(s, *expected, "SafetyTier CBOR Text drift on {variant:?}");
             }
             other => panic!("SafetyTier CBOR MUST encode as Text({expected:?}); got {other:?}"),
         }
@@ -127,13 +127,9 @@ fn safety_tier_variants_pairwise_distinct() {
     }
     assert_eq!(seen_jsons.len(), SAFETY_TIER_CASES.len());
 
-    for i in 0..SAFETY_TIER_CASES.len() {
-        for j in (i + 1)..SAFETY_TIER_CASES.len() {
-            assert_ne!(
-                SAFETY_TIER_CASES[i].0, SAFETY_TIER_CASES[j].0,
-                "{:?} and {:?} MUST be distinct",
-                SAFETY_TIER_CASES[i].0, SAFETY_TIER_CASES[j].0
-            );
+    for (i, (left, _)) in SAFETY_TIER_CASES.iter().enumerate() {
+        for (right, _) in SAFETY_TIER_CASES.iter().skip(i + 1) {
+            assert_ne!(*left, *right, "{left:?} and {right:?} MUST be distinct");
         }
     }
 }

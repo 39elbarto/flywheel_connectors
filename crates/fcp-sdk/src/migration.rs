@@ -11,12 +11,10 @@
 //!
 //! # Components
 //!
-//! - [`ConnectorRuntime`]: Lifecycle wrapper providing `ExecutionContext` creation,
-//!   shutdown coordination, and health tracking.
 //! - [`RetryLoop`]: Generic retry executor using `ExecutionContext` for
 //!   deadline-aware exponential backoff with jitter.
-//! - [`ConnectorErrorMapping`]: Trait for consistent `AsyncError` → connector
-//!   error conversion.
+//! - [`crate::ConnectorErrorMapping`]: Trait for consistent `AsyncError` →
+//!   connector error conversion.
 //! - [`HttpRetryConfig`]: Serializable retry configuration shared by HTTP connectors.
 //! - [`classify_http_status`]: Canonical HTTP status → retry decision mapping.
 //! - [`map_async_to_fcp_error`]: Canonical `AsyncError` → `FcpError` mapping.
@@ -26,19 +24,15 @@
 //! Every connector migration MUST satisfy all items below. Use this as
 //! the acceptance gate before closing a connector migration bead.
 //!
-//! ## Phase 1: Runtime Bootstrap
+//! Runtime bootstrap helpers graduated to [`crate::runtime::ConnectorRuntime`],
+//! and the connector error-mapping contract graduated to
+//! [`crate::error_mapping`]. Connector authors should import
+//! [`crate::ConnectorErrorMapping`] from the SDK root.
 //!
-//! - [ ] Replace any direct runtime builders or spawn calls with
-//!   `ConnectorRuntime::new()` during `configure()`.
-//! - [ ] All request paths create contexts via `runtime.request_context()`
-//!   or `runtime.request_context_with_timeout()`.
-//! - [ ] Long-lived operations (streaming, polling) use `runtime.background_context()`.
-//! - [ ] Connector `shutdown()` calls `runtime.shutdown()` to propagate cancellation.
-//!
-//! ## Phase 2: Retry & Error Mapping
+//! ## Retry & Error Mapping
 //!
 //! - [ ] Remove hand-rolled retry loops; replace with [`RetryLoop::execute()`].
-//! - [ ] Implement [`ConnectorErrorMapping`] on the connector's error type.
+//! - [ ] Implement [`crate::ConnectorErrorMapping`] on the connector's error type.
 //! - [ ] HTTP status classification delegates to [`classify_http_status()`].
 //! - [ ] `AsyncError` mapping delegates to [`map_async_to_fcp_error()`] for
 //!   the timeout/cancellation/runtime arms.
@@ -119,9 +113,10 @@
 //!
 //! ```ignore
 //! // connectors/openai/src/client.rs — AFTER migration
+//! use fcp_sdk::{ConnectorErrorMapping, ConnectorRuntime};
 //! use fcp_sdk::migration::{
-//!     AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime,
-//!     HttpRetryConfig, RetryLoop, classify_http_status, map_async_to_fcp_error,
+//!     AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status,
+//!     map_async_to_fcp_error,
 //! };
 //!
 //! // In OpenAIClient:
@@ -201,11 +196,10 @@
 //! - Retry config serializable from connector TOML/JSON configuration
 //! - Error mapping centralized in `ConnectorErrorMapping` impl
 
-use std::fmt;
 use std::time::Duration;
 
+use fcp_async_core::http::HttpClientError;
 use fcp_async_core::{AsyncError, ExecutionContext};
-use fcp_manifest::{ConnectorManifest, ManifestTimeouts};
 #[cfg(feature = "connector-http")]
 use fcp_manifest::{
     HostEgressHttpRequest, HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse,
@@ -213,388 +207,12 @@ use fcp_manifest::{
 use tracing::{debug, warn};
 
 use crate::FcpError;
+use crate::error_mapping::ConnectorErrorMapping;
+pub use crate::error_mapping::map_async_to_fcp_error;
 use crate::retry::{RetryDecision, RetryPolicy};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ConnectorRuntime
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Shared connector runtime providing lifecycle management.
-///
-/// Each connector instance creates one `ConnectorRuntime` during `configure()`.
-/// The runtime provides:
-/// - Request-scoped `ExecutionContext` creation with configurable timeouts
-/// - Background context for long-lived operations (streaming, polling)
-/// - Graceful shutdown coordination
-///
-/// # Example
-///
-/// ```ignore
-/// let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-///
-/// // For each request:
-/// let ctx = runtime.request_context();
-/// let result = ctx.run(client.get(url).send()).await;
-///
-/// // On shutdown:
-/// runtime.shutdown();
-/// ```
-#[derive(Debug, Clone)]
-pub struct ConnectorRuntime {
-    config: ConnectorRuntimeConfig,
-    background_ctx: ExecutionContext,
-    request_ctx_root: ExecutionContext,
-}
-
-const MANIFEST_REQUEST_TIMEOUT_ENV_VAR: &str = "FCP_REQUEST_TIMEOUT_MS";
-const HOST_EGRESS_PROXY_URL_ENV_VAR: &str = "FCP_HOST_EGRESS_PROXY_URL";
-
-/// Operator opt-in that lets `FCP_REQUEST_TIMEOUT_MS` actually take effect.
-///
-/// Bead flywheel_connectors-3a3r6: previously the request-timeout env var
-/// silently overrode the manifest's pinned `[timeouts]` section, which
-/// inverts the trust hierarchy — the manifest is operator-pinned (and
-/// will be signed in a future regime), the env is ambient and writable
-/// by anything in the connector's process tree. Defense-in-depth pattern
-/// shared with br-n4429 (registry trust roots): require an explicit `=1`
-/// opt-in env before honoring the ambient override. Anything else (unset,
-/// `0`, `false`, blank, mixed case) means the manifest wins.
-const ALLOW_AMBIENT_TIMEOUT_OVERRIDE_ENV_VAR: &str = "FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE";
-
-/// Pure: classify a raw env value (or its absence) as an opt-in or not.
-///
-/// Exact-match against `1` / `true` / `yes`. Mixed case (`True`, `YES`)
-/// and falsey values (`0`, `false`, `no`, blank) all read as not-opt-in
-/// so a typo can't accidentally enable the override.
-fn opt_in_value_allows_override(value: Option<&str>) -> bool {
-    matches!(value, Some("1" | "true" | "yes"))
-}
-
 #[cfg(test)]
-thread_local! {
-    /// Test-only override for the opt-in env read. The crate forbids
-    /// `unsafe_code`, so tests cannot use `std::env::set_var` (which
-    /// became `unsafe` in Rust 2024). Each test sets this thread-local to
-    /// its desired raw value and the reader below honors it. Outer
-    /// `Option` is "is the override set?" (None == fall through to real
-    /// env read); inner `Option` is "what raw value should be reported?"
-    /// (None == env-unset).
-    #[allow(clippy::option_option)]
-    static AMBIENT_OPT_IN_TEST_VALUE:
-        std::cell::RefCell<Option<Option<String>>> =
-            const { std::cell::RefCell::new(None) };
-
-    /// Test-only override for the request-timeout env read. Same shape
-    /// and rationale as `AMBIENT_OPT_IN_TEST_VALUE`.
-    #[allow(clippy::option_option)]
-    static REQUEST_TIMEOUT_TEST_VALUE:
-        std::cell::RefCell<Option<Option<String>>> =
-            const { std::cell::RefCell::new(None) };
-}
-
-fn ambient_timeout_override_allowed() -> bool {
-    #[cfg(test)]
-    {
-        let test_override = AMBIENT_OPT_IN_TEST_VALUE.with(|cell| cell.borrow().clone());
-        if let Some(value) = test_override {
-            return opt_in_value_allows_override(value.as_deref());
-        }
-    }
-    let real = std::env::var_os(ALLOW_AMBIENT_TIMEOUT_OVERRIDE_ENV_VAR);
-    let owned = real.map(|value| value.to_string_lossy().into_owned());
-    opt_in_value_allows_override(owned.as_deref())
-}
-
-fn ambient_request_timeout_env_value() -> Option<String> {
-    #[cfg(test)]
-    {
-        let test_override = REQUEST_TIMEOUT_TEST_VALUE.with(|cell| cell.borrow().clone());
-        if let Some(value) = test_override {
-            return value;
-        }
-    }
-    std::env::var_os(MANIFEST_REQUEST_TIMEOUT_ENV_VAR)
-        .map(|value| value.to_string_lossy().into_owned())
-}
-
-/// Errors produced while loading runtime settings from an embedded manifest.
-#[derive(Debug, thiserror::Error)]
-pub enum ConnectorRuntimeConfigError {
-    /// The connector manifest could not be parsed or validated.
-    #[error(transparent)]
-    Manifest(#[from] fcp_manifest::ManifestError),
-
-    /// The request-timeout override env var was present but unusable.
-    #[error("{env_var} must be a positive integer number of milliseconds, got `{value}`")]
-    InvalidRequestTimeoutEnvVar {
-        /// The env var name.
-        env_var: &'static str,
-        /// The invalid value observed at load time.
-        value: String,
-    },
-}
-
-/// Configuration for [`ConnectorRuntime`].
-#[derive(Debug, Clone)]
-pub struct ConnectorRuntimeConfig {
-    /// Default timeout for request-scoped operations.
-    pub request_timeout: Duration,
-    /// Default timeout for establishing outbound connections.
-    pub connect_timeout: Duration,
-    /// Default wall-clock budget for a single operation.
-    pub wall_clock_timeout: Duration,
-    /// Timeout for graceful shutdown.
-    pub shutdown_timeout: Duration,
-    /// Connector-facing host egress endpoint. When present, SDK egress helpers
-    /// use `/rpc/egress/*` instead of opening direct sockets.
-    pub host_egress_proxy_url: Option<String>,
-}
-
-impl Default for ConnectorRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            request_timeout: Duration::from_secs(120),
-            connect_timeout: Duration::from_secs(10),
-            wall_clock_timeout: Duration::from_secs(120),
-            shutdown_timeout: Duration::from_secs(30),
-            host_egress_proxy_url: None,
-        }
-    }
-}
-
-impl ConnectorRuntimeConfig {
-    /// Manifest-aligned defaults used by newly scaffolded connectors.
-    #[must_use]
-    pub const fn manifest_defaults() -> Self {
-        Self {
-            request_timeout: Duration::from_secs(30),
-            connect_timeout: Duration::from_secs(5),
-            wall_clock_timeout: Duration::from_secs(60),
-            shutdown_timeout: Duration::from_secs(30),
-            host_egress_proxy_url: None,
-        }
-    }
-
-    /// Build runtime settings from a manifest `[timeouts]` section.
-    #[must_use]
-    pub const fn from_manifest_timeouts(timeouts: &ManifestTimeouts) -> Self {
-        Self::manifest_defaults()
-            .with_request_timeout(Duration::from_millis(timeouts.request_timeout_ms))
-            .with_connect_timeout(Duration::from_millis(timeouts.connect_timeout_ms))
-            .with_wall_clock_timeout(Duration::from_millis(timeouts.wall_clock_timeout_ms))
-    }
-
-    /// Build runtime settings from a parsed connector manifest.
-    ///
-    /// If the manifest omits `[timeouts]`, scaffold defaults are used. An
-    /// `FCP_REQUEST_TIMEOUT_MS` env var overrides the request timeout
-    /// ONLY when the operator has explicitly opted in via
-    /// `FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE=1` (br-3a3r6). Without the
-    /// opt-in the manifest's pinned timeout always wins, even if the env
-    /// var is set — the manifest is operator-pinned, the env is ambient
-    /// and writable by anything in the connector's process tree.
-    ///
-    /// # Errors
-    /// Returns an error when the opt-in is set AND `FCP_REQUEST_TIMEOUT_MS`
-    /// is present but invalid. When the opt-in is missing the env value is
-    /// not consulted, so a malformed value cannot be used as a denial-of-
-    /// service vector.
-    pub fn from_manifest(
-        manifest: &ConnectorManifest,
-    ) -> Result<Self, ConnectorRuntimeConfigError> {
-        let request_timeout_override = if ambient_timeout_override_allowed() {
-            ambient_request_timeout_env_value()
-        } else {
-            None
-        };
-        Self::from_manifest_with_request_timeout_override(
-            manifest,
-            request_timeout_override.as_deref(),
-        )
-    }
-
-    /// Build runtime settings from embedded manifest TOML.
-    ///
-    /// # Errors
-    /// Returns an error when the manifest is invalid or the request-timeout
-    /// env override cannot be parsed.
-    pub fn from_manifest_str(manifest_toml: &str) -> Result<Self, ConnectorRuntimeConfigError> {
-        let manifest = ConnectorManifest::parse_str(manifest_toml)?;
-        Self::from_manifest(&manifest)
-    }
-
-    /// Builder: set request timeout.
-    #[must_use]
-    pub const fn with_request_timeout(mut self, timeout: Duration) -> Self {
-        self.request_timeout = timeout;
-        self
-    }
-
-    /// Builder: set connect timeout.
-    #[must_use]
-    pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
-        self.connect_timeout = timeout;
-        self
-    }
-
-    /// Builder: set wall-clock timeout.
-    #[must_use]
-    pub const fn with_wall_clock_timeout(mut self, timeout: Duration) -> Self {
-        self.wall_clock_timeout = timeout;
-        self
-    }
-
-    /// Builder: set shutdown timeout.
-    #[must_use]
-    pub const fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
-        self.shutdown_timeout = timeout;
-        self
-    }
-
-    /// Builder: set the host egress proxy base URL.
-    #[must_use]
-    pub fn with_host_egress_proxy_url(mut self, url: impl Into<String>) -> Self {
-        self.host_egress_proxy_url = Some(url.into());
-        self
-    }
-
-    /// Builder: read the host egress proxy base URL from the launch
-    /// environment the host gives strict host-proxy connectors.
-    #[must_use]
-    pub fn with_host_egress_proxy_url_from_env(mut self) -> Self {
-        if let Some(url) = std::env::var_os(HOST_EGRESS_PROXY_URL_ENV_VAR)
-            .map(|value| value.to_string_lossy().trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            self.host_egress_proxy_url = Some(url);
-        }
-        self
-    }
-
-    fn from_manifest_with_request_timeout_override(
-        manifest: &ConnectorManifest,
-        request_timeout_override: Option<&str>,
-    ) -> Result<Self, ConnectorRuntimeConfigError> {
-        let mut config = manifest
-            .timeouts
-            .as_ref()
-            .map_or_else(Self::manifest_defaults, Self::from_manifest_timeouts);
-
-        if let Some(timeout) = parse_request_timeout_override(request_timeout_override)? {
-            config = config.with_request_timeout(timeout);
-        }
-
-        Ok(config)
-    }
-}
-
-fn parse_request_timeout_override(
-    request_timeout_override: Option<&str>,
-) -> Result<Option<Duration>, ConnectorRuntimeConfigError> {
-    let Some(raw) = request_timeout_override else {
-        return Ok(None);
-    };
-
-    let timeout_ms: u64 =
-        raw.parse().map_err(
-            |_| ConnectorRuntimeConfigError::InvalidRequestTimeoutEnvVar {
-                env_var: MANIFEST_REQUEST_TIMEOUT_ENV_VAR,
-                value: raw.to_string(),
-            },
-        )?;
-    if timeout_ms == 0 {
-        return Err(ConnectorRuntimeConfigError::InvalidRequestTimeoutEnvVar {
-            env_var: MANIFEST_REQUEST_TIMEOUT_ENV_VAR,
-            value: raw.to_string(),
-        });
-    }
-
-    Ok(Some(Duration::from_millis(timeout_ms)))
-}
-
-impl ConnectorRuntime {
-    /// Create a new connector runtime.
-    #[must_use]
-    pub fn new(config: ConnectorRuntimeConfig) -> Self {
-        Self {
-            config,
-            background_ctx: ExecutionContext::background(),
-            request_ctx_root: ExecutionContext::request_scoped(Duration::MAX),
-        }
-    }
-
-    /// Create a request-scoped execution context with the configured timeout.
-    #[must_use]
-    pub fn request_context(&self) -> ExecutionContext {
-        self.request_ctx_root
-            .child()
-            .with_deadline(self.config.request_timeout)
-    }
-
-    /// Create a request-scoped context with a custom timeout.
-    #[must_use]
-    pub fn request_context_with_timeout(&self, timeout: Duration) -> ExecutionContext {
-        self.request_ctx_root.child().with_deadline(timeout)
-    }
-
-    /// Get a child of the background context for long-lived operations.
-    #[must_use]
-    pub fn background_context(&self) -> ExecutionContext {
-        self.background_ctx.child()
-    }
-
-    /// Trigger graceful shutdown of all contexts.
-    pub fn shutdown(&self) {
-        self.background_ctx.cancel();
-        self.request_ctx_root.cancel();
-    }
-
-    /// Whether shutdown has been requested.
-    #[must_use]
-    pub fn is_shutting_down(&self) -> bool {
-        self.background_ctx.is_cancelled()
-    }
-
-    /// The configured request timeout.
-    #[must_use]
-    pub const fn request_timeout(&self) -> Duration {
-        self.config.request_timeout
-    }
-
-    /// The configured connect timeout.
-    #[must_use]
-    pub const fn connect_timeout(&self) -> Duration {
-        self.config.connect_timeout
-    }
-
-    /// The configured wall-clock timeout.
-    #[must_use]
-    pub const fn wall_clock_timeout(&self) -> Duration {
-        self.config.wall_clock_timeout
-    }
-
-    /// The configured shutdown timeout.
-    #[must_use]
-    pub const fn shutdown_timeout(&self) -> Duration {
-        self.config.shutdown_timeout
-    }
-
-    /// Host egress proxy URL used by SDK network helpers, if configured.
-    #[must_use]
-    pub fn host_egress_proxy_url(&self) -> Option<&str> {
-        self.config.host_egress_proxy_url.as_deref()
-    }
-
-    /// Build a connector-facing client for host-mediated HTTP/TCP egress.
-    ///
-    /// The helper is only available with `connector-http`, matching the rest of
-    /// the SDK HTTP client surface.
-    #[cfg(feature = "connector-http")]
-    #[must_use]
-    pub fn host_egress_proxy_client(&self) -> Option<HostEgressProxyClient> {
-        self.host_egress_proxy_url().map(HostEgressProxyClient::new)
-    }
-}
+use std::fmt;
 
 /// Connector-side client for the host egress proxy.
 #[cfg(feature = "connector-http")]
@@ -791,50 +409,6 @@ impl HostEgressProxyError {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ConnectorErrorMapping
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Trait for mapping `AsyncError` to connector-specific error types.
-///
-/// Every connector must implement this to handle deadline/cancellation
-/// errors from `ExecutionContext` operations.
-///
-/// # Example
-///
-/// ```ignore
-/// impl ConnectorErrorMapping for MyConnectorError {
-///     fn from_async_error(error: AsyncError) -> Self {
-///         match error {
-///             AsyncError::Timeout { timeout_ms } => Self::DeadlineExceeded {
-///                 message: format!("request deadline exceeded after {timeout_ms}ms"),
-///             },
-///             AsyncError::Cancelled => Self::RequestCancelled,
-///             other => Self::Runtime { message: other.to_string() },
-///         }
-///     }
-///
-///     fn to_fcp_error(&self) -> FcpError { /* ... */ }
-/// }
-/// ```
-pub trait ConnectorErrorMapping: fmt::Display + fmt::Debug + Send + Sync {
-    /// Map an `AsyncError` (timeout, cancellation, etc.) to this connector's error type.
-    fn from_async_error(error: AsyncError) -> Self
-    where
-        Self: Sized;
-
-    /// Convert this connector error to the standard `FcpError` taxonomy.
-    fn to_fcp_error(&self) -> FcpError;
-
-    /// Whether this error is retryable.
-    fn is_retryable(&self) -> bool;
-
-    /// Suggested retry-after delay, if available.
-    fn retry_after(&self) -> Option<Duration> {
-        None
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Canonical HTTP → FCP Error Mapping
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -915,7 +489,28 @@ pub const fn is_http_status_retryable(status: u16) -> bool {
 pub enum AttemptOutcome<T, E> {
     /// Operation succeeded.
     Success(T),
-    /// Operation failed but may be retried.
+    /// Operation failed and is SAFE TO REPLAY.
+    ///
+    /// "Retryable" is a claim about **side effects**, not just about whether
+    /// the error looks transient. Returning this asserts one of:
+    /// - the request provably never reached the service (a connect error), or
+    /// - the operation is idempotent, or
+    /// - the request carries an idempotency key the provider honours.
+    ///
+    /// It is NOT enough that the status code is in the 5xx family or that the
+    /// transport reported a timeout. A 5xx means the service *received* the
+    /// request, and `reqwest::Error::is_timeout()` covers the total-request
+    /// timeout, which fires after the body was fully sent — so for a
+    /// non-idempotent operation either one may mean the work already
+    /// happened. Replaying it then performs the side effect again.
+    ///
+    /// The host's receipt/idempotency-key deduplication does NOT cover this:
+    /// it deduplicates repeated *invokes*, while this retry happens inside the
+    /// connector process, below that boundary. The host sees one invoke and
+    /// writes one receipt while the provider saw N requests.
+    ///
+    /// Use [`AttemptOutcome::retryable_if_replayable`] when the safety of a
+    /// replay depends on whether the request was transmitted.
     Retryable {
         /// The error from this attempt.
         error: E,
@@ -924,6 +519,92 @@ pub enum AttemptOutcome<T, E> {
     },
     /// Operation failed terminally (no retry).
     Terminal(E),
+}
+
+impl<T, E> AttemptOutcome<T, E> {
+    /// Classify a transient failure for an operation whose replay safety
+    /// depends on whether the request was actually transmitted.
+    ///
+    /// `replayable` must be `true` only when replaying the request cannot
+    /// duplicate a side effect — because the request never left the client,
+    /// because the operation is idempotent, or because it carries an
+    /// idempotency key. When it is `false` the failure is reported as
+    /// [`AttemptOutcome::Terminal`]: giving the caller one honest error beats
+    /// silently performing the side effect up to `max_retries` more times.
+    ///
+    /// See [`transport_error_reached_service`] for classifying a
+    /// `reqwest::Error` on that axis, or
+    /// [`http_client_error_reached_service`] for the asupersync
+    /// `HttpClientError`.
+    pub const fn retryable_if_replayable(
+        error: E,
+        retry_after: Option<Duration>,
+        replayable: bool,
+    ) -> Self {
+        if replayable {
+            Self::Retryable { error, retry_after }
+        } else {
+            Self::Terminal(error)
+        }
+    }
+}
+
+/// Whether a `reqwest` transport error leaves it POSSIBLE that the service
+/// received and acted on the request.
+///
+/// Only a connect-phase failure proves the request never left the client. A
+/// timeout, a body/decode error, or a response-phase failure can all occur
+/// after the request was fully written, so for a non-idempotent operation they
+/// must be treated as "may already have executed".
+///
+/// Conservative by construction: an unrecognised error class returns `true`
+/// (assume it reached the service) so a new upstream variant fails closed.
+#[cfg(feature = "connector-http")]
+#[must_use]
+pub fn transport_error_reached_service(error: &reqwest::Error) -> bool {
+    !(error.is_connect() || error.is_builder())
+}
+
+/// Whether an asupersync [`HttpClientError`] leaves it POSSIBLE that the
+/// service received and acted on the request.
+///
+/// The asupersync counterpart of [`transport_error_reached_service`], for
+/// connectors built on `fcp_async_core::http` rather than `reqwest`. Unlike the
+/// `reqwest` helper this needs no feature gate: `fcp-async-core` is an
+/// unconditional dependency of this crate.
+///
+/// Returns `false` only for the variants that are raised while the connection
+/// is still being established, which proves no request bytes were written:
+/// URL parsing, DNS, TCP connect, the TLS handshake, proxy negotiation
+/// (SOCKS5 and HTTP `CONNECT`), and pool exhaustion.
+///
+/// Everything else returns `true`. In particular:
+/// - `Io` may be a mid-body write failure *or* a response-read failure that
+///   happens after the body was fully sent. The two are the same variant, so
+///   the ambiguous case decides it.
+/// - `HttpError` and `TooManyRedirects` are response-phase: the service
+///   answered, so it necessarily received the request.
+/// - `Cancelled` can be observed at any point, including after transmission.
+///
+/// Conservative by construction: the classification is an allowlist of
+/// pre-transmission variants, so an error class added upstream returns `true`
+/// (assume it reached the service) and fails closed without a compile break.
+/// Asupersync after 0.3.4 adds `DeadlineExceeded` — the total-request
+/// deadline, which fires after the request may have been fully transmitted —
+/// and this helper already classifies it correctly.
+#[must_use]
+pub const fn http_client_error_reached_service(error: &HttpClientError) -> bool {
+    !matches!(
+        error,
+        HttpClientError::InvalidUrl(_)
+            | HttpClientError::DnsError(_)
+            | HttpClientError::ConnectError(_)
+            | HttpClientError::TlsError(_)
+            | HttpClientError::ConnectTunnelRefused { .. }
+            | HttpClientError::InvalidConnectInput(_)
+            | HttpClientError::ProxyError(_)
+            | HttpClientError::PoolExhausted { .. }
+    )
 }
 
 /// Generic retry executor using `ExecutionContext` for deadline-aware backoff.
@@ -937,6 +618,13 @@ pub enum AttemptOutcome<T, E> {
 /// let ctx = runtime.request_context();
 /// let policy = RetryPolicy::new().with_max_attempts(Some(3));
 ///
+/// // `replayable` is the whole safety question: a POST that creates a
+/// // resource must NOT be replayed once the request has left the client,
+/// // because a 5xx or a timeout can both be reported after the service
+/// // already did the work. Set it to `true` unconditionally only for an
+/// // operation that is idempotent or that carries an idempotency key.
+/// let create_is_replayable = false;
+///
 /// let result = RetryLoop::execute(&ctx, &policy, |attempt| async move {
 ///     match client.post(url).send().await {
 ///         Ok(resp) if resp.status().is_success() => AttemptOutcome::Success(resp),
@@ -944,12 +632,22 @@ pub enum AttemptOutcome<T, E> {
 ///             error: MyError::RateLimited,
 ///             retry_after: Some(Duration::from_secs(30)),
 ///         },
+///         // A 5xx means the service RECEIVED the request.
+///         Ok(resp) if resp.status().is_server_error() => {
+///             AttemptOutcome::retryable_if_replayable(
+///                 MyError::Api(resp.status()),
+///                 None,
+///                 create_is_replayable,
+///             )
+///         }
 ///         Ok(resp) => AttemptOutcome::Terminal(MyError::Api(resp.status())),
-///         Err(e) if e.is_timeout() => AttemptOutcome::Retryable {
-///             error: MyError::Http(e),
-///             retry_after: None,
-///         },
-///         Err(e) => AttemptOutcome::Terminal(MyError::Http(e)),
+///         // Only a connect-phase failure proves the request never left the
+///         // client; `is_timeout()` covers the TOTAL request timeout, which
+///         // fires after the body was fully sent.
+///         Err(e) => {
+///             let replayable = create_is_replayable || !transport_error_reached_service(&e);
+///             AttemptOutcome::retryable_if_replayable(MyError::Http(e), None, replayable)
+///         }
 ///     }
 /// }).await;
 /// ```
@@ -1028,17 +726,23 @@ impl RetryLoop {
                         return Err(error);
                     };
 
+                    // `redacted_summary()`, never `%error`: a connector error
+                    // that forwards a `reqwest::Error` renders the full URL,
+                    // and providers that authenticate via `?key=…` would leak
+                    // the credential into this line on every retry.
                     warn!(
                         attempt,
                         delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        error = %error,
+                        error = %error.redacted_summary(),
                         "retrying after transient error"
                     );
 
                     // Sleep under context (respects deadline + cancellation)
                     if let Err(async_err) = ctx.sleep(delay).await {
-                        // Context expired or cancelled during sleep
-                        return Err(E::from_async_error(async_err));
+                        return match async_err {
+                            AsyncError::Timeout { .. } => Err(error),
+                            other => Err(E::from_async_error(other)),
+                        };
                     }
 
                     let Some(next_attempt) = attempt.checked_add(1) else {
@@ -1112,33 +816,6 @@ pub fn classify_http_status(status: u16, retry_after: Option<Duration>) -> Retry
     crate::retry::decision_from_http_status(status, retry_after)
 }
 
-/// Map an `AsyncError` from context operations to a standard `FcpError`.
-///
-/// This is the canonical mapping for context-level errors (timeout, cancellation).
-/// Connector-specific error types should delegate to this for the `AsyncError` arm.
-#[must_use]
-pub fn map_async_to_fcp_error(error: &AsyncError) -> FcpError {
-    match error {
-        AsyncError::Timeout { timeout_ms } => FcpError::External {
-            service: "runtime".into(),
-            message: format!("request deadline exceeded after {timeout_ms}ms"),
-            status_code: Some(504),
-            retryable: true,
-            retry_after: None,
-        },
-        AsyncError::Cancelled => FcpError::External {
-            service: "runtime".into(),
-            message: "request cancelled".into(),
-            status_code: None,
-            retryable: false,
-            retry_after: None,
-        },
-        other => FcpError::Internal {
-            message: other.to_string(),
-        },
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1147,190 +824,81 @@ pub fn map_async_to_fcp_error(error: &AsyncError) -> FcpError {
 mod tests {
     use super::*;
 
-    /// br-3a3r6: scope-bound test override of the opt-in env value.
-    /// Crate forbids `unsafe_code` so tests can't `std::env::set_var`;
-    /// instead this RAII guard sets the per-thread override and clears
-    /// it on drop. Tests run in parallel on different threads, so the
-    /// thread-local keeps each scenario isolated.
-    struct OptInOverrideGuard;
-    impl OptInOverrideGuard {
-        fn set(value: Option<&str>) -> Self {
-            AMBIENT_OPT_IN_TEST_VALUE.with(|cell| {
-                *cell.borrow_mut() = Some(value.map(str::to_owned));
-            });
-            Self
+    // ── Replay safety (br-kxd3e) ─────────────────────────────────
+
+    /// `Retryable` is a claim about SIDE EFFECTS, not about how transient the
+    /// error looks. When a replay could duplicate one, the honest outcome is a
+    /// single terminal error rather than up to `max_retries` more executions.
+    #[test]
+    fn retryable_if_replayable_downgrades_an_unsafe_replay_to_terminal() {
+        let unsafe_replay: AttemptOutcome<(), &str> =
+            AttemptOutcome::retryable_if_replayable("boom", Some(Duration::from_secs(1)), false);
+        assert!(
+            matches!(unsafe_replay, AttemptOutcome::Terminal("boom")),
+            "a non-replayable failure must not be retried"
+        );
+
+        let safe_replay: AttemptOutcome<(), &str> =
+            AttemptOutcome::retryable_if_replayable("boom", Some(Duration::from_secs(1)), true);
+        assert!(matches!(
+            safe_replay,
+            AttemptOutcome::Retryable {
+                error: "boom",
+                retry_after: Some(_)
+            }
+        ));
+    }
+
+    /// Only the connection-establishment failures prove no request bytes were
+    /// written. These are the variants a non-idempotent operation may replay.
+    #[test]
+    fn http_client_error_pre_transmission_variants_did_not_reach_the_service() {
+        let pre_transmission = [
+            HttpClientError::InvalidUrl("not a url".to_string()),
+            HttpClientError::DnsError(std::io::Error::other("nxdomain")),
+            HttpClientError::ConnectError(std::io::Error::other("refused")),
+            HttpClientError::TlsError("handshake failed".to_string()),
+            HttpClientError::ConnectTunnelRefused {
+                status: 403,
+                reason: "Forbidden".to_string(),
+            },
+            HttpClientError::InvalidConnectInput("bad authority".to_string()),
+            HttpClientError::ProxyError("SOCKS5 auth rejected".to_string()),
+            HttpClientError::PoolExhausted {
+                host: "api.example.com".to_string(),
+                port: 443,
+            },
+        ];
+
+        for error in &pre_transmission {
+            assert!(
+                !http_client_error_reached_service(error),
+                "{error:?} is raised while connecting, so no request bytes were written"
+            );
         }
     }
-    impl Drop for OptInOverrideGuard {
-        fn drop(&mut self) {
-            AMBIENT_OPT_IN_TEST_VALUE.with(|cell| *cell.borrow_mut() = None);
+
+    /// Everything else may be observed after the body was fully sent, so a
+    /// non-idempotent operation must treat it as "may already have executed".
+    #[test]
+    fn http_client_error_post_transmission_variants_may_have_reached_the_service() {
+        let may_have_reached = [
+            // A mid-body write failure and a response-read failure are the
+            // same variant; only the latter proves transmission, so both must
+            // fail closed.
+            HttpClientError::Io(std::io::Error::other("connection reset")),
+            // Redirects imply the service answered at least once.
+            HttpClientError::TooManyRedirects { count: 11, max: 10 },
+            // Cancellation can land at any point, including post-send.
+            HttpClientError::Cancelled,
+        ];
+
+        for error in &may_have_reached {
+            assert!(
+                http_client_error_reached_service(error),
+                "{error:?} can occur after transmission and must fail closed"
+            );
         }
-    }
-
-    struct RequestTimeoutOverrideGuard;
-    impl RequestTimeoutOverrideGuard {
-        fn set(value: Option<&str>) -> Self {
-            REQUEST_TIMEOUT_TEST_VALUE.with(|cell| {
-                *cell.borrow_mut() = Some(value.map(str::to_owned));
-            });
-            Self
-        }
-    }
-    impl Drop for RequestTimeoutOverrideGuard {
-        fn drop(&mut self) {
-            REQUEST_TIMEOUT_TEST_VALUE.with(|cell| *cell.borrow_mut() = None);
-        }
-    }
-
-    fn manifest_toml_with_optional_timeouts(timeouts: Option<&str>) -> String {
-        let placeholder = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
-        let timeouts_block = timeouts.unwrap_or_default();
-        let raw = format!(
-            r#"[manifest]
-format = "fcp-connector-manifest"
-schema_version = "2.1"
-min_mesh_version = "2.0.0"
-min_protocol = "fcp2-sym/2.0"
-protocol_features = []
-max_datagram_bytes = 1200
-interface_hash = "{placeholder}"
-
-[connector]
-id = "fcp.test"
-name = "Test Connector"
-version = "0.1.0"
-description = "runtime config test manifest"
-archetypes = ["operational"]
-format = "native"
-
-[connector.state]
-model = "stateless"
-state_schema_version = "1"
-
-[zones]
-home = "z:project:test"
-allowed_sources = ["z:project:test"]
-allowed_targets = ["z:project:test"]
-forbidden = ["z:public"]
-
-[capabilities]
-required = ["network.dns", "network.outbound", "test.placeholder"]
-optional = []
-forbidden = ["system.exec"]
-
-[provides.operations.placeholder_operation]
-description = "Placeholder operation"
-capability = "test.placeholder"
-risk_level = "low"
-safety_tier = "safe"
-requires_approval = "none"
-idempotency = "best_effort"
-input_schema = {{ type = "object", properties = {{ }} }}
-output_schema = {{ type = "object", properties = {{ }} }}
-
-[provides.operations.placeholder_operation.network_constraints]
-host_allow = ["example.invalid"]
-port_allow = [443]
-require_sni = true
-
-{timeouts_block}
-[sandbox]
-profile = "strict"
-memory_mb = 64
-cpu_percent = 25
-wall_clock_timeout_ms = 60000
-fs_readonly_paths = ["/usr", "/lib"]
-fs_writable_paths = ["$CONNECTOR_STATE"]
-deny_exec = true
-deny_ptrace = true
-"#
-        );
-        let unchecked = ConnectorManifest::parse_str_unchecked(&raw).unwrap();
-        let interface_hash = unchecked.compute_interface_hash().unwrap();
-        raw.replace(placeholder, &interface_hash.to_string())
-    }
-
-    // -- ConnectorRuntime tests ------------------------------------------------
-
-    #[test]
-    fn runtime_default_config() {
-        let config = ConnectorRuntimeConfig::default();
-        assert_eq!(config.request_timeout, Duration::from_secs(120));
-        assert_eq!(config.connect_timeout, Duration::from_secs(10));
-        assert_eq!(config.wall_clock_timeout, Duration::from_secs(120));
-        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
-        assert!(config.host_egress_proxy_url.is_none());
-    }
-
-    #[test]
-    fn runtime_creates_request_context() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let ctx = runtime.request_context();
-        assert!(!ctx.is_cancelled());
-        assert!(ctx.remaining_budget().is_some());
-        assert_eq!(ctx.scope(), fcp_async_core::ContextScope::Request);
-    }
-
-    #[test]
-    fn runtime_creates_background_context() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let ctx = runtime.background_context();
-        assert!(!ctx.is_cancelled());
-        assert!(ctx.remaining_budget().is_none()); // No deadline
-    }
-
-    #[test]
-    fn runtime_shutdown_propagates() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let bg = runtime.background_context();
-        let req = runtime.request_context();
-        assert!(!runtime.is_shutting_down());
-        assert!(!bg.is_cancelled());
-        assert!(!req.is_cancelled());
-
-        runtime.shutdown();
-
-        assert!(runtime.is_shutting_down());
-        assert!(bg.is_cancelled());
-        assert!(req.is_cancelled());
-    }
-
-    #[test]
-    fn runtime_custom_timeout() {
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(60)),
-        );
-        assert_eq!(runtime.request_timeout(), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn br_d9us6_runtime_config_exposes_host_egress_proxy_url() {
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default().with_host_egress_proxy_url("http://127.0.0.1:7878/"),
-        );
-        assert_eq!(
-            runtime.host_egress_proxy_url(),
-            Some("http://127.0.0.1:7878/")
-        );
-    }
-
-    #[cfg(feature = "connector-http")]
-    #[test]
-    fn br_d9us6_host_egress_client_routes_helpers_to_host_rpc_paths() {
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default().with_host_egress_proxy_url("http://127.0.0.1:7878/"),
-        );
-        let client = runtime
-            .host_egress_proxy_client()
-            .expect("configured host egress proxy client");
-        assert_eq!(
-            client.http_endpoint(),
-            "http://127.0.0.1:7878/rpc/egress/http"
-        );
-        assert_eq!(
-            client.tcp_endpoint(),
-            "http://127.0.0.1:7878/rpc/egress/tcp"
-        );
     }
 
     #[cfg(feature = "connector-http")]
@@ -1468,17 +1036,6 @@ deny_ptrace = true
                 .expect("rejection body")
                 .contains("deny_reason=denied_host")
         );
-    }
-
-    #[test]
-    fn runtime_connect_and_wall_clock_accessors() {
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default()
-                .with_connect_timeout(Duration::from_secs(7))
-                .with_wall_clock_timeout(Duration::from_secs(75)),
-        );
-        assert_eq!(runtime.connect_timeout(), Duration::from_secs(7));
-        assert_eq!(runtime.wall_clock_timeout(), Duration::from_secs(75));
     }
 
     // -- HttpRetryConfig tests ------------------------------------------------
@@ -1647,6 +1204,31 @@ deny_ptrace = true
     }
 
     #[test]
+    fn retry_loop_preserves_retryable_error_when_deadline_expires_during_backoff() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_millis(5));
+            let policy = RetryPolicy::new()
+                .with_max_attempts(Some(3))
+                .with_jitter_enabled(false);
+
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |_attempt| async {
+                    AttemptOutcome::Retryable {
+                        error: TestError::Transient("service overloaded".into()),
+                        retry_after: Some(Duration::from_millis(50)),
+                    }
+                })
+                .await;
+
+            match result.unwrap_err() {
+                TestError::Transient(message) => assert_eq!(message, "service overloaded"),
+                other => panic!("expected original retryable error, got {other:?}"),
+            }
+        })
+        .expect("runtime should preserve retryable error on backoff deadline expiry");
+    }
+
+    #[test]
     fn retry_loop_respects_cancellation() {
         fcp_async_core::runtime::block_on_sync(async {
             let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
@@ -1674,290 +1256,6 @@ deny_ptrace = true
             }
         })
         .expect("runtime should execute cancellation-aware retry test");
-    }
-
-    // -- ConnectorRuntimeConfig builder tests --------------------------------
-
-    #[test]
-    fn config_with_shutdown_timeout() {
-        let config =
-            ConnectorRuntimeConfig::default().with_shutdown_timeout(Duration::from_secs(10));
-        assert_eq!(config.shutdown_timeout, Duration::from_secs(10));
-        // request_timeout unchanged
-        assert_eq!(config.request_timeout, Duration::from_secs(120));
-    }
-
-    #[test]
-    fn config_builder_chain_both() {
-        let config = ConnectorRuntimeConfig::default()
-            .with_request_timeout(Duration::from_secs(60))
-            .with_shutdown_timeout(Duration::from_secs(5));
-        assert_eq!(config.request_timeout, Duration::from_secs(60));
-        assert_eq!(config.shutdown_timeout, Duration::from_secs(5));
-    }
-
-    #[test]
-    fn config_manifest_defaults_match_scaffold_expectations() {
-        let config = ConnectorRuntimeConfig::manifest_defaults();
-        assert_eq!(config.request_timeout, Duration::from_secs(30));
-        assert_eq!(config.connect_timeout, Duration::from_secs(5));
-        assert_eq!(config.wall_clock_timeout, Duration::from_secs(60));
-        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn config_from_manifest_timeouts_uses_manifest_values() {
-        let config = ConnectorRuntimeConfig::from_manifest_timeouts(&ManifestTimeouts {
-            request_timeout_ms: 45_000,
-            connect_timeout_ms: 7_000,
-            wall_clock_timeout_ms: 90_000,
-        });
-        assert_eq!(config.request_timeout, Duration::from_secs(45));
-        assert_eq!(config.connect_timeout, Duration::from_secs(7));
-        assert_eq!(config.wall_clock_timeout, Duration::from_secs(90));
-        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn config_from_manifest_without_timeouts_uses_manifest_defaults() {
-        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
-            .expect("manifest should parse");
-        let config =
-            ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(&manifest, None)
-                .expect("manifest defaults should load");
-        assert_eq!(config.request_timeout, Duration::from_secs(30));
-        assert_eq!(config.connect_timeout, Duration::from_secs(5));
-        assert_eq!(config.wall_clock_timeout, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn config_from_manifest_with_timeouts_uses_manifest_section() {
-        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
-            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
-        )))
-        .expect("manifest should parse");
-        let config =
-            ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(&manifest, None)
-                .expect("manifest timeouts should load");
-        assert_eq!(config.request_timeout, Duration::from_secs(48));
-        assert_eq!(config.connect_timeout, Duration::from_secs(8));
-        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
-    }
-
-    #[test]
-    fn config_from_manifest_override_uses_request_timeout_env_value() {
-        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
-            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
-        )))
-        .expect("manifest should parse");
-        let config = ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(
-            &manifest,
-            Some("61000"),
-        )
-        .expect("override should parse");
-        assert_eq!(config.request_timeout, Duration::from_secs(61));
-        assert_eq!(config.connect_timeout, Duration::from_secs(8));
-        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
-    }
-
-    #[test]
-    fn config_from_manifest_override_rejects_invalid_env_value() {
-        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
-            .expect("manifest should parse");
-        let err = ConnectorRuntimeConfig::from_manifest_with_request_timeout_override(
-            &manifest,
-            Some("invalid"),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("FCP_REQUEST_TIMEOUT_MS must be a positive integer")
-        );
-    }
-
-    #[test]
-    fn config_from_manifest_str_parses_embedded_manifest() {
-        // br-3a3r6: from_manifest_str now ignores the ambient
-        // FCP_REQUEST_TIMEOUT_MS unless FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE
-        // is also set. The manifest value (52s) is the expected outcome.
-        let _opt_in = OptInOverrideGuard::set(None);
-        let config = ConnectorRuntimeConfig::from_manifest_str(
-            &manifest_toml_with_optional_timeouts(Some(
-                "[timeouts]\nrequest_timeout_ms = 52000\nconnect_timeout_ms = 6000\nwall_clock_timeout_ms = 88000\n\n",
-            )),
-        )
-        .expect("embedded manifest should parse");
-        assert_eq!(config.request_timeout, Duration::from_secs(52));
-        assert_eq!(config.connect_timeout, Duration::from_secs(6));
-        assert_eq!(config.wall_clock_timeout, Duration::from_secs(88));
-    }
-
-    #[test]
-    fn from_manifest_ignores_ambient_timeout_env_without_opt_in() {
-        // br-3a3r6: ambient FCP_REQUEST_TIMEOUT_MS must NOT override the
-        // manifest's pinned [timeouts] section unless the operator has
-        // explicitly opted in.
-        let _opt_in = OptInOverrideGuard::set(None);
-        let _timeout = RequestTimeoutOverrideGuard::set(Some("99000"));
-        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
-            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
-        )))
-        .expect("manifest should parse");
-        let config = ConnectorRuntimeConfig::from_manifest(&manifest)
-            .expect("manifest precedence path should succeed");
-        assert_eq!(
-            config.request_timeout,
-            Duration::from_secs(48),
-            "manifest must win without explicit opt-in"
-        );
-    }
-
-    #[test]
-    fn from_manifest_honors_ambient_timeout_env_with_opt_in() {
-        // br-3a3r6: when the operator explicitly sets
-        // FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE=1, the env override is
-        // honored and replaces the manifest request_timeout.
-        let _opt_in = OptInOverrideGuard::set(Some("1"));
-        let _timeout = RequestTimeoutOverrideGuard::set(Some("99000"));
-        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
-            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
-        )))
-        .expect("manifest should parse");
-        let config =
-            ConnectorRuntimeConfig::from_manifest(&manifest).expect("opt-in path should succeed");
-        assert_eq!(
-            config.request_timeout,
-            Duration::from_secs(99),
-            "explicit opt-in must let env override the manifest request timeout"
-        );
-        // connect/wall-clock are NOT overridable by env — manifest stays.
-        assert_eq!(config.connect_timeout, Duration::from_secs(8));
-        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
-    }
-
-    #[test]
-    fn from_manifest_invalid_env_with_opt_in_returns_error() {
-        // br-3a3r6: when opt-in is on, an unparseable
-        // FCP_REQUEST_TIMEOUT_MS surfaces as an error (was the existing
-        // contract before the gate). Without opt-in the env is never
-        // consulted, so a malformed value is silently irrelevant — that
-        // behavior is documented on `from_manifest`.
-        let _opt_in = OptInOverrideGuard::set(Some("1"));
-        let _timeout = RequestTimeoutOverrideGuard::set(Some("not-a-number"));
-        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
-            .expect("manifest should parse");
-        let err = ConnectorRuntimeConfig::from_manifest(&manifest).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("FCP_REQUEST_TIMEOUT_MS must be a positive integer")
-        );
-    }
-
-    #[test]
-    fn from_manifest_invalid_env_without_opt_in_is_ignored() {
-        // br-3a3r6: malformed FCP_REQUEST_TIMEOUT_MS in the absence of
-        // opt-in must NOT cause a startup error — the value is never
-        // consulted, so the manifest path completes cleanly.
-        let _opt_in = OptInOverrideGuard::set(None);
-        let _timeout = RequestTimeoutOverrideGuard::set(Some("garbage"));
-        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
-            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
-        )))
-        .expect("manifest should parse");
-        let config = ConnectorRuntimeConfig::from_manifest(&manifest)
-            .expect("malformed env must be ignored without opt-in");
-        assert_eq!(config.request_timeout, Duration::from_secs(48));
-    }
-
-    #[test]
-    fn opt_in_value_allows_override_recognises_truthy_values() {
-        for value in ["1", "true", "yes"] {
-            assert!(
-                opt_in_value_allows_override(Some(value)),
-                "{value:?} should be treated as opt-in"
-            );
-        }
-        for value in ["0", "false", "no", "", "True", "YES", "TRUE", " 1", "1 "] {
-            assert!(
-                !opt_in_value_allows_override(Some(value)),
-                "{value:?} should NOT be treated as opt-in (case-sensitive exact match required)"
-            );
-        }
-        assert!(
-            !opt_in_value_allows_override(None),
-            "unset env must default to opt-in disabled"
-        );
-    }
-
-    #[test]
-    fn config_debug() {
-        let config = ConnectorRuntimeConfig::default();
-        let debug = format!("{config:?}");
-        assert!(debug.contains("ConnectorRuntimeConfig"));
-    }
-
-    #[test]
-    fn config_clone() {
-        let config =
-            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(77));
-        let moved = config;
-        assert_eq!(moved.request_timeout, Duration::from_secs(77));
-    }
-
-    // -- ConnectorRuntime additional tests ------------------------------------
-
-    #[test]
-    fn runtime_request_context_with_custom_timeout() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let ctx = runtime.request_context_with_timeout(Duration::from_secs(5));
-        assert!(!ctx.is_cancelled());
-        assert!(ctx.remaining_budget().is_some());
-    }
-
-    #[test]
-    fn runtime_shutdown_timeout_accessor() {
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default().with_shutdown_timeout(Duration::from_secs(15)),
-        );
-        assert_eq!(runtime.shutdown_timeout(), Duration::from_secs(15));
-    }
-
-    #[test]
-    fn runtime_multiple_background_contexts_independent() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let bg1 = runtime.background_context();
-        let bg2 = runtime.background_context();
-        assert!(!bg1.is_cancelled());
-        assert!(!bg2.is_cancelled());
-        // Shutting down cancels both
-        runtime.shutdown();
-        assert!(bg1.is_cancelled());
-        assert!(bg2.is_cancelled());
-    }
-
-    #[test]
-    fn runtime_shutdown_idempotent() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        runtime.shutdown();
-        assert!(runtime.is_shutting_down());
-        runtime.shutdown(); // second call should not panic
-        assert!(runtime.is_shutting_down());
-    }
-
-    #[test]
-    fn runtime_debug() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let debug = format!("{runtime:?}");
-        assert!(debug.contains("ConnectorRuntime"));
-    }
-
-    #[test]
-    fn runtime_clone() {
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(42)),
-        );
-        let moved = runtime;
-        assert_eq!(moved.request_timeout(), Duration::from_secs(42));
     }
 
     // -- HttpRetryConfig serde tests ------------------------------------------
@@ -2261,113 +1559,6 @@ deny_ptrace = true
             AttemptOutcome::Retryable { retry_after, .. } => assert!(retry_after.is_none()),
             _ => panic!("expected Retryable"),
         }
-    }
-
-    // -- NEW: ConnectorRuntime deep edge cases --------------------------------
-
-    #[test]
-    fn runtime_request_context_not_cancelled() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let ctx = runtime.request_context();
-        assert!(!ctx.is_cancelled());
-        // Request context should have a finite budget
-        let budget = ctx.remaining_budget();
-        assert!(budget.is_some());
-        // Budget should be close to request timeout (120s default)
-        assert!(budget.unwrap() <= Duration::from_secs(120));
-    }
-
-    #[test]
-    fn runtime_custom_timeout_propagates_to_context() {
-        let timeout = Duration::from_millis(500);
-        let runtime =
-            ConnectorRuntime::new(ConnectorRuntimeConfig::default().with_request_timeout(timeout));
-        let ctx = runtime.request_context();
-        let budget = ctx.remaining_budget().unwrap();
-        // Budget should be at most the configured timeout
-        assert!(budget <= timeout);
-    }
-
-    #[test]
-    fn runtime_background_context_has_no_deadline() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let bg = runtime.background_context();
-        assert!(bg.remaining_budget().is_none());
-    }
-
-    #[test]
-    fn runtime_shutdown_cancels_all_background_children() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let bg1 = runtime.background_context();
-        let bg2 = runtime.background_context();
-        let bg3 = runtime.background_context();
-        assert!(!bg1.is_cancelled());
-        assert!(!bg2.is_cancelled());
-        assert!(!bg3.is_cancelled());
-        runtime.shutdown();
-        assert!(bg1.is_cancelled());
-        assert!(bg2.is_cancelled());
-        assert!(bg3.is_cancelled());
-    }
-
-    #[test]
-    fn runtime_request_context_is_cancelled_by_shutdown() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let ctx_before = runtime.request_context();
-        assert!(!ctx_before.is_cancelled());
-        runtime.shutdown();
-        assert!(ctx_before.is_cancelled());
-    }
-
-    #[test]
-    fn runtime_request_context_created_after_shutdown_starts_cancelled() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        runtime.shutdown();
-
-        let ctx = runtime.request_context();
-        assert!(ctx.is_cancelled());
-    }
-
-    #[test]
-    fn runtime_with_zero_request_timeout() {
-        let runtime = ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default().with_request_timeout(Duration::ZERO),
-        );
-        assert_eq!(runtime.request_timeout(), Duration::ZERO);
-        let ctx = runtime.request_context();
-        // Zero-duration context should still be valid
-        assert!(ctx.remaining_budget().is_some());
-    }
-
-    #[test]
-    fn runtime_with_large_timeout() {
-        let timeout = Duration::from_secs(86_400); // 24 hours
-        let runtime =
-            ConnectorRuntime::new(ConnectorRuntimeConfig::default().with_request_timeout(timeout));
-        assert_eq!(runtime.request_timeout(), timeout);
-    }
-
-    #[test]
-    fn runtime_config_clone_preserves_values() {
-        let config = ConnectorRuntimeConfig::default()
-            .with_request_timeout(Duration::from_secs(42))
-            .with_shutdown_timeout(Duration::from_secs(7));
-        let cloned = config.clone();
-        // Use original after clone to avoid redundant_clone
-        assert_eq!(config.request_timeout, Duration::from_secs(42));
-        assert_eq!(cloned.shutdown_timeout, Duration::from_secs(7));
-    }
-
-    #[test]
-    fn runtime_clone_shares_background_ctx() {
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let cloned = runtime.clone();
-        // Both should report same shutdown state
-        assert!(!runtime.is_shutting_down());
-        assert!(!cloned.is_shutting_down());
-        // Shutting down original propagates to clone
-        runtime.shutdown();
-        assert!(cloned.is_shutting_down());
     }
 
     // -- NEW: HttpRetryConfig edge cases --------------------------------------

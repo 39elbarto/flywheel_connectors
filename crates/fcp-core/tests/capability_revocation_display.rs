@@ -1,42 +1,42 @@
 //! Pin `RevocationDecision` + `RevocationFreshnessClass` serde tag
-//! matrix — the closest analogues to "CapabilityRevocation Display"
+//! matrix — the closest analogues to "`CapabilityRevocation` Display"
 //! (flywheel_connectors-ym328).
 //!
 //! Bead asks for `CapabilityRevocation Display + serde tag`. No type
 //! literally named `CapabilityRevocation` exists in fcp-core. The
 //! revocation surface that decides whether a capability is revoked
-//! covers many enums most of which are already pinned (RevocationScope
-//! by 8gfcv, SealValidation by registry_consistency_variant_matrix.rs,
-//! RevocationSlaStatus indirectly via revocation tests). Two unpinned
+//! covers many enums most of which are already pinned (`RevocationScope`
+//! by 8gfcv, `SealValidation` by `registry_consistency_variant_matrix.rs`,
+//! `RevocationSlaStatus` indirectly via revocation tests). Two unpinned
 //! revocation classifiers in this surface:
 //!
 //!  - `RevocationDecision` (revocation.rs:714) — 2-variant decision
 //!    (`NotRevoked` / `Revoked`) with NO `rename_all`, so the wire
-//!    form is the PascalCase variant name verbatim.
+//!    form is the `PascalCase` variant name verbatim.
 //!  - `RevocationFreshnessClass` (revocation.rs:349) — 3-variant
 //!    operation classifier (`Critical` / `Risky` / `Safe`) with
 //!    `#[serde(rename_all = "snake_case")]` plus a hand-written
-//!    `as_str()` returning the same snake_case tokens.
+//!    `as_str()` returning the same `snake_case` tokens.
 //!
 //! `RevocationFreshnessClass` also has documented `.minimum_policy()`
 //! and `.allows_policy()` truth tables — pinning these protects the
-//! "host MUST NOT downgrade Critical to BestEffort" invariant.
+//! "host MUST NOT downgrade `Critical` to `BestEffort`" invariant.
 //!
 //! Targets:
 //!
-//!   1. **`RevocationDecision` per-variant JSON form** (PascalCase).
+//!   1. **`RevocationDecision` per-variant JSON form** (`PascalCase`).
 //!   2. **`RevocationDecision` JSON + CBOR round-trip**.
-//!   3. **`RevocationFreshnessClass` per-variant JSON tag** (snake_case).
+//!   3. **`RevocationFreshnessClass` per-variant JSON tag** (`snake_case`).
 //!   4. **`RevocationFreshnessClass::as_str` agrees with serde tag**.
 //!   5. **`RevocationFreshnessClass` JSON + CBOR round-trip**.
 //!   6. **`RevocationFreshnessClass::minimum_policy` truth table** —
-//!      Critical→Strict / Risky→Warn / Safe→BestEffort.
+//!      `Critical`→`Strict` / `Risky`→`Warn` / `Safe`→`BestEffort`.
 //!   7. **`RevocationFreshnessClass::allows_policy` truth table** —
-//!      operator MUST NOT downgrade Critical to BestEffort/Warn.
-//!   8. **PascalCase rejected for snake_case enum, snake_case
-//!      rejected for PascalCase enum** — drift sentinel.
+//!      operator MUST NOT downgrade `Critical` to `BestEffort`/`Warn`.
+//!   8. **`PascalCase` rejected for `snake_case` enum, `snake_case`
+//!      rejected for `PascalCase` enum** — drift sentinel.
 //!   9. **Pairwise distinctness within each enum**.
-//!  10. **Cross-enum: RevocationDecision and RevocationFreshnessClass
+//!  10. **Cross-enum: `RevocationDecision` and `RevocationFreshnessClass`
 //!      use disjoint token spaces**.
 
 use ciborium::value::Value as CborValue;

@@ -10,8 +10,8 @@
 //! Properties pinned (NORMATIVE):
 //!
 //! 1. **Wildcard allow = unrestricted.** `resource_allow = ["*"]`
-//!    accepts any URI, and accepts even the empty resource_uris slice.
-//! 2. **Non-wildcard allow requires resource_uris.** If the token
+//!    accepts any URI, and accepts even the empty `resource_uris` slice.
+//! 2. **Non-wildcard allow requires `resource_uris`.** If the token
 //!    declares a specific allow pattern but the caller forgets to
 //!    pass any URIs, the verifier MUST reject with
 //!    `ResourceNotAllowed` (defense-in-depth: prevents silent
@@ -57,7 +57,8 @@ fn build_token(
         .operations(&["op.test"])
         .issuer("node:primary")
         .validity(now - Duration::minutes(1), now + Duration::hours(1))
-        .constraints_cbor(&constraints_cbor(constraints))
+        .try_constraints_cbor(&constraints_cbor(constraints))
+        .expect("constraints CBOR is valid")
         .sign(signing_key)
         .expect("sign capability token");
     CapabilityToken::from_raw(cose)
@@ -101,7 +102,7 @@ fn wildcard_allow_accepts_arbitrary_uri() {
 #[test]
 fn wildcard_allow_accepts_empty_resource_uris_slice() {
     // The defense-in-depth check explicitly exempts pure wildcard
-    // allow lists so the existing `verifier.verify(.., &[])` call
+    // allow lists so the existing `verifier.verify_bound(.., &[])` call
     // sites continue to work.
     let signing_key = Ed25519SigningKey::generate();
     let constraints = CapabilityConstraints {

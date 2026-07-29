@@ -49,6 +49,10 @@ DRY_RUN=false
 CI_MODE="${CI:-false}"
 ONLY_PHASES=""
 SOAK_DURATION=""
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+RELIABILITY_TARGET_DIR="${RELIABILITY_TARGET_DIR:-${CARGO_TARGET_DIR:-/tmp/fcp-reliability-soak}}"
+export RCH_FORCE_REMOTE=1
 
 declare -i CHECK_PASS=0
 declare -i CHECK_FAIL=0
@@ -213,6 +217,47 @@ should_run_phase() {
   return 1
 }
 
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+run_remote_cargo_test() {
+  local log_file="$1"
+  shift
+  local remote_error=""
+
+  if ! "${RCH_BIN}" exec -- env \
+    CARGO_TARGET_DIR="${RELIABILITY_TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    cargo "$@" > "${log_file}" 2>&1; then
+    return 1
+  fi
+
+  if remote_error="$(rch_remote_summary_present "${log_file}" 2>&1)"; then
+    return 0
+  fi
+
+  printf '%s\n' "${remote_error}" >> "${log_file}"
+  printf '%s\n' "${remote_error}" >&2
+  return 1
+}
+
 run_cargo_check() {
   local label="$1"
   local package="$2"
@@ -234,15 +279,16 @@ run_cargo_check() {
 
   local start end elapsed status
   start=$(now_ms)
-  if command -v rch >/dev/null 2>&1; then
-    if rch exec -- cargo test -p "${package}" ${test_filter} -- --nocapture > "${log_file}" 2>&1; then
-      status="pass"
-    else
-      status="fail"
-    fi
+  local filter_args=()
+  if [[ -n "${test_filter}" ]]; then
+    read -r -a filter_args <<< "${test_filter}"
+  fi
+  require_cmd "${RCH_BIN}"
+  if run_remote_cargo_test "${log_file}" \
+    test -p "${package}" "${filter_args[@]}" -- --nocapture; then
+    status="pass"
   else
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-reliability-soak}" \
-      cargo test -p "${package}" ${test_filter} -- --nocapture > "${log_file}" 2>&1 && status="pass" || status="fail"
+    status="fail"
   fi
   end=$(now_ms)
   elapsed=$((end - start))
@@ -293,6 +339,7 @@ run_e2e_script() {
 
   local start end elapsed status
   start=$(now_ms)
+  # shellcheck disable=SC2086 # env_overrides is a trusted assignment list for scenario scripts.
   if env OUT_DIR="${scenario_out}" ${env_overrides} bash "${full_script}" > "${log_file}" 2>&1; then
     status="pass"
   else
@@ -356,7 +403,7 @@ CANCEL_RECOVERY_MAX_MS=5000
 
 # ── Pre-flight ──────────────────────────────────────────────────────────────
 require_cmd jq
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 if [[ -z "${OUT_ROOT}" ]]; then
   OUT_ROOT="${REPO_ROOT}/artifacts/asupersync/reliability-soak/${RUN_ID}"

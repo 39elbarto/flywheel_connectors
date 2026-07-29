@@ -4,7 +4,6 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use fcp_async_core::Cx;
 use fcp_async_core::http::HttpClientBuilder;
 use fcp_openai_compat::{
     ChatCompletionStream, ChatCompletionsRequest, ChatMessage, EmbeddingInput, EmbeddingsRequest,
@@ -143,7 +142,7 @@ async fn golden_vector_lane_covers_openai_compatible_profiles() {
             .mount(&server)
             .await;
 
-        let cx = Cx::for_testing();
+        let cx = fcp_async_core::compatibility_cx();
         let client = client(provider(&server, profile), RateLimitPolicy::FailFast);
         let chat = client
             .chat_completions(
@@ -219,7 +218,7 @@ async fn streaming_chat_tool_call_and_done_are_decoded() {
         .mount(&server)
         .await;
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     let stream = client(provider(&server, "xai"), RateLimitPolicy::FailFast)
         .chat_completions_stream(
             &cx,
@@ -269,7 +268,7 @@ async fn rate_limit_retry_waits_once_then_succeeds() {
         RateLimitPolicy::WaitUpTo(Duration::from_secs(1)),
     )
     .chat_completions(
-        &Cx::for_testing(),
+        &fcp_async_core::compatibility_cx(),
         ChatCompletionsRequest::new("fixture", vec![ChatMessage::user_text("hello")]),
     )
     .await
@@ -295,7 +294,7 @@ async fn provider_service_error_maps_without_prompt_or_token_leakage() {
 
     let err = client(provider(&server, "deepseek-r1"), RateLimitPolicy::FailFast)
         .chat_completions(
-            &Cx::for_testing(),
+            &fcp_async_core::compatibility_cx(),
             ChatCompletionsRequest::new("fixture", vec![ChatMessage::user_text("hello")]),
         )
         .await
@@ -328,7 +327,7 @@ async fn model_cache_can_be_invalidated_and_refreshed() {
         .mount(&server)
         .await;
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     let client = client(
         provider(&server, "local-openai-compatible"),
         RateLimitPolicy::FailFast,
@@ -346,7 +345,7 @@ async fn model_cache_can_be_invalidated_and_refreshed() {
 #[fcp_async_core::runtime::test]
 async fn cancellation_checkpoint_prevents_request_dispatch() {
     let server = MockServer::start().await;
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
 
     let err = client(

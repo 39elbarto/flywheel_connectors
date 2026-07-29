@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented with HTTP-facade and capability-token drift
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/postgresql_connector_verification.sh`
 > **Supabase Data API upstream**: https://supabase.com/docs/guides/api
 > **PostgREST RPC upstream**: https://postgrest.org/en/latest/references/api/functions.html
 
@@ -70,7 +70,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime `self_check` reports `ok` whenever config exists and does not call the live `/rest/v1/health` endpoint.
 - Runtime `doctor` checks only local configuration, client initialization, and handshake state; it does not perform a live provider probe.
 - Runtime keeps request/error counters in memory only.
-- There is no tracked verification shell script for this connector.
+- The tracked verifier script is deliberately fail-closed: missing `rch` workers or Docker/testcontainer prerequisites are reported as infra-blocked, not as a green connector proof.
 
 A follow-up parity bead should decide whether this connector remains a custom PostgREST/Supabase HTTP facade or becomes a native PostgreSQL driver, replace placeholder manifest network constraints, install bound capability-token verification, enforce approval-token semantics for write operations, align handshake capabilities with actual capability IDs, and add broader deterministic endpoint-shape coverage beyond the transaction harness.
 
@@ -189,12 +189,25 @@ The deterministic evidence is currently split:
 - `connectors/postgresql/src/error.rs` defines connector error classes and FCP error conversion.
 - `connectors/postgresql/manifest.toml` defines the operation catalog, placeholder network constraints, sandbox boundary, zone policy, rate-limit pools, and AI hints.
 - `connectors/postgresql/tests/transaction_integration.rs` covers real transaction behavior through a testcontainer-backed shim.
+- `scripts/e2e/postgresql_connector_verification.sh` bundles the redaction-safe manifest, docs, Cargo, and testcontainer proof lane for reruns.
 
 ## Verification Bundle
+
+The closeout surface is the verifier, crate-local test suite, and fail-closed
+`fwc proof run` evidence for Cargo-backed `rch` proof commands. The verifier
+writes proof-governor artifacts under `${OUT_ROOT}/proof`. Only
+`accepted_remote_proof` rows in `*.rch_remote_proof.jsonl` are green closeout
+evidence for Cargo-backed steps. `refused_local_fallback`, `infra_blocked`,
+`remote_command_failed`, `failed_closed`, `not_proof`, or a missing proof row
+keep the batch bead open. `format_check` is a source-state check, not accepted
+remote Cargo proof.
 
 Run these after changing this connector contract:
 
 ```bash
+scripts/e2e/postgresql_connector_verification.sh
+PROOF_GOVERNOR=1 scripts/e2e/postgresql_connector_verification.sh
+FWC_BIN=/path/to/current/target/debug/fwc PROOF_GOVERNOR=1 scripts/e2e/postgresql_connector_verification.sh
 git diff --check -- connectors/postgresql/README.md
 ubs connectors/postgresql/README.md
 LC_ALL=C rg -n '[^ -~]' connectors/postgresql/README.md
@@ -216,7 +229,11 @@ For the Docker-backed transaction lane, use the feature-gated test explicitly:
 rch exec -- cargo test -p fcp-postgresql --features integration-testcontainer --test transaction_integration
 ```
 
+Set `POSTGRESQL_RUN_TESTCONTAINER=0` only for a metadata/docs smoke of the verifier shape when Docker is unavailable. That mode is not local non-mock acceptance evidence.
+
 ## Operator Guidance
+
+Rerun commands are listed in the verification bundle above. Use the tracked verifier for the full redaction-safe proof lane, and use the individual `rch` commands only when narrowing a specific failing step.
 
 - Configure an explicit `base_url`; the default `https://db.example.com` is a placeholder.
 - Verify the configured facade implements the expected custom RPC endpoints before diagnosing connector code.

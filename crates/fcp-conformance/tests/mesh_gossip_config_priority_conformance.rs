@@ -20,12 +20,12 @@
 //! - `DEFAULT_RECONCILIATION_BATCH_SIZE = 1000`
 //! - `MAX_OBJECT_IDS_PER_REQUEST = 100`
 //! - `GossipConfig::default` documented values:
-//!   priority_gossip_interval_ms=100, max_revocation_push_peers=32,
-//!   max_peer_states=4096
+//!   `priority_gossip_interval_ms=100`, `max_revocation_push_peers=32`,
+//!   `max_peer_states=4096`
 //! - `PriorityGossipPolicy::default == DirectPush` (revocations
 //!   pushed immediately to all peers — drift would silently slow
 //!   revocation propagation)
-//! - 3 distinct PriorityGossipPolicy variants, Copy + serde
+//! - 3 distinct `PriorityGossipPolicy` variants, Copy + serde
 //! - `IbltDecodeError` 3 variants with documented payloads:
 //!   `TooLarge { len, max }`, `InvalidEncoding`,
 //!   `TooManyChanges { decoded, max }`
@@ -259,7 +259,7 @@ fn gossip_stats_three_fields_preserved_under_clone() {
         symbol_count: 1000,
         last_updated: 1_500_000_000,
     };
-    let cloned = s.clone();
+    let cloned = s;
     assert_eq!(cloned.object_count, 42);
     assert_eq!(cloned.symbol_count, 1000);
     assert_eq!(cloned.last_updated, 1_500_000_000);

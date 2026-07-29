@@ -23,8 +23,8 @@
 //!   1. `to_canonical_cbor(prov)` is byte-stable across runs.
 //!   2. The canonical bytes match the pinned hex constant.
 //!   3. `ciborium::from_reader(bytes)` decodes back to a structurally
-//!      equal `Provenance` (origin_zone, taint, elevated, chain length,
-//!      elevation_token presence).
+//!      equal `Provenance` (`origin_zone`, taint, elevated, chain length,
+//!      `elevation_token` presence).
 //!   4. Re-encoding the decoded value yields the original bytes
 //!      (idempotence under encode∘decode).
 
@@ -51,7 +51,7 @@ const Z_PUBLIC: &str = "z:public";
 ///   `69 556e 7461 696e 7465 64` text(9) "Untainted"
 ///   `68 656c 6576 6174 6564` text(8) "elevated"
 ///   `f4`                    false
-///   `6b 6f72 6967 696e 5f7a 6f6e 65` text(11) "origin_zone"
+///   `6b 6f72 6967 696e 5f7a 6f6e 65` text(11) "`origin_zone`"
 const PROVENANCE_PREFIX_HEX: &str =
     "a465636861696e80657461696e7469556e7461696e74656468656c657661746564f46b6f726967696e5f7a6f6e65";
 
@@ -64,9 +64,9 @@ fn zone(id: &str) -> ZoneId {
 /// The CBOR text string head is `0x60 + len` for `len <= 23`.
 fn expected_hex(zone_id: &str) -> String {
     let z_bytes = zone_id.as_bytes();
-    let len = z_bytes.len();
+    let len = u8::try_from(z_bytes.len()).expect("test zones MUST fit in a single-byte CBOR head");
     assert!(len <= 23, "test zones MUST fit in a single-byte CBOR head");
-    let head = 0x60u8 | (len as u8);
+    let head = 0x60u8 | len;
     format!(
         "{PROVENANCE_PREFIX_HEX}{:02x}{}",
         head,

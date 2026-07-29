@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented; manifest/runtime drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/kubernetes_connector_verification.sh`
 > **Kubernetes API upstream**: https://kubernetes.io/docs/reference/
 
 ## Purpose
@@ -91,7 +91,7 @@ This README documents the runtime truth and keeps current drift visible:
 - `base_url_policy` can produce `configured_with_warnings` but does not hard-stop client creation.
 - `kubernetes.get_secret` redacts data by default unless `unmask=true`, while `kubernetes.secret.get` returns the full secret object including `data`.
 - The manifest state hint mentions watch cursors and checkpoints, but the current runtime does not persist watch cursors.
-- There is no dedicated tracked verification shell script for this connector.
+- The tracked verifier script is deliberately fail-closed: missing `rch` workers or remote prerequisites are reported as infra-blocked, not as a green connector proof.
 
 A follow-up parity bead should align connector IDs, implement full handshake and token verification, reconcile approval metadata with runtime approval-token checks, split one-shot reads from true streams, persist watch cursors if event caps remain advertised, and add a tracked verification bundle.
 
@@ -128,7 +128,7 @@ The current Kubernetes README slice documents the existing runtime surface:
 - Default production host shape: `kubernetes.default.svc`.
 - Common Kubernetes API ports: `443` and `6443`.
 - TLS and SNI are required by the manifest for provider operations.
-- Manifest network policy allows cluster/private API ranges but denies tailnet ranges.
+- Manifest network policy denies localhost, private ranges, and tailnet ranges; local loopback coverage is limited to deterministic test fixtures outside production egress.
 - Runtime base URL policy accepts in-cluster service hosts and custom HTTPS API endpoints.
 - Runtime base URL policy accepts loopback hosts for deterministic tests.
 - Runtime base URL policy rejects non-loopback HTTP.
@@ -289,12 +289,25 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - `connectors/kubernetes/src/error.rs` defines connector error classes and FCP error conversion.
 - `connectors/kubernetes/manifest.toml` defines the operation catalog, network constraints, sandbox boundary, zone policy, event caps, and rate-limit intent.
 - `connectors/kubernetes/tests/integration.rs` contains the runtime contract proof surface.
+- `scripts/e2e/kubernetes_connector_verification.sh` bundles the redaction-safe gauntlet, docs, Cargo, integration, and loopback local non-mock proof lane for reruns.
 
 ## Verification Bundle
+
+The closeout surface is the verifier, crate-local test suite, and fail-closed
+`fwc proof run` evidence for Cargo-backed `rch` proof commands. The verifier
+writes proof-governor artifacts under `${OUT_ROOT}/proof`. Only
+`accepted_remote_proof` rows in `*.rch_remote_proof.jsonl` are green closeout
+evidence for Cargo-backed steps. `refused_local_fallback`, `infra_blocked`,
+`remote_command_failed`, `failed_closed`, `not_proof`, or a missing proof row
+keep the batch bead open. `format_check` is a source-state check, not accepted
+remote Cargo proof.
 
 Run these after changing this connector contract:
 
 ```bash
+scripts/e2e/kubernetes_connector_verification.sh
+PROOF_GOVERNOR=1 scripts/e2e/kubernetes_connector_verification.sh
+FWC_BIN=/path/to/current/target/debug/fwc PROOF_GOVERNOR=1 scripts/e2e/kubernetes_connector_verification.sh
 git diff --check -- connectors/kubernetes/README.md
 ubs connectors/kubernetes/README.md
 LC_ALL=C rg -n '[^ -~]' connectors/kubernetes/README.md
@@ -311,6 +324,8 @@ rch exec -- cargo fmt --check
 ```
 
 ## Operator Guidance
+
+Rerun commands are listed in the verification bundle above. Use the tracked verifier for the full redaction-safe proof lane, and use the individual `rch` commands only when narrowing a specific failing step.
 
 - Prefer `credential_id` for production so host policy owns secret injection.
 - Use direct `bearer_token` only in local deterministic tests or explicitly scoped environments.

@@ -23,6 +23,9 @@ pub const PROOF_RUNNER_EVENT_SCHEMA: &str = "fcp.proof-runner-event.v1";
 /// Stable schema for proof-runner summaries.
 pub const PROOF_RUNNER_SUMMARY_SCHEMA: &str = "fcp.proof-runner-summary.v1";
 
+/// Stable schema for fail-closed RCH remote-proof evidence rows.
+pub const RCH_REMOTE_PROOF_EVIDENCE_SCHEMA: &str = "fcp.rch-remote-proof-evidence.v1";
+
 /// Redaction-safe command and policy for a proof run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofCommandSpec {
@@ -769,6 +772,496 @@ impl ProofRunClassification {
     }
 }
 
+/// Redaction-safe RCH remote-proof evidence row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchRemoteProofEvidence {
+    /// Schema identifier; must be [`RCH_REMOTE_PROOF_EVIDENCE_SCHEMA`].
+    #[serde(default = "default_rch_remote_proof_schema")]
+    pub schema: String,
+    /// Command vector that was planned or observed.
+    pub command: Vec<String>,
+    /// Working directory used for the command.
+    pub cwd: String,
+    /// Git revision under test.
+    pub git_revision: String,
+    /// Worker id reported by RCH, when a remote worker was actually selected.
+    #[serde(default)]
+    pub worker_id: Option<String>,
+    /// Final `[RCH] remote|local` summary line, with secret-bearing details removed.
+    #[serde(default)]
+    pub rch_summary_line: Option<String>,
+    /// Selector/admission reason when RCH did not produce a remote result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector_reason: Option<String>,
+    /// Remote topology/preflight reason when setup failed before Cargo ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_reason: Option<String>,
+    /// Cargo target directory used for the run.
+    #[serde(default)]
+    pub target_dir: Option<String>,
+    /// Run start timestamp in Unix milliseconds.
+    pub started_at_unix_ms: u64,
+    /// Run finish timestamp in Unix milliseconds, if terminal.
+    #[serde(default)]
+    pub finished_at_unix_ms: Option<u64>,
+    /// Terminal exit kind observed by the governor.
+    pub exit_kind: RchRemoteProofExitKind,
+    /// Stable blocker reason when the row cannot be accepted as remote proof.
+    #[serde(default)]
+    pub blocker_reason: Option<RchRemoteProofBlockerReason>,
+    /// Redaction flags for row consumers.
+    pub redaction: RchRemoteProofRedaction,
+}
+
+impl RchRemoteProofEvidence {
+    /// Validate and classify this evidence row.
+    ///
+    /// Unknown or ambiguous evidence deliberately returns a fail-closed
+    /// classification rather than green proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofRunError`] when the row violates schema or redaction
+    /// rules.
+    pub fn classify(&self) -> Result<RchRemoteProofClassification, ProofRunError> {
+        self.validate()?;
+
+        if !command_contains_cargo(&self.command)
+            || self.exit_kind == RchRemoteProofExitKind::NonProof
+        {
+            return Ok(RchRemoteProofClassification::NotProof {
+                blocker: RchRemoteProofBlockerReason::NonCargoNonProof,
+            });
+        }
+
+        match self.exit_kind {
+            RchRemoteProofExitKind::RemotePassed => Ok(self.classify_remote_passed()),
+            RchRemoteProofExitKind::RemoteFailed { exit_code } => {
+                Ok(self.classify_remote_failed(exit_code))
+            }
+            RchRemoteProofExitKind::Blocked => Ok(classify_blocker(self.inferred_blocker_reason())),
+            RchRemoteProofExitKind::NonProof => Ok(RchRemoteProofClassification::NotProof {
+                blocker: RchRemoteProofBlockerReason::NonCargoNonProof,
+            }),
+            RchRemoteProofExitKind::Unknown => Ok(RchRemoteProofClassification::FailedClosed {
+                blocker: RchRemoteProofBlockerReason::Unknown,
+            }),
+        }
+    }
+
+    /// Whether this row is accepted as remote proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofRunError`] when row validation fails.
+    pub fn counts_as_remote_proof(&self) -> Result<bool, ProofRunError> {
+        Ok(self.classify()? == RchRemoteProofClassification::AcceptedRemoteProof)
+    }
+
+    /// Require an accepted remote proof classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofRunError::NotRchRemoteProof`] for every non-green
+    /// classification, including local fallback, infra blockers, missing
+    /// summaries, and non-Cargo commands.
+    pub fn require_remote_success(&self) -> Result<(), ProofRunError> {
+        let classification = self.classify()?;
+        if classification == RchRemoteProofClassification::AcceptedRemoteProof {
+            Ok(())
+        } else {
+            Err(ProofRunError::NotRchRemoteProof { classification })
+        }
+    }
+
+    /// Serialize this row as one deterministic JSONL record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofRunError`] when the row is invalid or cannot serialize.
+    pub fn to_jsonl_record(&self) -> Result<String, ProofRunError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(ProofRunError::from)
+    }
+
+    /// Parse the final RCH summary line if one is present.
+    #[must_use]
+    pub fn parsed_summary(&self) -> Option<RchRemoteProofSummary> {
+        self.rch_summary_line
+            .as_deref()
+            .and_then(RchRemoteProofSummary::parse_final_summary_line)
+    }
+
+    /// Validate schema, required fields, redaction flags, and timestamp order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofRunError`] when fields are unsafe or internally
+    /// contradictory.
+    pub fn validate(&self) -> Result<(), ProofRunError> {
+        if self.schema != RCH_REMOTE_PROOF_EVIDENCE_SCHEMA {
+            return Err(ProofRunError::InvalidSchema {
+                expected: RCH_REMOTE_PROOF_EVIDENCE_SCHEMA,
+                actual: self.schema.clone(),
+            });
+        }
+        if self.command.is_empty() {
+            return Err(ProofRunError::EmptyArgv);
+        }
+        for arg in &self.command {
+            validate_safe_text("rch_remote_proof.command", arg)?;
+        }
+        validate_safe_text("rch_remote_proof.cwd", &self.cwd)?;
+        validate_graphish_text("rch_remote_proof.git_revision", &self.git_revision)?;
+        if let Some(worker_id) = &self.worker_id {
+            validate_graphish_text("rch_remote_proof.worker_id", worker_id)?;
+        }
+        if let Some(summary) = &self.rch_summary_line {
+            validate_safe_text(
+                "rch_remote_proof.rch_summary_line",
+                &strip_ansi_csi(summary),
+            )?;
+        }
+        if let Some(selector_reason) = &self.selector_reason {
+            validate_safe_text("rch_remote_proof.selector_reason", selector_reason)?;
+        }
+        if let Some(preflight_reason) = &self.preflight_reason {
+            validate_safe_text("rch_remote_proof.preflight_reason", preflight_reason)?;
+        }
+        if let Some(target_dir) = &self.target_dir {
+            validate_safe_text("rch_remote_proof.target_dir", target_dir)?;
+        }
+        if self
+            .finished_at_unix_ms
+            .is_some_and(|finished_at| finished_at < self.started_at_unix_ms)
+        {
+            return Err(ProofRunError::InvalidPolicy {
+                reason: "finished_at_unix_ms cannot precede started_at_unix_ms",
+            });
+        }
+        self.redaction.validate()
+    }
+
+    fn classify_remote_passed(&self) -> RchRemoteProofClassification {
+        let Some(summary) = self.parsed_summary() else {
+            return RchRemoteProofClassification::FailedClosed {
+                blocker: self.summary_failure_reason(),
+            };
+        };
+        if summary.location != RchRemoteProofSummaryLocation::Remote {
+            return classify_blocker(self.inferred_blocker_reason());
+        }
+        if self.blocker_reason.is_some() {
+            return RchRemoteProofClassification::FailedClosed {
+                blocker: RchRemoteProofBlockerReason::AmbiguousRchSummary,
+            };
+        }
+        if self.worker_id.is_none() && summary.worker_id.is_none() {
+            return RchRemoteProofClassification::FailedClosed {
+                blocker: RchRemoteProofBlockerReason::AmbiguousRchSummary,
+            };
+        }
+        RchRemoteProofClassification::AcceptedRemoteProof
+    }
+
+    fn classify_remote_failed(&self, exit_code: i32) -> RchRemoteProofClassification {
+        let Some(summary) = self.parsed_summary() else {
+            return RchRemoteProofClassification::FailedClosed {
+                blocker: self.summary_failure_reason(),
+            };
+        };
+        if summary.location == RchRemoteProofSummaryLocation::Remote {
+            RchRemoteProofClassification::RemoteCommandFailed { exit_code }
+        } else {
+            classify_blocker(self.inferred_blocker_reason())
+        }
+    }
+
+    fn inferred_blocker_reason(&self) -> RchRemoteProofBlockerReason {
+        if let Some(reason) = self.blocker_reason {
+            return reason;
+        }
+        let Some(summary) = &self.rch_summary_line else {
+            return RchRemoteProofBlockerReason::MissingRchSummary;
+        };
+        let cleaned = strip_ansi_csi(summary);
+        let lower = cleaned.to_ascii_lowercase();
+        if lower.contains("active_project_exclusion") {
+            RchRemoteProofBlockerReason::ActiveProjectExclusion
+        } else if lower.contains("no admissible workers") || lower.contains("no_admissible_workers")
+        {
+            RchRemoteProofBlockerReason::NoAdmissibleWorkers
+        } else if lower.contains("topology")
+            || lower.contains("preflight")
+            || lower.contains("ln: already exists")
+        {
+            RchRemoteProofBlockerReason::TopologyPreflightFailure
+        } else if lower.contains("pressure") || lower.contains("all_workers_busy") {
+            RchRemoteProofBlockerReason::WorkerPressure
+        } else if RchRemoteProofSummary::parse_final_summary_line(&cleaned)
+            .is_some_and(|summary| summary.location == RchRemoteProofSummaryLocation::Local)
+        {
+            RchRemoteProofBlockerReason::LocalFallbackRefused
+        } else if RchRemoteProofSummary::parse_final_summary_line(&cleaned).is_none() {
+            RchRemoteProofBlockerReason::MalformedRchSummary
+        } else {
+            RchRemoteProofBlockerReason::AmbiguousRchSummary
+        }
+    }
+
+    fn summary_failure_reason(&self) -> RchRemoteProofBlockerReason {
+        match &self.rch_summary_line {
+            Some(line) if RchRemoteProofSummary::parse_final_summary_line(line).is_none() => {
+                RchRemoteProofBlockerReason::MalformedRchSummary
+            }
+            Some(_) => RchRemoteProofBlockerReason::AmbiguousRchSummary,
+            None => RchRemoteProofBlockerReason::MissingRchSummary,
+        }
+    }
+}
+
+fn default_rch_remote_proof_schema() -> String {
+    RCH_REMOTE_PROOF_EVIDENCE_SCHEMA.to_owned()
+}
+
+/// Terminal exit kind recorded by the RCH remote-proof schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RchRemoteProofExitKind {
+    /// Remote command exited zero.
+    RemotePassed,
+    /// Remote command ran and exited non-zero.
+    RemoteFailed {
+        /// Process exit code.
+        exit_code: i32,
+    },
+    /// The proof did not reach a trustworthy remote command result.
+    Blocked,
+    /// The command is not eligible to be claimed as RCH Cargo proof.
+    NonProof,
+    /// Exit state is unavailable or ambiguous.
+    Unknown,
+}
+
+/// Stable blocker reason for non-green RCH remote-proof rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RchRemoteProofBlockerReason {
+    /// Local fallback was attempted or would be attempted and must be refused.
+    LocalFallbackRefused,
+    /// Another active same-project RCH command blocked admission.
+    ActiveProjectExclusion,
+    /// RCH reported no admissible worker.
+    NoAdmissibleWorkers,
+    /// Remote path topology or preflight setup failed before a real build result.
+    TopologyPreflightFailure,
+    /// Worker pressure or slot pressure blocked a trustworthy remote proof.
+    WorkerPressure,
+    /// Command is not a Cargo proof command.
+    NonCargoNonProof,
+    /// The RCH summary line was present but malformed.
+    MalformedRchSummary,
+    /// The RCH summary line was missing.
+    MissingRchSummary,
+    /// The summary conflicted with row metadata.
+    AmbiguousRchSummary,
+    /// The reason is not classified.
+    Unknown,
+}
+
+/// Fail-closed classification for one RCH remote-proof evidence row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RchRemoteProofClassification {
+    /// Accepted as remote proof.
+    AcceptedRemoteProof,
+    /// Remote command executed and failed for real code/test reasons.
+    RemoteCommandFailed {
+        /// Process exit code.
+        exit_code: i32,
+    },
+    /// RCH infrastructure blocked the run before a real command result.
+    InfraBlocked {
+        /// Stable blocker reason.
+        blocker: RchRemoteProofBlockerReason,
+    },
+    /// Local fallback was refused by proof policy.
+    RefusedLocalFallback,
+    /// This row is explicitly not a remote Cargo proof.
+    NotProof {
+        /// Stable non-proof reason.
+        blocker: RchRemoteProofBlockerReason,
+    },
+    /// The row is unknown or ambiguous and must not be green.
+    FailedClosed {
+        /// Stable fail-closed reason.
+        blocker: RchRemoteProofBlockerReason,
+    },
+}
+
+impl RchRemoteProofClassification {
+    /// Stable string label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AcceptedRemoteProof => "accepted_remote_proof",
+            Self::RemoteCommandFailed { .. } => "remote_command_failed",
+            Self::InfraBlocked { .. } => "infra_blocked",
+            Self::RefusedLocalFallback => "refused_local_fallback",
+            Self::NotProof { .. } => "not_proof",
+            Self::FailedClosed { .. } => "failed_closed",
+        }
+    }
+}
+
+impl RchRemoteProofBlockerReason {
+    /// Stable string label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalFallbackRefused => "local_fallback_refused",
+            Self::ActiveProjectExclusion => "active_project_exclusion",
+            Self::NoAdmissibleWorkers => "no_admissible_workers",
+            Self::TopologyPreflightFailure => "topology_preflight_failure",
+            Self::WorkerPressure => "worker_pressure",
+            Self::NonCargoNonProof => "non_cargo_non_proof",
+            Self::MalformedRchSummary => "malformed_rch_summary",
+            Self::MissingRchSummary => "missing_rch_summary",
+            Self::AmbiguousRchSummary => "ambiguous_rch_summary",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Parsed leading tokens from the final RCH summary line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchRemoteProofSummary {
+    /// Remote or local execution location.
+    pub location: RchRemoteProofSummaryLocation,
+    /// Worker id for remote summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+}
+
+impl RchRemoteProofSummary {
+    /// Parse the stable leading tokens from RCH's final summary line.
+    #[must_use]
+    pub fn parse_final_summary_line(line: &str) -> Option<Self> {
+        let cleaned = strip_ansi_csi(line);
+        let mut parts = cleaned.trim().strip_prefix("[RCH] ")?.split_whitespace();
+        match parts.next()? {
+            "remote" => {
+                let worker_id = parts
+                    .next()
+                    .filter(|part| !part.starts_with('('))
+                    .map(str::to_owned);
+                Some(Self {
+                    location: RchRemoteProofSummaryLocation::Remote,
+                    worker_id,
+                })
+            }
+            "local" => Some(Self {
+                location: RchRemoteProofSummaryLocation::Local,
+                worker_id: None,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Location reported by a final RCH summary line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RchRemoteProofSummaryLocation {
+    /// The command ran remotely.
+    Remote,
+    /// The command ran locally or fell back locally.
+    Local,
+}
+
+/// Redaction flags for RCH remote-proof evidence rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchRemoteProofRedaction {
+    /// Redaction flags asserted by the producer.
+    pub flags: BTreeSet<RchRemoteProofRedactionFlag>,
+}
+
+/// Individual redaction guarantees for RCH remote-proof evidence rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RchRemoteProofRedactionFlag {
+    /// Command was checked for raw secret-bearing arguments.
+    CommandChecked,
+    /// Working directory was normalized or otherwise made redaction-safe.
+    CwdRedacted,
+    /// Target directory was normalized or otherwise made redaction-safe.
+    TargetDirRedacted,
+    /// RCH summary line was stripped of secret-bearing details.
+    SummaryRedacted,
+    /// Raw secret values were removed from all row fields.
+    SecretValuesRemoved,
+}
+
+impl RchRemoteProofRedaction {
+    fn validate(&self) -> Result<(), ProofRunError> {
+        if !self
+            .flags
+            .contains(&RchRemoteProofRedactionFlag::SecretValuesRemoved)
+        {
+            return Err(ProofRunError::InvalidPolicy {
+                reason: "redaction must remove raw secret values",
+            });
+        }
+        Ok(())
+    }
+}
+
+const fn classify_blocker(blocker: RchRemoteProofBlockerReason) -> RchRemoteProofClassification {
+    match blocker {
+        RchRemoteProofBlockerReason::LocalFallbackRefused => {
+            RchRemoteProofClassification::RefusedLocalFallback
+        }
+        RchRemoteProofBlockerReason::ActiveProjectExclusion
+        | RchRemoteProofBlockerReason::NoAdmissibleWorkers
+        | RchRemoteProofBlockerReason::TopologyPreflightFailure
+        | RchRemoteProofBlockerReason::WorkerPressure => {
+            RchRemoteProofClassification::InfraBlocked { blocker }
+        }
+        RchRemoteProofBlockerReason::NonCargoNonProof => {
+            RchRemoteProofClassification::NotProof { blocker }
+        }
+        RchRemoteProofBlockerReason::MalformedRchSummary
+        | RchRemoteProofBlockerReason::MissingRchSummary
+        | RchRemoteProofBlockerReason::AmbiguousRchSummary
+        | RchRemoteProofBlockerReason::Unknown => {
+            RchRemoteProofClassification::FailedClosed { blocker }
+        }
+    }
+}
+
+fn command_contains_cargo(argv: &[String]) -> bool {
+    argv.iter()
+        .any(|arg| arg == "cargo" || arg.ends_with("/cargo"))
+}
+
+fn strip_ansi_csi(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// JSONL event record emitted by the proof-runner contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofRunJsonlEvent {
@@ -815,6 +1308,12 @@ pub enum ProofRunError {
     NotRemoteProof {
         /// Terminal classification.
         classification: ProofRunClassification,
+    },
+    /// RCH evidence row did not satisfy remote-proof requirements.
+    #[error("rch proof evidence is not accepted remote proof: {classification:?}")]
+    NotRchRemoteProof {
+        /// Terminal classification.
+        classification: RchRemoteProofClassification,
     },
     /// Serialization failed.
     #[error(transparent)]
@@ -1226,6 +1725,484 @@ mod tests {
                 .starts_with("blake3-256:")
         );
         assert!(evidence.rerun_command.expect("rerun").requires_rch);
+    }
+
+    fn rch_evidence(
+        exit_kind: RchRemoteProofExitKind,
+        blocker_reason: Option<RchRemoteProofBlockerReason>,
+        rch_summary_line: Option<&str>,
+    ) -> RchRemoteProofEvidence {
+        RchRemoteProofEvidence {
+            schema: RCH_REMOTE_PROOF_EVIDENCE_SCHEMA.to_owned(),
+            command: vec![
+                "rch".to_owned(),
+                "exec".to_owned(),
+                "--".to_owned(),
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "fcp-evidence".to_owned(),
+            ],
+            cwd: ".".to_owned(),
+            git_revision: "abc1234".to_owned(),
+            worker_id: Some("worker-7".to_owned()),
+            rch_summary_line: rch_summary_line.map(str::to_owned),
+            selector_reason: None,
+            preflight_reason: None,
+            target_dir: Some("/tmp/fcp-proof-governor".to_owned()),
+            started_at_unix_ms: NOW,
+            finished_at_unix_ms: Some(NOW + 1_000),
+            exit_kind,
+            blocker_reason,
+            redaction: RchRemoteProofRedaction {
+                flags: BTreeSet::from([
+                    RchRemoteProofRedactionFlag::CommandChecked,
+                    RchRemoteProofRedactionFlag::CwdRedacted,
+                    RchRemoteProofRedactionFlag::TargetDirRedacted,
+                    RchRemoteProofRedactionFlag::SummaryRedacted,
+                    RchRemoteProofRedactionFlag::SecretValuesRemoved,
+                ]),
+            },
+        }
+    }
+
+    fn assert_rch_fixture(
+        label: &str,
+        evidence: &RchRemoteProofEvidence,
+        expected: RchRemoteProofClassification,
+    ) {
+        let actual = evidence.classify().expect(label);
+        assert_eq!(
+            actual, expected,
+            "fixture {label}: expected {expected:?}, actual {actual:?}, summary={:?}, selector_reason={:?}, preflight_reason={:?}",
+            evidence.rch_summary_line, evidence.selector_reason, evidence.preflight_reason
+        );
+        assert_eq!(
+            evidence.counts_as_remote_proof().expect(label),
+            expected == RchRemoteProofClassification::AcceptedRemoteProof,
+            "fixture {label}: remote-proof boolean disagreed with classification {actual:?}"
+        );
+    }
+
+    type RchFixture = (
+        &'static str,
+        RchRemoteProofEvidence,
+        RchRemoteProofClassification,
+    );
+
+    fn remote_command_fixtures() -> [RchFixture; 5] {
+        [
+            (
+                "remote pass",
+                rch_evidence(
+                    RchRemoteProofExitKind::RemotePassed,
+                    None,
+                    Some("[RCH] remote worker-7 (cargo test passed)"),
+                ),
+                RchRemoteProofClassification::AcceptedRemoteProof,
+            ),
+            (
+                "remote build failure",
+                rch_evidence(
+                    RchRemoteProofExitKind::RemoteFailed { exit_code: 101 },
+                    None,
+                    Some("[RCH] remote worker-7 failed [RCH-E101]"),
+                ),
+                RchRemoteProofClassification::RemoteCommandFailed { exit_code: 101 },
+            ),
+            (
+                "local fallback refused after daemon unavailable",
+                rch_evidence(
+                    RchRemoteProofExitKind::Blocked,
+                    Some(RchRemoteProofBlockerReason::LocalFallbackRefused),
+                    Some("[RCH] local (daemon unavailable; refusing local fallback)"),
+                ),
+                RchRemoteProofClassification::RefusedLocalFallback,
+            ),
+            (
+                "local fallback refused after remote execution failed",
+                rch_evidence(
+                    RchRemoteProofExitKind::Blocked,
+                    None,
+                    Some("[RCH] local (remote execution failed)"),
+                ),
+                RchRemoteProofClassification::RefusedLocalFallback,
+            ),
+            (
+                "ansi colored remote pass",
+                rch_evidence(
+                    RchRemoteProofExitKind::RemotePassed,
+                    None,
+                    Some("\u{1b}[32m[RCH] remote worker-7 (cargo test passed)\u{1b}[0m"),
+                ),
+                RchRemoteProofClassification::AcceptedRemoteProof,
+            ),
+        ]
+    }
+
+    fn infra_blocked_fixtures() -> [RchFixture; 4] {
+        [
+            (
+                "active project exclusion",
+                rch_evidence(
+                    RchRemoteProofExitKind::Blocked,
+                    None,
+                    Some("[RCH] local (no admissible workers: active_project_exclusion=1)"),
+                ),
+                RchRemoteProofClassification::InfraBlocked {
+                    blocker: RchRemoteProofBlockerReason::ActiveProjectExclusion,
+                },
+            ),
+            (
+                "no admissible workers",
+                rch_evidence(
+                    RchRemoteProofExitKind::Blocked,
+                    None,
+                    Some("[RCH] local (no admissible workers: healthy=0)"),
+                ),
+                RchRemoteProofClassification::InfraBlocked {
+                    blocker: RchRemoteProofBlockerReason::NoAdmissibleWorkers,
+                },
+            ),
+            (
+                "topology preflight failure",
+                rch_evidence(
+                    RchRemoteProofExitKind::Blocked,
+                    Some(RchRemoteProofBlockerReason::TopologyPreflightFailure),
+                    Some("[RCH] local (remote topology preflight failed: ln: Already exists)"),
+                ),
+                RchRemoteProofClassification::InfraBlocked {
+                    blocker: RchRemoteProofBlockerReason::TopologyPreflightFailure,
+                },
+            ),
+            (
+                "worker pressure",
+                rch_evidence(
+                    RchRemoteProofExitKind::Blocked,
+                    None,
+                    Some("[RCH] local (all_workers_busy under pressure)"),
+                ),
+                RchRemoteProofClassification::InfraBlocked {
+                    blocker: RchRemoteProofBlockerReason::WorkerPressure,
+                },
+            ),
+        ]
+    }
+
+    fn non_compilation_fixture() -> RchFixture {
+        let mut non_cargo = rch_evidence(
+            RchRemoteProofExitKind::NonProof,
+            Some(RchRemoteProofBlockerReason::NonCargoNonProof),
+            Some("[RCH] remote worker-7 (git status passed)"),
+        );
+        non_cargo.command = vec!["git".to_owned(), "status".to_owned()];
+
+        (
+            "non compilation command",
+            non_cargo,
+            RchRemoteProofClassification::NotProof {
+                blocker: RchRemoteProofBlockerReason::NonCargoNonProof,
+            },
+        )
+    }
+
+    fn failed_closed_fixtures() -> [RchFixture; 4] {
+        [
+            (
+                "missing rch summary",
+                rch_evidence(RchRemoteProofExitKind::RemotePassed, None, None),
+                RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::MissingRchSummary,
+                },
+            ),
+            (
+                "malformed rch summary",
+                rch_evidence(
+                    RchRemoteProofExitKind::RemotePassed,
+                    None,
+                    Some("RCH remote worker-7 without bracket prefix"),
+                ),
+                RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::MalformedRchSummary,
+                },
+            ),
+            (
+                "ambiguous summary metadata",
+                rch_evidence(
+                    RchRemoteProofExitKind::RemotePassed,
+                    Some(RchRemoteProofBlockerReason::WorkerPressure),
+                    Some("[RCH] remote worker-7 (cargo test passed)"),
+                ),
+                RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::AmbiguousRchSummary,
+                },
+            ),
+            (
+                "unknown exit state",
+                rch_evidence(
+                    RchRemoteProofExitKind::Unknown,
+                    None,
+                    Some("[RCH] remote worker-7 (unknown state)"),
+                ),
+                RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::Unknown,
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn rch_remote_proof_fixture_corpus_covers_required_states() {
+        for (label, evidence, expected) in remote_command_fixtures()
+            .into_iter()
+            .chain(infra_blocked_fixtures())
+            .chain(std::iter::once(non_compilation_fixture()))
+            .chain(failed_closed_fixtures())
+        {
+            assert_rch_fixture(label, &evidence, expected);
+        }
+    }
+
+    #[test]
+    fn rch_unknown_states_fail_closed() {
+        let missing_summary = rch_evidence(RchRemoteProofExitKind::RemotePassed, None, None);
+        let malformed_summary = rch_evidence(
+            RchRemoteProofExitKind::RemotePassed,
+            None,
+            Some("RCH remote worker-7 without bracket prefix"),
+        );
+        let unknown = rch_evidence(
+            RchRemoteProofExitKind::Unknown,
+            None,
+            Some("[RCH] remote worker-7 (unknown state)"),
+        );
+
+        for (label, evidence, expected) in [
+            (
+                "missing summary",
+                missing_summary,
+                RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::MissingRchSummary,
+                },
+            ),
+            (
+                "malformed summary",
+                malformed_summary,
+                RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::MalformedRchSummary,
+                },
+            ),
+            (
+                "unknown state",
+                unknown,
+                RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::Unknown,
+                },
+            ),
+        ] {
+            assert_rch_fixture(label, &evidence, expected);
+        }
+
+        let missing_summary = rch_evidence(RchRemoteProofExitKind::RemotePassed, None, None);
+        assert!(matches!(
+            missing_summary.require_remote_success(),
+            Err(ProofRunError::NotRchRemoteProof {
+                classification: RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::MissingRchSummary
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn rch_jsonl_golden_records_cover_accepted_and_blocked_proofs() {
+        let accepted = rch_evidence(
+            RchRemoteProofExitKind::RemotePassed,
+            None,
+            Some("[RCH] remote worker-7 (cargo test passed)"),
+        );
+        let mut blocked = rch_evidence(
+            RchRemoteProofExitKind::Blocked,
+            Some(RchRemoteProofBlockerReason::LocalFallbackRefused),
+            Some("[RCH] local (remote execution failed)"),
+        );
+        blocked.worker_id = None;
+        blocked.selector_reason = Some(
+            RchRemoteProofBlockerReason::LocalFallbackRefused
+                .as_str()
+                .to_owned(),
+        );
+
+        let accepted_json: serde_json::Value =
+            serde_json::from_str(&accepted.to_jsonl_record().expect("accepted jsonl"))
+                .expect("accepted json");
+        let blocked_json: serde_json::Value =
+            serde_json::from_str(&blocked.to_jsonl_record().expect("blocked jsonl"))
+                .expect("blocked json");
+
+        assert_eq!(
+            accepted_json,
+            serde_json::json!({
+                "schema": RCH_REMOTE_PROOF_EVIDENCE_SCHEMA,
+                "command": ["rch", "exec", "--", "cargo", "test", "-p", "fcp-evidence"],
+                "cwd": ".",
+                "git_revision": "abc1234",
+                "worker_id": "worker-7",
+                "rch_summary_line": "[RCH] remote worker-7 (cargo test passed)",
+                "target_dir": "/tmp/fcp-proof-governor",
+                "started_at_unix_ms": NOW,
+                "finished_at_unix_ms": NOW + 1_000,
+                "exit_kind": {"state": "remote_passed"},
+                "blocker_reason": null,
+                "redaction": {
+                    "flags": [
+                        "command_checked",
+                        "cwd_redacted",
+                        "target_dir_redacted",
+                        "summary_redacted",
+                        "secret_values_removed"
+                    ]
+                }
+            })
+        );
+        assert_eq!(
+            blocked_json,
+            serde_json::json!({
+                "schema": RCH_REMOTE_PROOF_EVIDENCE_SCHEMA,
+                "command": ["rch", "exec", "--", "cargo", "test", "-p", "fcp-evidence"],
+                "cwd": ".",
+                "git_revision": "abc1234",
+                "worker_id": null,
+                "rch_summary_line": "[RCH] local (remote execution failed)",
+                "selector_reason": "local_fallback_refused",
+                "target_dir": "/tmp/fcp-proof-governor",
+                "started_at_unix_ms": NOW,
+                "finished_at_unix_ms": NOW + 1_000,
+                "exit_kind": {"state": "blocked"},
+                "blocker_reason": "local_fallback_refused",
+                "redaction": {
+                    "flags": [
+                        "command_checked",
+                        "cwd_redacted",
+                        "target_dir_redacted",
+                        "summary_redacted",
+                        "secret_values_removed"
+                    ]
+                }
+            })
+        );
+        assert_rch_fixture(
+            "accepted golden",
+            &accepted,
+            RchRemoteProofClassification::AcceptedRemoteProof,
+        );
+        assert_rch_fixture(
+            "blocked golden",
+            &blocked,
+            RchRemoteProofClassification::RefusedLocalFallback,
+        );
+    }
+
+    #[test]
+    fn rch_missing_summary_requires_remote_success_error_remains_fail_closed() {
+        let missing_summary = rch_evidence(RchRemoteProofExitKind::RemotePassed, None, None);
+
+        assert_eq!(
+            missing_summary.classify().expect("missing summary"),
+            RchRemoteProofClassification::FailedClosed {
+                blocker: RchRemoteProofBlockerReason::MissingRchSummary,
+            }
+        );
+        assert!(matches!(
+            missing_summary.require_remote_success(),
+            Err(ProofRunError::NotRchRemoteProof {
+                classification: RchRemoteProofClassification::FailedClosed {
+                    blocker: RchRemoteProofBlockerReason::MissingRchSummary
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn rch_summary_parser_accepts_ansi_colored_stderr_lines() {
+        let evidence = rch_evidence(
+            RchRemoteProofExitKind::RemotePassed,
+            None,
+            Some("\u{1b}[32m[RCH] remote worker-7 (cargo test passed)\u{1b}[0m"),
+        );
+
+        assert_eq!(
+            evidence.parsed_summary().expect("summary").worker_id,
+            Some("worker-7".to_owned())
+        );
+        assert_eq!(
+            evidence.classify().expect("ansi summary"),
+            RchRemoteProofClassification::AcceptedRemoteProof
+        );
+    }
+
+    #[test]
+    fn rch_remote_proof_schema_serializes_required_contract_fields() {
+        let evidence = rch_evidence(
+            RchRemoteProofExitKind::RemotePassed,
+            None,
+            Some("[RCH] remote worker-7 (cargo test passed)"),
+        );
+        let value = serde_json::to_value(&evidence).expect("serialize evidence");
+
+        for field in [
+            "command",
+            "cwd",
+            "git_revision",
+            "worker_id",
+            "rch_summary_line",
+            "target_dir",
+            "started_at_unix_ms",
+            "finished_at_unix_ms",
+            "exit_kind",
+            "blocker_reason",
+            "redaction",
+        ] {
+            assert!(value.get(field).is_some(), "missing field {field}");
+        }
+        assert_eq!(value["schema"], RCH_REMOTE_PROOF_EVIDENCE_SCHEMA);
+    }
+
+    #[test]
+    fn rch_jsonl_record_carries_selector_preflight_worker_and_redaction_metadata() {
+        let mut evidence = rch_evidence(
+            RchRemoteProofExitKind::Blocked,
+            Some(RchRemoteProofBlockerReason::TopologyPreflightFailure),
+            Some("[RCH] local (remote topology preflight failed: ln: Already exists)"),
+        );
+        evidence.selector_reason = Some(
+            RchRemoteProofBlockerReason::NoAdmissibleWorkers
+                .as_str()
+                .to_owned(),
+        );
+        evidence.preflight_reason = Some(
+            RchRemoteProofBlockerReason::TopologyPreflightFailure
+                .as_str()
+                .to_owned(),
+        );
+
+        let record = evidence.to_jsonl_record().expect("jsonl record");
+        let value: serde_json::Value = serde_json::from_str(&record).expect("parse jsonl");
+
+        assert_eq!(value["schema"], RCH_REMOTE_PROOF_EVIDENCE_SCHEMA);
+        assert_eq!(value["worker_id"], "worker-7");
+        assert_eq!(value["command"][0], "rch");
+        assert_eq!(value["git_revision"], "abc1234");
+        assert_eq!(value["target_dir"], "/tmp/fcp-proof-governor");
+        assert_eq!(value["selector_reason"], "no_admissible_workers");
+        assert_eq!(value["preflight_reason"], "topology_preflight_failure");
+        assert!(
+            value["redaction"]["flags"]
+                .as_array()
+                .expect("redaction flags")
+                .iter()
+                .any(|flag| flag == "secret_values_removed")
+        );
     }
 
     #[test]

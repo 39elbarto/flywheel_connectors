@@ -159,7 +159,10 @@ async fn handle_message(connector: &mut QqConnector, message: &str) -> serde_jso
                 "result": value
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("id".to_string(), id);
             }
             response
         }
@@ -169,7 +172,10 @@ async fn handle_message(connector: &mut QqConnector, message: &str) -> serde_jso
                 "error": error.to_response()
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("id".to_string(), id);
             }
             response
         }

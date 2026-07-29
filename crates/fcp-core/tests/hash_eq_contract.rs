@@ -12,7 +12,7 @@
 //! coordination all rely on hash-stable equality.
 //!
 //! For each canonical id type with `Hash + Eq`, this test constructs
-//! two values that ARE equal via different paths (clone, FromStr ↔
+//! two values that ARE equal via different paths (clone, `FromStr` ↔
 //! Display round-trip, struct-literal vs constructor, alternate
 //! Into<String> sources, parse-prefixed forms, etc.) and asserts
 //! `hash(a) == hash(b)` whenever `a == b`.
@@ -48,14 +48,14 @@ fn hash_of<T: Hash + ?Sized>(value: &T) -> u64 {
 }
 
 /// Generic property: assert that `a == b` AND `hash(a) == hash(b)`.
-fn assert_hash_eq_contract<T: Hash + Eq + std::fmt::Debug>(label: &str, a: T, b: T) {
+fn assert_hash_eq_contract<T: Hash + Eq + std::fmt::Debug>(label: &str, a: &T, b: &T) {
     assert_eq!(
         a, b,
         "{label}: Eq violated — values constructed via different paths are not equal: \
          {a:?} vs {b:?}"
     );
-    let ha = hash_of(&a);
-    let hb = hash_of(&b);
+    let ha = hash_of(a);
+    let hb = hash_of(b);
     assert_eq!(
         ha, hb,
         "{label}: HASH-EQ CONTRACT VIOLATION — a == b but hash(a)={ha} != hash(b)={hb}"
@@ -89,23 +89,23 @@ fn zone_id_canonical_hash_eq_contract() {
 
         assert_hash_eq_contract(
             &format!("ZoneId({canonical}) factory vs try_from"),
-            via_factory.clone(),
-            via_try_from,
+            &via_factory,
+            &via_try_from,
         );
         assert_hash_eq_contract(
             &format!("ZoneId({canonical}) factory vs parse"),
-            via_factory.clone(),
-            via_parse,
+            &via_factory,
+            &via_parse,
         );
         assert_hash_eq_contract(
             &format!("ZoneId({canonical}) factory vs clone"),
-            via_factory.clone(),
-            via_clone,
+            &via_factory,
+            &via_clone,
         );
         assert_hash_eq_contract(
             &format!("ZoneId({canonical}) factory vs Display roundtrip"),
-            via_factory,
-            via_display_roundtrip,
+            &via_factory,
+            &via_display_roundtrip,
         );
     }
 }
@@ -118,12 +118,8 @@ fn zone_id_project_subzone_hash_eq_contract() {
     let a = ZoneId::try_from(canonical.to_string()).expect("project zone");
     let b = ZoneId::from_str(canonical).expect("project zone via FromStr");
     let c = a.clone();
-    assert_hash_eq_contract(
-        "ZoneId(z:project:alpha-team) try_from vs FromStr",
-        a.clone(),
-        b,
-    );
-    assert_hash_eq_contract("ZoneId(z:project:alpha-team) clone", a, c);
+    assert_hash_eq_contract("ZoneId(z:project:alpha-team) try_from vs FromStr", &a, &b);
+    assert_hash_eq_contract("ZoneId(z:project:alpha-team) clone", &a, &c);
 }
 
 #[test]
@@ -168,28 +164,28 @@ fn capability_id_hash_eq_contract() {
 
         assert_hash_eq_contract(
             &format!("CapabilityId({canonical}) new vs from_static"),
-            via_new.clone(),
-            via_static,
+            &via_new,
+            &via_static,
         );
         assert_hash_eq_contract(
             &format!("CapabilityId({canonical}) new vs try_from"),
-            via_new.clone(),
-            via_try_from,
+            &via_new,
+            &via_try_from,
         );
         assert_hash_eq_contract(
             &format!("CapabilityId({canonical}) new vs parse"),
-            via_new.clone(),
-            via_parse,
+            &via_new,
+            &via_parse,
         );
         assert_hash_eq_contract(
             &format!("CapabilityId({canonical}) new vs clone"),
-            via_new.clone(),
-            via_clone,
+            &via_new,
+            &via_clone,
         );
         assert_hash_eq_contract(
             &format!("CapabilityId({canonical}) new vs Display roundtrip"),
-            via_new,
-            via_display_roundtrip,
+            &via_new,
+            &via_display_roundtrip,
         );
     }
 }
@@ -215,23 +211,23 @@ fn instance_id_hash_eq_contract() {
 
         assert_hash_eq_contract(
             &format!("InstanceId({canonical}) new vs try_from"),
-            via_new.clone(),
-            via_try_from,
+            &via_new,
+            &via_try_from,
         );
         assert_hash_eq_contract(
             &format!("InstanceId({canonical}) new vs parse"),
-            via_new.clone(),
-            via_parse,
+            &via_new,
+            &via_parse,
         );
         assert_hash_eq_contract(
             &format!("InstanceId({canonical}) new vs clone"),
-            via_new.clone(),
-            via_clone,
+            &via_new,
+            &via_clone,
         );
         assert_hash_eq_contract(
             &format!("InstanceId({canonical}) new vs Display roundtrip"),
-            via_new,
-            via_display_roundtrip,
+            &via_new,
+            &via_display_roundtrip,
         );
     }
 }
@@ -249,7 +245,7 @@ fn object_id_hash_eq_contract() {
         {
             let mut b = [0u8; 32];
             for (i, slot) in b.iter_mut().enumerate() {
-                *slot = i as u8;
+                *slot = u8::try_from(i).expect("object id byte index fits in u8");
             }
             b
         },
@@ -269,23 +265,23 @@ fn object_id_hash_eq_contract() {
         let label = format!("ObjectId({})", hex::encode(bytes));
         assert_hash_eq_contract(
             &format!("{label} from_bytes vs Copy"),
-            via_from_bytes,
-            via_clone,
+            &via_from_bytes,
+            &via_clone,
         );
         assert_hash_eq_contract(
             &format!("{label} from_bytes vs parse_prefixed(bare hex)"),
-            via_from_bytes,
-            via_parse,
+            &via_from_bytes,
+            &via_parse,
         );
         assert_hash_eq_contract(
             &format!("{label} from_bytes vs parse_prefixed(objectid:hex)"),
-            via_from_bytes,
-            via_parse_prefixed,
+            &via_from_bytes,
+            &via_parse_prefixed,
         );
         assert_hash_eq_contract(
             &format!("{label} from_bytes vs Display roundtrip"),
-            via_from_bytes,
-            via_display_roundtrip,
+            &via_from_bytes,
+            &via_display_roundtrip,
         );
     }
 }
@@ -299,7 +295,11 @@ fn object_id_uppercase_hex_normalizes_to_same_value() {
     let upper_hex = lower_hex.to_uppercase();
     let lower = ObjectId::parse_prefixed(lower_hex).expect("lowercase parse");
     let upper = ObjectId::parse_prefixed(&upper_hex).expect("uppercase parse");
-    assert_hash_eq_contract("ObjectId(deadbeef...) lowercase vs uppercase", lower, upper);
+    assert_hash_eq_contract(
+        "ObjectId(deadbeef...) lowercase vs uppercase",
+        &lower,
+        &upper,
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -318,13 +318,13 @@ fn node_id_hash_eq_contract() {
 
         assert_hash_eq_contract(
             &format!("NodeId({canonical}) String vs &str"),
-            via_new_owned.clone(),
-            via_new_borrowed,
+            &via_new_owned,
+            &via_new_borrowed,
         );
         assert_hash_eq_contract(
             &format!("NodeId({canonical}) clone"),
-            via_new_owned,
-            via_clone,
+            &via_new_owned,
+            &via_clone,
         );
     }
 }

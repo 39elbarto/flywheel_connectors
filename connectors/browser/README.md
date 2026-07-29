@@ -1,6 +1,6 @@
 # Browser Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: runtime contract documented; manifest-derived operation metadata
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/browser_target_session_manager_verification.sh`
@@ -64,6 +64,7 @@ Important runtime truths the contract preserves:
 - Control-plane requests carry the `X-FCP-Browser-*` operation, timeout, response-budget, target, stale-recovery, current-tab, and export-guard headers.
 - Control budget classes are small `10000 ms` / `1048576` bytes, standard `30000 ms` / `10485760` bytes, and capture `60000 ms` / `52428800` bytes.
 - Runtime handshake installs a `CapabilityVerifier`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `invoke` requires `operation`, `input`, and `capability_token`.
 - `invoke` verifies a bound capability token for the operation capability before dispatch.
 - Runtime capability-token verification currently passes an empty resource URI list.
@@ -80,18 +81,17 @@ Important runtime truths the contract preserves:
 
 This README documents the runtime truth and keeps current drift visible:
 
-- Runtime handshake returns placeholder manifest hash `sha256:browser-connector-v1`.
 - Manifest target-page network constraints allow selected external host patterns, while runtime `browser_url` validation controls only the browser-control endpoint.
 - Runtime `simulate` deserializes the request and unconditionally returns allowed; it does not check operation inventory, input shape, configured state, handshake state, capability token, or resource bindings.
 - Runtime verifies bound capability tokens with an empty resource URI list for every operation.
 - Manifest marks some risky browser operations as `requires_approval = "policy"` and dangerous operations as `interactive`.
-- Runtime introspection derives approval mode from safety tier, while direct invocation requires an `approval_token` only for the explicit execution-approval list.
+- Runtime introspection derives approval mode from manifest `requires_approval`, while direct invocation requires an `approval_token` only for the explicit execution-approval list.
 - `browser.navigate` and `browser.click` are risky operations but do not require a direct runtime `approval_token`.
 - `handle_shutdown()` reports shutdown status and signals the direct-CDP manager shutdown cleanup, but it does not fully clear stored config, client, verifier, or session state.
 - Manifest state hints mention browser profile state and page cache metadata, but the runtime session store in this slice is process-local.
 - The tracked target/session manager verification script covers direct-CDP manager JSONL evidence; there is still no full Browser connector verification bundle for every operation mode.
 
-A follow-up parity bead should replace placeholder manifest proof, make `simulate` enforce the same readiness and token checks as `invoke`, decide whether resource URI binding is required for browser targets, reconcile approval metadata with runtime enforcement, and clarify whether browser session objects need durable state.
+A follow-up parity bead should make `simulate` enforce the same readiness and token checks as `invoke`, decide whether resource URI binding is required for browser targets, reconcile manifest policy approval with runtime enforcement, and clarify whether browser session objects need durable state.
 
 ## First-Slice Scope
 
@@ -104,6 +104,57 @@ The current Browser README slice documents the existing runtime surface:
 - direct execution-approval token validation for the highest-risk operation subset
 - readable-content and document-output guardrails
 - deterministic integration and real-browser proof surfaces
+
+## Readable And Document Extraction Parity Decision
+
+The Browser connector adopts the OpenClaw-style readable-content guardrail
+shape where it fits the FCP browser-control boundary, and deliberately defers
+the parts that would turn `fcp.browser` into a general web-fetch or document
+processing runtime.
+
+Reference context: OpenClaw documents `web_fetch` as plain HTTP fetch plus
+readable extraction, while JS-heavy or login-protected pages are routed to the
+Browser tool instead. See <https://docs.openclaw.ai/tools/web-fetch> and
+<https://docs.openclaw.ai/browser>.
+
+Adopted for `browser.extract_text`:
+
+- Plain-text and markdown output modes are part of the manifest contract.
+- Invisible Unicode stripping is required before output is returned.
+- The default output cap is `200000` characters and the absolute request cap is
+  `1000000` characters.
+- Output metadata records guardrail decisions, external-content taint, and the
+  readability decision so downstream agents can distinguish trusted connector
+  metadata from hostile page content.
+
+Adopted for `browser.render_pdf`:
+
+- Callers can request a `max_pages` bound.
+- Runtime output records rendered-PDF external-content metadata and an explicit
+  document-extraction decision.
+- PDF text extraction is not silently implied by PDF rendering.
+
+Consciously deferred or rejected for this connector:
+
+- Raw HTTP `web_fetch`-style fetching is not adopted here. `fcp.browser` acts on
+  an already-controlled browser target; generic HTTP fetch belongs in a
+  web-fetch, Firecrawl-like, or shared extraction surface with its own network
+  policy and fixture matrix.
+- Raw-HTML parser bounds such as exact DOM nesting-depth rejection are not
+  adopted in the Browser connector's post-render text path. The connector reads
+  browser-produced page output through the control boundary instead of accepting
+  arbitrary untrusted HTML blobs for tree parsing.
+- PDF text extraction, OCR, image-render dependency fallbacks, and document
+  page-selection extraction are deferred to a Rust/self-contained document
+  extraction helper or connector. They must not introduce Node, Python, or other
+  interpreted runtime dependencies.
+- Browser automation remains separate from content crawling, robots policy,
+  search indexing, and bot-circumvention policy.
+
+The current test contract exercises the adopted surface through deterministic
+loopback readable-content and print/PDF fixtures, oversized output denial,
+capability denial before control routing, timeout/cancellation evidence, stale
+session fencing, shutdown cleanup, and redaction-safe JSONL logs.
 
 ## Auth And Scope Boundary
 
@@ -132,7 +183,7 @@ The current Browser README slice documents the existing runtime surface:
 - Runtime browser-control host allowlist: loopback plus `*.browser.mesh.internal` and `*.browser.flywheel.internal`.
 - Non-loopback browser-control URLs must use HTTPS.
 - Direct DevTools WebSocket support is limited to loopback page targets.
-- Direct DevTools target metadata records the configured page target as the current-tab/export target and disables stale-target recovery for raw page WebSocket mode.
+- Direct DevTools target metadata records the configured page target as the current-tab/export target; reconfiguring an active connector to a new loopback page target preserves the Rust manager and records stale-target recovery before the next operation connects.
 - Raw DevTools discovery endpoints are rejected as control-plane bases.
 - Manifest target-page host allowlist currently includes `*.github.com`, `*.google.com`, `*.wikipedia.org`, and `*.amazonaws.com`.
 - Manifest target-page ports are `80` and `443`.
@@ -210,7 +261,7 @@ These are excluded on purpose:
 - control-mode split for direct CDP, proxy-capable `fcp-browser-control`, non-proxy workers, Rust-owned launcher fixture mode, and guarded native launcher mode
 - credential-reference degraded state when host token injection is required
 - sandbox, placement, network guard, and execution-planner profiles
-- operation metadata with capability, risk, safety tier, idempotency, approval mode, schemas, and hints
+- manifest-derived operation metadata with capability, risk, safety tier, idempotency, approval mode, schemas, and hints
 - bound capability-token verification during `invoke`
 - direct execution-approval token validation for JavaScript, form, cookies, session save/restore, and proxy changes
 - readable-content and document-output metadata caps

@@ -4,7 +4,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_async_core::Cx;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_ollama::client::{
     DEFAULT_BASE_URL, DEFAULT_EMBEDDING_MODEL, DEFAULT_MODEL, OllamaAuth, OllamaClient,
@@ -386,7 +385,7 @@ async fn auth_required_tailnet_policy_rate_limit_cancellation_and_shutdown_are_s
     assert!(!error.to_string().contains("should-not-leak"));
     assert!(!error.to_string().contains("private prompt"));
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let client = OllamaClient::new(
         OllamaProvider::new(format!("{}/v1", server.uri()), OllamaAuth::None),
@@ -402,6 +401,10 @@ async fn auth_required_tailnet_policy_rate_limit_cancellation_and_shutdown_are_s
         .await
         .expect_err("cancelled context should fail before dispatch");
     assert!(cancelled.to_string().contains("cancelled"));
+    // compatibility_cx() returns the shared ambient runtime context, so clear
+    // the cancel flag before the rest of the test drives the runtime again
+    // (otherwise async Mutex locks observe the cancellation and panic).
+    cx.set_cancel_requested(false);
 
     connector
         .handle_shutdown(json!({}))
@@ -583,7 +586,7 @@ async fn ollama_loopback_e2e_jsonl_matrix() {
         }),
     );
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let cancelled = OllamaClient::new(
         OllamaProvider::new(format!("{}/v1", server.uri()), OllamaAuth::None),
@@ -597,6 +600,8 @@ async fn ollama_loopback_e2e_jsonl_matrix() {
     )
     .await
     .expect_err("cancelled context should fail");
+    // Restore the shared ambient runtime context before further runtime use.
+    cx.set_cancel_requested(false);
     emit_jsonl(
         &git_revision,
         "cancellation",
@@ -639,7 +644,7 @@ async fn ollama_local_smoke_or_structured_skip_jsonl() {
             "skipped",
             json!({
                 "base_url_class": "loopback",
-                "skip_reason": "Ollama is not listening on 127.0.0.1:11434",
+                "skip_reason": "Ollama default loopback endpoint is not listening",
                 "cleanup_result": "not_started_by_test"
             }),
         );

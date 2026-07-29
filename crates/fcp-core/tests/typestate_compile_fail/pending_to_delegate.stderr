@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/typestate_compile_fail/pending_to_delegate.rs:7:23
+  |
+7 |     delegate_approved(pending);
+  |     ----------------- ^^^^^^^ expected `ApprovalToken`, found `ApprovalToken<Pending>`
+  |     |
+  |     arguments to this function are incorrect
+  |
+  = note: expected struct `ApprovalToken<fcp_core::Approved>`
+             found struct `ApprovalToken<fcp_core::Pending>`
+note: function defined here
+ --> tests/typestate_compile_fail/pending_to_delegate.rs:3:4
+  |
+3 | fn delegate_approved(_: ApprovalToken<Approved>) {}
+  |    ^^^^^^^^^^^^^^^^^ --------------------------

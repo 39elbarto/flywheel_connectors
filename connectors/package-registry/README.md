@@ -1,7 +1,9 @@
 # Package Registry Connector V3 Contract
 
-> **Status**: planning contract
+> **Status**: PROVEN runtime contract documented with remote Package Registry verifier proof
 > **Bead**: `flywheel_connectors-j05nu.4.4.1`
+> **Verification script**: `scripts/e2e/package_registry_connector_verification.sh`
+> **Proof bundle**: `/Users/jemanuel/projects/fcp-package-registry-proof-20260607T0251Z/.codex-targets/package-registry-verification/20260607T0251Z/summary.json` (`sha256:f04a96e67eca873ea7d728e1c5218f0f71f8a04ed01a8bca5772ccc3e9177ca9`, `overall_status=ok`)
 > **Unblocks**: `flywheel_connectors-j05nu.4.4.2`
 > **Primary upstreams**:
 > - https://api-docs.npmjs.com/
@@ -155,13 +157,13 @@ These are excluded on purpose:
 - `doctor()` and `self_check()` should report the configured provider, supported operation subset, auth mode shape, and unsupported-surface caveats clearly.
 - Tests should cover scoped npm package names, PyPI project-name normalization, crates.io pagination and version-detail parsing, unsupported-provider search and downloads behavior, and rejection of artifact-body fetching in the first slice.
 
-## Verification And Operator Guidance
+## Operator Guidance
 
 The readiness bead adds a replayable verification bundle:
 
 - Entry point: `scripts/e2e/package_registry_connector_verification.sh`
 - Artifact root: `artifacts/e2e/package_registry_connector/<timestamp>`
-- Primary rerun commands:
+- Rerun commands:
   - `rch exec -- cargo run -q -p fwc -- manifest fix connectors/package-registry/manifest.toml --check --json`
   - `rch exec -- cargo check -p fcp-package-registry --all-targets`
   - `rch exec -- cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check`

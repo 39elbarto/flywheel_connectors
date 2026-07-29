@@ -43,6 +43,8 @@ Important implementation truths from `connector.rs`, `main.rs`, and `manifest.to
 - Authentication is application-level token bootstrap against `GET /cgi-bin/gettoken`; the access token is cached in memory only with a refresh safety margin.
 - Text, markdown, image, and file sends all call `POST /cgi-bin/message/send`.
 - Message sends require at least one WeCom targeting field: `touser`, `toparty`, or `totag`.
+- Message sends claim the target through SDK chat coordination before provider HTTP, so duplicate active owners fail before token issuance or `POST /cgi-bin/message/send`.
+- Successful send responses include a redaction-safe `coordination` audit array with claim and send-executed records; raw WeCom target identifiers are not copied into those records.
 - Image and file sends consume a temporary `media_id`, which the caller obtains first from `wecom.media.upload`.
 - The current send surface supports optional WeCom duplicate-check hints on outbound sends via `enable_duplicate_check` and `duplicate_check_interval`.
 - The current send surface still does not expose WeCom voice, video, news, template-card, task-card, or recall semantics.
@@ -131,6 +133,7 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 - For inbound callback deployments, the public HTTPS endpoint belongs to the host. The host receives the signed GET or POST, then forwards raw query/body material into `wecom.callback.verify_url` or `wecom.callback.ingest_event`; the connector does not expose its own listener.
 - Callback readiness requires both `callback_token` and `callback_encoding_aes_key`. If those are omitted, outbound send and directory operations remain usable, but live callback verification and event ingest are not deployment-ready.
 - Callback safety policy is configured with `callback_timestamp_skew_secs`, `callback_replay_window_secs`, `callback_replay_cache_entries`, `callback_allowed_user_ids`, `callback_allowed_external_user_ids`, `callback_allowed_room_ids`, `callback_dm_allowed`, `callback_room_allowed`, `callback_require_room_mention`, and `callback_mention_patterns`.
+- Outbound send ownership is configured with optional `chat_coordination`: `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`. This slice defaults to the in-memory backend for deterministic connector-local proof; production operators can select `agent_mail` or `mesh_gossip` through the shared SDK config surface.
 - Duplicate callbacks are acknowledged as verified policy drops with `event: null` so hosts can safely return success to WeCom without re-emitting the event.
 - Treat `agent_secret`, access tokens, callback secrets, decrypted callback plaintext, and tenant-specific IDs as sensitive. The connector’s readiness surfaces are intentionally redacted and should stay that way in external logs or artifacts.
 - Recommended verification bundle:
@@ -141,8 +144,11 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 
 ## Verification Handoff
 
+Verification script: `scripts/e2e/wecom_connector_verification.sh`
+
 - Deterministic unit coverage now exercises:
   - outbound send payload shaping for text and image messages, including duplicate-check hints
+  - outbound send ownership claims, redacted coordination audit records, and duplicate-owner denial before provider HTTP
   - media upload and media download request handling
   - callback URL verification, callback decrypt + XML parse, replay/policy gating, and normalized event routing
   - health and doctor readiness surfaces, including unconfigured and callback-ready states
@@ -170,10 +176,10 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `wecom.messages.send_text` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one text message to at least one supplied WeCom target family; accepts optional duplicate-check hints. |
-| `wecom.messages.send_markdown` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one markdown message to at least one supplied target family; accepts optional duplicate-check hints. |
-| `wecom.messages.send_image` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one image message using a previously uploaded temporary `media_id`; accepts optional duplicate-check hints. |
-| `wecom.messages.send_file` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Sends one file message using a previously uploaded temporary `media_id`; accepts optional duplicate-check hints. |
+| `wecom.messages.send_text` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Claims the target through chat coordination before HTTP, then sends one text message to at least one supplied WeCom target family; accepts optional duplicate-check hints. |
+| `wecom.messages.send_markdown` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Claims the target through chat coordination before HTTP, then sends one markdown message to at least one supplied target family; accepts optional duplicate-check hints. |
+| `wecom.messages.send_image` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Claims the target through chat coordination before HTTP, then sends one image message using a previously uploaded temporary `media_id`; accepts optional duplicate-check hints. |
+| `wecom.messages.send_file` | `POST /cgi-bin/message/send` | `wecom.messages.write` | `Risky` | `Medium` | `None` | Claims the target through chat coordination before HTTP, then sends one file message using a previously uploaded temporary `media_id`; accepts optional duplicate-check hints. |
 | `wecom.media.upload` | `POST /cgi-bin/media/upload` | `wecom.media.write` | `Risky` | `Medium` | `BestEffort` | Uploads one temporary media object and returns provider metadata such as `media_id`. |
 | `wecom.media.download` | `GET /cgi-bin/media/get` | `wecom.media.read` | `Safe` | `Low` | `Strict` | Downloads bytes for a known `media_id`, primarily for inbound callback attachments. |
 | `wecom.users.get` | `GET /cgi-bin/user/get` | `wecom.users.read` | `Safe` | `Low` | `Strict` | Fetches one user profile for a known `userid`. |

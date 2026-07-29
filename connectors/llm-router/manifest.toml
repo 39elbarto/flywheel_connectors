@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "Meta-connector for intelligent routing across multiple AI/LLM providers with cost, latency, and capability-based selection"
 archetypes = ["operational"]
 format = "native"
+status = "proven"
 
 [connector.state]
 model = "stateless"

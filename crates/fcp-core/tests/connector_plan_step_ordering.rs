@@ -1,13 +1,13 @@
 //! Pin step-kind ordering invariants on the closest analogue to a
-//! "ConnectorPlan" (flywheel_connectors-6tcjg).
+//! "`ConnectorPlan`" (flywheel_connectors-6tcjg).
 //!
-//! Bead asks for "ConnectorPlan ordering across step kinds". No
+//! Bead asks for "`ConnectorPlan` ordering across step kinds". No
 //! type literally named `ConnectorPlan` exists in fcp-core. The
-//! closest analogue is `ProvisioningRecipe` (provisioning.rs:91)
+//! closest analogue is `ProvisioningRecipe` (`provisioning.rs:91`)
 //! which holds a `Vec<ProvisioningStep>` and per step a
-//! `kind: ProvisioningStepType` (provisioning.rs:187) — the "step
-//! kinds" enum with six variants (PromptUser, PromptSecret,
-//! OpenUrl, StoreSecret, Oauth, Webhook).
+//! `kind: ProvisioningStepType` (`provisioning.rs:187`) — the "step
+//! kinds" enum with six variants (`PromptUser`, `PromptSecret`,
+//! `OpenUrl`, `StoreSecret`, `Oauth`, `Webhook`).
 //!
 //! `ProvisioningStepType` does NOT derive Ord (no comparison
 //! relation between step kinds). The "ordering" that DOES exist is:
@@ -18,7 +18,7 @@
 //!      tooling reads positionally inside the steps array.
 //!
 //! Existing `tests/provisioning_recipe_display_serde.rs` pins the
-//! Display + JSON shape on a fixed two-step recipe. This test
+//! `Display` + JSON shape on a fixed two-step recipe. This test
 //! complements with the gaps:
 //!
 //!   1. **Insertion order is preserved** through JSON + CBOR
@@ -26,10 +26,10 @@
 //!   2. **Reordering produces a different serialization** — the
 //!      array ordering is observable on the wire, not implicit.
 //!   3. **All six step-kind serde tags pinned** (the existing test
-//!      only exercised PromptUser + StoreSecret).
+//!      only exercised `PromptUser` + `StoreSecret`).
 //!   4. **`depends_on` is preserved per step** — the dependency DAG
 //!      is part of the wire contract, not metadata.
-//!   5. **`ProvisioningStatus` snake_case form pinned** for every
+//!   5. **`ProvisioningStatus` `snake_case` form pinned** for every
 //!      variant — operators read these exact tokens.
 //!   6. **`ProvisioningStepResult` tag pinned** for every variant.
 //!   7. **CBOR map carries `type` discriminator** for every step
@@ -38,7 +38,7 @@
 use ciborium::value::Value as CborValue;
 use fcp_core::{
     HumanPrompt, HumanPromptType, OAuthRecipe, ProvisioningRecipe, ProvisioningStatus,
-    ProvisioningStep, ProvisioningStepResult, ProvisioningStepType, RecipeId, StepId,
+    ProvisioningStep, ProvisioningStepResult, ProvisioningStepType, RecipeId, RetryConfig, StepId,
     WebhookRecipe, WebhookVerification,
 };
 
@@ -97,7 +97,7 @@ fn one_of_each_kind() -> Vec<(StepId, ProvisioningStepType, &'static str)> {
                     verification: WebhookVerification::ChallengeResponse {
                         challenge_param: "challenge".into(),
                     },
-                    retry_policy: Default::default(),
+                    retry_policy: RetryConfig::default(),
                 },
             },
             "webhook",
@@ -217,7 +217,7 @@ fn every_step_kind_has_pinned_snake_case_type_tag_in_json() {
     for (i, expected) in expected_tags.iter().enumerate() {
         let got = steps[i]
             .get("type")
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .unwrap_or_else(|| panic!("step[{i}] missing `type` discriminator"));
         assert_eq!(
             got, *expected,
@@ -308,7 +308,7 @@ fn depends_on_dag_preserved_through_json_roundtrip() {
         )
         .with_step(
             ProvisioningStep::new(
-                s_c.clone(),
+                s_c,
                 ProvisioningStepType::StoreSecret {
                     key: "k".into(),
                     value_from: s_b.clone(),
@@ -324,7 +324,7 @@ fn depends_on_dag_preserved_through_json_roundtrip() {
 
     assert_eq!(back.steps[0].depends_on, Vec::<StepId>::new());
     assert_eq!(back.steps[1].depends_on, vec![s_a.clone()]);
-    assert_eq!(back.steps[2].depends_on, vec![s_a.clone(), s_b.clone()]);
+    assert_eq!(back.steps[2].depends_on, vec![s_a, s_b]);
 }
 
 #[test]
@@ -353,8 +353,8 @@ fn depends_on_order_within_step_is_preserved() {
                     message: "c?".into(),
                 },
             )
-            .depends_on(s_b.clone())
-            .depends_on(s_a.clone()),
+            .depends_on(s_b)
+            .depends_on(s_a),
         );
 
     let value = serde_json::to_value(&recipe).expect("serialize");
@@ -447,7 +447,7 @@ fn provisioning_step_result_status_tag_pinned_per_variant() {
     for (value, expected_tag) in cases {
         let got = value
             .get("status")
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .expect("status field");
         assert_eq!(got, expected_tag, "ProvisioningStepResult status tag drift");
     }
@@ -463,10 +463,10 @@ fn each_step_kind_round_trips_to_same_kind_label() {
     // produces the same wire bytes — confirming variant identity
     // survives serde despite the flatten + tag combination.
     for (id, kind, expected_label) in one_of_each_kind() {
-        let step = ProvisioningStep::new(id.clone(), kind);
+        let step = ProvisioningStep::new(id, kind);
         let value = serde_json::to_value(&step).expect("serialize");
         assert_eq!(
-            value.get("type").and_then(|v| v.as_str()),
+            value.get("type").and_then(serde_json::Value::as_str),
             Some(expected_label),
             "step kind {expected_label} did not appear as `type` in JSON"
         );
@@ -474,7 +474,7 @@ fn each_step_kind_round_trips_to_same_kind_label() {
         let back: ProvisioningStep = serde_json::from_value(value).expect("deserialize");
         let revalue = serde_json::to_value(&back).expect("re-serialize");
         assert_eq!(
-            revalue.get("type").and_then(|v| v.as_str()),
+            revalue.get("type").and_then(serde_json::Value::as_str),
             Some(expected_label),
             "step kind {expected_label} lost its tag through round-trip"
         );

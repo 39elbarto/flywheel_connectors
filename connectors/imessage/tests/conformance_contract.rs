@@ -1,3 +1,5 @@
+#![allow(clippy::map_unwrap_or, clippy::too_many_lines)]
+
 use fcp_imessage::BlueBubblesConnector;
 use fcp_prelude::{FcpConnector, IdempotencyClass, RiskLevel, SafetyTier};
 use serde_json::Value;
@@ -134,14 +136,14 @@ fn events_capabilities_and_manifest_guardrails_are_declared() {
     for needle in [
         r#"id = "fcp.imessage""#,
         r#"home = "z:private""#,
-        r#"[provides.operations.send_message.network_constraints]"#,
+        r"[provides.operations.send_message.network_constraints]",
         r#"host_allow = ["localhost", "127.0.0.1"]"#,
-        r#"port_allow = [1234]"#,
-        r#"max_redirects = 0"#,
-        r#"[provides.events.message_inbound]"#,
-        r#"[provides.events.message_outbound]"#,
-        r#"[provides.events.message_updated]"#,
-        r#"[provides.events.message_tapback]"#,
+        r"port_allow = [1234]",
+        r"max_redirects = 0",
+        r"[provides.events.message_inbound]",
+        r"[provides.events.message_outbound]",
+        r"[provides.events.message_updated]",
+        r"[provides.events.message_tapback]",
         r#"topic = "imessage.message.inbound""#,
         r#"topic = "imessage.message.tapback""#,
     ] {

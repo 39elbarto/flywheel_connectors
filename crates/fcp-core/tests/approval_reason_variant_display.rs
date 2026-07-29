@@ -1,5 +1,5 @@
 //! Pin approval-classifier serde tags on the closest analogues to
-//! "ApprovalReason" (flywheel_connectors-qnll1).
+//! "`ApprovalReason`" (flywheel_connectors-qnll1).
 //!
 //! Bead asks for `ApprovalReason variant Display + serde tag`. No
 //! type literally named `ApprovalReason` exists in fcp-core. The
@@ -8,9 +8,9 @@
 //!
 //!  - `ApprovalMode` (protocol.rs:1897) — the operation-side
 //!    classifier on `OperationMeta.requires_approval`. 4 variants
-//!    (None / Policy / Interactive / ElevationToken) carrying
+//!    (None / Policy / Interactive / `ElevationToken`) carrying
 //!    `#[serde(rename_all = "snake_case")]`. This is the closest
-//!    "ApprovalReason" analogue — it's literally the documented
+//!    "`ApprovalReason`" analogue — it's literally the documented
 //!    reason an operation requires approval.
 //!  - `ApprovalScope` (provenance.rs:824) — the token-side
 //!    classifier on `ApprovalToken.scope`. 3 variants (Elevation /
@@ -25,12 +25,12 @@
 //!
 //! Targets:
 //!
-//!   1. **`ApprovalMode` per-variant JSON tag** (snake_case).
+//!   1. **`ApprovalMode` per-variant JSON tag** (`snake_case`).
 //!   2. **JSON + CBOR round-trip** preserves variant identity for
-//!      all 4 ApprovalMode variants.
+//!      all 4 `ApprovalMode` variants.
 //!   3. **Multi-word variant uses underscore** (`elevation_token`,
 //!      not `elevation-token` / `elevationToken`).
-//!   4. **PascalCase + unknown rejected** for ApprovalMode.
+//!   4. **`PascalCase` + unknown rejected** for `ApprovalMode`.
 //!   5. **`ApprovalMode::None` token does NOT alias serde null** —
 //!      explicit `"none"` string is required.
 //!   6. **`ApprovalScope` per-variant `type` tag** in JSON
@@ -163,9 +163,9 @@ fn approval_mode_variants_pairwise_distinct() {
     }
     assert_eq!(seen.len(), 4);
 
-    for i in 0..APPROVAL_MODE_CASES.len() {
-        for j in (i + 1)..APPROVAL_MODE_CASES.len() {
-            assert_ne!(APPROVAL_MODE_CASES[i].0, APPROVAL_MODE_CASES[j].0);
+    for (i, (left, _)) in APPROVAL_MODE_CASES.iter().enumerate() {
+        for (right, _) in APPROVAL_MODE_CASES.iter().skip(i + 1) {
+            assert_ne!(left, right);
         }
     }
 }
@@ -195,7 +195,7 @@ fn execution_fixture() -> ApprovalScope {
 
 #[test]
 fn approval_scope_type_tag_pinned_for_declassification() {
-    let value = serde_json::to_value(&declassification_fixture()).expect("serialize");
+    let value = serde_json::to_value(declassification_fixture()).expect("serialize");
     assert_eq!(
         value.get("type").and_then(|v| v.as_str()),
         Some("declassification"),
@@ -213,7 +213,7 @@ fn approval_scope_type_tag_pinned_for_declassification() {
 
 #[test]
 fn approval_scope_type_tag_pinned_for_execution() {
-    let value = serde_json::to_value(&execution_fixture()).expect("serialize");
+    let value = serde_json::to_value(execution_fixture()).expect("serialize");
     assert_eq!(
         value.get("type").and_then(|v| v.as_str()),
         Some("execution")

@@ -11,18 +11,18 @@
 //! Properties pinned (NORMATIVE):
 //!
 //! 1. **`TraceReplayInputFormat` 3 variants** — Auto, Json, Cbor.
-//!    Serde uses snake_case wire form (`auto` / `json` / `cbor`).
+//!    Serde uses `snake_case` wire form (`auto` / `json` / `cbor`).
 //! 2. **Format `Copy + Eq + Hash`** — must be small and cheap; replay
-//!    UIs put it in HashMap keys.
+//!    UIs put it in `HashMap` keys.
 //! 3. **`TraceReplayDiff` field-preserving struct** — index,
-//!    event_type, expected_decision, actual_decision, detail. Serde
-//!    round-trip is identity; PartialEq compares all five fields.
+//!    `event_type`, `expected_decision`, `actual_decision`, detail. Serde
+//!    round-trip is identity; `PartialEq` compares all five fields.
 //! 4. **`TraceReplaySummary`** counts roundtrip via JSON identity:
-//!    total_events, event_type_counts (BTreeMap is stable-ordered),
-//!    expected/actual_decision_counts, matched/mismatched events +
+//!    `total_events`, `event_type_counts` (`BTreeMap` is stable-ordered),
+//!    `expected/actual_decision_counts`, matched/mismatched events +
 //!    decisions.
 //! 5. **`TraceReplayReport`** roundtrip and Default-construction
-//!    sanity (PartialEq + serde).
+//!    sanity (`PartialEq` + serde).
 //! 6. **`TraceReplayError` Display contract** — operator log greps:
 //!    "trace IO error" / "failed to parse trace as <fmt>" /
 //!    "mesh replay failed" / "trace capture unavailable".

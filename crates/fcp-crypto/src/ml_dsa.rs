@@ -22,7 +22,8 @@
 use core::convert::Infallible;
 
 use ml_dsa::{
-    B32, KeyGen, MlDsa65, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
+    B32, MlDsa65, Signature as MlDsaSignature, SigningKey as MlDsaSigningKey,
+    VerifyingKey as MlDsaVerifyingKey,
 };
 use rand_core_pq::{TryCryptoRng, TryRng};
 use zeroize::{Zeroize, Zeroizing};
@@ -35,12 +36,12 @@ use crate::owner_key::{
 };
 
 // Pull the matching `signature` traits from upstream's re-export so we use
-// the exact version `ml-dsa = 0.1.0-rc.9` was compiled against. Importing
+// the exact version `ml-dsa` was compiled against. Importing
 // `signature` ourselves at a different version produces two distinct
 // `Verifier` traits in scope, which silently shadows the one ml-dsa expects.
 use ml_dsa::signature::{Keypair, Verifier};
 
-/// Length of the ML-DSA-65 `KeyGen` seed (FIPS 204 §3.7 ξ).
+/// Length of the ML-DSA-65 signing-key seed (FIPS 204 §3.7 ξ).
 pub const ML_DSA_65_SEED_SIZE: usize = 32;
 
 /// Owner of an expanded ML-DSA-65 secret key.
@@ -51,7 +52,7 @@ pub const ML_DSA_65_SEED_SIZE: usize = 32;
 /// [`Zeroizing`] so it is wiped on drop.
 pub struct MlDsa65SigningKey {
     seed: Zeroizing<[u8; ML_DSA_65_SEED_SIZE]>,
-    expanded: ml_dsa::ExpandedSigningKey<MlDsa65>,
+    signing_key: Box<MlDsaSigningKey<MlDsa65>>,
     verifying_key: MlDsa65VerifyingKey,
 }
 
@@ -59,7 +60,7 @@ impl core::fmt::Debug for MlDsa65SigningKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MlDsa65SigningKey")
             .field("seed", &"[redacted; 32 bytes]")
-            .field("expanded", &"[redacted; expanded signing key]")
+            .field("signing_key", &"[redacted; upstream signing key]")
             .field("verifying_key", &self.verifying_key.key_id())
             .finish()
     }
@@ -100,12 +101,12 @@ impl MlDsa65SigningKey {
         Ok(Self::from_seed_inner(seed))
     }
 
+    #[allow(clippy::large_stack_frames)] // upstream ML-DSA key expansion builds FIPS polynomial buffers internally
     fn from_seed_inner(seed: Zeroizing<[u8; ML_DSA_65_SEED_SIZE]>) -> Self {
         let xi = B32::try_from(seed.as_slice())
             .expect("ML_DSA_65_SEED_SIZE is 32 bytes by construction");
-        let kp = <MlDsa65 as KeyGen>::from_seed(&xi);
-        let expanded = kp.signing_key().clone();
-        let upstream_vk = kp.verifying_key();
+        let signing_key = Box::new(MlDsaSigningKey::<MlDsa65>::from_seed(&xi));
+        let upstream_vk = signing_key.verifying_key();
         let vk_bytes_array = upstream_vk.encode();
         let vk_bytes = MlDsa65VerifyingKeyBytes::try_from_bytes(vk_bytes_array.as_slice().to_vec())
             .expect("ml-dsa always emits a 1952-byte verifying key for MlDsa65 parameter set");
@@ -115,7 +116,7 @@ impl MlDsa65SigningKey {
         };
         Self {
             seed,
-            expanded,
+            signing_key,
             verifying_key,
         }
     }
@@ -142,7 +143,7 @@ impl MlDsa65SigningKey {
     /// ML-DSA-65 signing key: pair with [`Self::from_envelope`] for
     /// the inverse direction. The envelope wraps the FIPS 204 §3.7
     /// ξ-seed; the expanded secret-key form is recomputable on demand
-    /// via [`Self::from_envelope`] → [`<MlDsa65 as KeyGen>::from_seed`].
+    /// via [`Self::from_envelope`] → [`ml_dsa::SigningKey::from_seed`].
     ///
     /// Closes the modes-of-reasoning audit gap that
     /// `MlDsa65VerifyingKeyBytes` + `MlDsa65SignatureBytes` had typed
@@ -185,7 +186,8 @@ impl MlDsa65SigningKey {
     pub fn sign(&self, message: &[u8], context: &[u8]) -> CryptoResult<MlDsa65SignatureBytes> {
         let mut rng = OsRngV10;
         let sig = self
-            .expanded
+            .signing_key
+            .expanded_key()
             .sign_randomized(message, context, &mut rng)
             .map_err(|e| CryptoError::SerializationError(format!("ml-dsa-65 sign failed: {e}")))?;
         sig_to_bytes(&sig)
@@ -207,7 +209,8 @@ impl MlDsa65SigningKey {
         context: &[u8],
     ) -> CryptoResult<MlDsa65SignatureBytes> {
         let sig = self
-            .expanded
+            .signing_key
+            .expanded_key()
             .sign_deterministic(message, context)
             .map_err(|e| {
                 CryptoError::SerializationError(format!("ml-dsa-65 deterministic sign failed: {e}"))
@@ -221,7 +224,7 @@ impl Drop for MlDsa65SigningKey {
         // Seed is in Zeroizing so it wipes automatically; this explicit
         // call exists so a future change that takes the seed out of
         // Zeroizing still wipes the field. The expanded form does not
-        // expose Zeroize on rc.9; the seed wipe is the load-bearing
+        // expose Zeroize on its public API; the seed wipe is the load-bearing
         // protection.
         self.seed.zeroize();
     }
@@ -354,7 +357,7 @@ fn sig_to_bytes(sig: &MlDsaSignature<MlDsa65>) -> CryptoResult<MlDsa65SignatureB
 /// `getrandom`-backed adapter implementing `rand_core` v0.10's
 /// [`TryCryptoRng`].
 ///
-/// Exists because `ml-dsa = 0.1.0-rc.9` consumes `rand_core = "0.10"`, which
+/// Exists because `ml-dsa` consumes `rand_core = "0.10"`, which
 /// is one major version ahead of the workspace `rand = "0.8"` family. Rather
 /// than pull a third generation of `rand` into the dependency graph, we
 /// implement just the surface ml-dsa needs against `getrandom` directly.

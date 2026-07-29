@@ -3,7 +3,6 @@
 use std::time::Duration as StdDuration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_async_core::Cx;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_nvidia_nim::client::{
     DEFAULT_BASE_URL, DEFAULT_EMBEDDING_MODEL, DEFAULT_MODEL, DEFAULT_RERANK_BASE_URL,
@@ -465,7 +464,7 @@ async fn auth_rate_limit_cancellation_and_shutdown_are_safe() {
     assert!(!error.to_string().contains("should-not-leak"));
     assert!(!error.to_string().contains("private prompt"));
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let client = NvidiaNimClient::new(
         NvidiaNimProvider::new(format!("{}/v1", server.uri()), NvidiaNimAuth::None),
@@ -483,6 +482,10 @@ async fn auth_rate_limit_cancellation_and_shutdown_are_safe() {
         .await
         .expect_err("cancelled context should fail before dispatch");
     assert!(cancelled.to_string().contains("cancelled"));
+    // compatibility_cx() returns the shared ambient runtime context, so clear
+    // the cancel flag before the rest of the test drives the runtime again
+    // (otherwise async Mutex locks observe the cancellation and panic).
+    cx.set_cancel_requested(false);
 
     connector
         .handle_shutdown(json!({}))
@@ -705,7 +708,7 @@ async fn nvidia_nim_loopback_e2e_jsonl_matrix() {
         }),
     );
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let cancelled = NvidiaNimClient::new(
         NvidiaNimProvider::new(format!("{}/v1", server.uri()), NvidiaNimAuth::None),
@@ -721,6 +724,8 @@ async fn nvidia_nim_loopback_e2e_jsonl_matrix() {
     )
     .await
     .expect_err("cancelled context should fail");
+    // Restore the shared ambient runtime context before further runtime use.
+    cx.set_cancel_requested(false);
     emit_jsonl(
         &git_revision,
         "cancellation",

@@ -43,6 +43,12 @@ pub struct SmtpConfig {
     pub starttls: bool,
 }
 
+impl SmtpConfig {
+    pub fn get_password(&self) -> String {
+        self.password.clone()
+    }
+}
+
 impl std::fmt::Debug for SmtpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SmtpConfig")
@@ -138,6 +144,8 @@ pub struct EmailSeenUidCache {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmailMonitorPolicy {
+    #[serde(default = "default_monitor_mailbox")]
+    pub mailbox: String,
     #[serde(default, deserialize_with = "deserialize_sender_list")]
     pub allowed_senders: Vec<String>,
     #[serde(default = "default_true")]
@@ -157,6 +165,7 @@ pub struct EmailMonitorPolicy {
 impl Default for EmailMonitorPolicy {
     fn default() -> Self {
         Self {
+            mailbox: default_monitor_mailbox(),
             allowed_senders: Vec::new(),
             require_allowed_sender: true,
             drop_automated: true,
@@ -201,6 +210,10 @@ const fn default_request_timeout_ms() -> u64 {
 
 const fn default_monitor_poll_interval_secs() -> u64 {
     15
+}
+
+fn default_monitor_mailbox() -> String {
+    "INBOX".to_owned()
 }
 
 const fn default_max_body_chars() -> usize {
@@ -358,6 +371,11 @@ impl EmailSeenUidCache {
         self.seen.contains(uid)
     }
 
+    #[must_use]
+    pub fn uids(&self) -> Vec<String> {
+        self.seen.iter().cloned().collect()
+    }
+
     pub fn observe(&mut self, uid: impl Into<String>) -> bool {
         let uid = uid.into();
         if self.seen.contains(&uid) {
@@ -403,6 +421,12 @@ impl EmailSeenUidCache {
 
 impl EmailMonitorPolicy {
     pub fn validate(&self) -> FcpResult<()> {
+        if self.mailbox.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "monitor_policy.mailbox must not be empty".into(),
+            });
+        }
         let senders = self.normalized_allowed_senders()?;
         if self.allowed_senders.len() > MAX_ALLOWED_SENDERS {
             return Err(FcpError::InvalidRequest {
@@ -441,6 +465,11 @@ impl EmailMonitorPolicy {
             });
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn mailbox(&self) -> &str {
+        self.mailbox.trim()
     }
 
     pub fn normalized_allowed_senders(&self) -> FcpResult<BTreeSet<String>> {
@@ -482,6 +511,7 @@ impl EmailMonitorPolicy {
 
     pub fn redacted_state(&self) -> Value {
         json!({
+            "mailbox_configured": !self.mailbox().is_empty(),
             "allowed_senders_configured": !self.allowed_senders.is_empty(),
             "allowed_senders_count": self.allowed_senders.len(),
             "require_allowed_sender": self.require_allowed_sender,
@@ -717,6 +747,7 @@ mod tests {
         assert_eq!(config.monitor_policy.poll_interval_secs, 15);
         assert_eq!(config.monitor_policy.max_body_chars, 50_000);
         assert_eq!(config.monitor_policy.seen_uid_cap, 2_000);
+        assert_eq!(config.monitor_policy.mailbox(), "INBOX");
         assert_eq!(
             config
                 .monitor_policy
@@ -908,14 +939,38 @@ mod tests {
     fn monitor_policy_redacted_state_hides_sender_values() {
         let policy = EmailMonitorPolicy {
             allowed_senders: vec!["secret@example.com".into()],
+            mailbox: "Sensitive".into(),
             allow_attachments: true,
             ..EmailMonitorPolicy::default()
         };
         let state = policy.redacted_state();
+        assert_eq!(state["mailbox_configured"], true);
         assert_eq!(state["allowed_senders_count"], 1);
         assert_eq!(state["allowed_senders_configured"], true);
         assert_eq!(state["allow_attachments"], true);
+        assert!(!state.to_string().contains("Sensitive"));
         assert!(!state.to_string().contains("secret@example.com"));
+    }
+
+    #[test]
+    fn monitor_policy_accepts_explicit_mailbox_binding() {
+        let config = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "u", "password": "p" },
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" },
+            "monitor_policy": { "mailbox": "Alerts" }
+        }))
+        .unwrap();
+        assert_eq!(config.monitor_policy.mailbox(), "Alerts");
+    }
+
+    #[test]
+    fn monitor_policy_rejects_blank_mailbox_binding() {
+        let result = EmailGenericConfig::from_value(serde_json::json!({
+            "imap": { "host": "h", "username": "u", "password": "p" },
+            "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" },
+            "monitor_policy": { "mailbox": "  " }
+        }));
+        assert!(result.is_err());
     }
 
     #[test]

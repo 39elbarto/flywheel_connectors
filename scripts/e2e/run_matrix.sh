@@ -15,6 +15,10 @@ ONLY_ARCHETYPES=""
 ONLY_CONNECTORS=""
 ONLY_TRACKS=""
 DRY_RUN=false
+TARGET_DIR="${RUN_MATRIX_TARGET_DIR:-/tmp/fcp-e2e-run-matrix}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 SUMMARY_JSONL=""
 SUMMARY_JSON=""
@@ -55,20 +59,36 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
+  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+    "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
+}
+
+rch_remote_summary_present() {
+  local log_path="$1"
+  local summary
+  summary="$(grep -aE '\[RCH\][[:space:]]+(remote|local|failed)' "${log_path}" | tail -n 1 || true)"
+  [[ "${summary}" =~ \[RCH\][[:space:]]+remote ]]
+}
+
+run_cargo_logged() {
+  local log_path="$1"
+  shift
+  local rc
+
+  run_cargo "$@" > "${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! rch_remote_summary_present "${log_path}"; then
+    echo "${SCRIPT_NAME}: rch command did not produce remote proof; see ${log_path}" >&2
+    echo "rch command did not produce remote proof" >> "${log_path}"
+    return 2
   fi
-  cargo "$@"
+  return "${rc}"
 }
 
 validate_log_jsonl() {
   local log_path="$1"
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e --validate-log "${log_path}"
-    return $?
-  fi
-  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${log_path}"
+  local validation_log="${log_path}.validation.log"
+  run_cargo_logged "${validation_log}" run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${log_path}"
 }
 
 now_ms() {
@@ -332,7 +352,7 @@ run_scenario() {
   scenario_json="${scenario_dir}/scenario.json"
   replay_command="bash \"${SCRIPT_DIR}/run_matrix.sh\" --run-id \"${RUN_ID}\" --seed \"${ROOT_SEED}\" --out-root \"${OUT_ROOT}\" --only-scenarios \"${scenario}\""
 
-  command="RUN_ID=\"${RUN_ID}\" SCENARIO_ID=\"${scenario_id}\" SEED=\"${scenario_seed}\" OUT_DIR=\"${payload_dir}\" LOG_JSONL=\"${log_jsonl}\" \"${resolved_script_path}\""
+  command="RUN_ID=\"${RUN_ID}\" SCENARIO_ID=\"${scenario_id}\" SEED=\"${scenario_seed}\" OUT_DIR=\"${payload_dir}\" LOG_JSONL=\"${log_jsonl}\" RCH_BIN=\"${RCH_BIN}\" RCH_REQUIRE_REMOTE=\"${RCH_REQUIRE_REMOTE}\" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \"${resolved_script_path}\""
 
   mkdir -p "${scenario_dir}" "${payload_dir}"
   printf '%s\n' "${command}" > "${command_path}"
@@ -371,9 +391,22 @@ run_scenario() {
   else
     start_ms="$(now_ms)"
     set +e
-    bash -lc "set -euo pipefail; ${command}" > "${execution_log}" 2>&1
+    env \
+      RUN_ID="${RUN_ID}" \
+      SCENARIO_ID="${scenario_id}" \
+      SEED="${scenario_seed}" \
+      OUT_DIR="${payload_dir}" \
+      LOG_JSONL="${log_jsonl}" \
+      RCH_BIN="${RCH_BIN}" \
+      RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \
+      RCH_FORCE_REMOTE=1 \
+      RCH_VISIBILITY=verbose \
+      "${resolved_script_path}" > "${execution_log}" 2>&1
     rc=$?
     set -e
+    if [[ ! -s "${execution_log}" ]]; then
+      printf 'scenario exited with status %s; see %s and %s\n' "${rc}" "${log_jsonl}" "${payload_dir}" > "${execution_log}"
+    fi
     end_ms="$(now_ms)"
     duration_ms=$((end_ms - start_ms))
 
@@ -516,9 +549,7 @@ require_cmd jq
   exit 1
 }
 if [[ "${DRY_RUN}" != "true" ]]; then
-  if ! command -v fcp-e2e >/dev/null 2>&1; then
-    require_cmd cargo
-  fi
+  require_cmd "${RCH_BIN}"
 fi
 if [[ ! -x "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" ]]; then
   echo "Expected executable script not found: ${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" >&2
@@ -762,11 +793,13 @@ jq -s \
   echo "cd \"${REPO_ROOT}\""
   echo
   echo "FAIL_COUNT=\$(jq -r '.fail_count' \"${FAILURE_INDEX_JSON}\")"
+  # shellcheck disable=SC2016
   echo 'if [[ "${FAIL_COUNT}" == "0" ]]; then'
   echo '  echo "No failed scenarios to rerun."'
   echo "  exit 0"
   echo "fi"
   echo
+  # shellcheck disable=SC2016
   echo 'echo "Replaying ${FAIL_COUNT} failed scenarios..."'
   while IFS= read -r cmd || [[ -n "${cmd}" ]]; do
     if [[ -n "${cmd}" ]]; then

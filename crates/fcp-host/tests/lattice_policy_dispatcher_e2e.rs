@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -115,9 +116,44 @@ struct DispatchResult {
 }
 
 fn artifact_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(RELATIVE_ARTIFACT_PATH)
+    if let Ok(root) = std::env::var("FCP_LATTICE_EVIDENCE_ROOT") {
+        let root = root.trim();
+        if !root.is_empty() {
+            let root = PathBuf::from(root);
+            let root = if root.is_absolute() {
+                root
+            } else {
+                workspace_root().join(root)
+            };
+
+            return root.join(
+                RELATIVE_ARTIFACT_PATH
+                    .strip_prefix("target/")
+                    .unwrap_or(RELATIVE_ARTIFACT_PATH),
+            );
+        }
+    }
+
+    workspace_root().join(RELATIVE_ARTIFACT_PATH)
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn command_stdout(mut command: Command) -> Option<String> {
+    command
+        .output()
+        .ok()
+        .and_then(|output| output.status.success().then_some(output.stdout))
+        .and_then(|stdout| String::from_utf8(stdout).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_git_revision(value: &str) -> bool {
+    let len = value.len();
+    (7..=40).contains(&len) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn git_revision() -> String {
@@ -128,15 +164,26 @@ fn git_revision() -> String {
         }
     }
 
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|output| output.status.success().then_some(output.stdout))
-        .and_then(|stdout| String::from_utf8(stdout).ok())
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
+    let root = workspace_root();
+    let root_arg = root.to_string_lossy().into_owned();
+    command_stdout({
+        let mut command = Command::new("git");
+        command
+            .arg("-c")
+            .arg(format!("safe.directory={root_arg}"))
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD"]);
+        command
+    })
+    .or_else(|| {
+        command_stdout({
+            let mut command = Command::new("git");
+            command.arg("-C").arg(&root).args(["rev-parse", "HEAD"]);
+            command
+        })
+    })
+    .unwrap_or_else(|| "unknown".to_owned())
 }
 
 const fn build_profile() -> &'static str {
@@ -301,7 +348,7 @@ fn minted_fixture(params: pq::LatticeParams, fixture_label: &'static [u8]) -> Mi
         &certificate.public_key.hash,
         &verifier.trust_set_id(),
     );
-    let sub_token = LatticeSubToken {
+    let delegated_capability = LatticeSubToken {
         cert_id: certificate.cert_id,
         op_id: operation.clone(),
         principal_id: principal.clone(),
@@ -315,7 +362,7 @@ fn minted_fixture(params: pq::LatticeParams, fixture_label: &'static [u8]) -> Mi
         fixture_id_hash: digest_hex(b"fcp-host/e2e/lattice-fixture-v1|", fixture_label),
         verifier,
         certificate,
-        sub_token,
+        sub_token: delegated_capability,
         zone,
         operation,
         principal,
@@ -474,7 +521,7 @@ fn run_scenario(
     verifier: LatticeDelegationVerifierImpl,
     ctx: fcp_host::EnforcementContext,
 ) -> EvidenceRecord {
-    let sub_token = ctx
+    let delegated_capability = ctx
         .lattice_sub_token
         .as_ref()
         .expect("scenario context must carry lattice sub-token");
@@ -483,7 +530,7 @@ fn run_scenario(
     let request_principal = PrincipalId::new(ctx.principal.clone()).unwrap();
     let start = Instant::now();
     let verifier_outcome = verifier.verify_sub_token(
-        sub_token,
+        delegated_capability,
         &request_zone,
         &request_operation,
         &request_principal,
@@ -580,6 +627,10 @@ fn run_scenario(
 #[test]
 fn lattice_policy_dispatcher_e2e_writes_redaction_safe_jsonl() {
     let git_revision = git_revision();
+    assert!(
+        is_git_revision(&git_revision),
+        "JSONL evidence must carry a concrete git revision, got {git_revision:?}"
+    );
     let small = minted_fixture(
         pq::LatticeParams::SMALL_TEST,
         b"fcp-host/e2e/lattice-dispatcher-small-v1",
@@ -784,8 +835,12 @@ fn lattice_policy_dispatcher_e2e_writes_redaction_safe_jsonl() {
     let file = File::create(&path).expect("create JSONL artifact");
     let mut writer = BufWriter::new(file);
     for record in &records {
-        serde_json::to_writer(&mut writer, record).expect("serialize evidence record");
+        let line = serde_json::to_string(record).expect("serialize evidence record");
+        writer
+            .write_all(line.as_bytes())
+            .expect("write JSONL record");
         writer.write_all(b"\n").expect("write JSONL newline");
+        eprintln!("{line}");
     }
     writer.flush().expect("flush JSONL artifact");
 

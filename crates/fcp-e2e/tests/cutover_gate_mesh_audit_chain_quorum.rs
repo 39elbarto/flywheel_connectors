@@ -8,13 +8,13 @@ fn cutover_gate(gate_id: &str) -> MeshCutoverGate {
 }
 
 #[test]
-fn cutover_gate_mesh_audit_chain_quorum_skips_without_quorum_checkpoint_telemetry() {
+fn cutover_gate_mesh_audit_chain_quorum_skips_without_live_quorum_checkpoint_telemetry() {
     let gate = cutover_gate("mesh-audit-chain-quorum");
 
     assert_eq!(gate.status, CutoverGateStatus::Skip);
     assert_eq!(
         gate.measured_value["telemetry_state"].as_str(),
-        Some("unavailable")
+        Some("route_available_artifact_required")
     );
     assert_eq!(
         gate.measured_value["quorum_signed_checkpoints"].as_u64(),
@@ -22,8 +22,15 @@ fn cutover_gate_mesh_audit_chain_quorum_skips_without_quorum_checkpoint_telemetr
     );
     assert_eq!(gate.measured_value["quorum_signers"].as_u64(), Some(0));
     assert_eq!(
-        gate.measured_value["missing_route"].as_str(),
+        gate.measured_value["available_route"].as_str(),
         Some("fwc audit chain status --json")
+    );
+    assert!(
+        gate.measured_value["missing_fields"]
+            .as_array()
+            .expect("missing fields array")
+            .iter()
+            .any(|field| field == "live_quorum_checkpoint_snapshot")
     );
     assert_eq!(gate.target["quorum_signed_checkpoints"].as_u64(), Some(1));
     assert_eq!(gate.target["quorum_signers"].as_u64(), Some(2));

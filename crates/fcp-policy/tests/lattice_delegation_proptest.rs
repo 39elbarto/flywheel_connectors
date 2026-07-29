@@ -12,6 +12,7 @@
 
 use std::{
     fs,
+    path::PathBuf,
     process::Command,
     time::{Duration, Instant},
 };
@@ -103,6 +104,32 @@ fn git_revision() -> String {
 
 fn evidence_command_line(env_key: &str, fallback: &str) -> String {
     std::env::var(env_key).unwrap_or_else(|_| fallback.to_string())
+}
+
+fn artifact_write_path(relative_path: &str) -> PathBuf {
+    std::env::var("FCP_LATTICE_EVIDENCE_ROOT")
+        .ok()
+        .map(|root| root.trim().to_owned())
+        .filter(|root| !root.is_empty())
+        .map_or_else(
+            || PathBuf::from(relative_path),
+            |root| {
+                let root = PathBuf::from(root);
+                let root = if root.is_absolute() {
+                    root
+                } else {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../..")
+                        .join(root)
+                };
+
+                root.join(
+                    relative_path
+                        .strip_prefix("target/")
+                        .unwrap_or(relative_path),
+                )
+            },
+        )
 }
 
 fn formal_theorem_names() -> Vec<&'static str> {
@@ -238,11 +265,12 @@ fn minted_policy_fixture(
 }
 
 fn write_formal_policy_artifact(lines: &[String]) {
-    fs::create_dir_all("target/fcp-policy").expect("policy evidence directory is writable");
+    let path = artifact_write_path(FORMAL_POLICY_ARTIFACT_PATH);
+    fs::create_dir_all(path.parent().expect("policy evidence path has parent"))
+        .expect("policy evidence directory is writable");
     let mut jsonl = lines.join("\n");
     jsonl.push('\n');
-    fs::write(FORMAL_POLICY_ARTIFACT_PATH, jsonl)
-        .expect("policy formal correspondence artifact writes");
+    fs::write(&path, jsonl).expect("policy formal correspondence artifact writes");
 }
 
 fn zone_from_kind(kind: u8) -> ZoneId {
@@ -670,7 +698,7 @@ fn lattice_delegation_formal_correspondence_fixture_jsonl_is_secret_free() {
 
     write_formal_policy_artifact(&lines);
     assert!(
-        fs::metadata(FORMAL_POLICY_ARTIFACT_PATH)
+        fs::metadata(artifact_write_path(FORMAL_POLICY_ARTIFACT_PATH))
             .expect("policy correspondence evidence artifact exists")
             .len()
             > 0,

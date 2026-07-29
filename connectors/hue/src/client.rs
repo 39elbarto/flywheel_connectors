@@ -22,8 +22,32 @@ impl std::fmt::Debug for HueClient {
     }
 }
 
-fn sanitize_path_segment(s: &str) -> String {
-    s.replace(['/', '\\', '?', '#', '&', '%', '\0'], "")
+/// Validate a Hue resource id before interpolating it into the CLIP v2 path.
+///
+/// Hue light/scene ids are UUIDs (`[0-9a-fA-F-]`). Stripping dangerous bytes
+/// (the previous behavior) silently retargeted a malformed id — `a/b` became
+/// `ab`, a *different* light — and let a bare `..` survive to hit the collection
+/// endpoint. Rejecting instead keeps every request pinned to the addressed
+/// resource and surfaces a clear error.
+fn sanitize_path_segment(s: &str) -> HueResult<&str> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err(HueError::Config("resource id must not be empty".into()));
+    }
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.contains('?')
+        || trimmed.contains('#')
+        || trimmed.contains('&')
+        || trimmed.contains('%')
+        || trimmed.contains('\0')
+    {
+        return Err(HueError::Config(
+            "resource id contains path traversal or URL control characters".into(),
+        ));
+    }
+    Ok(trimmed)
 }
 
 impl HueClient {
@@ -106,7 +130,7 @@ impl HueClient {
             fcp_core::FcpError::InvalidRequest { message, .. } => HueError::Config(message),
             other => HueError::Config(other.to_string()),
         })?;
-        let light_id = sanitize_path_segment(input.light_id.trim());
+        let light_id = sanitize_path_segment(&input.light_id)?;
         let mut body = json!({ "on": { "on": input.on } });
         if let Some(brightness) = input.brightness {
             body["dimming"] = json!({ "brightness": brightness });
@@ -129,7 +153,7 @@ impl HueClient {
             fcp_core::FcpError::InvalidRequest { message, .. } => HueError::Config(message),
             other => HueError::Config(other.to_string()),
         })?;
-        let scene_id = sanitize_path_segment(input.scene_id.trim());
+        let scene_id = sanitize_path_segment(&input.scene_id)?;
         let response = self
             .client
             .put(format!(
@@ -147,61 +171,8 @@ impl HueClient {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use wiremock::matchers::{body_json, header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-
-    #[fcp_async_core::runtime::test]
-    async fn list_lights_uses_hue_application_key_header() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/clip/v2/resource/light"))
-            .and(header("hue-application-key", "app-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
-            .mount(&server)
-            .await;
-
-        let config = HueConfig::from_value(json!({
-            "bridge_url": server.uri(),
-            "app_key": "app-key"
-        }))
-        .expect("config should parse");
-        let client = HueClient::from_config(&config).expect("client should build");
-        let result = client.list_lights().await.expect("list should succeed");
-        assert_eq!(result["data"], json!([]));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn set_light_state_sends_expected_payload() {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/clip/v2/resource/light/light-1"))
-            .and(body_json(json!({
-                "on": { "on": true },
-                "dimming": { "brightness": 50.0 }
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
-            .mount(&server)
-            .await;
-
-        let config = HueConfig::from_value(json!({
-            "bridge_url": server.uri(),
-            "app_key": "app-key"
-        }))
-        .expect("config should parse");
-        let client = HueClient::from_config(&config).expect("client should build");
-        let input = SetLightStateInput::from_value(json!({
-            "light_id": "light-1",
-            "on": true,
-            "brightness": 50.0
-        }))
-        .expect("input should parse");
-        client
-            .set_light_state(&input)
-            .await
-            .expect("set should succeed");
-    }
 
     #[test]
     fn debug_redacts_app_key() {
@@ -217,39 +188,31 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_path_segment_strips_traversal() {
-        assert_eq!(sanitize_path_segment("../../etc/passwd"), "....etcpasswd");
-        assert_eq!(sanitize_path_segment("light-1"), "light-1");
-        assert_eq!(sanitize_path_segment("id/../../admin"), "id....admin");
-        assert_eq!(sanitize_path_segment("normal-uuid-v4"), "normal-uuid-v4");
-        assert!(!sanitize_path_segment("foo/bar").contains('/'));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn recall_scene_sends_expected_payload() {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/clip/v2/resource/scene/scene-1"))
-            .and(body_json(json!({
-                "recall": { "action": "active" }
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
-            .mount(&server)
-            .await;
-
-        let config = HueConfig::from_value(json!({
-            "bridge_url": server.uri(),
-            "app_key": "app-key"
-        }))
-        .expect("config should parse");
-        let client = HueClient::from_config(&config).expect("client should build");
-        let input = RecallSceneInput::from_value(json!({
-            "scene_id": "scene-1"
-        }))
-        .expect("input should parse");
-        client
-            .recall_scene(&input)
-            .await
-            .expect("scene recall should succeed");
+    fn sanitize_path_segment_rejects_traversal() {
+        // Rejecting (vs. the old silent stripping) keeps requests pinned to the
+        // addressed resource instead of retargeting a corrupted id.
+        for bad in [
+            "",
+            "   ",
+            "../../etc/passwd",
+            "..",
+            "id/../../admin",
+            "foo/bar",
+            "a\\b",
+            "a?b",
+            "a#b",
+            "a&b",
+            "a%2fb",
+        ] {
+            assert!(
+                sanitize_path_segment(bad).is_err(),
+                "expected `{bad}` to be rejected"
+            );
+        }
+        assert_eq!(sanitize_path_segment("light-1").unwrap(), "light-1");
+        assert_eq!(
+            sanitize_path_segment(" normal-uuid-v4 ").unwrap(),
+            "normal-uuid-v4"
+        );
     }
 }

@@ -28,7 +28,11 @@ use fcp_qdrant::connector::QdrantConnector;
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> fcp_core::CapabilityToken {
     let cap = match op {
         "qdrant.create_collection" | "qdrant.delete_collection" => "qdrant.collections.write",
         "qdrant.upsert_points" | "qdrant.delete_points" => "qdrant.points.write",
@@ -54,8 +58,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("valid constraints cbor")
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
@@ -124,7 +130,11 @@ async fn list_collections_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.list_collections",
@@ -157,7 +167,7 @@ async fn search_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.search");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.search",
@@ -191,7 +201,11 @@ async fn upsert_points_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.upsert_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.upsert_points",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.upsert_points",
@@ -236,7 +250,11 @@ async fn collection_info_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.collection_info");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.collection_info",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.collection_info",
@@ -268,7 +286,11 @@ async fn unauthorized_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.list_collections",
@@ -295,7 +317,11 @@ async fn not_found_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.collection_info");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.collection_info",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.collection_info",
@@ -317,7 +343,11 @@ async fn invoke_without_configure_fails() {
     let connector = QdrantConnector::new();
 
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -336,7 +366,7 @@ async fn invoke_with_wrong_capability_denied() {
     let mut connector = QdrantConnector::new();
     // Handshake grants search but we invoke list_collections
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.search"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.search");
 
     let result = connector
         .handle_invoke(json!({
@@ -354,7 +384,7 @@ async fn invoke_unknown_operation_denied() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.deny.unknown_operation");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.nonexistent");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.nonexistent");
 
     let result = connector
         .handle_invoke(json!({
@@ -435,7 +465,7 @@ async fn search_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.search_missing_collection");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.search"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.search");
 
     let result = connector
         .handle_invoke(json!({
@@ -459,7 +489,11 @@ async fn upsert_points_missing_points_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.upsert_missing_points");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.upsert_points"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.upsert_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.upsert_points",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -503,7 +537,7 @@ async fn query_points_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.query_points");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.query_points");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.query_points",
@@ -540,7 +574,7 @@ async fn query_points_array_result_format() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.query_points");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.query_points");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.query_points",
@@ -578,7 +612,11 @@ async fn batch_query_points_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.batch_query_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.batch_query_points",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.batch_query_points",
@@ -617,7 +655,7 @@ async fn get_points_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.get_points");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.get_points");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.get_points",
@@ -659,7 +697,7 @@ async fn scroll_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.scroll");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.scroll");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.scroll",
@@ -695,7 +733,7 @@ async fn count_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.count");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.count");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.count",
@@ -728,7 +766,11 @@ async fn create_collection_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.create_collection");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.create_collection",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.create_collection",
@@ -768,7 +810,11 @@ async fn delete_collection_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.delete_collection");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.delete_collection",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.delete_collection",
@@ -804,7 +850,11 @@ async fn delete_points_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.delete_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.delete_points",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.delete_points",
@@ -837,7 +887,11 @@ async fn delete_points_with_filter() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.delete_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.delete_points",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.delete_points",
@@ -873,7 +927,11 @@ async fn rate_limit_429_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.list_collections",
@@ -904,7 +962,11 @@ async fn server_error_500_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.list_collections",
@@ -937,7 +999,11 @@ async fn json_parse_failure_from_api() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.list_collections",
@@ -964,7 +1030,11 @@ async fn forbidden_403_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.list_collections",
@@ -1144,7 +1214,7 @@ async fn query_points_missing_query_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.query_points_missing_query");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.query_points"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.query_points");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.query_points");
 
     let result = connector
         .handle_invoke(json!({
@@ -1168,7 +1238,7 @@ async fn query_points_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.query_points_missing_collection");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.query_points"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.query_points");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.query_points");
 
     let result = connector
         .handle_invoke(json!({
@@ -1193,7 +1263,11 @@ async fn batch_query_points_missing_queries_fails() {
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) =
         full_setup(&mut connector, &["qdrant.batch_query_points"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.batch_query_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.batch_query_points",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1218,7 +1292,11 @@ async fn batch_query_points_missing_collection_name_fails() {
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) =
         full_setup(&mut connector, &["qdrant.batch_query_points"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.batch_query_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.batch_query_points",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1242,7 +1320,7 @@ async fn get_points_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.get_points_missing_collection");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.get_points"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.get_points");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.get_points");
 
     let result = connector
         .handle_invoke(json!({
@@ -1266,7 +1344,7 @@ async fn scroll_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.scroll_missing_collection");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.scroll"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.scroll");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.scroll");
 
     let result = connector
         .handle_invoke(json!({
@@ -1290,7 +1368,7 @@ async fn count_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.count_missing_collection");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.count"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.count");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.count");
 
     let result = connector
         .handle_invoke(json!({
@@ -1315,7 +1393,11 @@ async fn create_collection_missing_vectors_fails() {
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) =
         full_setup(&mut connector, &["qdrant.create_collection"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.create_collection");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.create_collection",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1340,7 +1422,11 @@ async fn create_collection_missing_name_fails() {
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) =
         full_setup(&mut connector, &["qdrant.create_collection"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.create_collection");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.create_collection",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1365,7 +1451,11 @@ async fn delete_collection_missing_name_fails() {
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) =
         full_setup(&mut connector, &["qdrant.delete_collection"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.delete_collection");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.delete_collection",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1389,7 +1479,11 @@ async fn delete_points_missing_collection_name_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.validation.delete_points_missing_collection");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.delete_points"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.delete_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.delete_points",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1414,7 +1508,11 @@ async fn collection_info_missing_collection_name_fails() {
         AsyncTestContext::for_scenario("qdrant.validation.collection_info_missing_collection");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.collection_info"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.collection_info");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.collection_info",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1453,7 +1551,11 @@ async fn list_collections_empty() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.list_collections",
@@ -1483,7 +1585,7 @@ async fn search_empty_results() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.search");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.search",
@@ -1520,7 +1622,7 @@ async fn scroll_empty_results() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.scroll");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.scroll");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.scroll",
@@ -1554,7 +1656,7 @@ async fn count_zero_result() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.count");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.count");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.count",
@@ -1586,7 +1688,7 @@ async fn get_points_empty_results() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.get_points");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.get_points");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.get_points",
@@ -1750,7 +1852,11 @@ async fn invoke_without_handshake_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.list_collections",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1768,7 +1874,7 @@ async fn invoke_missing_operation_field_fails() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.deny.missing_operation_field");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.search"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.search");
 
     let result = connector
         .handle_invoke(json!({
@@ -1834,7 +1940,7 @@ async fn search_with_filter_and_threshold() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.search");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.search");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.search",
@@ -1886,7 +1992,7 @@ async fn scroll_with_offset_parameter() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.scroll");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.scroll");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.scroll",
@@ -1926,7 +2032,7 @@ async fn count_with_filter() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.count");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "qdrant.count");
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.count",
@@ -1956,7 +2062,11 @@ async fn simulate_returns_allowed() {
     let _ctx = AsyncTestContext::for_scenario("qdrant.simulate.allowed");
     let mut connector = QdrantConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["qdrant.upsert_points"]).await;
-    let token = generate_valid_token(&signing_key, "qdrant.upsert_points");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.upsert_points",
+    );
 
     let result = connector
         .handle_simulate(json!({
@@ -1998,7 +2108,11 @@ async fn create_collection_with_optional_config() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "qdrant.create_collection");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "qdrant.create_collection",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "qdrant.create_collection",

@@ -95,7 +95,7 @@ impl OutlookError {
     }
 }
 
-impl fcp_sdk::migration::ConnectorErrorMapping for OutlookError {
+impl fcp_sdk::ConnectorErrorMapping for OutlookError {
     fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
         match error {
             fcp_async_core::AsyncError::Timeout { timeout_ms } => Self::Api {
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_from_timeout() -> Result<(), String> {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = OutlookError::from_async_error(fcp_async_core::AsyncError::Timeout {
             timeout_ms: 5000,
         });
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_from_cancelled() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = OutlookError::from_async_error(fcp_async_core::AsyncError::Cancelled);
         assert!(err.to_string().contains("cancelled"));
     }

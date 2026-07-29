@@ -1,13 +1,13 @@
-//! Metamorphic tests for DurableSymbolStore::record_mutation
+//! Metamorphic tests for `DurableSymbolStore::record_mutation`
 //! read-validate / write-publish split (br-38cd93962).
 //!
-//! Commit 38cd93962 split record_mutation into two scopes:
-//! 1. Read-lock + validate_mutation
-//! 2. WAL append + write-lock + apply_loaded_mutation
+//! Commit 38cd93962 split `record_mutation` into two scopes:
+//! 1. Read-lock + `validate_mutation`
+//! 2. WAL append + write-lock + `apply_loaded_mutation`
 //!
 //! The split shrinks the write-lock window so concurrent readers can
 //! make progress during the WAL fsync. The shape preserves the
-//! load-bearing guarantee that next_seq advances ONLY on a successful
+//! load-bearing guarantee that `next_seq` advances ONLY on a successful
 //! WAL append (so a failed validate or a failed apply leaves no
 //! irrecoverable gap in the WAL sequence).
 //!
@@ -16,7 +16,7 @@
 //!
 //! - **MR.read-after-write** (Equivalence): for any successful
 //!   `put_symbol(s)`, a subsequent `get_symbol(s.id, s.esi)` MUST
-//!   return bytes equal to `s.data`. Across a put_symbol/get_symbol
+//!   return bytes equal to `s.data`. Across a `put_symbol/get_symbol`
 //!   round-trip the observable state matches the input.
 //!
 //! - **MR.failed-write-rollback-and-reload** (Invertive): a failed
@@ -25,7 +25,7 @@
 //!   snapshot — we prove this by closing the store, REOPENING it
 //!   from disk, and asserting the recovered state is the same as
 //!   the pre-attempt state. Pre-fix the read-then-write split could
-//!   advance next_seq on validate-success but apply-fail and leave
+//!   advance `next_seq` on validate-success but apply-fail and leave
 //!   an irrecoverable gap; the proof of "no gap" is "the store
 //!   reopens cleanly and observes the same state".
 //!
@@ -185,7 +185,7 @@ proptest! {
         let probe_program: Vec<(u8, Vec<u32>)> =
             vec![(seed, vec![0, 1, 2, 3, 4, 5, 6, 7])];
 
-        let probe_program_inner = probe_program.clone();
+        let probe_program_inner = probe_program;
         let (probe_before, probe_after, probe_reopen) = rt.block_on(async move {
             let store = open_store(&temp);
             store.put_object_meta(meta_for(seed, 16)).await.expect("put meta");
@@ -254,7 +254,7 @@ proptest! {
 
         let probe_program: Vec<(u8, Vec<u32>)> = vec![(seed, vec![esi])];
 
-        let probe_program_inner = probe_program.clone();
+        let probe_program_inner = probe_program;
         let (single_probe, double_probe) = rt.block_on(async move {
             let store_single = open_store(&temp_single);
             store_single.put_object_meta(meta_for(seed, 16)).await.expect("meta single");

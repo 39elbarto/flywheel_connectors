@@ -28,6 +28,21 @@ pub const EXACT_OVERLAP_PROVIDER_IDS: &[&str] = &[
     "tavily",
 ];
 
+/// Architectural provider overlap named by the broad OpenClaw/Hermes parity plan.
+///
+/// These providers are not part of the first exact-name migration pass, but the
+/// plan tracks them as adjacent SDK/setup/model-catalog surfaces that should use
+/// the same provider-contract proof obligations when their connector slices move.
+pub const ADJACENT_OVERLAP_PROVIDER_IDS: &[&str] = &[
+    "deepseek",
+    "groq",
+    "ollama",
+    "perplexity-search",
+    "qwen",
+    "together",
+    "xai",
+];
+
 /// One actionable provider-contract failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderContractViolation {
@@ -515,6 +530,17 @@ pub struct ProviderContract {
     pub import_side_effects: Vec<ProviderImportSideEffectContract>,
 }
 
+const PROVIDER_BUILTIN_SECRET_VALUE_MARKERS: [(&str, &str); 8] = [
+    ("sk-live-", "sk-live-"),
+    ("bearer ", "Bearer token"),
+    ("authorization:", "authorization header"),
+    ("token=", "token assignment"),
+    ("access_token=", "access token assignment"),
+    ("refresh_token=", "refresh token assignment"),
+    ("private_key", "private_key"),
+    ("secret_seed", "secret_seed"),
+];
+
 impl ProviderContract {
     /// Create a provider contract.
     #[must_use]
@@ -949,7 +975,37 @@ fn validate_redaction_payloads(contract: &ProviderContract, report: &mut Provide
                 );
             }
         }
+        if let Some(marker) = provider_builtin_secret_value_marker(&payload.payload) {
+            report.push(
+                format!("redaction_payloads[{payload_index}]"),
+                format!("leaks built-in secret marker '{marker}' in a string value"),
+            );
+        }
     }
+}
+
+fn provider_builtin_secret_value_marker(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(value) => provider_builtin_secret_marker(value),
+        Value::Array(values) => values.iter().find_map(provider_builtin_secret_value_marker),
+        Value::Object(values) => values
+            .values()
+            .find_map(provider_builtin_secret_value_marker),
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
+}
+
+fn provider_builtin_secret_marker(value: &str) -> Option<&'static str> {
+    let normalized = value.to_ascii_lowercase();
+    if normalized.contains("bearer\t")
+        || normalized.contains("bearer\n")
+        || normalized.contains("bearer\r")
+    {
+        return Some("Bearer token");
+    }
+    PROVIDER_BUILTIN_SECRET_VALUE_MARKERS
+        .iter()
+        .find_map(|(needle, marker)| normalized.contains(*needle).then_some(*marker))
 }
 
 fn validate_import_side_effects(contract: &ProviderContract, report: &mut ProviderContractReport) {
@@ -1127,6 +1183,8 @@ fn is_provider_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
 
     use super::*;
@@ -1332,6 +1390,40 @@ mod tests {
     }
 
     #[test]
+    fn redaction_payloads_reject_builtin_secret_values() {
+        let report = validate_provider_contract(
+            &ProviderContract::new("openai", "OpenAI").with_redaction_payload(
+                ProviderRedactionPayload::new(
+                    "doctor",
+                    json!({
+                        "summary": "Authorization: Bearer redacted",
+                        "nested": { "status": "not-safe" }
+                    }),
+                ),
+            ),
+        )
+        .expect_err("built-in secret marker must fail even without provider markers");
+
+        assert!(messages(&report).contains("leaks built-in secret marker 'Bearer token'"));
+    }
+
+    #[test]
+    fn redaction_payload_keys_may_name_redacted_secret_fields() {
+        assert_provider_contract(
+            &ProviderContract::new("openrouter", "OpenRouter").with_redaction_payload(
+                ProviderRedactionPayload::new(
+                    "doctor",
+                    json!({
+                        "authorization": "[REDACTED]",
+                        "access_token": "[REDACTED]",
+                        "refresh_token": "[REDACTED]"
+                    }),
+                ),
+            ),
+        );
+    }
+
+    #[test]
     fn import_time_side_effect_observations_must_be_empty() {
         let report = validate_provider_contract(
             &ProviderContract::new("anthropic", "Anthropic").with_import_side_effect(
@@ -1345,18 +1437,62 @@ mod tests {
     }
 
     #[test]
-    fn exact_overlap_provider_targets_are_stable_and_unique() {
+    fn overlap_provider_targets_are_stable_unique_and_connector_backed() {
+        let mut exact_values = EXACT_OVERLAP_PROVIDER_IDS.to_vec();
+        exact_values.sort_unstable();
+        assert_eq!(
+            exact_values,
+            vec![
+                "anthropic",
+                "deepgram",
+                "elevenlabs",
+                "exa",
+                "firecrawl",
+                "huggingface",
+                "mistral",
+                "openai",
+                "openrouter",
+                "tavily",
+            ]
+        );
+
+        let mut adjacent_values = ADJACENT_OVERLAP_PROVIDER_IDS.to_vec();
+        adjacent_values.sort_unstable();
+        assert_eq!(
+            adjacent_values,
+            vec![
+                "deepseek",
+                "groq",
+                "ollama",
+                "perplexity-search",
+                "qwen",
+                "together",
+                "xai",
+            ]
+        );
+
         let values = EXACT_OVERLAP_PROVIDER_IDS
             .iter()
+            .chain(ADJACENT_OVERLAP_PROVIDER_IDS)
             .map(|value| (*value).to_owned())
             .collect::<Vec<_>>();
         let mut sorted = values.clone();
         sorted.sort();
         sorted.dedup();
 
-        assert_eq!(values.len(), 10);
         assert_eq!(values.len(), sorted.len());
-        assert!(values.contains(&"openai".to_owned()));
-        assert!(values.contains(&"tavily".to_owned()));
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for provider_id in values {
+            let manifest = workspace_root
+                .join("connectors")
+                .join(&provider_id)
+                .join("manifest.toml");
+            assert!(
+                manifest.is_file(),
+                "OpenClaw/Hermes provider parity target `{provider_id}` must map to a connector manifest at {}",
+                manifest.display()
+            );
+        }
     }
 }

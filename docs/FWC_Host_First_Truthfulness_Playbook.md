@@ -693,6 +693,56 @@ How to read the bundle:
 - `environment.json`: the execution context needed to decide whether a mismatch is environmental or semantic, including whether replay is expected to stay offloaded through `rch`
 - `replay.sh`: the deterministic rerun entrypoint; cargo-backed verification steps should preserve `rch exec -- ...`, and if the script cannot reproduce the scenario, the evidence is incomplete
 
+### Proof freshness status
+
+Before closing a proof-bearing Bead or publishing a final go/no-go record, run
+the proof freshness gate over registry-backed rows:
+
+```bash
+fwc proof status --registry <proof-registry.json> --artifacts <observed-artifacts.json> --now-unix-ms <capture-ms>
+```
+
+Interpret the result mechanically:
+
+- `green`: the proof is live or host-backed, fresh under policy, has required
+  artifacts and matching digests, and its verifier passed.
+- `yellow`: the proof is reviewable but not a final PASS by itself. This covers
+  stale warn-mode rows, structured skips, replay-only evidence, offline
+  evidence, and static evidence that has not been promoted into a fresh registry
+  row.
+- `red`: the proof fails closed. Missing required artifacts, digest mismatches,
+  stale fail-closed rows, missing owner/source/rerun metadata, and verifier
+  failures block proof-bearing closeout.
+- `infra_blocked`: the verifier could not run because required infrastructure
+  was unavailable. Keep the proof state separate from code failure, record the
+  blocker in the Bead comment or review record, and rerun when the worker or
+  preflight is available.
+
+If `rch` or Agent Mail are unavailable, do not restart, repair, or kill shared
+services as part of this workflow. Preserve the evidence, record the
+`infra_blocked` status, and continue with Beads as the coordination surface.
+
+### Proof artifact pressure
+
+Use the artifact pressure report before widening proof queues or after a proof
+lane reports disk-pressure symptoms:
+
+```bash
+fwc proof artifacts --path target/proof --queue <proof-queue.json> --json
+```
+
+The report is read-only. It classifies proof bundles, Cargo target trees,
+scanner outputs, and remote-worker scratch metadata as `active_job`, `current`,
+`stale`, or `unknown_owner`, then summarizes bytes by class and category. When
+the configured pressure threshold is reached, the command reports
+`proof_infra_blocked` so proof lanes stay blocked until a human approves an
+archival plan.
+
+The command never removes artifacts and never generates destructive cleanup
+commands. Its recommendations are operator-approval records with redacted path
+display values plus stable path hashes. Treat them as review input for a human
+cleanup decision, not as authorization to mutate the tree.
+
 ### Fastest path from a failed run to a reproducible case
 
 Use the bundle in this order when a `fwc` scenario or host-backed workflow fails:
@@ -787,6 +837,85 @@ rch exec -- cargo test -p fwc
 rch exec -- cargo test --workspace
 rch exec -- cargo fmt --check
 ```
+
+For the fail-closed `rch` proof governor, the owning crate lanes are:
+
+```bash
+rch exec -- cargo test -p fcp-evidence proof_runner
+rch exec -- cargo test -p fwc rch_execution
+```
+
+Those tests cover transcript classification, blocked/local-fallback evidence,
+golden JSONL records, and the guard that local fallback must not invoke the
+Cargo payload.
+
+The first connector verifier wired to the governor is:
+
+```bash
+scripts/e2e/slack_connector_verification.sh
+```
+
+Its Cargo-backed steps are executed through `fwc proof run`, which in turn
+wraps Cargo with remote-required `rch` and emits per-step
+`*.rch_remote_proof.jsonl` records under the verifier's `proof/` artifact
+directory. A verifier step is green only when the governor classifies the row as
+`accepted_remote_proof`. `remote_command_failed` is a real code/test failure.
+`refused_local_fallback`, `infra_blocked`, `failed_closed`, `not_proof`, or a
+missing/malformed summary are not closeout evidence; keep the bead open and cite
+the blocker JSONL instead. Set `PROOF_GOVERNOR=0` only for legacy comparison
+runs, not for bead closeout.
+
+### Proof-Governor Closeout Template
+
+Use this vocabulary in final-review notes, Beads comments, and connector README
+verification sections. Do not invent a second status taxonomy.
+
+- Green closeout: cite each `accepted_remote_proof` JSONL row with command,
+  worker id, target dir, git revision, and artifact path.
+- Remote code/test failure: cite `remote_command_failed` with the preserved
+  Cargo exit code and keep or reopen the bead as an implementation failure.
+- Local fallback refused: cite `refused_local_fallback` with
+  `local_fallback_refused`; this is proof that the guard worked, not proof that
+  the code passed.
+- Infrastructure blocker: cite `infra_blocked` with the blocker reason such as
+  `active_project_exclusion`, `no_admissible_workers`,
+  `topology_preflight_failure`, or `worker_pressure`.
+- Failed closed: cite `failed_closed` when the summary is missing, malformed, or
+  ambiguous.
+- Not proof: cite `not_proof` for dry-run-only plans, static docs, offline
+  artifacts, and non-Cargo rows that did not execute the governed payload.
+
+Final response template:
+
+```text
+Proof:
+- accepted_remote_proof: <command>, worker=<worker_id>, target_dir=<path>, artifact=<*.rch_remote_proof.jsonl>
+
+Blocked proof:
+- <status>: blocker=<reason>, artifact=<*.rch_remote_proof.jsonl>, action=<keep bead open|fix code|fix proof infra>
+```
+
+Beads closeout template:
+
+```text
+Completed in <commit>. Green proof rows: accepted_remote_proof for <lanes>, artifacts under <path>.
+Blocked/non-green rows: <none|status + blocker + artifact>. rch sync logs, dry-run worker selection, and proof plans without --execute were not counted as proof.
+```
+
+The examples below are parsed by `fwc` proof-governor tests; update the test
+with this table when the taxonomy changes.
+
+<!-- proof-governor-closeout-examples:start -->
+| Closeout status | Fixture kind | Example input | Blocker reason |
+|---|---|---|---|
+| `accepted_remote_proof` | `rch_summary` | `[RCH] remote worker-7 (cargo test passed)` | `` |
+| `remote_command_failed` | `rch_summary` | `[RCH] remote worker-7 failed [RCH-E101]` | `` |
+| `refused_local_fallback` | `rch_summary` | `[RCH] local (remote execution failed)` | `local_fallback_refused` |
+| `infra_blocked` | `rch_summary` | `[RCH] local (active_project_exclusion=1 no admissible workers)` | `active_project_exclusion` |
+| `infra_blocked` | `rch_summary` | `[RCH] local (remote topology preflight failed: ln: Already exists)` | `topology_preflight_failure` |
+| `failed_closed` | `missing_rch_summary` | `cargo test passed without an RCH summary` | `missing_rch_summary` |
+| `not_proof` | `non_cargo_non_proof` | `fwc proof run claim:slack-verifier --corpus proof.json` | `non_cargo_non_proof` |
+<!-- proof-governor-closeout-examples:end -->
 
 If you add scripted transcript or scenario runners, the replay instructions and playbooks should preserve the `rch exec -- ...` prefix for any cargo-backed step.
 

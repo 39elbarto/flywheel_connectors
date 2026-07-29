@@ -1,8 +1,10 @@
 # PayPal Connector V3 Contract
 
-> **Status**: implemented first-slice contract
+> **Status**: PROVEN runtime contract documented with remote PayPal local no-mock verifier proof
 > **Bead**: `flywheel_connectors-j05nu.6.2.1`
 > **Unblocks**: `flywheel_connectors-j05nu.6.2.2`
+> **Verification script**: `scripts/e2e/paypal_connector_verification.sh`
+> **Proof**: `/tmp/fcp-paypal-proof2-20260606T103700Z/paypal_connector_verification.jsonl`, sha256 `7d9477c794316c4d3187e24a1dbe602bcf8e5cbe470c35f5a2f7dcdb05dc1e07`, 7 redaction-scanned records, rch remote `vmi1293453`
 > **Primary upstream**: https://developer.paypal.com/api/rest/
 
 ## Purpose
@@ -36,7 +38,7 @@ Important implementation truths from `connector.rs`, `client.rs`, and `manifest.
 - The live runtime is request-response only. It does not expose webhooks, event streaming, subscriptions, or background sync loops.
 - `paypal.payments.list` is backed by `GET /v1/reporting/transactions` with `fields=all`.
 - `paypal.health` and `self_check()` are grounded in OAuth token acquisition plus a lightweight orders probe against `GET /v2/checkout/orders?limit=1`.
-- The connector currently does not propagate `InvokeRequest.idempotency_key` into PayPal replay-protection headers, so mutating operations are only `BestEffort` for retries even though PayPal supports idempotent POST handling for some APIs.
+- Mutating operations propagate `InvokeRequest.idempotency_key` into the `PayPal-Request-Id` header when the caller supplies one. They remain `BestEffort` because PayPal's exact replay guarantees vary by endpoint and retention window.
 
 ## Accepted First Slice
 
@@ -79,20 +81,28 @@ This is intentionally narrower than "all of PayPal". The first slice is meant to
 | `paypal.invoices.read` | List merchant invoices |
 | `paypal.invoices.write` | Create draft invoices and send them |
 
-## Accepted Operation Inventory
+## Operation Inventory
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
 | `paypal.health` | `GET /v2/checkout/orders?limit=1` | `paypal.orders.read` | `Safe` | `Low` | `Strict` | Auth and reachability probe. A provider `400` still counts as reachable and authenticated in the current runtime. |
-| `paypal.orders.create` | `POST /v2/checkout/orders` | `paypal.orders.write` | `Risky` | `High` | `BestEffort` | Creates a real order object. Exact-once retry semantics are not wired through the connector yet. |
+| `paypal.orders.create` | `POST /v2/checkout/orders` | `paypal.orders.write` | `Risky` | `High` | `BestEffort` | Creates a real order object. Uses `PayPal-Request-Id` when the caller supplies an idempotency key. |
 | `paypal.orders.get` | `GET /v2/checkout/orders/{order_id}` | `paypal.orders.read` | `Safe` | `Low` | `Strict` | Canonical point lookup for one order ID. |
-| `paypal.orders.capture` | `POST /v2/checkout/orders/{order_id}/capture` | `paypal.orders.write` | `Risky` | `Critical` | `BestEffort` | Real-money side effect. Requires interactive approval. |
+| `paypal.orders.capture` | `POST /v2/checkout/orders/{order_id}/capture` | `paypal.orders.write` | `Risky` | `Critical` | `BestEffort` | Real-money side effect. Requires interactive approval and uses `PayPal-Request-Id` when supplied. |
 | `paypal.payments.list` | `GET /v1/reporting/transactions` | `paypal.payments.read` | `Safe` | `Low` | `Strict` | Requires `start_date` and `end_date`. PayPal documents a maximum 31-day window and up to three hours of reporting lag. |
 | `paypal.payments.get` | `GET /v2/payments/captures/{capture_id}` | `paypal.payments.read` | `Safe` | `Low` | `Strict` | Canonical point lookup for one capture ID. |
-| `paypal.payments.refund` | `POST /v2/payments/captures/{capture_id}/refund` | `paypal.payments.write` | `Risky` | `High` | `BestEffort` | Refunds a completed capture. Can be partial or full. |
-| `paypal.invoices.create` | `POST /v2/invoicing/invoices` | `paypal.invoices.write` | `Risky` | `Medium` | `BestEffort` | Creates a draft invoice only. Sending is a separate operation. |
+| `paypal.payments.refund` | `POST /v2/payments/captures/{capture_id}/refund` | `paypal.payments.write` | `Risky` | `High` | `BestEffort` | Refunds a completed capture. Can be partial or full; uses `PayPal-Request-Id` when supplied. |
+| `paypal.invoices.create` | `POST /v2/invoicing/invoices` | `paypal.invoices.write` | `Risky` | `Medium` | `BestEffort` | Creates a draft invoice only. Sending is a separate operation. Uses `PayPal-Request-Id` when supplied. |
 | `paypal.invoices.list` | `GET /v2/invoicing/invoices?page=1&page_size=20` | `paypal.invoices.read` | `Safe` | `Low` | `Strict` | First slice keeps a fixed first-page listing surface. |
-| `paypal.invoices.send` | `POST /v2/invoicing/invoices/{invoice_id}/send` | `paypal.invoices.write` | `Risky` | `High` | `BestEffort` | Delivers or schedules an invoice to an external recipient. |
+| `paypal.invoices.send` | `POST /v2/invoicing/invoices/{invoice_id}/send` | `paypal.invoices.write` | `Risky` | `High` | `BestEffort` | Delivers or schedules an invoice to an external recipient. Uses `PayPal-Request-Id` when supplied. |
+
+## Verification Surface
+
+The tracked verification entry point is `scripts/e2e/paypal_connector_verification.sh`. It runs the PayPal crate check, formatting check, local no-mock test, full connector test suite, clippy, and a redaction scan over its JSONL/log artifacts.
+
+`connectors/paypal/tests/local_non_mock.rs` covers the no-live-credential provider boundary with a raw TCP HTTP loopback server. Because production connector configuration rejects localhost and non-TLS provider URLs, the test also verifies that connector-level guard before exercising the REST client against the local server. The loopback proof covers OAuth client-credentials token exchange, order create/get/capture, transaction search, capture get, refund, invoice create/list/send, health reachability, path traversal rejection before provider traffic, idempotency headers, and redaction-safe JSON evidence.
+
+Promotion proof `purple-paypal-proof2-20260606T103700Z` passed the tracked verifier with accepted remote Cargo proof for `cargo_check`, `local_non_mock`, `connector_tests`, and `clippy`, plus source-state formatting and local redaction scan checks.
 
 ## Explicit Non-Goals
 
@@ -115,7 +125,7 @@ These are excluded on purpose. They either expand the trust boundary beyond one 
 - Keep the auth boundary strict: one merchant, one environment, one client credential pair.
 - Preserve the current environment validation that rejects mismatched hosts.
 - Maintain the current Transaction Search input contract: explicit ISO-8601 `start_date` and `end_date`.
-- Do not claim exact-once semantics for mutating operations until `InvokeRequest.idempotency_key` is actually mapped to PayPal replay-protection headers where supported.
+- Do not claim exact-once semantics for mutating operations solely because `InvokeRequest.idempotency_key` maps to `PayPal-Request-Id`; endpoint-specific PayPal replay retention still controls the provider-side guarantee.
 - Keep `health` and `self_check()` tied to OAuth token acquisition plus the lightweight orders probe instead of inventing a synthetic connector-only health rule.
 - Preserve clear error mapping for `401`, `403`, `404`, `429`, and retryable `5xx` failures.
 - Keep the first slice request-response only. Webhooks, subscriptions, and partner delegation are follow-on work, not hidden scope.
@@ -127,8 +137,20 @@ This contract is grounded in the current connector implementation and current Pa
 - `connectors/paypal/src/connector.rs` defines the operation inventory, capability mapping, readiness behavior, and runtime contract details.
 - `connectors/paypal/src/client.rs` defines the concrete REST endpoints, OAuth token acquisition, retry handling, and current host assumptions.
 - `connectors/paypal/manifest.toml` defines the mechanical network boundary and per-operation metadata that must match the runtime.
+- `connectors/paypal/tests/local_non_mock.rs` exercises the local raw HTTP provider proof without live PayPal credentials or `wiremock`.
 - PayPal REST getting started: https://developer.paypal.com/api/rest/
 - PayPal idempotency guidance: https://developer.paypal.com/api/rest/reference/idempotency/
 - PayPal rate-limiting guidance: https://developer.paypal.com/api/rest/reference/rate-limiting/
 - PayPal Transaction Search API: https://developer.paypal.com/docs/api/transaction-search/v1/
 - PayPal Invoicing API v2: https://developer.paypal.com/docs/api/invoicing/v2/
+
+## Operator Guidance
+
+Use sandbox PayPal app credentials for live operator checks. Do not point the connector at localhost, private networks, tailnet addresses, or a non-TLS base URL; those are intentionally rejected by runtime configuration and denied by the manifest network policy.
+
+Rerun commands:
+
+- `env -u CARGO_TARGET_DIR RUN_ID=manual-paypal bash scripts/e2e/paypal_connector_verification.sh`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-paypal-readme cargo test -p fcp-paypal --test local_non_mock -- --nocapture`
+- `scripts/graduation/run_gauntlet.sh --jsonl /tmp/fcp-paypal-gauntlet.jsonl connectors/paypal`
+- `ubs connectors/paypal/src/connector.rs connectors/paypal/src/client.rs connectors/paypal/tests/integration.rs connectors/paypal/tests/local_non_mock.rs connectors/paypal/README.md scripts/e2e/paypal_connector_verification.sh`

@@ -381,15 +381,18 @@ impl GarbageCollector {
 
         while let Some(object_id) = queue.pop_front() {
             if visited.insert(object_id) {
-                let header = store
-                    .get_header(&object_id)
-                    .await
-                    .map_err(|err| match err {
-                        ObjectStoreError::NotFound(_) if roots.is_root(&object_id) => {
-                            GcError::InvalidRoot(object_id)
+                let header = match store.get_header(&object_id).await {
+                    Ok(header) => header,
+                    Err(err) => match err {
+                        ObjectStoreError::NotFound(_) => {
+                            if roots.is_root(&object_id) {
+                                return Err(GcError::InvalidRoot(object_id));
+                            }
+                            continue;
                         }
-                        other => GcError::ObjectStore(other),
-                    })?;
+                        other => return Err(GcError::ObjectStore(other)),
+                    },
+                };
 
                 if header.zone_id != *zone_id {
                     if roots.is_root(&object_id) {

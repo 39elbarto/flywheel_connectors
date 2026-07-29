@@ -11,8 +11,8 @@ use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
     InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };
-use fcp_sdk::migration::ConnectorErrorMapping;
-use fcp_sonos::{SonosConnector, error::SonosError, types::SonosConfig};
+use fcp_sdk::ConnectorErrorMapping;
+use fcp_sonos::{SonosConnector, client::SonosClient, error::SonosError, types::SonosConfig};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -191,6 +191,29 @@ async fn mount_av_transport_action(server: &MockServer, action: &str) {
         .expect(1)
         .mount(server)
         .await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_play_uses_avtransport_soap_action() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/MediaRenderer/AVTransport/Control"))
+        .and(header(
+            "soapaction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#Play\"",
+        ))
+        .and(body_string_contains("<u:Play"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<ok/>"))
+        .mount(&server)
+        .await;
+
+    let config = SonosConfig::from_value(json!({
+        "device_url": server.uri()
+    }))
+    .expect("config should parse");
+    let client = SonosClient::from_config(&config).expect("client should build");
+    let result = client.play().await.expect("play should succeed");
+    assert_eq!(result["action"], "play");
 }
 
 #[fcp_async_core::runtime::test]
@@ -583,5 +606,11 @@ async fn operation_catalog_manifest_and_redaction_preserve_security_posture() {
     let debug = format!("{configured:?}");
     assert!(!debug.contains("password"));
     assert!(!debug.contains("secret"));
-    assert!(!debug.contains("token"));
+    // The connector's transitive Debug now includes the async runtime's
+    // cancellation plumbing, whose internal `receiver_token: ArenaIndex(..)`
+    // field is a benign arena handle (not a credential). Strip those framework
+    // field names before asserting no credential-looking `token` material leaks
+    // from the connector's own state.
+    let debug_without_framework_fields = debug.replace("receiver_token", "receiver");
+    assert!(!debug_without_framework_fields.contains("token"));
 }

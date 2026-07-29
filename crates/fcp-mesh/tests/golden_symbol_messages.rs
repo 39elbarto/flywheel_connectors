@@ -1,6 +1,6 @@
 //! Frozen-byte golden tests for fcp-mesh symbol-exchange messages.
 //!
-//! AmberLark, 2026-05-02 — testing-golden-artifacts alpha-domain sweep.
+//! `AmberLark`, 2026-05-02 — testing-golden-artifacts alpha-domain sweep.
 //!
 //! Companion to `wire_format_goldens.rs` (which pins `GossipSummary`
 //! and `RevocationPushMessage`). This file pins the OTHER two
@@ -8,7 +8,7 @@
 //!
 //! - [`SymbolAck`]      — terminal acknowledgement of a symbol
 //!                        exchange (Complete / Cancelled / Duplicate
-//!                        / BudgetExceeded)
+//!                        / `BudgetExceeded`)
 //! - [`DecodeStatus`]   — incremental decode-progress signal
 //!
 //! Both messages cross peers and are signed; their `transcript_bytes`
@@ -23,6 +23,8 @@
 //!     git add crates/fcp-mesh/tests/snapshots/
 //!
 //! Any other change MUST fail these tests.
+
+#![allow(clippy::doc_overindented_list_items)]
 
 use std::fmt::Write as _;
 
@@ -79,7 +81,7 @@ fn fixture_header(schema_name: &str) -> ObjectHeader {
     }
 }
 
-/// Fixture: minimal SymbolAck — `Complete` reason, no missing hints.
+/// Fixture: minimal `SymbolAck` — `Complete` reason, no missing hints.
 /// The most common terminal-ack shape on the wire today.
 fn complete_symbol_ack() -> SymbolAck {
     SymbolAck {
@@ -96,7 +98,7 @@ fn complete_symbol_ack() -> SymbolAck {
     }
 }
 
-/// Fixture: SymbolAck with the `BudgetExceeded` terminal reason.
+/// Fixture: `SymbolAck` with the `BudgetExceeded` terminal reason.
 /// Pins the enum-variant tag layout so a future rename or
 /// re-ordering of `SymbolAckReason` is caught at test time.
 fn budget_exceeded_symbol_ack() -> SymbolAck {
@@ -114,7 +116,7 @@ fn budget_exceeded_symbol_ack() -> SymbolAck {
     }
 }
 
-/// Fixture: DecodeStatus mid-decode (incomplete) with a
+/// Fixture: `DecodeStatus` mid-decode (incomplete) with a
 /// `missing_hint` populated. Pins both the integer encoding for
 /// `received_unique`/`needed` AND the optional-vector encoding for
 /// `missing_hint`.
@@ -135,7 +137,7 @@ fn mid_decode_status() -> DecodeStatus {
     }
 }
 
-/// Fixture: DecodeStatus terminal (complete=true), no missing_hint.
+/// Fixture: `DecodeStatus` terminal (complete=true), no `missing_hint`.
 /// Pins the `complete=true + None hint` shape for the success branch.
 fn complete_decode_status() -> DecodeStatus {
     DecodeStatus {

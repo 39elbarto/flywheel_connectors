@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use uuid::Uuid;
 
 use crate::{

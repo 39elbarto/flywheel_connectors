@@ -1,5 +1,5 @@
 //! Pin `ZoneId` 5-zone classifier matrix + `ZoneIdError` 8-variant Display
-//! — the closest analogue to "ZoneClass variant Display"
+//! — the closest analogue to "`ZoneClass` variant Display"
 //! (flywheel_connectors-y4lj9).
 //!
 //! Bead asks for `ZoneClass` Display + serde tag pinning. No type literally
@@ -11,33 +11,37 @@
 //!   * `WORK` (`z:work`) — project collaboration,
 //!   * `COMMUNITY` (`z:community`) — public/semi-public,
 //!   * `PUBLIC` (`z:public`) — internet-facing, untrusted.
-//! These ARE the documented zone classes. ZoneIdError at
-//! `crates/fcp-core/src/capability.rs:419` is the 8-variant rejection
-//! enum that pins the boundary of the taxonomy.
 //!
-//! Existing coverage: zone_id_display.rs (Display roundtrip),
-//! zone_id_equality_across_paths.rs (equality), zone_id_parse_error_matrix.rs
+//! These ARE the documented zone classes. `ZoneIdError` at
+//! `crates/fcp-core/src/capability.rs:419` is the 8-variant rejection enum
+//! that pins the boundary of the taxonomy.
+//!
+//! Existing coverage: `zone_id_display.rs` (Display roundtrip),
+//! `zone_id_equality_across_paths.rs` (equality), `zone_id_parse_error_matrix.rs`
 //! (variant selection during parsing). NOT covered: per-zone-constant
-//! string pinning, ZoneId serde scalar-string shape, CBOR Text shape,
-//! per-zone is_canonical/distinct sentinels, ZoneIdError per-variant
+//! string pinning, `ZoneId` serde scalar-string shape, CBOR Text shape,
+//! per-zone `is_canonical`/distinct sentinels, `ZoneIdError` per-variant
 //! Display verbatim + distinct-Display sentinel.
 //!
 //! Coverage:
 //!   * 5 zone constants pinned to exact `z:<class>` strings,
-//!   * 5 constructor methods produce expected text + as_bytes / as_str
+//!   * 5 constructor methods produce expected text + `as_bytes` / `as_str`
 //!     consistency,
 //!   * Pairwise distinctness across all 5 zones (Display + Hash + JSON),
-//!   * JSON scalar string shape (transparent via serde(try_from/into)),
+//!   * JSON scalar string shape (transparent via `serde(try_from/into)`),
 //!   * CBOR Text scalar shape,
 //!   * Round-trip via Display+FromStr for every canonical zone,
-//!   * 8-variant ZoneIdError Display verbatim with payload preservation,
-//!   * Distinct-Display sentinel across all 8 ZoneIdError variants.
+//!   * 8-variant `ZoneIdError` Display verbatim with payload preservation,
+//!   * Distinct-Display sentinel across all 8 `ZoneIdError` variants.
 
 use ciborium::Value as CborValue;
 use fcp_core::{ZoneId, ZoneIdError};
 use serde_json::json;
 
-const ALL_CANONICAL_ZONES: &[(&str, fn() -> ZoneId)] = &[
+type ZoneCtor = fn() -> ZoneId;
+type CanonicalZone = (&'static str, ZoneCtor);
+
+const ALL_CANONICAL_ZONES: &[CanonicalZone] = &[
     ("z:owner", ZoneId::owner),
     ("z:private", ZoneId::private),
     ("z:work", ZoneId::work),
@@ -78,12 +82,12 @@ fn all_canonical_zones_are_pairwise_distinct() {
         .iter()
         .map(|&(_, ctor)| ctor())
         .collect();
-    for i in 0..zones.len() {
-        for j in 0..zones.len() {
+    for (i, left) in zones.iter().enumerate() {
+        for (j, right) in zones.iter().enumerate() {
             if i == j {
-                assert_eq!(zones[i], zones[j]);
+                assert_eq!(left, right);
             } else {
-                assert_ne!(zones[i], zones[j], "zones must differ at ({i}, {j})");
+                assert_ne!(left, right, "zones must differ at ({i}, {j})");
             }
         }
     }

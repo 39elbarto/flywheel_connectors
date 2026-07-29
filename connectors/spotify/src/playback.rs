@@ -573,35 +573,29 @@ impl PlaybackCommandValidator {
         }
 
         match command {
-            PlaybackCommand::SetVolume { volume_percent } => {
-                if *volume_percent > self.max_volume {
-                    return Err(PlaybackValidationError::VolumeOutOfRange {
-                        value: *volume_percent,
-                        max: self.max_volume,
-                    });
-                }
+            PlaybackCommand::SetVolume { volume_percent } if *volume_percent > self.max_volume => {
+                return Err(PlaybackValidationError::VolumeOutOfRange {
+                    value: *volume_percent,
+                    max: self.max_volume,
+                });
             }
-            PlaybackCommand::Seek { position_ms } => {
-                if *position_ms < self.min_seek_ms || *position_ms > self.max_seek_ms {
-                    return Err(PlaybackValidationError::SeekOutOfRange {
-                        position_ms: *position_ms,
-                        min_ms: self.min_seek_ms,
-                        max_ms: self.max_seek_ms,
-                    });
-                }
+            PlaybackCommand::Seek { position_ms }
+                if *position_ms < self.min_seek_ms || *position_ms > self.max_seek_ms =>
+            {
+                return Err(PlaybackValidationError::SeekOutOfRange {
+                    position_ms: *position_ms,
+                    min_ms: self.min_seek_ms,
+                    max_ms: self.max_seek_ms,
+                });
             }
             PlaybackCommand::Play {
                 context_uri: Some(uri),
                 ..
-            } => {
-                if uri.is_empty() {
-                    return Err(PlaybackValidationError::EmptyContextUri);
-                }
+            } if uri.is_empty() => {
+                return Err(PlaybackValidationError::EmptyContextUri);
             }
-            PlaybackCommand::TransferPlayback { device_id, .. } => {
-                if device_id.is_empty() {
-                    return Err(PlaybackValidationError::NoDeviceSpecified);
-                }
+            PlaybackCommand::TransferPlayback { device_id, .. } if device_id.is_empty() => {
+                return Err(PlaybackValidationError::NoDeviceSpecified);
             }
             _ => {}
         }

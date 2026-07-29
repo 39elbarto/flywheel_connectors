@@ -1,9 +1,9 @@
 # Gmail Connector V3 Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
+> **Status**: PROVEN
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/gmail_connector_verification.sh`
 > **Gmail REST upstream**: https://developers.google.com/workspace/gmail/api/reference/rest
 > **Messages upstream**: https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages
 > **Messages send upstream**: https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send
@@ -64,7 +64,7 @@ Important runtime truths the contract preserves:
 
 This README documents the runtime truth and keeps current drift visible:
 
-- Runtime handshake returns placeholder manifest hash `sha256:gmail-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest event caps say `streaming = true` with `min_buffer_events = 50`, but runtime handshake reports `streaming = false` with `min_buffer_events = 100`.
 - Manifest `gmail.list_messages` input schema mentions `label_ids`, but runtime input validation and client dispatch use `query`, `max_results`, and `page_token`.
 - Manifest AI hints mention `gmail.search_messages` and `gmail.modify_labels`, but neither operation exists in runtime dispatch.
@@ -73,7 +73,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Runtime `handle_shutdown` does not clear stored `config`, `client`, `verifier`, or `session_id` fields, though it marks base configured/handshaken flags false.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align list-message schema, event caps, idempotency metadata, base URL policy wording, manifest hints, shutdown state cleanup, and placeholder manifest proof.
+A follow-up parity bead should align list-message schema, event caps, idempotency metadata, base URL policy wording, manifest hints, and shutdown state cleanup.
 
 ## First-Slice Scope
 
@@ -198,6 +198,7 @@ These are excluded on purpose:
 
 The deterministic integration evidence is anchored on connector-local tests covering:
 
+- local non-mock loopback acceptance for production `handle_invoke()` paths across `gmail.list_labels`, `gmail.get_message`, and `gmail.send_message`
 - lifecycle, configuration, base URL policy, loopback allowance, introspection, simulation, doctor, self-check, and shutdown behavior
 - message get/list/send/modify/trash, thread get, label list, draft get/create/send, and history sync through deterministic HTTP fixtures
 - cursor persistence and resumed history sync with `lease_seq` fencing
@@ -216,15 +217,18 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/gmail_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked verification bundle is `scripts/e2e/gmail_connector_verification.sh`. The closeout surface is the crate-local test suite plus fail-closed `fwc proof run` evidence for Cargo-backed `rch` proof commands.
 
 The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - deterministic WireMock coverage for Gmail API paths
+- deterministic local loopback coverage for the `local_non_mock` acceptance suite
 - shared Google auth, endpoint policy, provider error, lifecycle, simulation, history cursor, and introspection tests
-- formatting, check, test, and clippy proof through `rch`
+- formatting as a source-state check, plus test and clippy proof through `fwc proof run` / `rch`
 - UBS on changed files before commit
+
+The verifier writes proof-governor artifacts under `${OUT_ROOT}/proof`. Only `accepted_remote_proof` rows in `*.rch_remote_proof.jsonl` are green closeout evidence for Cargo-backed steps. `refused_local_fallback`, `infra_blocked`, `remote_command_failed`, `failed_closed`, `not_proof`, or a missing proof row keep the batch bead open. The wrapper normalizes stale proof-runner output for `[RCH] remote required; refusing local fallback` to `refused_local_fallback` so local-fallback refusal is not mistaken for a Gmail code failure.
 
 ## Operator Guidance
 
@@ -257,6 +261,10 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `scripts/e2e/gmail_connector_verification.sh`
+- `PROOF_GOVERNOR=1 scripts/e2e/gmail_connector_verification.sh`
+- `FWC_BIN=/path/to/current/target/debug/fwc PROOF_GOVERNOR=1 scripts/e2e/gmail_connector_verification.sh` when the installed `fwc` binary does not yet include `proof run`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-gmail-readme cargo test -p fcp-gmail --test local_non_mock -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-gmail-readme cargo check -p fcp-gmail --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-gmail-readme cargo test -p fcp-gmail --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-gmail-readme cargo clippy -p fcp-gmail --all-targets --no-deps -- -D warnings`

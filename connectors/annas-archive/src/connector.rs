@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, Introspection, OperationId,
+    OperationInfo,
 };
 use serde_json::json;
 use tracing::{info, instrument};
@@ -12,6 +14,13 @@ use crate::{
     client::{AnnasArchiveClient, DEFAULT_BASE_URL},
     error::AnnasArchiveError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OP_SEARCH: &str = "annas.search";
+const OP_METADATA: &str = "annas.metadata";
+const OP_LOOKUP_ISBN: &str = "annas.lookup.isbn";
+const OP_LOOKUP_MD5: &str = "annas.lookup.md5";
+const OPERATION_ORDER: &[&str] = &[OP_SEARCH, OP_METADATA, OP_LOOKUP_ISBN, OP_LOOKUP_MD5];
 
 /// FCP Anna's Archive Connector.
 pub struct AnnasArchiveConnector {
@@ -177,10 +186,10 @@ impl AnnasArchiveConnector {
         })?;
 
         let result = match operation {
-            "annas.search" => self.invoke_search(client, &input).await,
-            "annas.metadata" => self.invoke_metadata(client, &input).await,
-            "annas.lookup.isbn" => self.invoke_lookup_isbn(client, &input).await,
-            "annas.lookup.md5" => self.invoke_lookup_md5(client, &input).await,
+            OP_SEARCH => self.invoke_search(client, &input).await,
+            OP_METADATA => self.invoke_metadata(client, &input).await,
+            OP_LOOKUP_ISBN => self.invoke_lookup_isbn(client, &input).await,
+            OP_LOOKUP_MD5 => self.invoke_lookup_md5(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -275,173 +284,60 @@ fn require_str<'a>(
         .ok_or_else(|| AnnasArchiveError::InvalidInput(format!("Missing required field: {field}")))
 }
 
-/// Build a single [`OperationInfo`].
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
-    }
+fn operations_info() -> Vec<OperationInfo> {
+    typed_operations_info()
 }
 
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "annas.search",
-            "Search books and documents by keyword",
-            json!({
-                "type": "object",
-                "required": ["query"],
-                "properties": {
-                    "query": {"type": "string", "description": "Search query (title, author, topic)"},
-                    "lang": {"type": "string", "description": "Language filter (e.g. en, es, de)"},
-                    "ext": {"type": "string", "description": "File extension filter (e.g. pdf, epub)"},
-                    "sort": {"type": "string", "description": "Sort order (e.g. most_relevant, newest)"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["results"],
-                "properties": {"results": {"type": "array"}}
-            }),
-            "annas.search",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Search for books and documents by keyword, title, or author.".into(),
-                common_mistakes: vec![
-                    "Using overly broad queries without language or format filters.".into(),
-                ],
-                examples: vec![
-                    r#"{"query": "machine learning", "lang": "en", "ext": "pdf"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("annas.metadata"),
-                    CapabilityId::from_static("annas.lookup.isbn"),
-                ],
-            },
-        ),
-        op_info(
-            "annas.metadata",
-            "Get detailed metadata for a book by MD5 hash",
-            json!({
-                "type": "object",
-                "required": ["md5"],
-                "properties": {
-                    "md5": {"type": "string", "description": "MD5 hash identifier of the book"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["book"],
-                "properties": {"book": {"type": "object"}}
-            }),
-            "annas.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get detailed book metadata when you have the MD5 identifier.".into(),
-                common_mistakes: vec![
-                    "Using an uppercase MD5 hash — the identifier must be lowercase hex (32 characters).".into(),
-                ],
-                examples: vec![
-                    r#"{"md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("annas.search"),
-                    CapabilityId::from_static("annas.lookup.md5"),
-                ],
-            },
-        ),
-        op_info(
-            "annas.lookup.isbn",
-            "Look up a book by ISBN",
-            json!({
-                "type": "object",
-                "required": ["isbn"],
-                "properties": {
-                    "isbn": {"type": "string", "description": "ISBN-10 or ISBN-13"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["results"],
-                "properties": {"results": {"type": "array"}}
-            }),
-            "annas.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Look up a book by its ISBN number.".into(),
-                common_mistakes: vec![
-                    "Including dashes in the ISBN — provide digits only.".into(),
-                ],
-                examples: vec![
-                    r#"{"isbn": "9780134685991"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("annas.search"),
-                    CapabilityId::from_static("annas.metadata"),
-                ],
-            },
-        ),
-        op_info(
-            "annas.lookup.md5",
-            "Look up a book by MD5 hash",
-            json!({
-                "type": "object",
-                "required": ["md5"],
-                "properties": {
-                    "md5": {"type": "string", "description": "MD5 hash identifier"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["book"],
-                "properties": {"book": {"type": "object"}}
-            }),
-            "annas.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Look up a specific book when you have its MD5 hash identifier.".into(),
-                common_mistakes: vec![
-                    "Confusing lookup.md5 with metadata — lookup returns search-style results while metadata returns the full detail record for a given MD5.".into(),
-                ],
-                examples: vec![
-                    r#"{"md5": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("annas.metadata"),
-                    CapabilityId::from_static("annas.search"),
-                ],
-            },
-        ),
-    ]
+fn typed_operations_info() -> Vec<OperationInfo> {
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Anna's Archive manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: Some(ApprovalMode::from(operation.requires_approval)),
+    }
 }
 
 #[cfg(test)]
@@ -619,6 +515,106 @@ mod tests {
     fn operations_info_count() {
         let ops = operations_info();
         assert_eq!(ops.len(), 4);
+    }
+
+    #[test]
+    fn introspection_operations_preserve_runtime_order() {
+        let ops = typed_operations_info();
+        let ids: Vec<&str> = ops.iter().map(|op| op.id.as_ref()).collect();
+        assert_eq!(ids, OPERATION_ORDER.to_vec());
+    }
+
+    #[test]
+    fn strict_annas_archive_manifest() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        assert_eq!(manifest.connector.id.as_ref(), "fcp.annas-archive");
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should exist in manifest");
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.ai_hints.when_to_use.as_str(),
+                manifest_operation.ai_hints.when_to_use.as_str()
+            );
+            assert_eq!(
+                &operation.ai_hints.common_mistakes,
+                &manifest_operation.ai_hints.common_mistakes
+            );
+            assert_eq!(
+                &operation.ai_hints.examples,
+                &manifest_operation.ai_hints.examples
+            );
+            let actual_related: Vec<&str> = operation
+                .ai_hints
+                .related
+                .iter()
+                .map(|capability| capability.as_ref())
+                .collect();
+            let expected_related: Vec<&str> = manifest_operation
+                .ai_hints
+                .related
+                .iter()
+                .map(|capability| capability.as_ref())
+                .collect();
+            assert_eq!(actual_related, expected_related);
+
+            let expected_rate_limit = manifest_operation
+                .rate_limit
+                .as_ref()
+                .map(|rate_limit| rate_limit.0.clone());
+            match (operation.rate_limit.as_ref(), expected_rate_limit.as_ref()) {
+                (Some(actual), Some(expected)) => {
+                    assert_eq!(actual.max, expected.max);
+                    assert_eq!(actual.per_ms, expected.per_ms);
+                    assert_eq!(actual.burst, expected.burst);
+                    assert_eq!(actual.scope, expected.scope);
+                    assert_eq!(actual.pool_name, expected.pool_name);
+                }
+                (None, None) => {}
+                _ => panic!("runtime and manifest rate limit presence should match"),
+            }
+            assert_eq!(
+                operation.requires_approval,
+                Some(ApprovalMode::from(manifest_operation.requires_approval))
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_schema_is_the_runtime_introspection_schema() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should exist in manifest");
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+        }
     }
 
     #[test]

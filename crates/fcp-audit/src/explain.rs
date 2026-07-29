@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::{AuditEntry, Decision, DecisionReceipt, event_types};
 
 /// Replay evidence consumed by [`explain_bundle`].
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayBundle {
     /// Audit entries captured for the replayed operation.
     #[serde(
@@ -125,6 +125,11 @@ pub enum ExplainError {
 /// JSON object inputs may use `audit_entries`, `audit_events`,
 /// `audit_event_chain`, `events`, or `entries` for the audit chain. JSON array
 /// and JSONL inputs are interpreted as audit-entry chains.
+///
+/// # Errors
+///
+/// Returns [`ExplainError::Parse`] when the input cannot be parsed as a replay
+/// bundle, audit entry, JSON array, or JSONL audit-entry chain.
 pub fn parse_replay_bundle(input: &str) -> Result<ReplayBundle, ExplainError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -132,11 +137,11 @@ pub fn parse_replay_bundle(input: &str) -> Result<ReplayBundle, ExplainError> {
     }
 
     if trimmed.starts_with('{') {
-        let value: Value = serde_json::from_str(trimmed).map_err(parse_error)?;
+        let value: Value = serde_json::from_str(trimmed).map_err(|err| parse_error(&err))?;
         if looks_like_bundle_object(&value) {
-            return serde_json::from_value(value).map_err(parse_error);
+            return serde_json::from_value(value).map_err(|err| parse_error(&err));
         }
-        let entry = serde_json::from_value(value).map_err(parse_error)?;
+        let entry = serde_json::from_value(value).map_err(|err| parse_error(&err))?;
         return Ok(ReplayBundle {
             audit_entries: vec![entry],
             capability_tokens: Vec::new(),
@@ -152,16 +157,31 @@ pub fn parse_replay_bundle(input: &str) -> Result<ReplayBundle, ExplainError> {
 }
 
 /// Parse audit entries from a JSON array or JSONL text.
+///
+/// # Errors
+///
+/// Returns [`ExplainError::Parse`] when any JSON array element or JSONL line is
+/// not a valid [`AuditEntry`].
 pub fn parse_audit_entries(input: &str) -> Result<Vec<AuditEntry>, ExplainError> {
     parse_json_array_or_jsonl(input, "audit entry")
 }
 
 /// Parse decision receipts from a JSON array or JSONL text.
+///
+/// # Errors
+///
+/// Returns [`ExplainError::Parse`] when any JSON array element or JSONL line is
+/// not a valid [`DecisionReceipt`].
 pub fn parse_decision_receipts(input: &str) -> Result<Vec<DecisionReceipt>, ExplainError> {
     parse_json_array_or_jsonl(input, "decision receipt")
 }
 
 /// Parse capability-token evidence from a JSON array, JSON object, or JSONL text.
+///
+/// # Errors
+///
+/// Returns [`ExplainError::Parse`] when the input cannot be parsed as a JSON
+/// array, JSON object, or JSONL sequence of token values.
 pub fn parse_capability_tokens(input: &str) -> Result<Vec<Value>, ExplainError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -169,11 +189,11 @@ pub fn parse_capability_tokens(input: &str) -> Result<Vec<Value>, ExplainError> 
     }
 
     if trimmed.starts_with('[') {
-        return serde_json::from_str(trimmed).map_err(parse_error);
+        return serde_json::from_str(trimmed).map_err(|err| parse_error(&err));
     }
 
     if trimmed.starts_with('{') {
-        let value: Value = serde_json::from_str(trimmed).map_err(parse_error)?;
+        let value: Value = serde_json::from_str(trimmed).map_err(|err| parse_error(&err))?;
         if let Some(tokens) = value
             .get("capability_tokens")
             .or_else(|| value.get("tokens"))
@@ -196,6 +216,12 @@ pub fn parse_capability_tokens(input: &str) -> Result<Vec<Value>, ExplainError> 
 }
 
 /// Build a deterministic causal explanation from replay evidence.
+///
+/// # Errors
+///
+/// Returns [`ExplainError::EmptyBundle`] when no replay evidence is present and
+/// [`ExplainError::NoInvocation`] when no invocation-like audit entry can be
+/// selected from the bundle.
 pub fn explain_bundle(bundle: &ReplayBundle) -> Result<CausalExplanation, ExplainError> {
     if bundle.audit_entries.is_empty()
         && bundle.capability_tokens.is_empty()
@@ -272,13 +298,13 @@ where
     }
 
     if trimmed.starts_with('[') {
-        return serde_json::from_str(trimmed).map_err(parse_error);
+        return serde_json::from_str(trimmed).map_err(|err| parse_error(&err));
     }
 
     if trimmed.starts_with('{') {
         return serde_json::from_str(trimmed)
             .map(|single| vec![single])
-            .map_err(parse_error);
+            .map_err(|err| parse_error(&err));
     }
 
     input
@@ -301,7 +327,7 @@ fn non_empty_line((idx, line): (usize, &str)) -> Option<(usize, &str)> {
     }
 }
 
-fn parse_error(error: serde_json::Error) -> ExplainError {
+fn parse_error(error: &serde_json::Error) -> ExplainError {
     ExplainError::Parse(error.to_string())
 }
 
@@ -488,12 +514,23 @@ fn receipt_reason(receipt: &DecisionReceipt) -> CausalReason {
     let explanation = receipt
         .explanation
         .as_deref()
-        .or(non_empty(receipt.reason_code.as_str()))
+        .or_else(|| non_empty(receipt.reason_code.as_str()))
         .unwrap_or("allow");
+    let confidence = receipt
+        .confidence
+        .as_ref()
+        .map_or_else(String::new, |score| {
+            format!(
+                " with confidence {} (n={}, nonconforming={})",
+                score.display_value(),
+                score.sample_count,
+                score.nonconforming_count
+            )
+        });
     CausalReason {
         kind: CausalReasonKind::DecisionReceipt,
         statement: format!(
-            "decision receipt {} returned {} with reason {explanation}",
+            "decision receipt {} returned {}{confidence} with reason {explanation}",
             receipt.id, receipt.decision
         ),
         evidence: vec![format!("receipt:{}", receipt.id)],
@@ -568,7 +605,7 @@ fn optional_str_matches(actual: Option<&str>, expected: Option<&str>) -> bool {
     expected.is_none_or(|expected| actual.is_none_or(|actual| actual == expected))
 }
 
-fn non_empty(value: &str) -> Option<&str> {
+const fn non_empty(value: &str) -> Option<&str> {
     if value.is_empty() { None } else { Some(value) }
 }
 
@@ -621,8 +658,7 @@ fn reason_marker(idx: usize) -> char {
         .ok()
         .and_then(|offset| b'a'.checked_add(offset))
         .filter(u8::is_ascii_lowercase)
-        .map(char::from)
-        .unwrap_or('?')
+        .map_or('?', char::from)
 }
 
 #[cfg(test)]
@@ -647,6 +683,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq,
             occurred_at: 1_700_000_000 + seq,
+            hlc: crate::audit_entry_hlc_from_occurred_at(1_700_000_000 + seq, "user:alice"),
             prev: None,
             correlation_id: correlation_id.to_string(),
             trace_context: None,
@@ -675,6 +712,7 @@ mod tests {
             trace_context: None,
             connector_id: entry.connector_id.clone(),
             operation_id: entry.operation_id.clone(),
+            confidence: None,
             issuer_kid: None,
             signature: None,
         }

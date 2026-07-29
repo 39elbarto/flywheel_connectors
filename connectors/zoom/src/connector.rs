@@ -11,8 +11,9 @@ use fcp_prelude::{
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::prelude::*;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -203,7 +204,7 @@ fn operator_guidance() -> OperatorGuidance {
             RemediationHint {
                 code: "zoom_host_override_invalid",
                 symptom: "doctor reports api_base_url or oauth_base_url outside allowed hosts",
-                action: "Use the default Zoom hosts for live runs or localhost-only overrides for deterministic wiremock verification.",
+                action: "Use the default Zoom hosts for live runs or localhost-only overrides for deterministic local HTTP verification.",
             },
         ],
         rerun_commands: VERIFY_COMMANDS.to_vec(),
@@ -254,6 +255,12 @@ impl ZoomConnector {
             started_at: Instant::now(),
             verifier: None,
         }
+    }
+
+    /// Runtime instance identifier used for host-minted capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     fn manifest_hash() -> String {

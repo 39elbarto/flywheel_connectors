@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -109,10 +110,7 @@ impl MakeClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -189,20 +187,53 @@ impl MakeClient {
 
     /// Trigger a scenario run.
     pub async fn run_scenario(&self, scenario_id: &str) -> MakeResult<serde_json::Value> {
-        self.post(
-            &format!("/scenarios/{scenario_id}/run"),
-            &serde_json::json!({}),
-        )
-        .await
+        let safe_id = sanitize_path_segment(scenario_id, "scenario_id")?;
+        self.post(&format!("/scenarios/{safe_id}/run"), &serde_json::json!({}))
+            .await
     }
 
     // -- Executions --
 
     /// List recent executions for a scenario.
     pub async fn list_executions(&self, scenario_id: &str) -> MakeResult<serde_json::Value> {
-        self.get(&format!("/scenarios/{scenario_id}/executions"))
-            .await
+        let safe_id = sanitize_path_segment(scenario_id, "scenario_id")?;
+        self.get(&format!("/scenarios/{safe_id}/executions")).await
     }
+}
+
+/// Reject empty, slash-containing, and traversal-like path segments before egress.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> MakeResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(MakeError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(MakeError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(trimmed)
+}
+
+fn decode_success_body(status: StatusCode, body: &str) -> MakeResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(MakeError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
 }
 
 #[cfg(test)]
@@ -229,6 +260,38 @@ mod tests {
     fn auth_redacted_label() {
         let token = MakeAuth::ApiToken("tok".into());
         assert_eq!(token.redacted_label(), "api_token:redacted");
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            MakeError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            MakeError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

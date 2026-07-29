@@ -47,11 +47,14 @@ mod usage;
 
 pub use context::*;
 pub use export::{
-    HealthCheck, HealthResponse, flush_otlp_logs, flush_otlp_metrics, flush_otlp_tracer,
-    init_otlp_logs_with_options, init_otlp_logs_with_options_and_timeout,
-    init_otlp_metrics_with_options, init_otlp_metrics_with_options_and_timeout, init_otlp_tracer,
-    init_otlp_tracer_with_sample_rate, init_otlp_tracer_with_sample_rate_and_options,
-    init_otlp_tracer_with_sample_rate_options_and_timeout, init_prometheus_exporter,
+    HealthCheck, HealthResponse, OtlpRetryPolicy, flush_otlp_logs, flush_otlp_metrics,
+    flush_otlp_tracer, init_otlp_logs_with_options, init_otlp_logs_with_options_and_timeout,
+    init_otlp_logs_with_options_timeout_and_retry, init_otlp_metrics_with_options,
+    init_otlp_metrics_with_options_and_timeout, init_otlp_metrics_with_options_timeout_and_retry,
+    init_otlp_tracer, init_otlp_tracer_with_sample_rate,
+    init_otlp_tracer_with_sample_rate_and_options,
+    init_otlp_tracer_with_sample_rate_options_and_timeout,
+    init_otlp_tracer_with_sample_rate_options_timeout_and_retry, init_prometheus_exporter,
     prometheus_text_format, shutdown_otlp_logs, shutdown_otlp_metrics, shutdown_otlp_tracer,
 };
 pub use logging::*;

@@ -586,11 +586,11 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     )
 }
 
-/// Reject base_url / content_url overrides with userinfo, query, or
-/// fragment. The DropboxClient concatenates base_url via
-/// format!("{}{endpoint}", self.base_url) (client.rs:191) and similarly
-/// uses content_url for content endpoints. Without this check, a
-/// base_url like `https://api.dropboxapi.com/2?leak=x` would leak
+/// Reject `base_url` / `content_url` overrides with userinfo, query, or
+/// fragment. The `DropboxClient` concatenates `base_url` via
+/// `format!("{}{endpoint}", self.base_url)` and similarly
+/// uses `content_url` for content endpoints. Without this check, a
+/// `base_url` like `https://api.dropboxapi.com/2?leak=x` would leak
 /// attacker-chosen query values on every request and put the endpoint
 /// path after the `?` boundary. Userinfo
 /// (`https://attacker:pw@api.dropboxapi.com/2`) would bake into every
@@ -1824,7 +1824,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "dropbox.oauth2");
-        assert!(v["steps"].as_array().unwrap().len() == 2);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
     }
 
     #[test]

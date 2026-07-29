@@ -1,0 +1,105 @@
+name: Reality Check Cadence
+
+on:
+  schedule:
+    - cron: "5 0 1 * *"
+  workflow_dispatch:
+    inputs:
+      today:
+        description: "Override UTC date for cadence replay, formatted YYYY-MM-DD"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  monthly-reality-check:
+    name: Monthly Reality Check Cadence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Test cadence helper
+        run: cargo test -p br-tools --test scheduled_reality_check_filing
+
+      - name: Generate monthly proposal
+        run: |
+          set -euo pipefail
+          today="${{ github.event_name == 'workflow_dispatch' && inputs.today || '' }}"
+          if [ -z "$today" ]; then
+            today="$(date -u +%F)"
+          fi
+          mkdir -p artifacts/reality-check
+          cargo run -p br-tools --bin scheduled-reality-check -- \
+            --today "$today" \
+            --reality-dir docs/reality \
+            --issues .beads/issues.jsonl \
+            --json | tee artifacts/reality-check/proposed-beads.json
+
+      - name: Warn when a bead should be filed
+        run: |
+          set -euo pipefail
+          count="$(jq 'length' artifacts/reality-check/proposed-beads.json)"
+          if [ "$count" -gt 0 ]; then
+            title="$(jq -r '.[0].title' artifacts/reality-check/proposed-beads.json)"
+            echo "::warning title=Monthly reality-check overdue::$title"
+          fi
+
+      - name: Install br when filing is needed
+        run: |
+          set -euo pipefail
+          count="$(jq 'length' artifacts/reality-check/proposed-beads.json)"
+          if [ "$count" -eq 0 ]; then
+            exit 0
+          fi
+          if command -v br >/dev/null 2>&1; then
+            br --version
+            exit 0
+          fi
+          cargo install --git https://github.com/Dicklesworthstone/beads_rust.git --tag v0.2.3 --locked
+          br --version
+
+      - name: File monthly bead when br is available
+        run: |
+          set -euo pipefail
+          count="$(jq 'length' artifacts/reality-check/proposed-beads.json)"
+          if [ "$count" -eq 0 ]; then
+            exit 0
+          fi
+          title="$(jq -r '.[0].title' artifacts/reality-check/proposed-beads.json)"
+          issue_type="$(jq -r '.[0].issue_type' artifacts/reality-check/proposed-beads.json)"
+          priority="$(jq -r '.[0].priority' artifacts/reality-check/proposed-beads.json)"
+          description="$(jq -r '.[0].description' artifacts/reality-check/proposed-beads.json)"
+          labels="$(jq -r '.[0].labels | join(",")' artifacts/reality-check/proposed-beads.json)"
+          if ! br create \
+            --title "$title" \
+            --type "$issue_type" \
+            --priority "P$priority" \
+            --description "$description" \
+            --labels "$labels" \
+            --json | tee artifacts/reality-check/filed-bead.json; then
+            echo "::warning title=br filing failed::Cadence proposal generated, but br create failed in this runner"
+            exit 0
+          fi
+          if ! br sync --flush-only --json | tee artifacts/reality-check/br-sync.json; then
+            echo "::warning title=br sync failed::Cadence bead was created locally, but br sync failed in this runner"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reality-check-cadence-${{ github.sha }}
+          path: artifacts/reality-check/
+          retention-days: 30

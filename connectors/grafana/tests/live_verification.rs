@@ -1,0 +1,262 @@
+//! Environment-gated live verification for the Grafana connector.
+
+#![allow(
+    clippy::expect_used,
+    clippy::future_not_send,
+    clippy::missing_panics_doc,
+    clippy::unwrap_used
+)]
+
+use std::{
+    process,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use fcp_grafana::connector::GrafanaConnector;
+use fcp_testkit::live_suite::{CleanupStrategy, EnvironmentManifest, LiveEnvironment, LiveGate};
+use serde_json::{Value, json};
+
+const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
+const TOKEN_ENV: &str = "GRAFANA_SANDBOX_TOKEN";
+const URL_ENV: &str = "GRAFANA_SANDBOX_URL";
+const FOLDER_UID_ENV: &str = "GRAFANA_SANDBOX_FOLDER_UID";
+const NAMESPACE_ENV: &str = "FCP_SANDBOX_RUN_NAMESPACE";
+const OP_DATASOURCES_LIST: &str = "grafana.datasources.list";
+const OP_DASHBOARDS_CREATE: &str = "grafana.dashboards.create";
+const OP_DASHBOARDS_DELETE: &str = "grafana.dashboards.delete";
+
+fn manifest() -> EnvironmentManifest {
+    EnvironmentManifest::sandbox("grafana", "Grafana sandbox")
+        .with_env_secret(
+            "auth_token",
+            TOKEN_ENV,
+            "Grafana service account token scoped to the sandbox stack",
+        )
+        .with_env_var(URL_ENV, "Grafana sandbox API base URL")
+        .with_env_var(
+            FOLDER_UID_ENV,
+            "Dedicated Grafana folder UID reserved for connector-created dashboards",
+        )
+        .with_env_var(
+            NAMESPACE_ENV,
+            "Shared namespace recorded in evidence for any sandbox-side artifacts",
+        )
+        .with_account_setup(
+            "Use a dedicated Grafana Cloud stack or disposable self-hosted Grafana instance; never point this suite at production dashboards.",
+        )
+        .with_budget(0.01)
+        .with_cleanup(CleanupStrategy::PrefixDelete)
+        .with_rate_limits(1.0, true)
+}
+
+fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize, evidence: &Value) {
+    emit_live_jsonl_with_cleanup(status, reason, observed_count, false, false, evidence);
+}
+
+fn emit_live_jsonl_with_cleanup(
+    status: &str,
+    reason: &str,
+    observed_count: usize,
+    dashboard_create_attempted: bool,
+    dashboard_deleted: bool,
+    evidence: &Value,
+) {
+    eprintln!(
+        "GRAFANA_LIVE_SANDBOX_JSONL {}",
+        json!({
+            "event": "grafana_live_sandbox_verification",
+            "fixture_mode": "live",
+            "suite_class": "sandbox_required",
+            "gate_env_var": LIVE_GATE_ENV,
+            "required_secret_env": TOKEN_ENV,
+            "required_env": [URL_ENV, FOLDER_UID_ENV, NAMESPACE_ENV],
+            "operation": [OP_DATASOURCES_LIST, OP_DASHBOARDS_CREATE, OP_DASHBOARDS_DELETE],
+            "status": status,
+            "provider": "Grafana sandbox",
+            "environment": "sandbox",
+            "resource_class": "datasource_listing_and_sandbox_dashboard",
+            "observed_count": observed_count,
+            "call_ceiling": 3,
+            "rate_limit_guidance": "Performs one read-only datasource listing, one namespaced dashboard create, and one dashboard delete.",
+            "mutation_expected": true,
+            "cleanup_strategy": "prefix_delete",
+            "cleanup_result": if dashboard_create_attempted { Some(if dashboard_deleted { "dashboard_deleted" } else { "dashboard_delete_not_confirmed" }) } else { None },
+            "provider_project_class": "dedicated_sandbox",
+            "request_category": ["datasources.list", "dashboards.create", "dashboards.delete"],
+            "dashboard_create_attempted": dashboard_create_attempted,
+            "dashboard_deleted": dashboard_deleted,
+            "provider_resource_ids_logged": false,
+            "dashboard_uid_logged": false,
+            "folder_uid_logged": false,
+            "secret_values_logged": false,
+            "skip_reason": if status == "skipped" { Some(reason) } else { None },
+            "fcp_error_mapping": if status == "failed" { Some(reason) } else { None },
+            "evidence": evidence,
+        })
+    );
+}
+
+fn skip_reason(gate: &LiveGate, env: &LiveEnvironment) -> String {
+    if gate.is_enabled() {
+        env.problems().join("; ")
+    } else {
+        gate.skip_reason()
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn grafana_live_sandbox_datasource_listing_or_structured_skip_jsonl() {
+    let gate = LiveGate::sandbox();
+    let env = LiveEnvironment::from_manifest(manifest());
+    if !gate.is_enabled() || !env.is_ready() {
+        emit_live_jsonl(
+            "skipped",
+            &skip_reason(&gate, &env),
+            0,
+            &env.evidence_summary(),
+        );
+        return;
+    }
+
+    let connector = configured_connector(&env).await;
+    match connector
+        .handle_invoke(json!({
+            "operation_id": OP_DATASOURCES_LIST,
+            "input": {},
+        }))
+        .await
+    {
+        Ok(value) => {
+            let observed_count = value["datasources"].as_array().map_or(0, Vec::len);
+            let dashboard_uid = match create_sandbox_dashboard(&connector, &env).await {
+                Ok(uid) => uid,
+                Err(error) => {
+                    emit_live_jsonl_with_cleanup(
+                        "failed",
+                        &error,
+                        observed_count,
+                        true,
+                        false,
+                        &env.evidence_summary(),
+                    );
+                    panic!("Grafana sandbox dashboard create failed: {error}");
+                }
+            };
+            if let Err(error) = delete_sandbox_dashboard(&connector, &dashboard_uid).await {
+                emit_live_jsonl_with_cleanup(
+                    "failed",
+                    &error,
+                    observed_count,
+                    true,
+                    false,
+                    &env.evidence_summary(),
+                );
+                panic!("Grafana sandbox dashboard delete failed: {error}");
+            }
+            emit_live_jsonl_with_cleanup(
+                "passed",
+                "",
+                observed_count,
+                true,
+                true,
+                &json!({
+                    "environment": env.evidence_summary(),
+                    "operation_result": "datasources.list, dashboards.create, and dashboards.delete completed",
+                }),
+            );
+        }
+        Err(error) => {
+            emit_live_jsonl("failed", &error.to_string(), 0, &env.evidence_summary());
+            panic!("Grafana sandbox datasource listing failed: {error}");
+        }
+    }
+}
+
+async fn configured_connector(env: &LiveEnvironment) -> GrafanaConnector {
+    let mut connector = GrafanaConnector::new();
+    connector
+        .handle_configure(json!({
+            "auth_token": env.secrets.require("auth_token"),
+            "base_url": env.env_vars.get(URL_ENV).expect("Grafana URL env is ready"),
+        }))
+        .await
+        .expect("configure Grafana live connector");
+    connector
+        .handle_handshake(json!({"session_id": "live-verification"}))
+        .await
+        .expect("handshake Grafana live connector");
+    connector
+}
+
+async fn create_sandbox_dashboard(
+    connector: &GrafanaConnector,
+    env: &LiveEnvironment,
+) -> Result<String, String> {
+    let namespace = env
+        .env_vars
+        .get(NAMESPACE_ENV)
+        .expect("namespace env is ready");
+    let folder_uid = env
+        .env_vars
+        .get(FOLDER_UID_ENV)
+        .expect("folder uid env is ready");
+    let uid = dashboard_uid(namespace);
+    let title = format!("FCP sandbox live verification {namespace}");
+    let response = connector
+        .handle_invoke(json!({
+            "operation_id": OP_DASHBOARDS_CREATE,
+            "input": {
+                "folder_uid": folder_uid,
+                "overwrite": false,
+                "dashboard": {
+                    "id": null,
+                    "uid": uid,
+                    "title": title,
+                    "tags": ["fcp-live-verification", namespace],
+                    "timezone": "browser",
+                    "schemaVersion": 39,
+                    "version": 0,
+                    "panels": [],
+                    "templating": {"list": []},
+                    "annotations": {"list": []},
+                    "time": {"from": "now-15m", "to": "now"}
+                }
+            },
+        }))
+        .await
+        .map_err(|error| error.to_string())?;
+    response["uid"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "grafana dashboard create response did not include uid".to_string())
+}
+
+async fn delete_sandbox_dashboard(connector: &GrafanaConnector, uid: &str) -> Result<(), String> {
+    connector
+        .handle_invoke(json!({
+            "operation_id": OP_DASHBOARDS_DELETE,
+            "input": {"uid": uid},
+        }))
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn dashboard_uid(namespace: &str) -> String {
+    let mut safe = namespace
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .take(12)
+        .collect::<String>();
+    if safe.is_empty() {
+        safe.push_str("run");
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        % 1_000_000;
+    format!("fcp-{safe}-{}-{now}", process::id())
+}

@@ -1,10 +1,10 @@
 //! Pin signed-package envelope + canonical-payload serde behavior
 //! (flywheel_connectors-c8hb0).
 //!
-//! Bead asks for "SignedPackageCatalog Display formatting + serde
+//! Bead asks for "`SignedPackageCatalog` Display formatting + serde
 //! JSON+CBOR roundtrip". No type literally named
 //! `SignedPackageCatalog` exists in fcp-core. The closest analogue
-//! is `SignedManifest<T>` (connector_artifacts.rs:237) — the canonical
+//! is `SignedManifest<T>` (`connector_artifacts.rs:237`) — the canonical
 //! signed envelope that wraps any package payload (e.g.,
 //! `ConnectorManifestObject`, `ConnectorBinaryObject`,
 //! `ConnectorBinarySymbolSet`). `LocalRegistryCatalog` does exist in
@@ -22,7 +22,7 @@
 //!   3. **`canonical_payload_bytes` is deterministic** — same payload
 //!      produces identical bytes across calls.
 //!   4. **JSON round-trip** preserves all envelope fields (schema,
-//!      payload, signer_kid, signature) for a representative payload.
+//!      payload, `signer_kid`, signature) for a representative payload.
 //!   5. **CBOR round-trip** preserves the same fields.
 //!   6. **`to_canonical_bytes` / `from_canonical_bytes` round-trip**
 //!      via the canonical schema.
@@ -364,7 +364,7 @@ fn signature_tampering_after_roundtrip_fails_verification() {
         SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
             .expect("sign");
 
-    let mut tampered = original.clone();
+    let mut tampered = original;
     // Replace the signature with the all-zero signature — well-formed
     // shape, wrong cryptographic content.
     tampered.signature = fcp_crypto::ed25519::Ed25519Signature::from_bytes(&[0u8; 64]);

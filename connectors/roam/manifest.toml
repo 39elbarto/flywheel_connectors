@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:f465f2997f05b0ffbbf819c2a7dd702d0c77981fab481a891d6439897e22d58f"
+interface_hash = "blake3-256:fcp.interface.v2:b3675eac271a02963a4efbc8f9c787b852d565a9fd941a777b92b5213df22705"
 
 [connector]
 id = "fcp.roam"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "FCP connector for Roam Research (pages, blocks, graph)"
 archetypes = ["knowledge"]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "singleton_writer"
@@ -58,6 +59,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."roam.blocks.create".input_schema]
 required = [
@@ -111,6 +113,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."roam.blocks.list".input_schema]
 required = ["page_uid"]
@@ -161,6 +164,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."roam.pages.get".input_schema]
 required = ["title"]
@@ -217,6 +221,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."roam.pages.list".input_schema]
 required = []
@@ -291,7 +296,7 @@ burst = 10
 scope = "instance"
 
 [rate_limits.operation_pools]
-"roam.pages.get" = ["roam.pages.read"]
+"roam.pages.list" = ["roam.pages.read"]
 "roam.blocks.create" = ["roam.blocks.write"]
 "roam.blocks.list" = ["roam.blocks.read"]
-"roam.pages.list" = ["roam.pages.read"]
+"roam.pages.get" = ["roam.pages.read"]

@@ -14,6 +14,7 @@ const OP_CHAT_STREAM: &str = "deepseek.chat.completions_stream";
 const OP_MODELS: &str = "deepseek.models.list";
 const CAP_CHAT: &str = "deepseek.chat";
 const CAP_MODELS: &str = "deepseek.models.read";
+const LIVE_GATE_ENV: &str = "FCP_LIVE_READ";
 
 fn deepseek_api_key() -> Option<String> {
     std::env::var("DEEPSEEK_API_KEY")
@@ -21,11 +22,18 @@ fn deepseek_api_key() -> Option<String> {
         .filter(|key| !key.trim().is_empty())
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 fn emit_live(event: &str, payload: &Value) {
     let mut object = serde_json::Map::new();
     object.insert("event".into(), json!(event));
     object.insert("connector".into(), json!("fcp-deepseek"));
     object.insert("fixture_mode".into(), json!("live"));
+    object.insert("suite_class".into(), json!("live_read_only"));
+    object.insert("gate_env_var".into(), json!(LIVE_GATE_ENV));
     object.insert(
         "git_revision".into(),
         json!(option_env!("GIT_REVISION").unwrap_or("unknown")),
@@ -98,6 +106,26 @@ async fn setup_live_connector(
 
 #[fcp_async_core::runtime::test]
 async fn live_models_and_chat_shape() {
+    if !live_gate_enabled() {
+        emit_live(
+            "deepseek_live_skipped",
+            &json!({
+                "status": "skipped",
+                "skip_reason": format!("{LIVE_GATE_ENV} is not set to 1"),
+                "operation": "models+chat",
+                "model_id": "deepseek-v4-flash,deepseek-v4-pro",
+                "content_bytes": 0,
+                "reasoning_content_bytes": 0,
+                "stream_chunk_count": 0,
+                "http_status": "not_dispatched",
+                "retry_decision": "none",
+                "error_mapping": "none",
+                "cleanup_result": "skipped"
+            }),
+        );
+        return;
+    }
+
     let Some(api_key) = deepseek_api_key() else {
         emit_live(
             "deepseek_live_skipped",
@@ -191,6 +219,26 @@ async fn live_models_and_chat_shape() {
 
 #[fcp_async_core::runtime::test]
 async fn live_streaming_reasoning_shape() {
+    if !live_gate_enabled() {
+        emit_live(
+            "deepseek_live_stream_skipped",
+            &json!({
+                "status": "skipped",
+                "skip_reason": format!("{LIVE_GATE_ENV} is not set to 1"),
+                "operation": OP_CHAT_STREAM,
+                "model_id": "deepseek-v4-pro",
+                "content_bytes": 0,
+                "reasoning_content_bytes": 0,
+                "stream_chunk_count": 0,
+                "http_status": "not_dispatched",
+                "retry_decision": "none",
+                "error_mapping": "none",
+                "cleanup_result": "skipped"
+            }),
+        );
+        return;
+    }
+
     let Some(api_key) = deepseek_api_key() else {
         emit_live(
             "deepseek_live_stream_skipped",

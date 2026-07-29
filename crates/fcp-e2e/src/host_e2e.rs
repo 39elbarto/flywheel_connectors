@@ -1074,7 +1074,7 @@ mod tests {
         let result = runner.record_external_transcript(&script, transcript);
         assert!(result.passed);
         assert_eq!(result.transcript_summary.as_ref().unwrap().total, 3);
-        assert!(result.evidence.script.outcome == ScenarioOutcome::Pass);
+        assert_eq!(result.evidence.script.outcome, ScenarioOutcome::Pass);
     }
 
     #[test]

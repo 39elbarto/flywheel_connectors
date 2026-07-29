@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use fcp_async_core::{AsyncError, ExecutionContext};
 use fcp_kernel::{ConnectorId, SelfCheckReport, SelfCheckStatus};
 use fcp_policy::ZoneId;
-use futures_util::future::join_all;
+use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{ConnectorRegistry, HostError, HostResult};
@@ -327,7 +327,8 @@ where
                 });
             }
 
-            for result in join_all(futures).await {
+            let mut stream = futures_util::stream::iter(futures).buffer_unordered(16);
+            while let Some(result) = stream.next().await {
                 self_checks.push(result?);
             }
         }
@@ -2520,7 +2521,10 @@ mod tests {
 
     #[test]
     fn baseline_report_zone_id_with_special_chars() {
-        let zone = "z:test-zone_123-prod";
+        // Underscores were removed from the ZoneId charset (4728b8918) so
+        // zone ids stay representable as Tailscale ACL tags; hyphens and
+        // digits remain valid.
+        let zone = "z:test-zone-123-prod";
         let report = DoctorReport::baseline(zone);
         assert_eq!(report.zone_id.as_str(), zone);
     }

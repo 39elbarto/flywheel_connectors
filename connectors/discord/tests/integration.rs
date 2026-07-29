@@ -12,7 +12,6 @@
 
 #![allow(clippy::too_many_lines)]
 
-use asupersync::Cx;
 use asupersync::io::{AsyncRead, ReadBuf};
 use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
@@ -331,14 +330,14 @@ async fn accept_test_gateway_websocket(
         .await
         .expect("read gateway websocket handshake");
     WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept gateway websocket")
 }
 
 async fn recv_gateway_payload(ws: &mut TestGatewayWebSocket, context: &str) -> serde_json::Value {
     let message = ws
-        .recv(&Cx::for_testing())
+        .recv(&fcp_async_core::compatibility_cx())
         .await
         .expect(context)
         .unwrap_or_else(|| panic!("{context} missing"));
@@ -354,7 +353,7 @@ async fn send_gateway_json(
     context: &str,
 ) {
     ws.send(
-        &Cx::for_testing(),
+        &fcp_async_core::compatibility_cx(),
         ServerWsMessage::Text(serde_json::to_string(payload).expect("gateway payload serializes")),
     )
     .await
@@ -362,7 +361,9 @@ async fn send_gateway_json(
 }
 
 async fn close_test_gateway_websocket(ws: &mut TestGatewayWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
 }
 
 fn gateway_hello(interval_ms: u64) -> serde_json::Value {
@@ -3198,6 +3199,11 @@ async fn gateway_inbound_policy_loopback_drops_unauthorized_and_emits_authorized
             "api_url": mock_server.uri(),
             "gateway_url": gateway_url,
             "intents": ALL_REQUIRED_INTENTS,
+            // br-x13q4: the IDENTIFY limiter is process-global, so without this
+            // the second gateway test in the binary waits out the real 5 s
+            // window and blows its own 3 s timeout. `cfg(test)` does not reach
+            // integration tests, so the window has to be set here explicitly.
+            "gateway_identify_window_ms": 5,
             "inbound_policy": {
                 "require_mention_in_guilds": true,
                 "allowed_guilds": ["100"],
@@ -3263,6 +3269,477 @@ async fn gateway_inbound_policy_loopback_drops_unauthorized_and_emits_authorized
         .await
         .expect("shutdown should succeed");
     gateway_task.await.expect("gateway task should finish");
+}
+
+#[fcp_async_core::runtime::test]
+async fn gateway_inbound_delivery_loopback_retains_until_visible_send_success() {
+    let capture = LogCapture::new();
+    let _guard = capture.install_json_with_filter("info");
+    let failure_content = "secret_failure_body";
+    let final_content = "secret_final_body";
+    let mismatch_content = "secret_mismatch_body";
+    let after_clear_content = "secret_after_clear_body";
+
+    let fake_server = StructuredFakeHttpServer::spawn(5, move |idx, request| match idx {
+        0 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/users/@me");
+            assert_eq!(
+                request.headers.get("authorization").map(String::as_str),
+                Some("Bot test_token")
+            );
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "999",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/999/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord mismatch body json");
+            assert_eq!(body["content"], mismatch_content);
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "outbound-mismatch",
+                    "channel_id": "999",
+                    "content": mismatch_content,
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "999", "username": "TestBot", "discriminator": "0"}
+                }),
+            )
+        }
+        2 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/200/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord failed final body json");
+            assert_eq!(body["content"], failure_content);
+            StructuredHttpResponse::json(
+                500,
+                &json!({
+                    "message": "Discord upstream unavailable",
+                    "code": 500
+                }),
+            )
+        }
+        3 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/200/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord success final body json");
+            assert_eq!(body["content"], final_content);
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "outbound-success",
+                    "channel_id": "200",
+                    "content": final_content,
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "999", "username": "TestBot", "discriminator": "0"}
+                }),
+            )
+        }
+        4 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/200/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord after-clear body json");
+            assert_eq!(body["content"], after_clear_content);
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "outbound-after-clear",
+                    "channel_id": "200",
+                    "content": after_clear_content,
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "999", "username": "TestBot", "discriminator": "0"}
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gateway listener");
+    let addr = listener.local_addr().expect("gateway listener addr");
+    let gateway_url = format!("ws://{addr}");
+
+    let gateway_task = fcp_async_core::task::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept gateway client");
+        let mut ws = accept_test_gateway_websocket(socket).await;
+
+        send_gateway_json(&mut ws, &gateway_hello(1_000), "send gateway hello").await;
+
+        let identify = recv_gateway_payload(&mut ws, "client identify").await;
+        assert_eq!(identify["op"], 2, "connector must identify before events");
+
+        send_gateway_json(
+            &mut ws,
+            &gateway_dispatch(
+                "READY",
+                1,
+                &json!({
+                    "v": 10,
+                    "user": { "id": "999", "username": "TestBot" },
+                    "session_id": "sess-delivery",
+                    "resume_gateway_url": "wss://gateway.discord.gg"
+                }),
+            ),
+            "send ready",
+        )
+        .await;
+
+        send_gateway_json(
+            &mut ws,
+            &gateway_dispatch(
+                "MESSAGE_CREATE",
+                2,
+                &json!({
+                    "id": "message-allowed",
+                    "guild_id": "100",
+                    "channel_id": "200",
+                    "content": "please handle this <@999>",
+                    "author": { "id": "300", "username": "alice" }
+                }),
+            ),
+            "send guild message",
+        )
+        .await;
+
+        send_gateway_json(
+            &mut ws,
+            &gateway_dispatch(
+                "MESSAGE_CREATE",
+                3,
+                &json!({
+                    "id": "message-dm",
+                    "channel_id": "201",
+                    "content": "dm work item",
+                    "author": { "id": "301", "username": "bob" }
+                }),
+            ),
+            "send dm message",
+        )
+        .await;
+
+        close_test_gateway_websocket(&mut ws).await;
+    });
+
+    let mut connector = DiscordConnector::new();
+    connector
+        .handle_configure(json!({
+            "bot_credential": "test_token",
+            "api_url": fake_server.url(),
+            "gateway_url": gateway_url,
+            "intents": ALL_REQUIRED_INTENTS,
+            // br-x13q4: see the sibling gateway test — the IDENTIFY limiter is
+            // process-global and `cfg(test)` does not reach integration tests.
+            "gateway_identify_window_ms": 5,
+            "retry": {
+                "max_attempts": 0,
+                "initial_delay_ms": 10,
+                "max_delay_ms": 100,
+                "jitter": 0.0
+            },
+            "inbound_policy": {
+                "require_mention_in_guilds": true,
+                "allow_dms": true,
+                "allowed_channels": ["200", "201"],
+                "allowed_users": ["300", "301"]
+            }
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let mut event_rx = connector.subscribe_events();
+    let signing_key = setup_handshake(&mut connector, &["discord.read", "discord.send"]).await;
+    connector
+        .handle_subscribe(json!({
+            "topics": ["discord.ready", "discord.message"]
+        }))
+        .await
+        .expect("subscribe should succeed");
+
+    let mut saw_ready = false;
+    let mut guild_session_key = None;
+    let mut dm_session_key = None;
+    for _ in 0..3 {
+        let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+            .await
+            .expect("timeout waiting for Discord gateway event")
+            .expect("broadcast receive")
+            .expect("event payload");
+
+        match event.topic.as_str() {
+            "discord.ready" => {
+                saw_ready = true;
+                assert_eq!(event.seq, 1);
+            }
+            "discord.message" if event.data.payload["id"] == "message-allowed" => {
+                assert_eq!(event.seq, 2);
+                assert_eq!(event.data.principal.id, "300");
+                assert_eq!(
+                    event.data.payload["fcp_delivery"]["event_kind"],
+                    "room_event"
+                );
+                assert_eq!(event.data.payload["fcp_delivery"]["channel_id"], "200");
+                assert_eq!(event.data.payload["fcp_delivery"]["guild_id"], "100");
+                assert_eq!(
+                    event.data.payload["fcp_delivery"]["message_id"],
+                    "message-allowed"
+                );
+                assert_eq!(
+                    event.data.payload["fcp_delivery"]["retention"],
+                    "pending_until_outbound_delivery"
+                );
+                guild_session_key = Some(
+                    event.data.payload["fcp_delivery"]["session_key"]
+                        .as_str()
+                        .expect("guild fcp_delivery session key")
+                        .to_owned(),
+                );
+            }
+            "discord.message" if event.data.payload["id"] == "message-dm" => {
+                assert_eq!(event.seq, 3);
+                assert_eq!(event.data.principal.id, "301");
+                assert_eq!(
+                    event.data.payload["fcp_delivery"]["event_kind"],
+                    "direct_message"
+                );
+                assert_eq!(event.data.payload["fcp_delivery"]["channel_id"], "201");
+                assert_eq!(
+                    event.data.payload["fcp_delivery"]["guild_id"],
+                    serde_json::Value::Null
+                );
+                assert_eq!(
+                    event.data.payload["fcp_delivery"]["message_id"],
+                    "message-dm"
+                );
+                assert_eq!(
+                    event.data.payload["fcp_delivery"]["retention"],
+                    "pending_until_outbound_delivery"
+                );
+                dm_session_key = Some(
+                    event.data.payload["fcp_delivery"]["session_key"]
+                        .as_str()
+                        .expect("dm fcp_delivery session key")
+                        .to_owned(),
+                );
+            }
+            other => panic!(
+                "unexpected Discord gateway event topic/payload {other}: {:?}",
+                event.data.payload
+            ),
+        }
+    }
+
+    assert!(saw_ready, "READY event should be emitted");
+    let guild_session_key = guild_session_key.expect("guild message should include fcp_delivery");
+    let dm_session_key = dm_session_key.expect("DM message should include fcp_delivery");
+    assert_ne!(
+        guild_session_key, dm_session_key,
+        "inbound delivery session keys must distinguish gateway events"
+    );
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let hidden = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "200",
+                "content": "hidden progress body",
+                "delivery": {
+                    "kind": "progress",
+                    "visibility": "hidden",
+                    "inbound_event": {
+                        "session_key": guild_session_key.clone()
+                    }
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("hidden progress should be accounted without REST");
+    assert_eq!(hidden["delivery"]["status"], "suppressed");
+    assert_eq!(hidden["delivery"]["reason"], "hidden_non_final_update");
+    assert_eq!(hidden["delivery"]["inbound_event"]["status"], "pending");
+    assert_eq!(
+        hidden["delivery"]["inbound_event"]["reason"],
+        "discord_send_suppressed"
+    );
+    assert_eq!(
+        fake_server.requests().len(),
+        1,
+        "hidden progress must not call Discord REST"
+    );
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let mismatch = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "999",
+                "content": mismatch_content,
+                "delivery": {
+                    "kind": "final",
+                    "visibility": "visible",
+                    "inbound_event": {
+                        "session_key": guild_session_key.clone()
+                    }
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("visible send to wrong channel should keep inbound event pending");
+    assert_eq!(
+        mismatch["delivery"]["inbound_event"]["status"],
+        "target_mismatch"
+    );
+    assert_eq!(
+        mismatch["delivery"]["inbound_event"]["expected_channel_id"],
+        "200"
+    );
+    assert_eq!(
+        mismatch["delivery"]["inbound_event"]["actual_channel_id"],
+        "999"
+    );
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let failed = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "200",
+                "content": failure_content,
+                "delivery": {
+                    "kind": "final",
+                    "visibility": "visible",
+                    "inbound_event": {
+                        "session_key": guild_session_key.clone()
+                    }
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("visible final 5xx must be observable and retain inbound event");
+    assert!(
+        matches!(
+            failed,
+            fcp_core::FcpError::External {
+                service,
+                status_code: Some(500),
+                ..
+            } if service == "discord"
+        ),
+        "expected Discord External 500"
+    );
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let delivered = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "200",
+                "content": final_content,
+                "delivery": {
+                    "kind": "final",
+                    "visibility": "visible",
+                    "inbound_event": {
+                        "session_key": guild_session_key.clone()
+                    }
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("matching visible final send should mark inbound event delivered");
+    assert_eq!(delivered["id"], "outbound-success");
+    assert_eq!(
+        delivered["delivery"]["inbound_event"]["status"],
+        "marked_delivered"
+    );
+    assert_eq!(
+        delivered["delivery"]["inbound_event"]["source_message_id"],
+        "message-allowed"
+    );
+    assert_eq!(
+        delivered["delivery"]["inbound_event"]["delivered_message_id"],
+        "outbound-success"
+    );
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let after_clear = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "200",
+                "content": after_clear_content,
+                "delivery": {
+                    "kind": "final",
+                    "visibility": "visible",
+                    "inbound_event": {
+                        "session_key": guild_session_key
+                    }
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("send after delivered state is cleared should still send");
+    assert_eq!(after_clear["id"], "outbound-after-clear");
+    assert_eq!(
+        after_clear["delivery"]["inbound_event"]["status"],
+        "not_found"
+    );
+    assert_eq!(
+        after_clear["delivery"]["inbound_event"]["reason"],
+        "inbound_event_not_pending"
+    );
+
+    assert_eq!(
+        fake_server.requests().len(),
+        5,
+        "configure plus four visible REST sends should be observed"
+    );
+
+    connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+    gateway_task.await.expect("gateway task should finish");
+
+    let logs = capture.jsonl();
+    assert!(
+        logs.contains("Discord visible/final message delivery failed"),
+        "failure delivery log missing; logs={logs}"
+    );
+    assert!(
+        logs.contains("Discord message delivery accounted"),
+        "success delivery log missing; logs={logs}"
+    );
+    for secret in [
+        failure_content,
+        final_content,
+        mismatch_content,
+        after_clear_content,
+        "hidden progress body",
+        "test_token",
+    ] {
+        assert!(
+            !logs.contains(secret),
+            "sensitive delivery value must not be written to logs: {secret}; logs={logs}"
+        );
+    }
 }
 
 #[fcp_async_core::runtime::test]

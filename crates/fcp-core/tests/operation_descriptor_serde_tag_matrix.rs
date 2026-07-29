@@ -1,5 +1,5 @@
 //! Pin `OperationInfo` JSON+CBOR serde matrix — the closest analogue to
-//! "OperationDescriptor serde tag matrix" (flywheel_connectors-v0uat).
+//! "`OperationDescriptor` serde tag matrix" (flywheel_connectors-v0uat).
 //!
 //! Bead asks for `OperationDescriptor` JSON+CBOR roundtrip pinning. No type
 //! literally named `OperationDescriptor` exists in fcp-core. The closest
@@ -8,22 +8,23 @@
 //! `ConnectorDescriptor` exists in `connector_descriptors.rs:149` but
 //! describes the connector as a whole, not a single operation.
 //!
-//! No existing test pins OperationInfo's wire shape — `grep` for
+//! No existing test pins `OperationInfo`'s wire shape — `grep` for
 //! `OperationInfo` in `crates/fcp-core/tests/` returns empty.
 //!
 //! Coverage:
-//!   * 12-field JSON shape pinned (id, summary, description, input_schema,
-//!     output_schema, capability, risk_level, safety_tier, idempotency,
-//!     ai_hints, rate_limit, requires_approval),
-//!   * skip-when-None for description + rate_limit + requires_approval,
+//!   * 12-field JSON shape pinned (`id`, `summary`, `description`,
+//!     `input_schema`, `output_schema`, `capability`, `risk_level`,
+//!     `safety_tier`, `idempotency`, `ai_hints`, `rate_limit`,
+//!     `requires_approval`),
+//!   * skip-when-None for `description`, `rate_limit`, and `requires_approval`,
 //!   * Required field set always present (9 fields when minimal),
-//!   * RiskLevel + SafetyTier + IdempotencyClass embedded snake_case
+//!   * `RiskLevel` + `SafetyTier` + `IdempotencyClass` embedded `snake_case`
 //!     serde tags ride through round-trip,
-//!   * AgentHint nested struct round-trip,
-//!   * `input_schema` / `output_schema` are arbitrary serde_json::Value
+//!   * `AgentHint` nested struct round-trip,
+//!   * `input_schema` / `output_schema` are arbitrary `serde_json::Value`
 //!     (object / array / scalar all preserved),
 //!   * JSON + CBOR cross-format equality on the populated struct,
-//!   * Distinct safety_tier values produce distinct JSON.
+//!   * Distinct `safety_tier` values produce distinct JSON.
 
 use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, IdempotencyClass, OperationId, OperationInfo, RateLimit,

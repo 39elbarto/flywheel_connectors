@@ -2,7 +2,7 @@
 //!
 //! Validates the full retry/timeout/shutdown lifecycle of the
 //! Anthropic connector through the V3 `ConnectorRuntime` + `RetryLoop`
-//! machinery in `fcp-sdk::migration`.
+//! machinery in `fcp-sdk`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,9 +11,8 @@ use std::time::Duration;
 use fcp_anthropic::client::AnthropicClient;
 use fcp_anthropic::error::AnthropicError;
 use fcp_anthropic::types::Model;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, RetryLoop};
+use fcp_sdk::{ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};

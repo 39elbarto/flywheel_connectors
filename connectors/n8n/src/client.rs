@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -105,10 +106,7 @@ impl N8nClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -185,11 +183,13 @@ impl N8nClient {
 
     /// Get a specific workflow by ID.
     pub async fn get_workflow(&self, id: &str) -> N8nResult<serde_json::Value> {
+        let id = sanitize_path_segment(id, "workflow id")?;
         self.get(&format!("/workflows/{id}")).await
     }
 
     /// Activate or deactivate a workflow.
     pub async fn activate_workflow(&self, id: &str, active: bool) -> N8nResult<serde_json::Value> {
+        let id = sanitize_path_segment(id, "workflow id")?;
         let body = serde_json::json!({ "active": active });
         self.patch(&format!("/workflows/{id}"), &body).await
     }
@@ -203,8 +203,50 @@ impl N8nClient {
 
     /// Get a specific execution by ID.
     pub async fn get_execution(&self, id: &str) -> N8nResult<serde_json::Value> {
+        let id = sanitize_path_segment(id, "execution id")?;
         self.get(&format!("/executions/{id}")).await
     }
+}
+
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> N8nResult<&'a str> {
+    if value.trim().is_empty() || value != value.trim() {
+        return Err(N8nError::InvalidInput(format!(
+            "{field} must be a non-empty single path segment"
+        )));
+    }
+
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('&')
+        || value.contains('=')
+        || value.contains('%')
+        || value.chars().any(char::is_control)
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(N8nError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+
+    Ok(value)
+}
+
+fn decode_success_body(status: StatusCode, body: &str) -> N8nResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(N8nError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
 }
 
 #[cfg(test)]
@@ -238,6 +280,38 @@ mod tests {
         let cred = N8nAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
         assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            N8nError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            N8nError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]
@@ -306,6 +380,28 @@ mod tests {
         .unwrap();
         // trim_end_matches removes all trailing slashes
         assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_plain_ids() {
+        assert_eq!(
+            sanitize_path_segment("1001", "workflow id").unwrap(),
+            "1001"
+        );
+        assert_eq!(
+            sanitize_path_segment("exec_abc-123", "execution id").unwrap(),
+            "exec_abc-123"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal_markers() {
+        let err = sanitize_path_segment("../admin", "workflow id")
+            .expect_err("path traversal should be rejected");
+        assert!(matches!(err, N8nError::InvalidInput(message) if message.contains("workflow id")));
+        sanitize_path_segment("id/../admin", "workflow id").expect_err("slash rejected");
+        sanitize_path_segment("id%2Fadmin", "workflow id").expect_err("encoded slash rejected");
+        sanitize_path_segment(" id", "workflow id").expect_err("leading space rejected");
     }
 
     #[test]

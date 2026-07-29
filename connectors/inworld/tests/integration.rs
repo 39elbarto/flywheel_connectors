@@ -9,7 +9,6 @@ use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
 };
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_async_core::Cx;
 use fcp_async_core::io::{AsyncRead, ReadBuf};
 use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_async_core::task;
@@ -319,21 +318,24 @@ async fn accept_test_websocket(mut stream: TcpStream) -> (TestServerWebSocket, S
         .expect("read websocket handshake");
     let headers = String::from_utf8_lossy(&request).into_owned();
     let ws = WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket");
     (ws, headers)
 }
 
 async fn send_json_frame(ws: &mut TestServerWebSocket, value: Value, context: &str) {
-    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        ServerWsMessage::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn recv_json_frame(ws: &mut TestServerWebSocket, context: &str) -> Result<Value, String> {
     let message = ws
-        .recv(&Cx::for_testing())
+        .recv(&fcp_async_core::compatibility_cx())
         .await
         .map_err(|err| format!("{context}: {err}"))?
         .ok_or_else(|| format!("websocket closed before {context}"))?;
@@ -346,7 +348,9 @@ async fn recv_json_frame(ws: &mut TestServerWebSocket, context: &str) -> Result<
 }
 
 async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
 }
 
 #[fcp_async_core::runtime::test]

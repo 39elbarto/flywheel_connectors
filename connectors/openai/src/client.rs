@@ -6,9 +6,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
@@ -467,7 +466,8 @@ impl OpenAIClient {
         polling: VideoPollingOptions,
     ) -> OpenAIResult<VideoGenerationResponse> {
         let ctx = self.runtime.request_context();
-        let url = format!("{}/v1/videos/{video_id}", self.base_url);
+        let safe_video_id = sanitize_path_segment(video_id, "video_id")?;
+        let url = format!("{}/v1/videos/{safe_video_id}", self.base_url);
         for attempt in 0..polling.max_poll_attempts {
             let response: VideoGenerationResponse = self.get(&url).await?;
             match response.status.unwrap_or(VideoStatus::Unknown) {
@@ -485,9 +485,7 @@ impl OpenAIClient {
             if attempt.saturating_add(1) < polling.max_poll_attempts {
                 ctx.sleep(Duration::from_millis(polling.poll_interval_ms))
                     .await
-                    .map_err(
-                        <OpenAIError as fcp_sdk::migration::ConnectorErrorMapping>::from_async_error,
-                    )?;
+                    .map_err(<OpenAIError as fcp_sdk::ConnectorErrorMapping>::from_async_error)?;
             }
         }
 
@@ -695,7 +693,7 @@ impl OpenAIClient {
             params.push(format!("limit={limit}"));
         }
         if let Some(after) = after {
-            params.push(format!("after={after}"));
+            params.push(format!("after={}", encode_query_value(after, "after")?));
         }
         if !params.is_empty() {
             url.push('?');
@@ -712,7 +710,8 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn get_fine_tune(&self, job_id: &str) -> OpenAIResult<FineTuneJob> {
-        let url = format!("{}/v1/fine_tuning/jobs/{job_id}", self.base_url);
+        let safe_job_id = sanitize_path_segment(job_id, "job_id")?;
+        let url = format!("{}/v1/fine_tuning/jobs/{safe_job_id}", self.base_url);
         self.get(&url).await
     }
 
@@ -723,7 +722,8 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn cancel_fine_tune(&self, job_id: &str) -> OpenAIResult<FineTuneJob> {
-        let url = format!("{}/v1/fine_tuning/jobs/{job_id}/cancel", self.base_url);
+        let safe_job_id = sanitize_path_segment(job_id, "job_id")?;
+        let url = format!("{}/v1/fine_tuning/jobs/{safe_job_id}/cancel", self.base_url);
 
         let request = self
             .client
@@ -755,13 +755,14 @@ impl OpenAIClient {
         limit: Option<u32>,
         after: Option<&str>,
     ) -> OpenAIResult<FineTuneEventListResponse> {
-        let mut url = format!("{}/v1/fine_tuning/jobs/{job_id}/events", self.base_url);
+        let safe_job_id = sanitize_path_segment(job_id, "job_id")?;
+        let mut url = format!("{}/v1/fine_tuning/jobs/{safe_job_id}/events", self.base_url);
         let mut params = Vec::new();
         if let Some(limit) = limit {
             params.push(format!("limit={limit}"));
         }
         if let Some(after) = after {
-            params.push(format!("after={after}"));
+            params.push(format!("after={}", encode_query_value(after, "after")?));
         }
         if !params.is_empty() {
             url.push('?');
@@ -975,7 +976,7 @@ impl OpenAIClient {
             params.push(format!("limit={l}"));
         }
         if let Some(a) = after {
-            params.push(format!("after={a}"));
+            params.push(format!("after={}", encode_query_value(a, "after")?));
         }
         if !params.is_empty() {
             url.push('?');
@@ -991,7 +992,8 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn get_assistant(&self, assistant_id: &str) -> OpenAIResult<Assistant> {
-        let url = format!("{}/v1/assistants/{assistant_id}", self.base_url);
+        let safe_assistant_id = sanitize_path_segment(assistant_id, "assistant_id")?;
+        let url = format!("{}/v1/assistants/{safe_assistant_id}", self.base_url);
         self.get_v2(&url).await
     }
 
@@ -1002,7 +1004,8 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn delete_assistant(&self, assistant_id: &str) -> OpenAIResult<serde_json::Value> {
-        let url = format!("{}/v1/assistants/{assistant_id}", self.base_url);
+        let safe_assistant_id = sanitize_path_segment(assistant_id, "assistant_id")?;
+        let url = format!("{}/v1/assistants/{safe_assistant_id}", self.base_url);
         self.delete_v2(&url).await
     }
 
@@ -1037,7 +1040,8 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn get_thread(&self, thread_id: &str) -> OpenAIResult<Thread> {
-        let url = format!("{}/v1/threads/{thread_id}", self.base_url);
+        let safe_thread_id = sanitize_path_segment(thread_id, "thread_id")?;
+        let url = format!("{}/v1/threads/{safe_thread_id}", self.base_url);
         self.get_v2(&url).await
     }
 
@@ -1048,7 +1052,8 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn delete_thread(&self, thread_id: &str) -> OpenAIResult<serde_json::Value> {
-        let url = format!("{}/v1/threads/{thread_id}", self.base_url);
+        let safe_thread_id = sanitize_path_segment(thread_id, "thread_id")?;
+        let url = format!("{}/v1/threads/{safe_thread_id}", self.base_url);
         self.delete_v2(&url).await
     }
 
@@ -1067,7 +1072,8 @@ impl OpenAIClient {
         content: &str,
         metadata: Option<serde_json::Value>,
     ) -> OpenAIResult<ThreadMessage> {
-        let url = format!("{}/v1/threads/{thread_id}/messages", self.base_url);
+        let safe_thread_id = sanitize_path_segment(thread_id, "thread_id")?;
+        let url = format!("{}/v1/threads/{safe_thread_id}/messages", self.base_url);
         let mut body = serde_json::json!({
             "role": role,
             "content": content,
@@ -1090,13 +1096,14 @@ impl OpenAIClient {
         limit: Option<u32>,
         after: Option<&str>,
     ) -> OpenAIResult<ThreadMessageListResponse> {
-        let mut url = format!("{}/v1/threads/{thread_id}/messages", self.base_url);
+        let safe_thread_id = sanitize_path_segment(thread_id, "thread_id")?;
+        let mut url = format!("{}/v1/threads/{safe_thread_id}/messages", self.base_url);
         let mut params = Vec::new();
         if let Some(l) = limit {
             params.push(format!("limit={l}"));
         }
         if let Some(a) = after {
-            params.push(format!("after={a}"));
+            params.push(format!("after={}", encode_query_value(a, "after")?));
         }
         if !params.is_empty() {
             url.push('?');
@@ -1120,7 +1127,8 @@ impl OpenAIClient {
         instructions: Option<&str>,
         metadata: Option<serde_json::Value>,
     ) -> OpenAIResult<Run> {
-        let url = format!("{}/v1/threads/{thread_id}/runs", self.base_url);
+        let safe_thread_id = sanitize_path_segment(thread_id, "thread_id")?;
+        let url = format!("{}/v1/threads/{safe_thread_id}/runs", self.base_url);
         let mut body = serde_json::json!({
             "assistant_id": assistant_id,
         });
@@ -1140,7 +1148,12 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn get_run(&self, thread_id: &str, run_id: &str) -> OpenAIResult<Run> {
-        let url = format!("{}/v1/threads/{thread_id}/runs/{run_id}", self.base_url);
+        let safe_thread_id = sanitize_path_segment(thread_id, "thread_id")?;
+        let safe_run_id = sanitize_path_segment(run_id, "run_id")?;
+        let url = format!(
+            "{}/v1/threads/{safe_thread_id}/runs/{safe_run_id}",
+            self.base_url
+        );
         self.get_v2(&url).await
     }
 
@@ -1156,13 +1169,14 @@ impl OpenAIClient {
         limit: Option<u32>,
         after: Option<&str>,
     ) -> OpenAIResult<RunListResponse> {
-        let mut url = format!("{}/v1/threads/{thread_id}/runs", self.base_url);
+        let safe_thread_id = sanitize_path_segment(thread_id, "thread_id")?;
+        let mut url = format!("{}/v1/threads/{safe_thread_id}/runs", self.base_url);
         let mut params = Vec::new();
         if let Some(l) = limit {
             params.push(format!("limit={l}"));
         }
         if let Some(a) = after {
-            params.push(format!("after={a}"));
+            params.push(format!("after={}", encode_query_value(a, "after")?));
         }
         if !params.is_empty() {
             url.push('?');
@@ -1178,8 +1192,10 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn cancel_run(&self, thread_id: &str, run_id: &str) -> OpenAIResult<Run> {
+        let safe_thread_id = sanitize_path_segment(thread_id, "thread_id")?;
+        let safe_run_id = sanitize_path_segment(run_id, "run_id")?;
         let url = format!(
-            "{}/v1/threads/{thread_id}/runs/{run_id}/cancel",
+            "{}/v1/threads/{safe_thread_id}/runs/{safe_run_id}/cancel",
             self.base_url
         );
         self.post_empty_v2(&url).await
@@ -1345,6 +1361,66 @@ fn sanitize_error_message(message: &str) -> String {
         .collect::<String>()
 }
 
+/// Hex digits used by [`encode_query_value`] when percent-encoding a byte.
+const HEX_UPPER: [u8; 16] = *b"0123456789ABCDEF";
+
+/// Validate that a caller-supplied id is safe to interpolate into a URL path
+/// segment.
+///
+/// OpenAI resource ids (`ft-…`, `asst_…`, `thread_…`, `run_…`, `msg_…`,
+/// `video_…`) are opaque tokens, but they arrive as connector input, so hostile
+/// values must be refused. `reqwest` normalizes `..` segments while building the
+/// request, so an unsanitized id could otherwise reach a sibling endpoint under
+/// `api.openai.com`.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> OpenAIResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(OpenAIError::InvalidInput {
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(OpenAIError::InvalidInput {
+            message: format!("{field} contains path traversal characters"),
+        });
+    }
+    Ok(trimmed)
+}
+
+/// Percent-encode a value for safe inclusion in a URL query string.
+///
+/// Encodes every character outside the unreserved set (`A-Z a-z 0-9 - _ . ~`),
+/// including `%`, so a pagination cursor cannot smuggle additional query
+/// parameters (`after=cur&limit=9999`) or otherwise alter the URL structure.
+fn encode_query_value(value: &str, field: &str) -> OpenAIResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(OpenAIError::InvalidInput {
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let mut encoded = String::with_capacity(trimmed.len() * 2);
+    for byte in trimmed.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push('%');
+                encoded.push(HEX_UPPER[(byte >> 4) as usize] as char);
+                encoded.push(HEX_UPPER[(byte & 0x0F) as usize] as char);
+            }
+        }
+    }
+    Ok(encoded)
+}
+
 fn video_failure_message(response: &VideoGenerationResponse) -> String {
     response
         .error
@@ -1414,344 +1490,56 @@ fn parse_sse_event(event_str: &str) -> Option<OpenAIResult<ChatCompletionChunk>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_testkit::{AsyncTestContext, LogCapture};
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
 
-    #[fcp_async_core::runtime::test]
-    async fn test_chat_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .and(header("Authorization", "Bearer test_key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "chatcmpl-123",
-                "object": "chat.completion",
-                "created": 1677652288,
-                "model": "gpt-4o",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "Hello! How can I help you today?"
-                    },
-                    "finish_reason": "stop"
-                }],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 8,
-                    "total_tokens": 18
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = OpenAIClient::new("test_key")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let response = client
-            .chat(Model::Gpt4o, "Hi", None, Some(1024))
-            .await
-            .unwrap();
-
-        assert_eq!(response, "Hello! How can I help you today?");
-        assert_eq!(client.total_prompt_tokens(), 10);
-        assert_eq!(client.total_completion_tokens(), 8);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "error": {
-                    "message": "Incorrect API key provided",
-                    "type": "invalid_request_error",
-                    "param": null,
-                    "code": "invalid_api_key"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = OpenAIClient::new("bad_key")
-            .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(1, 10, 100);
-
-        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
-
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OpenAIError::InvalidApiKey));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
-                "error": {
-                    "message": "Rate limit exceeded",
-                    "type": "rate_limit_error",
-                    "param": null,
-                    "code": null
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = OpenAIClient::new("test_key")
-            .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(1, 10, 100);
-
-        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OpenAIError::RateLimited { .. }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_overloaded() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
-                "error": {
-                    "message": "Server overloaded",
-                    "type": "server_error",
-                    "param": null,
-                    "code": null
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = OpenAIClient::new("test_key")
-            .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(1, 10, 100);
-
-        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OpenAIError::Overloaded { .. }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_context_length_exceeded() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": {
-                    "message": "maximum context length exceeded",
-                    "type": "invalid_request_error",
-                    "param": null,
-                    "code": null
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = OpenAIClient::new("test_key")
-            .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(1, 10, 100);
-
-        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OpenAIError::ContextLengthExceeded { .. }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_content_filtered() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": {
-                    "message": "Content filtered",
-                    "type": "invalid_request_error",
-                    "param": null,
-                    "code": "content_filter"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = OpenAIClient::new("test_key")
-            .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(1, 10, 100);
-
-        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OpenAIError::ContentFiltered { .. }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_logs_redact_api_key_and_prompt() {
-        let capture = LogCapture::new();
-        let _guard = capture.install_json_with_filter("debug");
-        let scenario = AsyncTestContext::for_scenario("openai.client.log_redaction");
-        tracing::debug!(
-            run_id = %scenario.run_id(),
-            scenario_id = %scenario.scenario_id(),
-            correlation_id = %scenario.correlation_id(),
-            "log_capture_ready"
+    #[test]
+    fn sanitize_path_segment_accepts_opaque_ids() {
+        assert_eq!(
+            sanitize_path_segment("ft-abc123", "job_id").unwrap(),
+            "ft-abc123"
         );
-
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .and(header("Authorization", "Bearer test_key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "chatcmpl-123",
-                "object": "chat.completion",
-                "created": 1677652288,
-                "model": "gpt-4o",
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "Hello! How can I help you today?"
-                    },
-                    "finish_reason": "stop"
-                }],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 8,
-                    "total_tokens": 18
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = OpenAIClient::new("test_key")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-        let secret_prompt = "TopSecretPrompt";
-        let _ = client
-            .chat(Model::Gpt4o, secret_prompt, None, Some(1024))
-            .await
-            .unwrap();
-
-        let logs = capture.jsonl();
-        assert!(
-            logs.contains("log_capture_ready"),
-            "expected debug logs to be captured"
+        assert_eq!(
+            sanitize_path_segment("asst_9XyZ", "assistant_id").unwrap(),
+            "asst_9XyZ"
         );
-        assert!(
-            logs.contains(scenario.correlation_id()),
-            "scenario correlation id should be present in logs"
-        );
-        assert!(
-            !logs.contains("test_key"),
-            "API key should not appear in logs"
-        );
-        assert!(
-            !logs.contains(secret_prompt),
-            "prompt text should not appear in logs"
+        assert_eq!(
+            sanitize_path_segment("  thread_1  ", "thread_id").unwrap(),
+            "thread_1"
         );
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_generate_video_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/videos"))
-            .and(header("Authorization", "Bearer test_key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "video-123",
-                "model": "sora-2",
-                "status": "queued",
-                "seconds": "4",
-                "size": "1280x720"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/videos/video-123"))
-            .and(header("Authorization", "Bearer test_key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "video-123",
-                "model": "sora-2",
-                "status": "completed",
-                "seconds": "4",
-                "size": "1280x720"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/videos/video-123/content"))
-            .and(header("Authorization", "Bearer test_key"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "video/mp4")
-                    .set_body_bytes(b"video-bytes".to_vec()),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let client = OpenAIClient::new("test_key")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-
-        let video = client
-            .generate_video(
-                VideoModel::Sora2,
-                "A quiet product shot",
-                Some(VideoDurationSeconds::Seconds4),
-                Some(VideoSize::Size1280x720),
-                VideoPollingOptions {
-                    poll_interval_ms: 1,
-                    max_poll_attempts: 2,
-                },
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(video.video_id, "video-123");
-        assert_eq!(video.model, "sora-2");
-        assert_eq!(video.status, VideoStatus::Completed);
-        assert_eq!(video.seconds.as_deref(), Some("4"));
-        assert_eq!(video.size.as_deref(), Some("1280x720"));
-        assert_eq!(video.mime_type, "video/mp4");
-        assert_eq!(video.bytes, b"video-bytes");
+    #[test]
+    fn sanitize_path_segment_rejects_empty_and_traversal() {
+        assert!(sanitize_path_segment("   ", "job_id").is_err());
+        assert!(sanitize_path_segment("ft-abc/../admin", "job_id").is_err());
+        assert!(sanitize_path_segment("..", "job_id").is_err());
+        assert!(sanitize_path_segment("a%2Fb", "job_id").is_err());
+        assert!(sanitize_path_segment("a\\b", "run_id").is_err());
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_model_pricing() {
+    #[test]
+    fn encode_query_value_passes_plain_cursor() {
+        assert_eq!(
+            encode_query_value("ft-step-abc123", "after").unwrap(),
+            "ft-step-abc123"
+        );
+    }
+
+    #[test]
+    fn encode_query_value_encodes_param_smuggle() {
+        let encoded = encode_query_value("cur&limit=9999", "after").unwrap();
+        assert!(!encoded.contains('&'));
+        assert!(!encoded.contains('='));
+        assert!(encoded.contains("%26"));
+        assert!(encoded.contains("%3D"));
+    }
+
+    #[test]
+    fn encode_query_value_rejects_empty() {
+        assert!(encode_query_value("  ", "after").is_err());
+    }
+
+    #[test]
+    fn test_model_pricing() {
         assert_eq!(Model::Gpt4o.input_price_per_million(), 2.50);
         assert_eq!(Model::Gpt4o.output_price_per_million(), 10.0);
         assert_eq!(Model::Gpt4oMini.input_price_per_million(), 0.15);
@@ -1760,8 +1548,8 @@ mod tests {
         assert_eq!(Model::Gpt35Turbo.output_price_per_million(), 1.50);
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_usage_cost_calculation() {
+    #[test]
+    fn test_usage_cost_calculation() {
         let usage = Usage {
             prompt_tokens: 1000,
             completion_tokens: 500,

@@ -23,7 +23,7 @@ workspace = true
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
-fcp-sdk = { path = "../../crates/fcp-sdk" }
+fcp-sdk = { path = "../../crates/fcp-sdk", features = ["connector-http"] }
 fcp-google-discovery = { path = "../../crates/fcp-google-discovery" }
 
 anyhow.workspace = true
@@ -32,10 +32,12 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+hex.workspace = true
 percent-encoding.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -46,6 +48,6 @@ ciborium.workspace = true
 wiremock.workspace = true
 futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
-fcp-e2e = { path = "../../crates/fcp-e2e" }
+fcp-e2e = { path = "../../crates/fcp-e2e", default-features = false, features = ["gmail"] }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

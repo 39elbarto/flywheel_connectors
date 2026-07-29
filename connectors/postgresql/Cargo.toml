@@ -46,6 +46,7 @@ tokio-postgres = { version = "0.7", optional = true }
 axum = { version = "0.7", optional = true }
 
 [dev-dependencies]
+fcp-testkit.workspace = true
 wiremock.workspace = true
 
 [features]

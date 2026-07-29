@@ -7,7 +7,7 @@
 //!
 //! 1. Higher `fencing_token` wins.
 //! 2. Tie on token → later `expires_at` wins.
-//! 3. Tie on (token, expires_at) → lexicographically smaller `holder`
+//! 3. Tie on (token, `expires_at`) → lexicographically smaller `holder`
 //!    wins.
 //!
 //! These tests pin that ordering, the ACTIVE-vs-EXPIRED filter, and
@@ -21,7 +21,7 @@ fn obj() -> ObjectId {
     ObjectId::from_unscoped_bytes(b"subject-under-authority")
 }
 
-fn purpose() -> LeasePurpose {
+const fn purpose() -> LeasePurpose {
     LeasePurpose::OperationExecution
 }
 
@@ -85,7 +85,9 @@ fn higher_fencing_token_wins_among_active_leases() {
     let view = build_view(&eligible, &observed, 1_000);
 
     assert_eq!(
-        view.active_holder.as_ref().map(|n| n.as_str()),
+        view.active_holder
+            .as_ref()
+            .map(fcp_prelude::TailscaleNodeId::as_str),
         Some("node-b"),
         "higher fencing_token MUST win among active leases"
     );
@@ -108,7 +110,9 @@ fn tied_fencing_tokens_broken_by_later_expires_at() {
     let view = build_view(&eligible, &observed, 1_000);
 
     assert_eq!(
-        view.active_holder.as_ref().map(|n| n.as_str()),
+        view.active_holder
+            .as_ref()
+            .map(fcp_prelude::TailscaleNodeId::as_str),
         Some("node-b"),
         "tied fencing_token MUST be broken by later expires_at"
     );
@@ -130,7 +134,9 @@ fn tied_token_and_expiry_broken_lexicographically_by_holder() {
     let view = build_view(&eligible, &observed, 1_000);
 
     assert_eq!(
-        view.active_holder.as_ref().map(|n| n.as_str()),
+        view.active_holder
+            .as_ref()
+            .map(fcp_prelude::TailscaleNodeId::as_str),
         Some("node-a"),
         "tied (token, expires_at) MUST be broken by lex-smaller holder; \
          observation order MUST NOT determine the winner"
@@ -155,7 +161,9 @@ fn expired_lease_with_higher_token_does_not_take_authority() {
     let view = build_view(&eligible, &observed, 5_000);
 
     assert_eq!(
-        view.active_holder.as_ref().map(|n| n.as_str()),
+        view.active_holder
+            .as_ref()
+            .map(fcp_prelude::TailscaleNodeId::as_str),
         Some("node-b"),
         "active filter must precede token comparison; expired-but-higher-token \
          must NOT take authority"

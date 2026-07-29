@@ -11,12 +11,16 @@
 
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_hackernews::client::HackerNewsClient;
 use fcp_hackernews::connector::{HackerNewsConnector, operations_info};
+use fcp_hackernews::error::HackerNewsError;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
-    ZoneId,
+    HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus, OperationId,
+    RequestId, ZoneId,
 };
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
@@ -42,7 +46,11 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -60,6 +68,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints cbor should be valid")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -112,6 +121,18 @@ async fn setup_connector(base_url: &str) -> (HackerNewsConnector, Ed25519Signing
     (connector, signing_key)
 }
 
+fn test_client(server: &MockServer) -> HackerNewsClient {
+    HackerNewsClient::new(
+        Some(&format!("{}/v0", server.uri())),
+        HttpRetryConfig::default(),
+    )
+    .expect("wiremock URI should build Hacker News client")
+}
+
+fn test_runtime() -> ConnectorRuntime {
+    ConnectorRuntime::new(ConnectorRuntimeConfig::default())
+}
+
 #[fcp_async_core::runtime::test]
 async fn health_unconfigured_includes_guidance() {
     let connector = HackerNewsConnector::new();
@@ -126,6 +147,86 @@ async fn health_unconfigured_includes_guidance() {
         "hackernews_health_evidence={}",
         serde_json::to_string_pretty(&health).unwrap()
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_statuses_are_typed() {
+    let success_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/topstories.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([1, 2, 3])))
+        .mount(&success_server)
+        .await;
+    assert!(test_client(&success_server).health_check().await.is_ok());
+
+    let failure_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/topstories.json"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream unavailable"))
+        .mount(&failure_server)
+        .await;
+    let err = test_client(&failure_server)
+        .health_check()
+        .await
+        .expect_err("500 health check should fail");
+    assert!(matches!(
+        err,
+        HackerNewsError::Api {
+            status: 500,
+            message
+        } if message.contains("500")
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_item_user_and_story_endpoints_decode_contracts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v0/item/8863.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 8863,
+            "type": "story",
+            "by": "dhouston",
+            "time": 1175714200,
+            "title": "My YC app: Dropbox",
+            "url": "http://www.getdropbox.com",
+            "score": 111,
+            "descendants": 71,
+            "kids": [8952, 9224]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/item/99999999.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("null"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/user/jl.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "jl",
+            "created": 1173923446,
+            "karma": 2937,
+            "about": "Test user"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/topstories.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([100, 200, 300])))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server);
+    let runtime = test_runtime();
+    let item = client.get_item(&runtime, 8863).await.unwrap();
+    assert_eq!(item.title.as_deref(), Some("My YC app: Dropbox"));
+    let missing = client.get_item(&runtime, 99_999_999).await.unwrap_err();
+    assert!(matches!(missing, HackerNewsError::NotFound(_)));
+    let user = client.get_user(&runtime, "jl").await.unwrap();
+    assert_eq!(user.karma, 2937);
+    let ids = client.top_stories(&runtime).await.unwrap();
+    assert_eq!(ids, vec![100, 200, 300]);
 }
 
 #[fcp_async_core::runtime::test]
@@ -228,7 +329,7 @@ async fn invoke_item_get_preserves_public_item_evidence() {
         .invoke(invoke_req(
             OP_ITEM_GET,
             json!({ "id": 8863 }),
-            generate_valid_token(&signing_key, OP_ITEM_GET),
+            generate_valid_token(&signing_key, OP_ITEM_GET, connector.instance_id()),
         ))
         .await
         .unwrap();

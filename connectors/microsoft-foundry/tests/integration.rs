@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_async_core::Cx;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_microsoft_foundry::MicrosoftFoundryConnector;
 use fcp_microsoft_foundry::client::{
@@ -136,6 +135,7 @@ fn append_e2e_record(record: &Value) {
         .expect("e2e JSONL should open");
     writeln!(file, "{record}").expect("e2e JSONL line should write");
     println!("MICROSOFT_FOUNDRY_CONNECTOR_E2E_JSONL={}", path.display());
+    println!("MICROSOFT_FOUNDRY_CONNECTOR_E2E_RECORD={record}");
 }
 
 fn command_line() -> String {
@@ -587,7 +587,7 @@ async fn responses_timeout_and_cancellation_are_bounded() {
     let request =
         responses_request_from_value(json!({"input": "hello"}), "prod-gpt4o").expect("request");
     let timeout_error = client
-        .responses_create(&Cx::for_testing(), request)
+        .responses_create(&fcp_async_core::compatibility_cx(), request)
         .await
         .expect_err("slow server should time out");
     assert!(matches!(
@@ -595,7 +595,7 @@ async fn responses_timeout_and_cancellation_are_bounded() {
         OpenAiError::Network(NetworkError::Http { .. })
     ));
 
-    let cx = Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     cx.set_cancel_requested(true);
     let client = MicrosoftFoundryClient::new(
         provider,
@@ -613,6 +613,9 @@ async fn responses_timeout_and_cancellation_are_bounded() {
         cancel_error,
         OpenAiError::Network(NetworkError::Cancelled { .. })
     ));
+    // compatibility_cx() returns the shared ambient runtime context; clear the
+    // cancel flag so runtime teardown is not poisoned by the cancellation.
+    cx.set_cancel_requested(false);
     log_operation(
         "fixture",
         OP_RESPONSES_CREATE,

@@ -1,6 +1,6 @@
 # Segment Connector V3 Contract
 
-> **Status**: runtime contract documented; Segment Public API / tracking drift documented
+> **Status**: runtime contract documented; manifest-derived operation metadata; Segment Public API / tracking drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -31,7 +31,8 @@ Important runtime truths the contract preserves:
 - `BaseConnector` runtime ID is `segment`.
 - Manifest version is `0.1.0`.
 - Manifest format is `wasi`.
-- Manifest interface hash is all zeroes in this checkout.
+- Manifest interface hash is `blake3-256:fcp.interface.v2:da57c87547312a614bf0b60535fafa124f275ef0baf43cf52ca2dc74c4269acd`.
+- Runtime operation metadata is derived from `manifest.toml`.
 - Configuration requires exactly one auth source:
   - `api_token`
   - `credential_id`
@@ -86,8 +87,8 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime `credential_id` URL policy is broader than the manifest because it allows any HTTPS host after URL shape validation.
 - Manifest state says the connector stores API token and workspace slug. Runtime keeps config in memory and does not persist token, credential ID, workspace slug, provider payloads, counters, or cursors.
 - Manifest operation approval marks `segment.track` as policy. Runtime does not enforce approval tokens.
-- Runtime introspection reports no `requires_approval` metadata for any operation.
-- Manifest rate-limit pools exist for sources-read, destinations-read, and track-write operations. Runtime introspection reports no rate-limit metadata and the client does not enforce those manifest pools.
+- Runtime introspection reports manifest-derived `requires_approval` metadata for each operation.
+- Manifest rate-limit pools exist for sources-read, destinations-read, and track-write operations. Runtime introspection reports manifest-derived rate-limit metadata, but the client does not enforce those manifest pools.
 - Manifest response caps vary by operation. Runtime does not enforce those response byte caps before parsing JSON.
 - Handshake returns all three Segment capabilities unconditionally after configure. It does not filter requested capabilities.
 - Handshake does not parse a full `HandshakeRequest`, does not install a `CapabilityVerifier`, and does not return a manifest hash.
@@ -97,7 +98,7 @@ This README documents runtime truth and keeps current drift visible:
 - Provider 401, 403, 404, and 429 are mapped as `FcpError::External` with status codes, not specialized unauthorized/resource/rate-limit FCP variants.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should split Public API control-plane operations from tracking ingestion, decide whether `segment.track` should use the HTTP Tracking API and source write keys, reconcile URL policy with the manifest wildcard allowlist, add capability-token verification, expose approval and rate-limit metadata, add a live read-only self-check, and reconcile the manifest state model with in-memory runtime behavior.
+A follow-up parity bead should split Public API control-plane operations from tracking ingestion, decide whether `segment.track` should use the HTTP Tracking API and source write keys, reconcile URL policy with the manifest wildcard allowlist, add capability-token verification and approval-token enforcement, add runtime rate-limit enforcement, add a live read-only self-check, and reconcile the manifest state model with in-memory runtime behavior.
 
 ## First-Slice Scope
 
@@ -108,7 +109,7 @@ The current Segment README slice documents the existing runtime surface:
 - source listing, destination listing, and event tracking operations
 - lifecycle, doctor, health, self-check, simulate, introspect, invoke, and shutdown behavior
 - provider error mapping, retry behavior, timeout behavior, and source-ID validation
-- runtime/manifest/provider-doc drift around tracking endpoint semantics, URL policy, state persistence, approvals, rate limits, response caps, and capability-token verification
+- runtime/manifest/provider-doc drift around tracking endpoint semantics, URL policy, state persistence, approval enforcement, rate-limit enforcement, response caps, and capability-token verification
 - deterministic WireMock integration tests
 
 ## Auth And Zone Boundary

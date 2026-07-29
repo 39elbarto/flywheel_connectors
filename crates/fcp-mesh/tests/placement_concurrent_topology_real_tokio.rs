@@ -119,8 +119,8 @@ fn pool_for(
 ///   - tick % 4 == 1: remove the *first* node and its pool together
 ///   - tick % 4 == 2: rewrite the head node's pool capacity
 ///   - tick % 4 == 3: bump every pool's `current_time` proxy by
-///     touching memory_used (forces a torn-read window between the
-///     writes to individual ResourcePoolStatus entries)
+///     touching `memory_used` (forces a torn-read window between the
+///     writes to individual `ResourcePoolStatus` entries)
 ///
 /// We always keep at least one node/pool so readers never see an
 /// empty topology — that's a separately-tested degenerate case.
@@ -142,7 +142,7 @@ fn apply_mutation(input: &mut PlannerInput, tick: usize, work: &ZoneId) {
         1 => {
             if input.nodes.len() > 1 {
                 let removed = input.nodes.remove(0);
-                let removed_id = removed.profile.node_id.clone();
+                let removed_id = removed.profile.node_id;
                 input.resource_pools.retain(|p| p.node_id != removed_id);
             }
         }

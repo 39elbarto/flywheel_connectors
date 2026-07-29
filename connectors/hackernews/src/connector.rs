@@ -1,18 +1,21 @@
 //! Hacker News connector implementation.
 
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, ResourceTypeInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo,
+    ResourceTypeInfo, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::prelude::*;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -33,10 +36,20 @@ const OP_ASK_STORIES: &str = "hackernews.ask_stories";
 const OP_SHOW_STORIES: &str = "hackernews.show_stories";
 const OP_JOB_STORIES: &str = "hackernews.job_stories";
 const OP_HEALTH: &str = "hackernews.health";
+const OPERATION_ORDER: [&str; 9] = [
+    OP_ITEM_GET,
+    OP_USER_GET,
+    OP_TOP_STORIES,
+    OP_NEW_STORIES,
+    OP_BEST_STORIES,
+    OP_ASK_STORIES,
+    OP_SHOW_STORIES,
+    OP_JOB_STORIES,
+    OP_HEALTH,
+];
 
 // Capability IDs
 const CAP_READ: &str = "hackernews.read";
-const HN_PUBLIC_API_BOUNDARY: &str = "This connector only exposes public Firebase Hacker News reads; there is no Algolia search, authenticated account action, moderation, or streaming surface in the first slice.";
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/hackernews_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/hackernews_connector/<timestamp>";
 const VERIFY_COMMANDS: [&str; 11] = [
@@ -179,6 +192,12 @@ impl HackerNewsConnector {
             started_at: Instant::now(),
             verifier: None,
         }
+    }
+
+    /// Stable connector instance identity used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {
@@ -402,50 +421,6 @@ fn operator_guidance() -> OperatorGuidance {
     }
 }
 
-fn item_get_input_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["id"],
-        "additionalProperties": false,
-        "properties": {
-            "id": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Public Hacker News item ID"
-            }
-        }
-    })
-}
-
-fn user_get_input_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["username"],
-        "additionalProperties": false,
-        "properties": {
-            "username": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Case-sensitive Hacker News username"
-            }
-        }
-    })
-}
-
-fn feed_input_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "limit": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Optional maximum number of item IDs to return"
-            }
-        }
-    })
-}
-
 fn item_output_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -518,24 +493,6 @@ fn feed_output_schema() -> serde_json::Value {
     })
 }
 
-fn health_input_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false
-    })
-}
-
-fn health_output_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "required": ["status"],
-        "additionalProperties": false,
-        "properties": {
-            "status": { "type": "string", "enum": ["ok"] }
-        }
-    })
-}
-
 fn hackernews_resource_types() -> Vec<ResourceTypeInfo> {
     vec![
         ResourceTypeInfo {
@@ -567,206 +524,64 @@ fn hackernews_resource_types() -> Vec<ResourceTypeInfo> {
     ]
 }
 
-/// Build the typed operations catalog.
+/// Build the typed operations catalog from the embedded manifest.
 pub fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_ITEM_GET),
-            summary: "Get an item by ID".into(),
-            description: Some("Retrieves one public Firebase item by numeric ID. Covers stories, comments, jobs, polls, and poll options, but does not recursively expand comment trees or enrich feed snapshots.".into()),
-            input_schema: item_get_input_schema(),
-            output_schema: item_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to fetch a specific HN story, comment, job, or poll by its numeric ID".into(),
-                common_mistakes: vec![
-                    "Item IDs are numeric, not string usernames".into(),
-                    "Deleted or dead items may return partial data".into(),
-                    "Search, batching, and recursive thread expansion are explicit non-goals for this first slice".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_USER_GET),
-            summary: "Get a user by username".into(),
-            description: Some("Retrieves one public Hacker News user profile by case-sensitive username. No login, private account state, or authenticated actor context is exposed.".into()),
-            input_schema: user_get_input_schema(),
-            output_schema: user_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to look up a Hacker News user's profile by username".into(),
-                common_mistakes: vec![
-                    "Usernames are case-sensitive".into(),
-                    "This connector does not expose authenticated user actions or private profile data".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_TOP_STORIES),
-            summary: "Get top story IDs".into(),
-            description: Some("Returns a top-stories snapshot as numeric item IDs only. Use item.get to expand stories; there is no automatic hydration or search surface.".into()),
-            input_schema: feed_input_schema(),
-            output_schema: feed_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need the current top/front page stories on HN".into(),
-                common_mistakes: vec![
-                    "Returns only IDs - use item.get to fetch full story details".into(),
-                    HN_PUBLIC_API_BOUNDARY.into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_NEW_STORIES),
-            summary: "Get new story IDs".into(),
-            description: Some("Returns a newest-stories snapshot as numeric item IDs only. This is a feed snapshot, not a write, search, or live-streaming API.".into()),
-            input_schema: feed_input_schema(),
-            output_schema: feed_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need the most recently submitted stories".into(),
-                common_mistakes: vec![
-                    "Returns only IDs - use item.get to fetch full story details".into(),
-                    "This connector does not expose live subscriptions or polling cursors".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_BEST_STORIES),
-            summary: "Get best story IDs".into(),
-            description: Some("Returns a best-stories snapshot as numeric item IDs only. Upstream ranking semantics come from Hacker News; the connector does not re-rank or search.".into()),
-            input_schema: feed_input_schema(),
-            output_schema: feed_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need the highest-ranked stories over time".into(),
-                common_mistakes: vec![
-                    "Returns only IDs - use item.get to fetch full story details".into(),
-                    "This is not an Algolia relevance-search endpoint".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_ASK_STORIES),
-            summary: "Get Ask HN story IDs".into(),
-            description: Some("Returns an Ask HN feed snapshot as numeric item IDs only. There is no thread expansion or reply/write surface.".into()),
-            input_schema: feed_input_schema(),
-            output_schema: feed_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need Ask HN discussion threads".into(),
-                common_mistakes: vec![
-                    "Returns only IDs - use item.get to fetch full story details".into(),
-                    "The connector does not recursively expand Ask HN comment trees".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_SHOW_STORIES),
-            summary: "Get Show HN story IDs".into(),
-            description: Some("Returns a Show HN feed snapshot as numeric item IDs only. The connector does not auto-expand items or scrape extra metadata from news.ycombinator.com.".into()),
-            input_schema: feed_input_schema(),
-            output_schema: feed_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need Show HN project showcase threads".into(),
-                common_mistakes: vec![
-                    "Returns only IDs - use item.get to fetch full story details".into(),
-                    "This connector does not scrape HTML pages for richer project metadata".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(CAP_READ)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_JOB_STORIES),
-            summary: "Get job story IDs".into(),
-            description: Some("Returns a Jobs feed snapshot as numeric item IDs only. The connector does not submit jobs, favorite posts, or perform authenticated actions.".into()),
-            input_schema: feed_input_schema(),
-            output_schema: feed_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need current YC/HN job postings".into(),
-                common_mistakes: vec![
-                    "Returns only IDs - use item.get to fetch full story details".into(),
-                    "There is no authenticated submit or moderation surface in this connector".into(),
-                ],
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_HEALTH),
-            summary: "Check HN API health".into(),
-            description: Some("Verifies the public Firebase Hacker News API is reachable. This does not validate search, writes, or any authenticated surface because those are not in scope.".into()),
-            input_schema: health_input_schema(),
-            output_schema: health_output_schema(),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to verify the HN API is reachable and operational".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-    ]
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Hacker News manifest should parse");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 fcp_core::impl_fcp_sealed!(HackerNewsConnector);
@@ -1087,6 +902,8 @@ impl HackerNewsConnector {
 
 #[cfg(test)]
 mod tests {
+    use fcp_prelude::{IdempotencyClass, RiskLevel, SafetyTier};
+
     use super::*;
 
     const EXPECTED_MANIFEST_SCHEMA_OPS: [&str; 9] = [
@@ -1144,6 +961,13 @@ mod tests {
             .map_err(|err| format!("Hacker News manifest TOML should parse: {err}"))
     }
 
+    fn strict_hackernews_manifest() -> Result<ConnectorManifest, String> {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())?;
+        manifest.validate().map_err(|error| error.to_string())?;
+        Ok(manifest)
+    }
+
     fn manifest_operations(
         manifest: &toml::Value,
     ) -> Result<&toml::map::Map<String, toml::Value>, String> {
@@ -1164,7 +988,7 @@ mod tests {
             .and_then(toml::Value::as_table)
             .and_then(|operation| operation.get(field))
             .ok_or_else(|| format!("{operation_id} should declare {field}"))?;
-        if !schema.as_table().is_some_and(|table| !table.is_empty()) {
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
             return Err(format!(
                 "{operation_id}.{field} should be a non-empty schema table"
             ));
@@ -1383,6 +1207,66 @@ mod tests {
     fn test_operations_info_count() {
         let ops = operations_info();
         assert_eq!(ops.len(), 9);
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_hackernews_manifest()?;
+        let operations = operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).expect("serialize runtime hints"),
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .expect("serialize manifest hints")
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -1612,7 +1496,7 @@ mod tests {
         for op in &ops {
             assert_eq!(
                 op.requires_approval,
-                Some(ApprovalMode::None),
+                None,
                 "Op {} should not require approval",
                 op.id.as_str()
             );

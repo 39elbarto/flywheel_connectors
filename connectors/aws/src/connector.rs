@@ -12,7 +12,8 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -390,6 +391,12 @@ impl AwsConnector {
             started_at: Instant::now(),
             verifier: None,
         }
+    }
+
+    /// Return this connector instance identifier for host-scoped capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     fn manifest_hash() -> String {
@@ -1287,6 +1294,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         op: &'static str,
+        instance_id: &str,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -1299,6 +1307,7 @@ mod tests {
             .capability_id(capability)
             .zone_id("z:work")
             .principal("user:test")
+            .target_instance(instance_id)
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
@@ -1644,7 +1653,12 @@ mod tests {
                 OperationId::from_static(OP_S3_LIST_BUCKETS),
                 ZoneId::work(),
                 json!({}),
-                signed_token(&signing_key, CAP_S3_READ, OP_S3_LIST_BUCKETS),
+                signed_token(
+                    &signing_key,
+                    CAP_S3_READ,
+                    OP_S3_LIST_BUCKETS,
+                    c.base.instance_id.as_str(),
+                ),
             ))
             .await
         })

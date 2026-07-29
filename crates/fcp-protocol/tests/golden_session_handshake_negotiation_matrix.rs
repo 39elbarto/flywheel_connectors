@@ -20,14 +20,14 @@
 //!
 //! Cells:
 //!
-//!   - 8 hand-picked (initiator_pref, responder_pref) combinations
+//!   - 8 hand-picked (`initiator_pref`, `responder_pref`) combinations
 //!     covering: empty intersection (both directions), single-suite
 //!     overlap, two-suite intersection with different responder
 //!     orders, adversarial worst-first initiator, duplicate-stuffed
 //!     initiator, single-element symmetric overlap.
 //!   - For each cell: the negotiated suite (or None), its numeric
 //!     id, and human label.
-//!   - The MINIMUM_SUITE floor itself, rendered as a separate row
+//!   - The `MINIMUM_SUITE` floor itself, rendered as a separate row
 //!     so a future bump becomes a single visible diff.
 //!
 //! Update flow:
@@ -49,10 +49,10 @@ fn render_cell(
     let chosen = negotiate_suite(initiator, responder);
     let init_render: Vec<String> = initiator.iter().map(|s| format!("{}", s.id())).collect();
     let resp_render: Vec<String> = responder.iter().map(|s| format!("{}", s.id())).collect();
-    let result_render = match chosen {
-        None => "<none>".to_string(),
-        Some(s) => format!("id={} label={}", s.id(), s.as_str()),
-    };
+    let result_render = chosen.map_or_else(
+        || "<none>".to_string(),
+        |s| format!("id={} label={}", s.id(), s.as_str()),
+    );
     format!(
         "{label:<48} | initiator=[{}] responder=[{}] -> {result_render}",
         init_render.join(","),

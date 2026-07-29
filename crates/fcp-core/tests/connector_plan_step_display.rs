@@ -1,4 +1,6 @@
-use fcp_core::{OAuthRecipe, ProvisioningStepType, WebhookRecipe, WebhookVerification};
+use fcp_core::{
+    OAuthRecipe, ProvisioningStepType, RetryConfig, WebhookRecipe, WebhookVerification,
+};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -52,7 +54,7 @@ fn connector_plan_step_display_cases() -> Vec<StepDisplayCase> {
                     verification: WebhookVerification::ChallengeResponse {
                         challenge_param: "challenge".into(),
                     },
-                    retry_policy: Default::default(),
+                    retry_policy: RetryConfig::default(),
                 },
             },
             display: "webhook",

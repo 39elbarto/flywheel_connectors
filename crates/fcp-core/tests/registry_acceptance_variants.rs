@@ -7,17 +7,17 @@
 //! artifacts (and resume attempts and policy previews) are accepted
 //! splits across several enums:
 //!
-//!  - `VerificationDecision` (supply_chain.rs:926) — primary
-//!    registry-acceptance verdict: Allow / Deny on a verified artifact.
-//!  - `VerificationReasonCode` (supply_chain.rs above) — the
-//!    SCREAMING_SNAKE_CASE reason classifier paired with the decision.
-//!  - `ResumeDisposition` (connector_state.rs:1126) — 4-variant
+//!  - `VerificationDecision` (`supply_chain.rs:926`) — primary
+//!    registry-acceptance verdict: `Allow` / `Deny` on a verified artifact.
+//!  - `VerificationReasonCode` (`supply_chain.rs` above) — the
+//!    `SCREAMING_SNAKE_CASE` reason classifier paired with the decision.
+//!  - `ResumeDisposition` (`connector_state.rs:1126`) — 4-variant
 //!    disposition with a documented `.label()` Display analogue
-//!    (Attach/Retry/Deny/Reconcile).
-//!  - `ResumeOutcome` (connector_state.rs:1153) — 2-variant final
-//!    verdict (Accepted/Denied).
-//!  - `PolicyPreviewDecision` (policy.rs:1869) — 3-variant preview
-//!    decision (Allow/Deny/RequireApproval).
+//!    (`Attach`/`Retry`/`Deny`/`Reconcile`).
+//!  - `ResumeOutcome` (`connector_state.rs:1153`) — 2-variant final
+//!    verdict (`Accepted`/`Denied`).
+//!  - `PolicyPreviewDecision` (`policy.rs:1869`) — 3-variant preview
+//!    decision (`Allow`/`Deny`/`RequireApproval`).
 //!
 //! This test pins the "variants + Display per documented contract"
 //! contract for each, since drift in any of these tokens silently
@@ -27,11 +27,11 @@
 //!   1. **All variants enumerated** — count + identity guard against
 //!      silent additions.
 //!   2. **Per-variant JSON tag form** in the documented case
-//!      convention (snake_case for most, SCREAMING_SNAKE_CASE for
+//!      convention (`snake_case` for most, `SCREAMING_SNAKE_CASE` for
 //!      `VerificationReasonCode`).
 //!   3. **JSON + CBOR round-trip** preserves variant identity.
 //!   4. **`.label()` (where present) agrees with serde tag form**.
-//!   5. **PascalCase + unknown rejected** — only documented tokens
+//!   5. **`PascalCase` + unknown rejected** — only documented tokens
 //!      are canonical.
 
 use fcp_core::{
@@ -238,9 +238,9 @@ fn resume_disposition_variants_pairwise_distinct() {
         assert!(seen_labels.insert(*label), "duplicate label {label:?}");
     }
     assert_eq!(seen_labels.len(), 4);
-    for i in 0..RESUME_DISPOSITION_CASES.len() {
-        for j in (i + 1)..RESUME_DISPOSITION_CASES.len() {
-            assert_ne!(RESUME_DISPOSITION_CASES[i].0, RESUME_DISPOSITION_CASES[j].0);
+    for (i, (left, _)) in RESUME_DISPOSITION_CASES.iter().enumerate() {
+        for (right, _) in RESUME_DISPOSITION_CASES.iter().skip(i + 1) {
+            assert_ne!(left, right);
         }
     }
 }

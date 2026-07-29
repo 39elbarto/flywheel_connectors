@@ -8,6 +8,7 @@ use crate::codec::systematic::SystematicEncoder;
 use crate::chunk::{ChunkedObjectManifest, RawChunk};
 use crate::config::RaptorQConfig;
 use crate::error::EncodeError;
+use crate::k_selector::ArmRegistry;
 use crate::oti::ObjectTransmissionInformation;
 
 fn validated_symbol_size(config: &RaptorQConfig) -> Result<usize, EncodeError> {
@@ -99,6 +100,25 @@ impl RaptorQEncoder {
             payload_len: payload.len(),
             payload_hash: *blake3::hash(payload).as_bytes(),
         })
+    }
+
+    /// Create an encoder using an adaptive K-selector when it has a valid arm.
+    ///
+    /// If the registry has no payload-compatible arm, this preserves the
+    /// existing static config behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::new`] after deriving the selected
+    /// config.
+    pub fn new_with_k_selector(
+        payload: &[u8],
+        config: &RaptorQConfig,
+        selector: &ArmRegistry,
+        sample_seed: u64,
+    ) -> Result<Self, EncodeError> {
+        let selected = selector.selected_config(payload.len(), config, sample_seed);
+        Self::new(payload, &selected)
     }
 
     /// Get K (number of source symbols).
@@ -320,6 +340,25 @@ impl EncodingDecision {
         }
     }
 
+    /// Choose an encoding decision using an adaptive K-selector when available.
+    ///
+    /// If no arm supports the payload, this falls back to [`Self::for_payload`]
+    /// with the supplied static config.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::for_payload`] after deriving the
+    /// selected config.
+    pub fn for_payload_with_k_selector(
+        payload: &[u8],
+        config: &RaptorQConfig,
+        selector: &ArmRegistry,
+        sample_seed: u64,
+    ) -> Result<Self, EncodeError> {
+        let selected = selector.selected_config(payload.len(), config, sample_seed);
+        Self::for_payload(payload, &selected)
+    }
+
     /// Check if this is a direct encoding.
     #[must_use]
     pub const fn is_direct(&self) -> bool {
@@ -427,7 +466,7 @@ mod tests {
     /// `encode_all` / `into_encode_all` previously computed each repair
     /// symbol ESI as `k_prime + i` with raw `u32 + u32`. In debug builds
     /// that panics on overflow, and in release builds it silently wraps
-    /// into the source-symbol ESI range [0, k_prime), producing duplicate
+    /// into the source-symbol ESI range [0, `k_prime`), producing duplicate
     /// ESIs that collide with the systematic source symbols. The fix caps
     /// `repair_count` at `u32::MAX - k_prime` and uses `checked_add`
     /// inline so the invariant is enforced at the use site rather than
@@ -1310,17 +1349,17 @@ mod tests {
         let symbols = encoder.into_encode_all();
 
         let mut decoder = RaptorQDecoder::new(oti, &config);
-        let mut decoded: Option<Vec<u8>> = None;
+        let mut result_payload: Option<Vec<u8>> = None;
         for (esi, data) in symbols {
             match decoder.add_symbol(esi, data) {
                 Ok(Some(p)) => {
-                    decoded = Some(p);
+                    result_payload = Some(p);
                     break;
                 }
-                Ok(None) => continue,
+                Ok(None) => {}
                 Err(e) => panic!("into_encode_all round trip decode error: {e:?}"),
             }
         }
-        assert_eq!(decoded.expect("decode must complete"), payload);
+        assert_eq!(result_payload.expect("decode must complete"), payload);
     }
 }

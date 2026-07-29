@@ -1190,14 +1190,20 @@ fn mock_direct_green_cutover_gate_snapshot_json() -> Value {
                 "verified_owner_signatures": true,
                 "node_count": 3,
             }),
-            unknown => panic!("unexpected cutover gate id {unknown}"),
+            unknown => json!({
+                "telemetry_state": "unexpected-test-gate-id",
+                "unexpected_gate_id": unknown,
+                "node_count": 3,
+            }),
         };
     }
+    let overall_status = fwc::mesh_cmd::cutover_gate_overall_status(&gates).tag();
 
     json!({
         "schema_version": "fcp-host-cutover-gates/v1",
         "catalog_connector_count": 3,
         "node_count": 3,
+        "overall_status": overall_status,
         "gates": gates,
     })
 }

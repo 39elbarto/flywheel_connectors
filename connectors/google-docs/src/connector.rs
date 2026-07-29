@@ -11,9 +11,12 @@ use fcp_prelude::{
 };
 use reqwest::Url;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::DocsClient;
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn is_local_test_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
@@ -163,6 +166,13 @@ impl DocsConnector {
         }
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(
         &mut self,
         params: serde_json::Value,
@@ -226,6 +236,14 @@ impl DocsConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -249,7 +267,7 @@ impl DocsConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-docs-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -656,8 +674,6 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::CapabilityConstraints;
     use std::future::Future;
-    use wiremock::matchers::{method, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
     where
@@ -682,7 +698,11 @@ mod tests {
         serde_json::Value::Object(params)
     }
 
-    fn build_capability(signing_key: &Ed25519SigningKey, operation: &str) -> CapabilityToken {
+    fn build_capability(
+        signing_key: &Ed25519SigningKey,
+        operation: &str,
+        instance_id: &fcp_core::InstanceId,
+    ) -> CapabilityToken {
         let capability = match operation {
             "docs.get" => "docs.read",
             "docs.create" | "docs.batch_update" => "docs.write",
@@ -706,6 +726,7 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
             .expect("attach token constraints")
+            .target_instance(instance_id.as_str())
             .sign(signing_key)
             .expect("sign capability token");
         CapabilityToken::from_raw(cose)
@@ -715,8 +736,9 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         operation: &'static str,
         input: serde_json::Value,
+        instance_id: &fcp_core::InstanceId,
     ) -> serde_json::Value {
-        let capability = build_capability(signing_key, operation);
+        let capability = build_capability(signing_key, operation, instance_id);
         serde_json::to_value(SimulateRequest::new(
             ConnectorId::from_static("google-docs"),
             OperationId::from_static(operation),
@@ -734,7 +756,8 @@ mod tests {
     async fn configure_and_handshake(
         connector: &mut DocsConnector,
         signing_key: &Ed25519SigningKey,
-    ) {
+    ) -> fcp_core::InstanceId {
+        let instance_id = fcp_core::InstanceId::new();
         connector
             .handle_configure(bearer_config("test"))
             .await
@@ -745,10 +768,25 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": signing_key.verifying_key().to_bytes(),
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["docs.read", "docs.write"]
+                "capabilities_requested": ["docs.read", "docs.write"],
+                "requested_instance_id": instance_id
             }))
             .await
             .unwrap();
+        connector.base.instance_id.clone()
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(DocsConnector::manifest_hash(), expected);
+        assert_ne!(
+            DocsConnector::manifest_hash(),
+            "sha256:google-docs-connector-v1"
+        );
     }
 
     #[test]
@@ -1026,11 +1064,13 @@ mod tests {
     #[test]
     fn simulate_denies_before_configure() {
         let signing_key = Ed25519SigningKey::generate();
+        let instance_id = fcp_core::InstanceId::new();
         let connector = DocsConnector::new();
         let result = run_async_test(connector.handle_simulate(simulate_request(
             &signing_key,
             "docs.get",
             json!({ "document_id": "doc_123" }),
+            &instance_id,
         )))
         .unwrap();
         let response = parse_simulate_response(result);
@@ -1046,9 +1086,14 @@ mod tests {
         run_async_test(async {
             let signing_key = Ed25519SigningKey::generate();
             let mut connector = DocsConnector::new();
-            configure_and_handshake(&mut connector, &signing_key).await;
+            let instance_id = configure_and_handshake(&mut connector, &signing_key).await;
             let result = connector
-                .handle_simulate(simulate_request(&signing_key, "docs.get", json!({})))
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "docs.get",
+                    json!({}),
+                    &instance_id,
+                ))
                 .await
                 .unwrap();
             let response = parse_simulate_response(result);
@@ -1077,12 +1122,13 @@ mod tests {
         run_async_test(async {
             let signing_key = Ed25519SigningKey::generate();
             let mut connector = DocsConnector::new();
-            configure_and_handshake(&mut connector, &signing_key).await;
+            let instance_id = configure_and_handshake(&mut connector, &signing_key).await;
             let result = connector
                 .handle_simulate(simulate_request(
                     &signing_key,
                     "docs.get",
                     json!({ "document_id": "doc_123" }),
+                    &instance_id,
                 ))
                 .await
                 .unwrap();
@@ -1095,11 +1141,13 @@ mod tests {
     #[test]
     fn simulate_unknown_operation_is_denied() {
         let signing_key = Ed25519SigningKey::generate();
+        let instance_id = fcp_core::InstanceId::new();
         let connector = DocsConnector::new();
         let result = run_async_test(connector.handle_simulate(simulate_request(
             &signing_key,
             "docs.unknown",
             json!({}),
+            &instance_id,
         )))
         .unwrap();
         let response = parse_simulate_response(result);
@@ -1145,21 +1193,8 @@ mod tests {
     }
 
     #[test]
-    fn get_document_via_mock() {
+    fn configured_connector_introspects_docs_operations() {
         run_async_test(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path_regex(r"/v1/documents/.+"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "documentId": "test-doc-id",
-                    "title": "Test Document",
-                    "body": {
-                        "content": []
-                    }
-                })))
-                .mount(&server)
-                .await;
-
             let mut connector = DocsConnector::new();
             connector
                 .handle_configure(bearer_config("test-token"))
@@ -1177,8 +1212,8 @@ mod tests {
         let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             let signing_key = Ed25519SigningKey::generate();
-            configure_and_handshake(&mut connector, &signing_key).await;
-            let capability = build_capability(&signing_key, "docs.get");
+            let instance_id = configure_and_handshake(&mut connector, &signing_key).await;
+            let capability = build_capability(&signing_key, "docs.get", &instance_id);
             connector
                 .handle_invoke(json!({
                     "operation": "docs.get",
@@ -1198,8 +1233,8 @@ mod tests {
         let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             let signing_key = Ed25519SigningKey::generate();
-            configure_and_handshake(&mut connector, &signing_key).await;
-            let capability = build_capability(&signing_key, "docs.create");
+            let instance_id = configure_and_handshake(&mut connector, &signing_key).await;
+            let capability = build_capability(&signing_key, "docs.create", &instance_id);
             connector
                 .handle_invoke(json!({
                     "operation": "docs.create",
@@ -1219,8 +1254,8 @@ mod tests {
         let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             let signing_key = Ed25519SigningKey::generate();
-            configure_and_handshake(&mut connector, &signing_key).await;
-            let capability = build_capability(&signing_key, "docs.batch_update");
+            let instance_id = configure_and_handshake(&mut connector, &signing_key).await;
+            let capability = build_capability(&signing_key, "docs.batch_update", &instance_id);
             connector
                 .handle_invoke(json!({
                     "operation": "docs.batch_update",
@@ -1240,8 +1275,8 @@ mod tests {
         let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             let signing_key = Ed25519SigningKey::generate();
-            configure_and_handshake(&mut connector, &signing_key).await;
-            let capability = build_capability(&signing_key, "docs.batch_update");
+            let instance_id = configure_and_handshake(&mut connector, &signing_key).await;
+            let capability = build_capability(&signing_key, "docs.batch_update", &instance_id);
             connector
                 .handle_invoke(json!({
                     "operation": "docs.batch_update",

@@ -31,9 +31,12 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::{ObjectHeader, ObjectId, QuorumPolicy, RiskTier, SignatureSet, ZoneId};
+use crate::{ObjectHeader, ObjectId, QuorumPolicy, QuotientFilter, RiskTier, SignatureSet, ZoneId};
 
 /// Scope of a revocation (NORMATIVE).
 ///
@@ -149,6 +152,19 @@ impl RevocationObject {
     }
 }
 
+impl HybridSignable for RevocationObject {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature = [0_u8; 64];
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
+/// Hybrid signed revocation-object envelope.
+pub type HybridSignedRevocationObject = SignedEnvelope<RevocationObject>;
+
 /// Revocation event chain node (NORMATIVE).
 ///
 /// Links revocation objects into a hash-chain with monotonic sequence numbers.
@@ -205,6 +221,19 @@ impl RevocationEvent {
         &self.header.zone_id
     }
 }
+
+impl HybridSignable for RevocationEvent {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature = [0_u8; 64];
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
+/// Hybrid signed revocation-event envelope.
+pub type HybridSignedRevocationEvent = SignedEnvelope<RevocationEvent>;
 
 /// Epoch identifier for revocation head checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -276,6 +305,19 @@ impl RevocationHead {
         now.saturating_sub(self.header.created_at)
     }
 }
+
+impl HybridSignable for RevocationHead {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.quorum_signatures = SignatureSet::new();
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
+/// Hybrid signed revocation-head envelope.
+pub type HybridSignedRevocationHead = SignedEnvelope<RevocationHead>;
 
 /// Freshness policy for revocation checks (NORMATIVE).
 ///
@@ -427,9 +469,9 @@ pub struct RevocationCheckResult {
 
 /// Revocation registry (NORMATIVE).
 ///
-/// Provides exact revocation lookups via a hash map. Previous probabilistic
-/// filters (Bloom/XOR) were removed to eliminate false-positive latency and
-/// make check/use atomicity easier to reason about.
+/// Provides exact revocation lookups via a hash map. The quotient cache is a
+/// negative precheck only: cache positives still fall through to the exact
+/// registry, so false positives cannot revoke a non-revoked object.
 ///
 /// # Usage
 ///
@@ -451,6 +493,9 @@ pub struct RevocationRegistry {
     /// Active revocations indexed by revoked `ObjectId`.
     revocations: HashMap<ObjectId, RevocationObject>,
 
+    /// Revocation-aware negative cache for fast definitely-absent checks.
+    pub quotient_cache: QuotientFilter<ObjectId>,
+
     /// Latest known revocation head.
     pub head: Option<ObjectId>,
 
@@ -468,11 +513,12 @@ impl RevocationRegistry {
         Self::default()
     }
 
-    /// Create a registry with custom bloom filter sizing.
+    /// Create a registry with custom revocation-cache sizing.
     #[must_use]
     pub fn with_capacity(expected_revocations: usize) -> Self {
         Self {
             revocations: HashMap::with_capacity(expected_revocations),
+            quotient_cache: QuotientFilter::with_capacity(expected_revocations),
             head: None,
             head_seq: 0,
             last_updated: 0,
@@ -481,9 +527,12 @@ impl RevocationRegistry {
 
     /// Check if an object ID is revoked (MUST be called before any capability use).
     ///
-    /// Exact membership check (no probabilistic filters).
+    /// Exact membership check; the quotient cache only skips definite misses.
     #[must_use]
     pub fn is_revoked(&self, object_id: &ObjectId) -> bool {
+        if !self.quotient_cache.may_contain(object_id) {
+            return false;
+        }
         self.revocations.contains_key(object_id)
     }
 
@@ -546,6 +595,7 @@ impl RevocationRegistry {
             });
             if should_replace {
                 self.revocations.insert(*object_id, revocation.clone());
+                self.quotient_cache.insert(object_id);
             }
         }
     }
@@ -644,6 +694,7 @@ impl RevocationRegistry {
     /// Clear all revocations.
     pub fn clear(&mut self) {
         self.revocations.clear();
+        self.quotient_cache.clear();
         self.head = None;
         self.head_seq = 0;
         self.last_updated = 0;

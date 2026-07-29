@@ -141,7 +141,7 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["operations"].as_array().unwrap().len(), 3);
+    assert_eq!(intro["operations"].as_array().unwrap().len(), 4);
 }
 
 #[fcp_async_core::runtime::test]
@@ -289,7 +289,7 @@ async fn introspection_emits_v3_compliance_evidence() {
     let c = AmplitudeConnector::new();
     let intro = c.handle_introspect().await.unwrap();
     let ops = intro["operations"].as_array().expect("operations array");
-    assert_eq!(ops.len(), 3);
+    assert_eq!(ops.len(), 4);
     assert!(ops.iter().all(|op| {
         op["ai_hints"]["examples"]
             .as_array()
@@ -420,6 +420,35 @@ async fn cohorts_list_empty() {
         .await
         .unwrap();
     assert!(result["cohorts"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn health_invoke_checks_provider_reachability_without_payload_leakage() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cohorts"))
+        .and(header("Authorization", expected_auth_header().as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cohorts": [
+                {"id": 1, "name": "Sandbox Cohort", "size": 12}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "amplitude.health",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["healthy"], true);
+    assert_eq!(result["probe"], "amplitude.cohorts.list");
+    assert_eq!(result["cohorts_count"], 1);
+    assert!(result.get("cohorts").is_none());
 }
 
 // -- Events Export --

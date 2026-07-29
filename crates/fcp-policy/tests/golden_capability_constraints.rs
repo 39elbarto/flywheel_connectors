@@ -1,11 +1,11 @@
 //! Frozen-byte golden tests for fcp-policy schema-evolving structs.
 //!
-//! AmberLark, 2026-05-02 — testing-golden-artifacts alpha-domain sweep.
+//! `AmberLark`, 2026-05-02 — testing-golden-artifacts alpha-domain sweep.
 //!
 //! Pins the canonical CBOR byte layout for the policy types that
 //! cross the wire as part of capability-token verification:
 //!
-//! - [`CapabilityConstraints`] — embedded inside every CapabilityToken
+//! - [`CapabilityConstraints`] — embedded inside every `CapabilityToken`
 //!   via the `constraints` claim. Schema drift here silently breaks
 //!   constraint enforcement on already-issued tokens.
 //! - [`OperationalModelSelection`] — the V1/V2 truth-precedence

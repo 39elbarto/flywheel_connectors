@@ -39,6 +39,23 @@ async fn setup_connector(mock_url: &str) -> PostHogConnector {
     c
 }
 
+async fn setup_connector_with_project_key(mock_url: &str) -> PostHogConnector {
+    let mut c = PostHogConnector::new();
+    c.handle_configure(json!({
+        "api_key": "phx_test_key_123",
+        "project_api_key": "ph_project_test_123",
+        "project_id": "12345",
+        "base_url": mock_url,
+        "capture_url": format!("{mock_url}/i/v0/e/")
+    }))
+    .await
+    .unwrap();
+    c.handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
+    c
+}
+
 // -- Lifecycle --
 
 #[fcp_async_core::runtime::test]
@@ -127,7 +144,7 @@ async fn lifecycle_introspect() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
-    assert_eq!(intro["operations"].as_array().unwrap().len(), 3);
+    assert_eq!(intro["operations"].as_array().unwrap().len(), 4);
 }
 
 #[fcp_async_core::runtime::test]
@@ -231,7 +248,7 @@ async fn introspection_emits_v3_compliance_evidence() {
     let c = PostHogConnector::new();
     let intro = c.handle_introspect().await.unwrap();
     let ops = intro["operations"].as_array().expect("operations array");
-    assert_eq!(ops.len(), 3);
+    assert_eq!(ops.len(), 4);
     assert!(ops.iter().all(|op| {
         op["ai_hints"]["examples"]
             .as_array()
@@ -312,6 +329,53 @@ async fn events_query_missing_query() {
         .await
         .is_err()
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_capture_sandbox_event() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/i/v0/e/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector_with_project_key(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "posthog.events.capture",
+            "input": {
+                "event": "fcp_sandbox_verification",
+                "distinct_id": "fcp-sandbox-run",
+                "properties": {
+                    "$process_person_profile": false,
+                    "fcp_sandbox_namespace": "test"
+                }
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["captured"], true);
+    assert_eq!(result["response"]["status"], 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_capture_requires_project_api_key() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let err = c
+        .handle_invoke(json!({
+            "operation_id": "posthog.events.capture",
+            "input": {
+                "event": "fcp_sandbox_verification",
+                "distinct_id": "fcp-sandbox-run"
+            }
+        }))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("project_api_key"));
 }
 
 // -- Insights List --

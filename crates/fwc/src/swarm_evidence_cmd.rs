@@ -1,18 +1,25 @@
 //! Operator-facing swarm evidence exploration.
 //!
-//! This command intentionally reads replayable JSONL artifacts offline. It does
-//! not contact live services or reinterpret adaptive decisions; it surfaces the
-//! exact decision cards and report links already stored in the evidence bundle.
+//! Explore and replay intentionally read replayable JSONL artifacts offline.
+//! Pressure is read-only but may sample local OS state, coordination status, rch
+//! status, and an operator-provided host admin endpoint.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClientBuilder};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use url::Url;
 
 /// Arguments for `fwc swarm-evidence`.
 #[derive(Args, Debug, Clone, Serialize)]
@@ -28,6 +35,8 @@ pub enum SwarmEvidenceCommand {
     Explore(SwarmEvidenceExploreArgs),
     /// Render stored decision-card replay details without live services.
     Replay(SwarmEvidenceReplayArgs),
+    /// Forecast local swarm pressure using redaction-safe signals.
+    Pressure(SwarmPressureArgs),
 }
 
 /// Common redaction-safe filters for decision cards.
@@ -102,6 +111,151 @@ pub struct SwarmEvidenceReplayArgs {
     pub limit: usize,
 }
 
+/// Arguments for `fwc swarm pressure`.
+#[derive(Args, Debug, Clone, Default, Serialize)]
+pub struct SwarmPressureArgs {
+    /// Optional JSON fixture containing deterministic pressure inputs.
+    #[arg(long, value_name = "PATH")]
+    pub fixture: Option<PathBuf>,
+
+    /// Override detected logical CPU count for deterministic checks.
+    #[arg(long = "logical-cpus")]
+    pub logical_cpus: Option<usize>,
+
+    /// Active agent count from Beads/Agent Mail or a caller-provided snapshot.
+    #[arg(long = "active-agents")]
+    pub active_agents: Option<usize>,
+
+    /// Active connector process count from host/admin evidence.
+    #[arg(long = "active-connectors")]
+    pub active_connectors: Option<usize>,
+
+    /// Optional fcp-host endpoint for live connector lifecycle pressure.
+    #[arg(long = "host", value_name = "ENDPOINT")]
+    pub host: Option<String>,
+
+    /// Current disk free percentage for the working volume.
+    #[arg(long = "disk-free-percent")]
+    pub disk_free_percent: Option<u8>,
+
+    /// Current inode free percentage for the working volume.
+    #[arg(long = "inode-free-percent")]
+    pub inode_free_percent: Option<u8>,
+
+    /// Current memory free percentage for the host.
+    #[arg(long = "memory-free-percent")]
+    pub memory_free_percent: Option<u8>,
+
+    /// Queued or waiting rch jobs from a caller-provided `rch status --json` snapshot.
+    #[arg(long = "rch-queued-jobs")]
+    pub rch_queued_jobs: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct SwarmPressureFixture {
+    #[serde(default)]
+    logical_cpus: Option<usize>,
+    #[serde(default)]
+    active_agents: Option<usize>,
+    #[serde(default)]
+    active_connectors: Option<usize>,
+    #[serde(default)]
+    disk_free_percent: Option<u8>,
+    #[serde(default)]
+    inode_free_percent: Option<u8>,
+    #[serde(default)]
+    memory_free_percent: Option<u8>,
+    #[serde(default)]
+    rch_queued_jobs: Option<usize>,
+    #[serde(default)]
+    signals: Vec<SwarmPressureSignal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum SwarmPressureStatus {
+    Green,
+    Yellow,
+    Red,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SwarmPressureSignal {
+    name: String,
+    status: SwarmPressureStatus,
+    value: String,
+    threshold: String,
+    #[serde(default)]
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct SwarmPressureInputs {
+    fixture_path: Option<PathBuf>,
+    logical_cpus: usize,
+    active_agents: Option<AgentPressureInput>,
+    active_connectors: Option<ConnectorPressureInput>,
+    disk_free: Option<PercentPressureInput>,
+    inode_free: Option<PercentPressureInput>,
+    memory_free: Option<PercentPressureInput>,
+    rch_status: Option<RchPressureInput>,
+    signals: Vec<SwarmPressureSignal>,
+}
+
+#[derive(Debug, Clone)]
+struct PercentPressureInput {
+    percent: u8,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct AgentPressureInput {
+    active_agents: usize,
+    warning_count: usize,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct BeadsPressureInput {
+    in_progress_count: usize,
+    unique_assignee_count: usize,
+    unassigned_count: usize,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct AgentMailPressureInput {
+    active_agents: usize,
+    warning_count: usize,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectorPressureInput {
+    active_connectors: usize,
+    warning_count: usize,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone)]
+struct RchPressureInput {
+    queued_jobs: usize,
+    active_builds: usize,
+    warning_count: usize,
+    evidence: Value,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LocalPressureSamples {
+    disk_free: Option<PercentPressureInput>,
+    inode_free: Option<PercentPressureInput>,
+    memory_free: Option<PercentPressureInput>,
+    active_connectors: Option<ConnectorPressureInput>,
+    active_agents: Option<AgentPressureInput>,
+    rch_status: Option<RchPressureInput>,
+}
+
 #[derive(Debug, Clone)]
 struct JsonlRecord {
     line: usize,
@@ -129,11 +283,11 @@ struct DecisionCardEntry {
     raw_record: Value,
 }
 
-/// Run a `fwc swarm-evidence` command and return a structured payload.
-pub fn run(args: &SwarmEvidenceArgs) -> Result<Value> {
+pub fn run_with_host(args: &SwarmEvidenceArgs, explicit_host: Option<&str>) -> Result<Value> {
     match &args.command {
         SwarmEvidenceCommand::Explore(args) => explore(args),
         SwarmEvidenceCommand::Replay(args) => replay(args),
+        SwarmEvidenceCommand::Pressure(args) => pressure_with_host(args, explicit_host),
     }
 }
 
@@ -211,6 +365,1272 @@ fn replay(args: &SwarmEvidenceReplayArgs) -> Result<Value> {
     let toon = format_replay_toon(&payload);
     insert_toon(&mut payload, toon);
     Ok(payload)
+}
+
+pub fn pressure_with_host(args: &SwarmPressureArgs, explicit_host: Option<&str>) -> Result<Value> {
+    let inputs = pressure_inputs(args, explicit_host)?;
+    let signals = pressure_signals(&inputs);
+    let score = pressure_score(&signals);
+    let verdict = pressure_verdict(&signals);
+    let degraded_dependency_count = signals
+        .iter()
+        .filter(|signal| signal.status == SwarmPressureStatus::Degraded)
+        .count();
+    let recommended_agent_slots = recommended_agent_slots(
+        verdict,
+        inputs.logical_cpus,
+        inputs
+            .active_agents
+            .as_ref()
+            .map(|input| input.active_agents),
+    );
+    let recommended_cargo_lanes = recommended_cargo_lanes(verdict, inputs.logical_cpus);
+    let remediation_commands = remediation_commands(&signals);
+
+    let mut payload = json!({
+        "status": "ok",
+        "command": "swarm pressure",
+        "schema_version": "fwc.swarm-pressure/v1",
+        "generated_at": Utc::now().to_rfc3339(),
+        "source": {
+            "fixture": inputs.fixture_path.as_ref().map(|path| redaction_safe_fixture_label(path)),
+            "mode": if inputs.fixture_path.is_some() { "fixture" } else { "local-with-degraded-dependencies" },
+            "caveat": "This command is read-only. Missing live dependencies are represented as degraded signals; live probes are limited to local OS state, coordination status, rch status, and an optional fcp-host admin endpoint. It never starts Cargo work, repairs Agent Mail, or contacts external providers.",
+        },
+        "pressure_score_0_100": score,
+        "verdict": verdict,
+        "signals": signals,
+        "recommended_agent_slots": recommended_agent_slots,
+        "recommended_cargo_lanes": recommended_cargo_lanes,
+        "remediation_commands": remediation_commands,
+        "telemetry_event": {
+            "name": "fwc.swarm_pressure.run",
+            "fields": {
+                "verdict": verdict,
+                "pressure_score": score,
+                "degraded_dependency_count": degraded_dependency_count,
+                "recommended_agent_slots": recommended_agent_slots,
+            }
+        },
+        "message": format!(
+            "Swarm pressure is {verdict:?} with score {score}/100; {degraded_dependency_count} signal(s) are degraded."
+        ),
+    });
+    let toon = format_pressure_toon(&payload);
+    insert_toon(&mut payload, toon);
+    Ok(payload)
+}
+
+fn redaction_safe_fixture_label(path: &Path) -> String {
+    let raw_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("provided-fixture");
+    let mut safe_name = raw_name
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect::<String>();
+    if safe_name.is_empty() {
+        safe_name = "provided-fixture".to_owned();
+    }
+    format!("fixture:{safe_name}")
+}
+
+fn pressure_inputs(
+    args: &SwarmPressureArgs,
+    explicit_host: Option<&str>,
+) -> Result<SwarmPressureInputs> {
+    let fixture = match &args.fixture {
+        Some(path) => load_pressure_fixture(path)?,
+        None => SwarmPressureFixture::default(),
+    };
+    let local_samples = if args.fixture.is_some() {
+        LocalPressureSamples::default()
+    } else {
+        collect_local_pressure_samples(resolve_pressure_host(args, explicit_host).as_deref())
+    };
+    let logical_cpus = args
+        .logical_cpus
+        .or(fixture.logical_cpus)
+        .unwrap_or_else(available_logical_cpus);
+    let disk_free = args
+        .disk_free_percent
+        .map(|percent| provided_percent_input(percent, "cli-argument"))
+        .or_else(|| {
+            fixture
+                .disk_free_percent
+                .map(|percent| provided_percent_input(percent, "fixture"))
+        })
+        .or(local_samples.disk_free);
+    let inode_free = args
+        .inode_free_percent
+        .map(|percent| provided_percent_input(percent, "cli-argument"))
+        .or_else(|| {
+            fixture
+                .inode_free_percent
+                .map(|percent| provided_percent_input(percent, "fixture"))
+        })
+        .or(local_samples.inode_free);
+    let memory_free = args
+        .memory_free_percent
+        .map(|percent| provided_percent_input(percent, "cli-argument"))
+        .or_else(|| {
+            fixture
+                .memory_free_percent
+                .map(|percent| provided_percent_input(percent, "fixture"))
+        })
+        .or(local_samples.memory_free);
+    let rch_status = args
+        .rch_queued_jobs
+        .map(|queued_jobs| provided_rch_input(queued_jobs, "cli-argument"))
+        .or_else(|| {
+            fixture
+                .rch_queued_jobs
+                .map(|queued_jobs| provided_rch_input(queued_jobs, "fixture"))
+        })
+        .or(local_samples.rch_status);
+    let active_agents = args
+        .active_agents
+        .map(|active_agents| provided_agent_input(active_agents, "cli-argument"))
+        .or_else(|| {
+            fixture
+                .active_agents
+                .map(|active_agents| provided_agent_input(active_agents, "fixture"))
+        })
+        .or(local_samples.active_agents);
+    let active_connectors = args
+        .active_connectors
+        .map(|active_connectors| provided_connector_input(active_connectors, "cli-argument"))
+        .or_else(|| {
+            fixture
+                .active_connectors
+                .map(|active_connectors| provided_connector_input(active_connectors, "fixture"))
+        })
+        .or(local_samples.active_connectors);
+
+    Ok(SwarmPressureInputs {
+        fixture_path: args.fixture.clone(),
+        logical_cpus,
+        active_agents,
+        active_connectors,
+        disk_free,
+        inode_free,
+        memory_free,
+        rch_status,
+        signals: fixture.signals,
+    })
+}
+
+fn load_pressure_fixture(path: &Path) -> Result<SwarmPressureFixture> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open swarm pressure fixture `{}`", path.display()))?;
+    serde_json::from_reader(file).with_context(|| {
+        format!(
+            "failed to parse swarm pressure fixture `{}`",
+            path.display()
+        )
+    })
+}
+
+fn available_logical_cpus() -> usize {
+    thread::available_parallelism().map_or(1, usize::from)
+}
+
+fn collect_local_pressure_samples(host: Option<&str>) -> LocalPressureSamples {
+    LocalPressureSamples {
+        disk_free: disk_free_sample(),
+        inode_free: inode_free_sample(),
+        memory_free: memory_free_sample(),
+        active_connectors: host.and_then(host_connector_lifecycle_sample),
+        active_agents: coordination_active_agents_sample(),
+        rch_status: rch_status_sample(),
+    }
+}
+
+fn resolve_pressure_host(args: &SwarmPressureArgs, explicit_host: Option<&str>) -> Option<String> {
+    args.host
+        .as_deref()
+        .or(explicit_host)
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            ["FWC_HOST", "FCP_HOST_ENDPOINT", "FCP_HOST_BIND"]
+                .into_iter()
+                .find_map(|env_name| {
+                    std::env::var(env_name)
+                        .ok()
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty())
+                })
+        })
+}
+
+fn provided_percent_input(percent: u8, source: &str) -> PercentPressureInput {
+    PercentPressureInput {
+        percent,
+        evidence: json!({
+            "source": source,
+            "live": false,
+        }),
+    }
+}
+
+fn provided_agent_input(active_agents: usize, source: &str) -> AgentPressureInput {
+    AgentPressureInput {
+        active_agents,
+        warning_count: 0,
+        evidence: json!({
+            "source": source,
+            "live": false,
+            "agent_mail_repair_attempted": false,
+            "agent_mail_service_restart_attempted": false,
+            "agent_mail_process_signal_attempted": false,
+        }),
+    }
+}
+
+fn provided_connector_input(active_connectors: usize, source: &str) -> ConnectorPressureInput {
+    ConnectorPressureInput {
+        active_connectors,
+        warning_count: 0,
+        evidence: json!({
+            "source": source,
+            "live": false,
+            "host_contacted": false,
+        }),
+    }
+}
+
+const HOST_CONNECTOR_SAMPLE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+struct PressureHostClient {
+    client: BlockingClient,
+    base_url: String,
+}
+
+impl PressureHostClient {
+    fn new(endpoint: &str) -> Result<Self> {
+        let endpoint = normalize_pressure_host_endpoint(endpoint)?;
+
+        #[cfg(unix)]
+        {
+            if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+                let socket_path = endpoint.strip_prefix("unix://").unwrap_or(&endpoint);
+                let client = BlockingClientBuilder::new()
+                    .timeout(HOST_CONNECTOR_SAMPLE_TIMEOUT)
+                    .unix_socket(socket_path)
+                    .build()
+                    .context("failed to build Unix-socket pressure host client")?;
+                return Ok(Self {
+                    client,
+                    base_url: "http://localhost".to_owned(),
+                });
+            }
+        }
+
+        let client = BlockingClientBuilder::new()
+            .timeout(HOST_CONNECTOR_SAMPLE_TIMEOUT)
+            .build()
+            .context("failed to build pressure host client")?;
+        Ok(Self {
+            client,
+            base_url: endpoint,
+        })
+    }
+
+    fn get_json(&self, path: &str) -> Result<Value> {
+        let response = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .send()
+            .context("host GET request failed")?;
+        json_response(response)
+    }
+
+    fn post_json(&self, path: &str, body: &Value) -> Result<Value> {
+        let response = self
+            .client
+            .post(format!("{}{}", self.base_url, path))
+            .json(body)
+            .send()
+            .context("host POST request failed")?;
+        json_response(response)
+    }
+}
+
+fn json_response(response: reqwest::blocking::Response) -> Result<Value> {
+    let status = response.status();
+    if !status.is_success() {
+        bail!("host returned non-success status");
+    }
+    response
+        .json::<Value>()
+        .context("host returned invalid JSON")
+}
+
+fn normalize_pressure_host_endpoint(endpoint: &str) -> Result<String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        bail!("host endpoint cannot be empty");
+    }
+    if endpoint.contains("://")
+        && !(endpoint.starts_with("http://")
+            || endpoint.starts_with("https://")
+            || endpoint.starts_with("tcp://")
+            || endpoint.starts_with("unix://"))
+    {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+
+    #[cfg(unix)]
+    if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+        let socket_path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+        if socket_path.trim().is_empty() {
+            bail!("Unix host endpoint must include a socket path");
+        }
+        return Ok(endpoint.to_owned());
+    }
+
+    let normalized = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_owned()
+    } else {
+        let stripped = endpoint.strip_prefix("tcp://").unwrap_or(endpoint);
+        format!("http://{stripped}")
+    };
+    let url =
+        Url::parse(&normalized).with_context(|| format!("invalid host endpoint `{endpoint}`"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+    if url.host_str().is_none() {
+        bail!("host endpoint must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("host endpoint must not include username or password components");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("host endpoint must not include query or fragment components");
+    }
+    Ok(normalized.trim_end_matches('/').to_owned())
+}
+
+fn host_connector_lifecycle_sample(endpoint: &str) -> Option<ConnectorPressureInput> {
+    let client = match PressureHostClient::new(endpoint) {
+        Ok(client) => client,
+        Err(_) => return Some(host_connector_unavailable_sample("invalid_endpoint")),
+    };
+    let discover = match client.post_json("/rpc/discover", &json!({ "filter": null })) {
+        Ok(discover) => discover,
+        Err(_) => return Some(host_connector_unavailable_sample("discover_unavailable")),
+    };
+    let (health, transport_warning_count) = match client.get_json("/rpc/health") {
+        Ok(health) => (Some(health), 0),
+        Err(_) => (None, 1),
+    };
+    Some(connector_pressure_from_host_values(
+        &discover,
+        health.as_ref(),
+        transport_warning_count,
+    ))
+}
+
+fn host_connector_unavailable_sample(reason: &str) -> ConnectorPressureInput {
+    ConnectorPressureInput {
+        active_connectors: 0,
+        warning_count: 1,
+        evidence: json!({
+            "source": "host-admin-api",
+            "live": false,
+            "host_contacted": false,
+            "status": reason,
+            "active_connectors": 0,
+            "warning_count": 1,
+        }),
+    }
+}
+
+fn connector_pressure_from_host_values(
+    discover: &Value,
+    health: Option<&Value>,
+    transport_warning_count: usize,
+) -> ConnectorPressureInput {
+    let connectors = discover
+        .get("connectors")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut active_connectors = 0_usize;
+    let mut enabled_connectors = 0_usize;
+    let mut unhealthy_enabled_connectors = 0_usize;
+    let mut warning_count = transport_warning_count;
+
+    for connector in connectors {
+        let enabled = connector
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        enabled_connectors = enabled_connectors.saturating_add(1);
+        let health_state = connector_health_state(connector);
+        if !matches!(
+            health_state.as_deref(),
+            Some("unavailable" | "error" | "stopped" | "missing")
+        ) {
+            active_connectors = active_connectors.saturating_add(1);
+        }
+        if !matches!(health_state.as_deref(), Some("healthy")) {
+            unhealthy_enabled_connectors = unhealthy_enabled_connectors.saturating_add(1);
+        }
+    }
+
+    warning_count = warning_count.saturating_add(unhealthy_enabled_connectors);
+    let host_health = health
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    if host_health.is_some_and(|status| status != "healthy") {
+        warning_count = warning_count.saturating_add(1);
+    }
+
+    ConnectorPressureInput {
+        active_connectors,
+        warning_count,
+        evidence: json!({
+            "source": "host-admin-api",
+            "live": true,
+            "host_contacted": true,
+            "method": "POST /rpc/discover + GET /rpc/health",
+            "connector_count": connectors.len(),
+            "enabled_connectors": enabled_connectors,
+            "active_connectors": active_connectors,
+            "unhealthy_enabled_connectors": unhealthy_enabled_connectors,
+            "host_health": host_health,
+            "registry_version": discover.get("registry_version").and_then(Value::as_u64),
+            "health_unavailable": health.is_none(),
+            "warning_count": warning_count,
+        }),
+    }
+}
+
+fn connector_health_state(connector: &Value) -> Option<String> {
+    connector
+        .pointer("/health/status")
+        .and_then(Value::as_str)
+        .or_else(|| connector.pointer("/health/state").and_then(Value::as_str))
+        .or_else(|| connector.get("health").and_then(Value::as_str))
+        .map(str::to_ascii_lowercase)
+}
+
+fn provided_rch_input(queued_jobs: usize, source: &str) -> RchPressureInput {
+    RchPressureInput {
+        queued_jobs,
+        active_builds: 0,
+        warning_count: 0,
+        evidence: json!({
+            "source": source,
+            "live": false,
+            "rch_invoked": false,
+        }),
+    }
+}
+
+fn disk_free_sample() -> Option<PercentPressureInput> {
+    let output = Command::new("df").args(["-Pk", "."]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    let sample = parse_df_disk_sample(stdout)?;
+    Some(PercentPressureInput {
+        percent: sample.free_percent,
+        evidence: json!({
+            "source": "local-os",
+            "live": true,
+            "method": "df -Pk .",
+            "path": ".",
+            "available_bytes": sample.available,
+            "total_bytes": sample.total,
+        }),
+    })
+}
+
+fn inode_free_sample() -> Option<PercentPressureInput> {
+    let output = Command::new("df").args(["-Pi", "."]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    let sample = parse_df_inode_sample(stdout)?;
+    Some(PercentPressureInput {
+        percent: sample.free_percent,
+        evidence: json!({
+            "source": "local-os",
+            "live": true,
+            "method": "df -Pi .",
+            "path": ".",
+            "available_inodes": sample.available,
+            "total_inodes": sample.total,
+        }),
+    })
+}
+
+fn rch_status_sample() -> Option<RchPressureInput> {
+    let output = Command::new("rch")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    rch_status_sample_from_json(stdout)
+}
+
+fn coordination_active_agents_sample() -> Option<AgentPressureInput> {
+    let beads = beads_in_progress_sample();
+    let agent_mail = agent_mail_status_sample();
+    coordination_active_agents_from_samples(beads.as_ref(), agent_mail.as_ref())
+}
+
+fn beads_in_progress_sample() -> Option<BeadsPressureInput> {
+    let output = Command::new("br")
+        .args([
+            "list",
+            "--status",
+            "in_progress",
+            "--json",
+            "--limit",
+            "0",
+            "--no-auto-flush",
+            "--no-auto-import",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    beads_in_progress_sample_from_json(stdout)
+}
+
+fn agent_mail_status_sample() -> Option<AgentMailPressureInput> {
+    let output = Command::new("am")
+        .args(["status", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    agent_mail_status_sample_from_json(stdout)
+}
+
+fn coordination_active_agents_from_samples(
+    beads: Option<&BeadsPressureInput>,
+    agent_mail: Option<&AgentMailPressureInput>,
+) -> Option<AgentPressureInput> {
+    if beads.is_none() && agent_mail.is_none() {
+        return None;
+    }
+
+    let beads_active_estimate = beads
+        .map(|input| {
+            input
+                .unique_assignee_count
+                .saturating_add(input.unassigned_count)
+        })
+        .unwrap_or(0);
+    let agent_mail_active = agent_mail.map_or(0, |input| input.active_agents);
+    let active_agents = beads_active_estimate.max(agent_mail_active);
+    let mut missing_sources = Vec::new();
+    if beads.is_none() {
+        missing_sources.push("beads");
+    }
+    if agent_mail.is_none() {
+        missing_sources.push("agent_mail");
+    }
+    let warning_count = missing_sources.len() + agent_mail.map_or(0, |input| input.warning_count);
+
+    Some(AgentPressureInput {
+        active_agents,
+        warning_count,
+        evidence: json!({
+            "source": "coordination",
+            "live": true,
+            "active_agents": active_agents,
+            "warning_count": warning_count,
+            "beads_in_progress_count": beads.map(|input| input.in_progress_count),
+            "missing_sources": missing_sources,
+            "beads": beads.map(|input| input.evidence.clone()),
+            "agent_mail": agent_mail.map(|input| input.evidence.clone()),
+            "agent_mail_repair_attempted": false,
+            "agent_mail_service_restart_attempted": false,
+            "agent_mail_process_signal_attempted": false,
+        }),
+    })
+}
+
+fn beads_in_progress_sample_from_json(stdout: &str) -> Option<BeadsPressureInput> {
+    let value = serde_json::from_str::<Value>(stdout).ok()?;
+    let issues = value
+        .get("issues")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())?;
+    let mut assignees = BTreeSet::new();
+    let mut in_progress_count = 0_usize;
+    let mut unassigned_count = 0_usize;
+
+    for issue in issues {
+        if issue
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "in_progress")
+        {
+            continue;
+        }
+        in_progress_count = in_progress_count.saturating_add(1);
+        match issue
+            .get("assignee")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|assignee| !assignee.is_empty())
+        {
+            Some(assignee) => {
+                assignees.insert(assignee.to_owned());
+            }
+            None => {
+                unassigned_count = unassigned_count.saturating_add(1);
+            }
+        }
+    }
+
+    Some(BeadsPressureInput {
+        in_progress_count,
+        unique_assignee_count: assignees.len(),
+        unassigned_count,
+        evidence: json!({
+            "source": "beads",
+            "live": true,
+            "method": "br list --status in_progress --json --limit 0 --no-auto-flush --no-auto-import",
+            "in_progress_count": in_progress_count,
+            "unique_assignee_count": assignees.len(),
+            "unassigned_count": unassigned_count,
+        }),
+    })
+}
+
+fn agent_mail_status_sample_from_json(stdout: &str) -> Option<AgentMailPressureInput> {
+    let value = serde_json::from_str::<Value>(stdout).ok()?;
+    let active_agents = value
+        .get("active_agents")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())?;
+    let health = value.get("health").and_then(Value::as_str);
+    let health_warning = health.is_some_and(|status| !matches!(status, "ok" | "healthy"));
+    let recovery_mode = value.pointer("/recovery/mode").and_then(Value::as_str);
+    let warning_count = usize::from(health_warning);
+
+    Some(AgentMailPressureInput {
+        active_agents,
+        warning_count,
+        evidence: json!({
+            "source": "agent-mail",
+            "live": true,
+            "method": "am status --json",
+            "active_agents": active_agents,
+            "health": health,
+            "recovery_mode": recovery_mode,
+            "warning_count": warning_count,
+            "agent_mail_repair_attempted": false,
+            "agent_mail_service_restart_attempted": false,
+            "agent_mail_process_signal_attempted": false,
+        }),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn memory_free_sample() -> Option<PercentPressureInput> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    linux_memory_sample_from_meminfo(&content)
+}
+
+#[cfg(target_os = "macos")]
+fn memory_free_sample() -> Option<PercentPressureInput> {
+    let total_output = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    if !total_output.status.success() {
+        return None;
+    }
+    let total_stdout = std::str::from_utf8(&total_output.stdout).ok()?;
+    let total_bytes = total_stdout.trim().parse::<u64>().ok()?;
+
+    let vm_stat_output = Command::new("vm_stat").output().ok()?;
+    if !vm_stat_output.status.success() {
+        return None;
+    }
+    let vm_stat_stdout = std::str::from_utf8(&vm_stat_output.stdout).ok()?;
+    macos_memory_sample_from_vm_stat(total_bytes, vm_stat_stdout)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn memory_free_sample() -> Option<PercentPressureInput> {
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FilesystemPressureSample {
+    free_percent: u8,
+    available: u64,
+    total: u64,
+}
+
+fn parse_df_disk_sample(stdout: &str) -> Option<FilesystemPressureSample> {
+    let line = stdout.lines().rev().find(|line| !line.trim().is_empty())?;
+    let mut parts = line.split_whitespace();
+    let _filesystem = parts.next()?;
+    let total_kib = parts.next()?.parse::<u64>().ok()?;
+    let _used_kib = parts.next()?;
+    let available_kib = parts.next()?.parse::<u64>().ok()?;
+    let capacity_percent = parts
+        .next()?
+        .trim_end_matches('%')
+        .parse::<u8>()
+        .ok()?
+        .min(100);
+    Some(FilesystemPressureSample {
+        free_percent: 100_u8.saturating_sub(capacity_percent),
+        available: available_kib.saturating_mul(1024),
+        total: total_kib.saturating_mul(1024),
+    })
+}
+
+fn parse_df_inode_sample(stdout: &str) -> Option<FilesystemPressureSample> {
+    let line = stdout.lines().rev().find(|line| !line.trim().is_empty())?;
+    let mut parts = line.split_whitespace();
+    let _filesystem = parts.next()?;
+    let total = parts.next()?.parse::<u64>().ok()?;
+    let _used = parts.next()?;
+    let available = parts.next()?.parse::<u64>().ok()?;
+    let used_percent = parts
+        .next()?
+        .trim_end_matches('%')
+        .parse::<u8>()
+        .ok()?
+        .min(100);
+    Some(FilesystemPressureSample {
+        free_percent: 100_u8.saturating_sub(used_percent),
+        available,
+        total,
+    })
+}
+
+fn rch_status_sample_from_json(stdout: &str) -> Option<RchPressureInput> {
+    let value = serde_json::from_str::<Value>(stdout).ok()?;
+    if value.get("success").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let data = value.get("data")?;
+    let queued_jobs = data
+        .get("queued_builds")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let active_builds = data
+        .get("active_builds")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let reported_issue_count = data
+        .get("issues")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let posture_warning_count = usize::from(
+        data.get("posture")
+            .and_then(Value::as_str)
+            .is_some_and(|posture| posture != "remote_ready"),
+    );
+    let worker_pressure_warning_count = data
+        .pointer("/daemon/workers")
+        .and_then(Value::as_array)
+        .map(|workers| {
+            workers
+                .iter()
+                .filter(|worker| {
+                    worker
+                        .get("pressure_state")
+                        .and_then(Value::as_str)
+                        .is_some_and(|state| state != "healthy")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let warning_count =
+        reported_issue_count + posture_warning_count + worker_pressure_warning_count;
+    let daemon = data.pointer("/daemon/daemon");
+    let slots_total = daemon
+        .and_then(|daemon| daemon.get("slots_total"))
+        .and_then(Value::as_u64);
+    let slots_available = daemon
+        .and_then(|daemon| daemon.get("slots_available"))
+        .and_then(Value::as_u64);
+    let workers_total = daemon
+        .and_then(|daemon| daemon.get("workers_total"))
+        .and_then(Value::as_u64);
+    let workers_healthy = daemon
+        .and_then(|daemon| daemon.get("workers_healthy"))
+        .and_then(Value::as_u64);
+
+    Some(RchPressureInput {
+        queued_jobs,
+        active_builds,
+        warning_count,
+        evidence: json!({
+            "source": "rch",
+            "live": true,
+            "method": "rch status --json",
+            "rch_invoked": true,
+            "queued_builds": queued_jobs,
+            "active_builds": active_builds,
+            "reported_issue_count": reported_issue_count,
+            "worker_pressure_warning_count": worker_pressure_warning_count,
+            "slots_available": slots_available,
+            "slots_total": slots_total,
+            "workers_healthy": workers_healthy,
+            "workers_total": workers_total,
+        }),
+    })
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn linux_memory_sample_from_meminfo(content: &str) -> Option<PercentPressureInput> {
+    let mut total_kib = None;
+    let mut available_kib = None;
+    for line in content.lines() {
+        if total_kib.is_none() {
+            total_kib = meminfo_kib(line, "MemTotal:");
+        }
+        if available_kib.is_none() {
+            available_kib = meminfo_kib(line, "MemAvailable:");
+        }
+    }
+    let total_kib = total_kib?;
+    let available_kib = available_kib?;
+    let total_bytes = total_kib.saturating_mul(1024);
+    let available_bytes = available_kib.saturating_mul(1024);
+    Some(PercentPressureInput {
+        percent: percent_u8(available_bytes, total_bytes)?,
+        evidence: json!({
+            "source": "local-os",
+            "live": true,
+            "method": "/proc/meminfo",
+            "available_bytes": available_bytes,
+            "total_bytes": total_bytes,
+        }),
+    })
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn meminfo_kib(line: &str, prefix: &str) -> Option<u64> {
+    line.strip_prefix(prefix)?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn macos_memory_sample_from_vm_stat(
+    total_bytes: u64,
+    vm_stat_stdout: &str,
+) -> Option<PercentPressureInput> {
+    let page_size = vm_stat_page_size(vm_stat_stdout)?;
+    let available_pages = ["Pages free:", "Pages inactive:", "Pages speculative:"]
+        .into_iter()
+        .filter_map(|label| vm_stat_pages(vm_stat_stdout, label))
+        .sum::<u64>();
+    let available_bytes = available_pages.saturating_mul(page_size);
+    Some(PercentPressureInput {
+        percent: percent_u8(available_bytes, total_bytes)?,
+        evidence: json!({
+            "source": "local-os",
+            "live": true,
+            "method": "vm_stat + sysctl hw.memsize",
+            "available_bytes": available_bytes,
+            "total_bytes": total_bytes,
+            "page_size_bytes": page_size,
+            "available_pages": available_pages,
+        }),
+    })
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn vm_stat_page_size(stdout: &str) -> Option<u64> {
+    let marker = "page size of ";
+    let line = stdout.lines().find(|line| line.contains(marker))?;
+    let start = line.find(marker)?.saturating_add(marker.len());
+    line[start..].split_whitespace().next()?.parse::<u64>().ok()
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn vm_stat_pages(stdout: &str, label: &str) -> Option<u64> {
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with(label))?;
+    let value = line.trim_start().strip_prefix(label)?;
+    let digits = value
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>();
+    digits.parse::<u64>().ok()
+}
+
+fn percent_u8(available_bytes: u64, total_bytes: u64) -> Option<u8> {
+    if total_bytes == 0 {
+        return None;
+    }
+    let percent = available_bytes.saturating_mul(100) / total_bytes;
+    u8::try_from(percent.min(100)).ok()
+}
+
+fn pressure_signals(inputs: &SwarmPressureInputs) -> Vec<SwarmPressureSignal> {
+    let mut signals = inputs.signals.clone();
+    add_signal_if_missing(&mut signals, cpu_capacity_signal(inputs.logical_cpus));
+    add_signal_if_missing(
+        &mut signals,
+        percent_signal(
+            "memory_pressure",
+            inputs.memory_free.as_ref(),
+            15,
+            8,
+            "memory free percent",
+            ">=15% green, >=8% yellow, <8% red",
+            "memory pressure could not be sampled locally; pass --memory-free-percent or a fixture to make it explicit evidence",
+        ),
+    );
+    add_signal_if_missing(
+        &mut signals,
+        percent_signal(
+            "disk_free",
+            inputs.disk_free.as_ref(),
+            15,
+            5,
+            "disk free percent",
+            ">=15% green, >=5% yellow, <5% red",
+            "disk free space could not be sampled locally; pass --disk-free-percent or a fixture to make it explicit evidence",
+        ),
+    );
+    add_signal_if_missing(
+        &mut signals,
+        percent_signal(
+            "inode_free",
+            inputs.inode_free.as_ref(),
+            15,
+            5,
+            "inode free percent",
+            ">=15% green, >=5% yellow, <5% red",
+            "inode pressure could not be sampled locally; pass --inode-free-percent or a fixture to make it explicit evidence",
+        ),
+    );
+    add_signal_if_missing(&mut signals, agent_count_signal(inputs));
+    add_signal_if_missing(&mut signals, connector_count_signal(inputs));
+    add_signal_if_missing(&mut signals, rch_queue_signal(inputs));
+    signals
+}
+
+fn add_signal_if_missing(signals: &mut Vec<SwarmPressureSignal>, signal: SwarmPressureSignal) {
+    if !signals.iter().any(|existing| existing.name == signal.name) {
+        signals.push(signal);
+    }
+}
+
+fn cpu_capacity_signal(logical_cpus: usize) -> SwarmPressureSignal {
+    let status = if logical_cpus <= 1 {
+        SwarmPressureStatus::Red
+    } else if logical_cpus < 8 {
+        SwarmPressureStatus::Yellow
+    } else {
+        SwarmPressureStatus::Green
+    };
+    SwarmPressureSignal {
+        name: "cpu_capacity".to_owned(),
+        status,
+        value: format!("{logical_cpus} logical CPU(s)"),
+        threshold: ">=8 green, >=2 yellow, 1 red".to_owned(),
+        evidence: json!({
+            "source": "std::thread::available_parallelism",
+            "live": true,
+        }),
+    }
+}
+
+fn percent_signal(
+    name: &str,
+    input: Option<&PercentPressureInput>,
+    green_threshold: u8,
+    yellow_threshold: u8,
+    value_label: &str,
+    threshold: &str,
+    degraded_reason: &str,
+) -> SwarmPressureSignal {
+    match input {
+        Some(input) => {
+            let capped_percent = input.percent.min(100);
+            let status = if capped_percent < yellow_threshold {
+                SwarmPressureStatus::Red
+            } else if capped_percent < green_threshold {
+                SwarmPressureStatus::Yellow
+            } else {
+                SwarmPressureStatus::Green
+            };
+            SwarmPressureSignal {
+                name: name.to_owned(),
+                status,
+                value: format!("{capped_percent}% {value_label}"),
+                threshold: threshold.to_owned(),
+                evidence: input.evidence.clone(),
+            }
+        }
+        None => degraded_signal(name, "unavailable", threshold, degraded_reason),
+    }
+}
+
+fn agent_count_signal(inputs: &SwarmPressureInputs) -> SwarmPressureSignal {
+    match &inputs.active_agents {
+        Some(input) => {
+            let active_agents = input.active_agents;
+            let yellow_threshold = inputs.logical_cpus;
+            let red_threshold = inputs.logical_cpus.saturating_mul(2);
+            let mut status = threshold_status(active_agents, yellow_threshold, red_threshold);
+            if status == SwarmPressureStatus::Green && input.warning_count > 0 {
+                status = SwarmPressureStatus::Yellow;
+            }
+            let value = if input.warning_count == 0 {
+                format!("{active_agents} active agent(s)")
+            } else {
+                format!(
+                    "{active_agents} active agent(s), {} coordination warning(s)",
+                    input.warning_count
+                )
+            };
+            SwarmPressureSignal {
+                name: "agent_mail_agents".to_owned(),
+                status,
+                value,
+                threshold: format!(
+                    "<{} green, {}-{} yellow, >{} red",
+                    yellow_threshold, yellow_threshold, red_threshold, red_threshold
+                ),
+                evidence: input.evidence.clone(),
+            }
+        }
+        None => degraded_signal(
+            "agent_mail_agents",
+            "unavailable",
+            "active agents known and below logical CPU count",
+            "Agent Mail was not queried by this command; callers may provide a snapshot, but this command never repairs or restarts Agent Mail",
+        ),
+    }
+}
+
+fn connector_count_signal(inputs: &SwarmPressureInputs) -> SwarmPressureSignal {
+    match &inputs.active_connectors {
+        Some(input) => {
+            let active_connectors = input.active_connectors;
+            let yellow_threshold = inputs.logical_cpus.saturating_mul(2);
+            let red_threshold = inputs.logical_cpus.saturating_mul(4);
+            let mut status = threshold_status(active_connectors, yellow_threshold, red_threshold);
+            if status == SwarmPressureStatus::Green && input.warning_count > 0 {
+                status = SwarmPressureStatus::Yellow;
+            }
+            let value = if input.warning_count == 0 {
+                format!("{active_connectors} active connector(s)")
+            } else {
+                format!(
+                    "{active_connectors} active connector(s), {} host warning(s)",
+                    input.warning_count
+                )
+            };
+            SwarmPressureSignal {
+                name: "host_connectors".to_owned(),
+                status,
+                value,
+                threshold: format!(
+                    "<{} green, {}-{} yellow, >{} red",
+                    yellow_threshold, yellow_threshold, red_threshold, red_threshold
+                ),
+                evidence: input.evidence.clone(),
+            }
+        }
+        None => degraded_signal(
+            "host_connectors",
+            "unavailable",
+            "host connector count available",
+            "No host endpoint was configured; pass --host, FWC_HOST, FCP_HOST_ENDPOINT, FCP_HOST_BIND, --active-connectors, or a fixture to make this explicit evidence",
+        ),
+    }
+}
+
+fn rch_queue_signal(inputs: &SwarmPressureInputs) -> SwarmPressureSignal {
+    match &inputs.rch_status {
+        Some(rch_status) => {
+            let yellow_threshold = inputs.logical_cpus.div_ceil(2);
+            let red_threshold = inputs.logical_cpus;
+            let mut status =
+                threshold_status(rch_status.queued_jobs, yellow_threshold, red_threshold);
+            if status == SwarmPressureStatus::Green && rch_status.warning_count > 0 {
+                status = SwarmPressureStatus::Yellow;
+            }
+            SwarmPressureSignal {
+                name: "rch_status".to_owned(),
+                status,
+                value: format!(
+                    "{} queued rch job(s), {} active build(s), {} warning(s)",
+                    rch_status.queued_jobs, rch_status.active_builds, rch_status.warning_count
+                ),
+                threshold: format!(
+                    "<{} green, {}-{} yellow, >{} red",
+                    yellow_threshold, yellow_threshold, red_threshold, red_threshold
+                ),
+                evidence: rch_status.evidence.clone(),
+            }
+        }
+        None => degraded_signal(
+            "rch_status",
+            "unavailable",
+            "rch queued jobs known and below half of logical CPU count",
+            "rch status --json could not be sampled; no repair command was run and no Cargo work was started",
+        ),
+    }
+}
+
+fn threshold_status(
+    value: usize,
+    yellow_threshold: usize,
+    red_threshold: usize,
+) -> SwarmPressureStatus {
+    if value > red_threshold {
+        SwarmPressureStatus::Red
+    } else if value >= yellow_threshold {
+        SwarmPressureStatus::Yellow
+    } else {
+        SwarmPressureStatus::Green
+    }
+}
+
+fn degraded_signal(
+    name: &str,
+    value: &str,
+    threshold: &str,
+    degraded_reason: &str,
+) -> SwarmPressureSignal {
+    SwarmPressureSignal {
+        name: name.to_owned(),
+        status: SwarmPressureStatus::Degraded,
+        value: value.to_owned(),
+        threshold: threshold.to_owned(),
+        evidence: json!({
+            "source": "not-yet-wired",
+            "degraded_reason": degraded_reason,
+        }),
+    }
+}
+
+fn pressure_score(signals: &[SwarmPressureSignal]) -> u8 {
+    signals
+        .iter()
+        .map(|signal| match signal.status {
+            SwarmPressureStatus::Green => 10,
+            SwarmPressureStatus::Degraded => 55,
+            SwarmPressureStatus::Yellow => 65,
+            SwarmPressureStatus::Red => 95,
+        })
+        .max()
+        .unwrap_or(55)
+}
+
+fn pressure_verdict(signals: &[SwarmPressureSignal]) -> SwarmPressureStatus {
+    if signals
+        .iter()
+        .any(|signal| signal.status == SwarmPressureStatus::Red)
+    {
+        SwarmPressureStatus::Red
+    } else if signals.iter().any(|signal| {
+        matches!(
+            signal.status,
+            SwarmPressureStatus::Yellow | SwarmPressureStatus::Degraded
+        )
+    }) {
+        SwarmPressureStatus::Yellow
+    } else {
+        SwarmPressureStatus::Green
+    }
+}
+
+fn recommended_agent_slots(
+    verdict: SwarmPressureStatus,
+    logical_cpus: usize,
+    active_agents: Option<usize>,
+) -> usize {
+    let base = match verdict {
+        SwarmPressureStatus::Green => logical_cpus.div_ceil(2),
+        SwarmPressureStatus::Yellow | SwarmPressureStatus::Degraded => logical_cpus.div_ceil(8),
+        SwarmPressureStatus::Red => 0,
+    };
+    let active_discount = active_agents.unwrap_or(0).div_ceil(4);
+    base.saturating_sub(active_discount)
+}
+
+fn recommended_cargo_lanes(verdict: SwarmPressureStatus, logical_cpus: usize) -> usize {
+    match verdict {
+        SwarmPressureStatus::Green => logical_cpus.div_ceil(8).clamp(1, 4),
+        SwarmPressureStatus::Yellow | SwarmPressureStatus::Degraded => 1,
+        SwarmPressureStatus::Red => 0,
+    }
+}
+
+fn remediation_commands(signals: &[SwarmPressureSignal]) -> Vec<String> {
+    let mut commands = Vec::new();
+    for signal in signals {
+        match (signal.name.as_str(), signal.status) {
+            ("disk_free", SwarmPressureStatus::Red | SwarmPressureStatus::Yellow) => {
+                commands.push("df -h .".to_owned());
+                commands.push("defer new Cargo/rch lanes until disk headroom recovers".to_owned());
+            }
+            ("inode_free", SwarmPressureStatus::Red | SwarmPressureStatus::Yellow) => {
+                commands.push("df -ih .".to_owned());
+                commands
+                    .push("defer file-heavy generation until inode headroom recovers".to_owned());
+            }
+            ("memory_pressure", SwarmPressureStatus::Red | SwarmPressureStatus::Yellow) => {
+                commands
+                    .push("defer new Cargo/rch lanes until memory headroom recovers".to_owned());
+            }
+            ("rch_status", SwarmPressureStatus::Red | SwarmPressureStatus::Yellow) => {
+                commands.push("rch status --json".to_owned());
+            }
+            ("agent_mail_agents", SwarmPressureStatus::Degraded) => {
+                commands.push(
+                    "retry Agent Mail once if needed, then proceed without restarting the shared service"
+                        .to_owned(),
+                );
+            }
+            ("host_connectors", SwarmPressureStatus::Red | SwarmPressureStatus::Yellow) => {
+                commands.push("defer noncritical connector prewarm or bulk launch work".to_owned());
+            }
+            _ => {}
+        }
+    }
+    if commands.is_empty() {
+        commands.push("continue with normal rch-backed validation".to_owned());
+    }
+    commands.sort();
+    commands.dedup();
+    commands
 }
 
 fn insert_toon(payload: &mut Value, toon: String) {
@@ -749,15 +2169,84 @@ fn format_replay_toon(payload: &Value) -> String {
     lines.join("\n")
 }
 
+fn format_pressure_toon(payload: &Value) -> String {
+    let verdict = payload
+        .get("verdict")
+        .and_then(Value::as_str)
+        .unwrap_or("yellow");
+    let score = payload
+        .get("pressure_score_0_100")
+        .and_then(Value::as_u64)
+        .unwrap_or(55);
+    let degraded = payload
+        .pointer("/telemetry_event/fields/degraded_dependency_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut lines = vec![format!(
+        "swarm pressure verdict={verdict} score={score} degraded={degraded}"
+    )];
+    if let Some(signals) = payload.get("signals").and_then(Value::as_array) {
+        for signal in signals.iter().take(8) {
+            let name = signal
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            let status = signal
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("degraded");
+            let value = signal
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            lines.push(format!("- {name} status={status} value={value}"));
+        }
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::io::Write;
+    use std::path::PathBuf;
 
-    use serde_json::json;
+    use jsonschema::Validator;
+    use serde_json::{Value, json};
 
     use super::{
-        SwarmEvidenceExploreArgs, SwarmEvidenceFilters, SwarmEvidenceReplayArgs, explore, replay,
+        PercentPressureInput, RchPressureInput, SwarmEvidenceCommand, SwarmEvidenceExploreArgs,
+        SwarmEvidenceFilters, SwarmEvidenceReplayArgs, SwarmPressureArgs, SwarmPressureInputs,
+        SwarmPressureSignal, SwarmPressureStatus, agent_mail_status_sample_from_json,
+        beads_in_progress_sample_from_json, connector_pressure_from_host_values,
+        coordination_active_agents_from_samples, explore, linux_memory_sample_from_meminfo,
+        macos_memory_sample_from_vm_stat, parse_df_disk_sample, parse_df_inode_sample,
+        pressure_score, pressure_signals, pressure_verdict, pressure_with_host,
+        provided_agent_input, provided_connector_input, rch_status_sample_from_json, replay,
+        run_with_host,
     };
+
+    fn swarm_pressure_schema_validator() -> Validator {
+        let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("schemas")
+            .join("swarm_pressure.schema.json");
+        let schema_text =
+            std::fs::read_to_string(schema_path).expect("swarm pressure schema should load");
+        let schema: Value =
+            serde_json::from_str(&schema_text).expect("swarm pressure schema should parse");
+        Validator::new(&schema).expect("swarm pressure schema should compile")
+    }
+
+    fn assert_schema_valid(validator: &Validator, payload: &Value) {
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| format!("{} at {}", error, error.instance_path()))
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "swarm pressure artifact should validate against schema: {errors:?}"
+        );
+    }
 
     fn write_fixture() -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().expect("temp file");
@@ -997,5 +2486,511 @@ mod tests {
             "p99_regression"
         );
         assert_eq!(log["audit"]["audit_event_count"], 4);
+    }
+
+    #[test]
+    fn pressure_fixture_all_green_recommends_parallel_work() {
+        let mut file = tempfile::NamedTempFile::new().expect("pressure fixture");
+        serde_json::to_writer(
+            &mut file,
+            &json!({
+                "logical_cpus": 64,
+                "active_agents": 4,
+                "active_connectors": 12,
+                "disk_free_percent": 80,
+                "inode_free_percent": 90,
+                "memory_free_percent": 70,
+                "rch_queued_jobs": 0
+            }),
+        )
+        .expect("write pressure fixture");
+
+        let payload = pressure_with_host(
+            &SwarmPressureArgs {
+                fixture: Some(file.path().to_path_buf()),
+                ..SwarmPressureArgs::default()
+            },
+            None,
+        )
+        .expect("pressure");
+
+        assert_eq!(payload["schema_version"], "fwc.swarm-pressure/v1");
+        assert_eq!(payload["verdict"], "green");
+        assert_eq!(payload["pressure_score_0_100"], 10);
+        assert_eq!(payload["recommended_cargo_lanes"], 4);
+        assert!(
+            payload["recommended_agent_slots"]
+                .as_u64()
+                .is_some_and(|slots| slots > 0)
+        );
+        assert!(
+            payload["toon"]
+                .as_str()
+                .is_some_and(|toon| { toon.contains("swarm pressure verdict=green") })
+        );
+        assert!(
+            payload["source"]["fixture"]
+                .as_str()
+                .is_some_and(|fixture| fixture.starts_with("fixture:") && !fixture.contains('/'))
+        );
+        let disk_signal = payload["signals"]
+            .as_array()
+            .expect("signals")
+            .iter()
+            .find(|signal| signal["name"] == "disk_free")
+            .expect("disk signal");
+        assert_eq!(disk_signal["evidence"]["source"], "fixture");
+    }
+
+    #[test]
+    fn pressure_disk_red_selects_worst_safe_verdict() {
+        let payload = pressure_with_host(
+            &SwarmPressureArgs {
+                logical_cpus: Some(32),
+                active_agents: Some(2),
+                active_connectors: Some(8),
+                disk_free_percent: Some(2),
+                inode_free_percent: Some(80),
+                memory_free_percent: Some(60),
+                rch_queued_jobs: Some(0),
+                fixture: None,
+                host: None,
+            },
+            None,
+        )
+        .expect("pressure");
+
+        assert_eq!(payload["verdict"], "red");
+        assert_eq!(payload["pressure_score_0_100"], 95);
+        assert_eq!(payload["recommended_agent_slots"], 0);
+        assert!(
+            payload["remediation_commands"]
+                .as_array()
+                .expect("remediation commands")
+                .iter()
+                .any(|command| command == "df -h .")
+        );
+    }
+
+    #[test]
+    fn pressure_missing_dependencies_are_degraded_yellow() {
+        let mut file = tempfile::NamedTempFile::new().expect("pressure fixture");
+        serde_json::to_writer(
+            &mut file,
+            &json!({
+                "logical_cpus": 16
+            }),
+        )
+        .expect("write pressure fixture");
+
+        let payload = pressure_with_host(
+            &SwarmPressureArgs {
+                fixture: Some(file.path().to_path_buf()),
+                ..SwarmPressureArgs::default()
+            },
+            None,
+        )
+        .expect("pressure");
+
+        assert_eq!(payload["verdict"], "yellow");
+        assert_eq!(payload["pressure_score_0_100"], 55);
+        assert_eq!(
+            payload["telemetry_event"]["fields"]["degraded_dependency_count"],
+            6
+        );
+        assert!(
+            payload["source"]["caveat"]
+                .as_str()
+                .is_some_and(|caveat| caveat.contains("never starts Cargo work"))
+        );
+    }
+
+    #[test]
+    fn pressure_parses_df_disk_sample() {
+        let sample = parse_df_disk_sample(
+            "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk1 1000 750 250 75% /Volumes/Test Drive\n",
+        )
+        .expect("disk sample");
+
+        assert_eq!(sample.free_percent, 25);
+        assert_eq!(sample.available, 256_000);
+        assert_eq!(sample.total, 1_024_000);
+    }
+
+    #[test]
+    fn pressure_parses_df_inode_sample() {
+        let sample = parse_df_inode_sample(
+            "Filesystem Inodes IUsed IFree IUse% Mounted on\n/dev/disk1 1000 100 900 10% /Volumes/Test Drive\n",
+        )
+        .expect("inode sample");
+
+        assert_eq!(sample.free_percent, 90);
+        assert_eq!(sample.available, 900);
+        assert_eq!(sample.total, 1000);
+    }
+
+    #[test]
+    fn pressure_parses_rch_status_without_sensitive_fields() {
+        let input = rch_status_sample_from_json(
+            r#"{
+              "success": true,
+              "data": {
+                "posture": "remote_ready",
+                "daemon": {
+                  "daemon": {
+                    "workers_total": 8,
+                    "workers_healthy": 7,
+                    "slots_total": 54,
+                    "slots_available": 49
+                  },
+                  "workers": [
+                    {"id": "vmi1", "host": "192.0.2.1", "pressure_state": "healthy"},
+                    {"id": "vmi2", "host": "192.0.2.2", "pressure_state": "warning"}
+                  ]
+                },
+                "active_builds": [
+                  {"command": "cargo test -p private-crate", "worker_id": "vmi1"}
+                ],
+                "queued_builds": [{ "command": "cargo clippy" }],
+                "issues": [{"summary": "storage pressure"}]
+              }
+            }"#,
+        )
+        .expect("rch sample");
+
+        assert_eq!(input.queued_jobs, 1);
+        assert_eq!(input.active_builds, 1);
+        assert_eq!(input.warning_count, 2);
+        assert_eq!(input.evidence["source"], "rch");
+        assert_eq!(input.evidence["queued_builds"], 1);
+        assert_eq!(input.evidence["worker_pressure_warning_count"], 1);
+        assert!(input.evidence.get("command").is_none());
+        assert!(input.evidence.get("host").is_none());
+    }
+
+    #[test]
+    fn pressure_rch_warning_yellows_even_with_empty_queue() {
+        let signals = pressure_signals(&SwarmPressureInputs {
+            fixture_path: None,
+            logical_cpus: 32,
+            active_agents: Some(provided_agent_input(1, "test")),
+            active_connectors: Some(provided_connector_input(1, "test")),
+            disk_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            inode_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            memory_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            rch_status: Some(RchPressureInput {
+                queued_jobs: 0,
+                active_builds: 1,
+                warning_count: 1,
+                evidence: json!({}),
+            }),
+            signals: Vec::new(),
+        });
+        let rch_signal = signals
+            .iter()
+            .find(|signal| signal.name == "rch_status")
+            .expect("rch signal");
+
+        assert_eq!(rch_signal.status, SwarmPressureStatus::Yellow);
+    }
+
+    #[test]
+    fn pressure_host_lifecycle_aggregate_stays_redaction_safe() {
+        let input = connector_pressure_from_host_values(
+            &json!({
+                "registry_version": 42,
+                "connectors": [
+                    {
+                        "id": "fcp.github:enterprise:v1",
+                        "name": "GitHub Enterprise",
+                        "enabled": true,
+                        "health": {"status": "healthy"}
+                    },
+                    {
+                        "id": "fcp.slack:workspace:v1",
+                        "name": "Slack Workspace",
+                        "enabled": true,
+                        "health": {"status": "degraded", "reason": "rate budget"}
+                    },
+                    {
+                        "id": "fcp.gmail:workspace:v1",
+                        "name": "Gmail Workspace",
+                        "enabled": true,
+                        "health": {"status": "unavailable", "reason": "stopped"}
+                    },
+                    {
+                        "id": "fcp.disabled:workspace:v1",
+                        "name": "Disabled Connector",
+                        "enabled": false,
+                        "health": {"status": "healthy"}
+                    }
+                ]
+            }),
+            Some(&json!({"status": "healthy"})),
+            0,
+        );
+
+        assert_eq!(input.active_connectors, 2);
+        assert_eq!(input.warning_count, 2);
+        assert_eq!(input.evidence["source"], "host-admin-api");
+        assert_eq!(input.evidence["connector_count"], 4);
+        assert_eq!(input.evidence["enabled_connectors"], 3);
+        assert_eq!(input.evidence["unhealthy_enabled_connectors"], 2);
+        assert_eq!(input.evidence["registry_version"], 42);
+        let evidence = serde_json::to_string(&input.evidence).expect("evidence JSON");
+        assert!(!evidence.contains("fcp.github"));
+        assert!(!evidence.contains("Slack Workspace"));
+        assert!(!evidence.contains("rate budget"));
+    }
+
+    #[test]
+    fn pressure_parses_beads_in_progress_snapshot_without_issue_details() {
+        let input = beads_in_progress_sample_from_json(
+            r#"{
+              "issues": [
+                {"id": "fc-1", "title": "private detail", "status": "in_progress", "assignee": "IcyTern"},
+                {"id": "fc-2", "status": "in_progress", "assignee": "SageStork"},
+                {"id": "fc-3", "status": "in_progress"},
+                {"id": "fc-4", "status": "open", "assignee": "OtherAgent"}
+              ],
+              "total": 3
+            }"#,
+        )
+        .expect("beads sample");
+
+        assert_eq!(input.in_progress_count, 3);
+        assert_eq!(input.unique_assignee_count, 2);
+        assert_eq!(input.unassigned_count, 1);
+        assert_eq!(input.evidence["source"], "beads");
+        assert_eq!(input.evidence["in_progress_count"], 3);
+        assert!(input.evidence.get("title").is_none());
+        assert!(input.evidence.get("id").is_none());
+    }
+
+    #[test]
+    fn pressure_parses_agent_mail_status_without_repair_commands() {
+        let input = agent_mail_status_sample_from_json(
+            r#"{
+              "health": "degraded",
+              "active_agents": 2,
+              "recent_messages": 8,
+              "recommendations": [
+                {"safe_command": "am doctor check --json", "reason": "operator detail"}
+              ],
+              "recovery": {"mode": "degraded_read_only"}
+            }"#,
+        )
+        .expect("agent mail sample");
+
+        assert_eq!(input.active_agents, 2);
+        assert_eq!(input.warning_count, 1);
+        assert_eq!(input.evidence["source"], "agent-mail");
+        assert_eq!(input.evidence["health"], "degraded");
+        assert_eq!(input.evidence["recovery_mode"], "degraded_read_only");
+        assert_eq!(input.evidence["agent_mail_repair_attempted"], false);
+        assert!(input.evidence.get("recommendations").is_none());
+        assert!(input.evidence.get("safe_command").is_none());
+    }
+
+    #[test]
+    fn pressure_combines_beads_and_agent_mail_active_agents() {
+        let beads = beads_in_progress_sample_from_json(
+            r#"{
+              "issues": [
+                {"status": "in_progress", "assignee": "IcyTern"},
+                {"status": "in_progress", "assignee": "SageStork"}
+              ]
+            }"#,
+        )
+        .expect("beads sample");
+        let agent_mail =
+            agent_mail_status_sample_from_json(r#"{"health": "ok", "active_agents": 1}"#)
+                .expect("agent mail sample");
+        let input = coordination_active_agents_from_samples(Some(&beads), Some(&agent_mail))
+            .expect("coordination sample");
+
+        assert_eq!(input.active_agents, 2);
+        assert_eq!(input.warning_count, 0);
+        assert_eq!(input.evidence["source"], "coordination");
+        assert_eq!(input.evidence["beads"]["unique_assignee_count"], 2);
+        assert_eq!(input.evidence["agent_mail"]["active_agents"], 1);
+    }
+
+    #[test]
+    fn pressure_agent_mail_degraded_health_yellows_coordination_signal() {
+        let agent_mail = agent_mail_status_sample_from_json(
+            r#"{"health": "degraded", "active_agents": 1, "recovery": {"mode": "read_only"}}"#,
+        )
+        .expect("agent mail sample");
+        let input = coordination_active_agents_from_samples(None, Some(&agent_mail))
+            .expect("coordination sample");
+        let signals = pressure_signals(&SwarmPressureInputs {
+            fixture_path: None,
+            logical_cpus: 32,
+            active_agents: Some(input),
+            active_connectors: Some(provided_connector_input(1, "test")),
+            disk_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            inode_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            memory_free: Some(PercentPressureInput {
+                percent: 80,
+                evidence: json!({}),
+            }),
+            rch_status: Some(RchPressureInput {
+                queued_jobs: 0,
+                active_builds: 1,
+                warning_count: 0,
+                evidence: json!({}),
+            }),
+            signals: Vec::new(),
+        });
+        let agent_signal = signals
+            .iter()
+            .find(|signal| signal.name == "agent_mail_agents")
+            .expect("agent signal");
+
+        assert_eq!(agent_signal.status, SwarmPressureStatus::Yellow);
+        assert_eq!(agent_signal.evidence["agent_mail"]["health"], "degraded");
+        assert_eq!(agent_signal.evidence["agent_mail_repair_attempted"], false);
+    }
+
+    #[test]
+    fn pressure_parses_linux_meminfo_available_percent() {
+        let input = linux_memory_sample_from_meminfo(
+            "MemTotal:       1000 kB\nMemFree:         100 kB\nMemAvailable:    250 kB\n",
+        )
+        .expect("linux memory sample");
+
+        assert_eq!(input.percent, 25);
+        assert_eq!(input.evidence["source"], "local-os");
+        assert_eq!(input.evidence["method"], "/proc/meminfo");
+    }
+
+    #[test]
+    fn pressure_parses_macos_vm_stat_available_percent() {
+        let input = macos_memory_sample_from_vm_stat(
+            409_600,
+            "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free:                               10.\nPages inactive:                            5.\nPages speculative:                         2.\n",
+        )
+        .expect("macos memory sample");
+
+        assert_eq!(input.percent, 17);
+        assert_eq!(input.evidence["source"], "local-os");
+        assert_eq!(input.evidence["available_pages"], 17);
+    }
+
+    #[test]
+    fn pressure_run_dispatches_new_subcommand() {
+        let payload = run_with_host(
+            &super::SwarmEvidenceArgs {
+                command: SwarmEvidenceCommand::Pressure(SwarmPressureArgs {
+                    logical_cpus: Some(8),
+                    active_agents: Some(1),
+                    active_connectors: Some(2),
+                    disk_free_percent: Some(20),
+                    inode_free_percent: Some(20),
+                    memory_free_percent: Some(20),
+                    rch_queued_jobs: Some(0),
+                    fixture: None,
+                    host: None,
+                }),
+            },
+            None,
+        )
+        .expect("run pressure");
+
+        assert_eq!(payload["command"], "swarm pressure");
+        assert_eq!(payload["verdict"], "green");
+    }
+
+    #[test]
+    fn pressure_fixture_artifact_validates_schema_without_private_paths() {
+        let mut fixture = tempfile::NamedTempFile::new().expect("pressure fixture");
+        serde_json::to_writer(
+            &mut fixture,
+            &json!({
+                "logical_cpus": 32,
+                "active_agents": 2,
+                "active_connectors": 4,
+                "disk_free_percent": 70,
+                "inode_free_percent": 75,
+                "memory_free_percent": 65,
+                "rch_queued_jobs": 0
+            }),
+        )
+        .expect("write pressure fixture");
+
+        let payload = pressure_with_host(
+            &SwarmPressureArgs {
+                fixture: Some(fixture.path().to_path_buf()),
+                ..SwarmPressureArgs::default()
+            },
+            None,
+        )
+        .expect("pressure");
+
+        let mut artifact = tempfile::NamedTempFile::new().expect("pressure artifact");
+        serde_json::to_writer_pretty(&mut artifact, &payload).expect("write pressure artifact");
+        let artifact_payload: Value =
+            serde_json::from_reader(File::open(artifact.path()).expect("artifact reopens"))
+                .expect("artifact parses");
+
+        assert_schema_valid(&swarm_pressure_schema_validator(), &artifact_payload);
+
+        let fixture_source = artifact_payload["source"]["fixture"]
+            .as_str()
+            .expect("fixture source should be labeled");
+        assert!(fixture_source.starts_with("fixture:"));
+        assert!(!fixture_source.contains('/'));
+        assert!(!fixture_source.contains('\\'));
+
+        let artifact_text = serde_json::to_string(&artifact_payload).expect("artifact serializes");
+        assert!(!artifact_text.contains(&fixture.path().display().to_string()));
+        assert!(!artifact_text.contains("secret-token"));
+        assert!(!artifact_text.contains("private-crate"));
+    }
+
+    #[test]
+    fn pressure_scoring_uses_highest_severity() {
+        let signals = vec![
+            SwarmPressureSignal {
+                name: "cpu_capacity".to_owned(),
+                status: SwarmPressureStatus::Green,
+                value: "64 logical CPU(s)".to_owned(),
+                threshold: ">=8 green".to_owned(),
+                evidence: json!({}),
+            },
+            SwarmPressureSignal {
+                name: "rch_status".to_owned(),
+                status: SwarmPressureStatus::Yellow,
+                value: "40 queued rch job(s)".to_owned(),
+                threshold: "<32 green".to_owned(),
+                evidence: json!({}),
+            },
+            SwarmPressureSignal {
+                name: "disk_free".to_owned(),
+                status: SwarmPressureStatus::Red,
+                value: "2% disk free percent".to_owned(),
+                threshold: ">=15% green".to_owned(),
+                evidence: json!({}),
+            },
+        ];
+
+        assert_eq!(pressure_score(&signals), 95);
+        assert_eq!(pressure_verdict(&signals), SwarmPressureStatus::Red);
     }
 }

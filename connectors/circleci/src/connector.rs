@@ -1,17 +1,19 @@
 //! CircleCI connector implementation.
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::prelude::*;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::Url;
 use serde::Deserialize;
 use serde_json::json;
@@ -33,6 +35,19 @@ const OP_JOBS_LIST: &str = "circleci.jobs.list";
 const OP_JOBS_GET: &str = "circleci.jobs.get";
 const OP_PROJECTS_LIST: &str = "circleci.projects.list";
 const OP_HEALTH: &str = "circleci.health";
+const OPERATION_ORDER: [&str; 11] = [
+    OP_PIPELINES_LIST,
+    OP_PIPELINES_GET,
+    OP_PIPELINES_TRIGGER,
+    OP_WORKFLOWS_LIST,
+    OP_WORKFLOWS_GET,
+    OP_WORKFLOWS_CANCEL,
+    OP_WORKFLOWS_RERUN,
+    OP_JOBS_LIST,
+    OP_JOBS_GET,
+    OP_PROJECTS_LIST,
+    OP_HEALTH,
+];
 
 // Capability IDs
 const CAP_PIPELINES_READ: &str = "circleci.pipelines.read";
@@ -213,6 +228,12 @@ impl CircleCiConnector {
         }
     }
 
+    /// Stable connector instance identity used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_prelude::InstanceId {
+        &self.base.instance_id
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -302,384 +323,59 @@ impl Default for CircleCiConnector {
 
 /// Build the typed operations catalog.
 pub fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_PIPELINES_LIST),
-            summary: "List pipelines for a project".into(),
-            description: Some("Returns recent pipelines for a CircleCI project".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["project_slug"],
-                "additionalProperties": false,
-                "properties": {
-                    "project_slug": { "type": "string", "description": "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" },
-                    "page_token": { "type": "string", "description": "Pagination token" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["items"],
-                "additionalProperties": false,
-                "properties": {
-                    "items": { "type": "array" },
-                    "next_page_token": { "type": ["string", "null"] }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_PIPELINES_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list recent pipelines for a project".into(),
-                common_mistakes: vec![
-                    "Project slug must be in format vcs/org/repo (e.g., gh/org/repo)".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_PIPELINES_GET)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_PIPELINES_GET),
-            summary: "Get a pipeline by ID".into(),
-            description: Some("Returns details for a specific pipeline".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["pipeline_id"],
-                "additionalProperties": false,
-                "properties": {
-                    "pipeline_id": { "type": "string", "description": "Pipeline UUID" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["id", "state", "number"],
-                "properties": {
-                    "id": { "type": "string" },
-                    "state": { "type": "string" },
-                    "number": { "type": "integer", "minimum": 0 }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_PIPELINES_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need details about a specific pipeline".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_PIPELINES_LIST)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_PIPELINES_TRIGGER),
-            summary: "Trigger a new pipeline".into(),
-            description: Some("Triggers a new pipeline run on a project".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["project_slug"],
-                "additionalProperties": false,
-                "properties": {
-                    "project_slug": { "type": "string", "description": "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" },
-                    "branch": { "type": "string", "description": "Branch to run" },
-                    "tag": { "type": "string", "description": "Tag to run" },
-                    "parameters": { "type": "object", "description": "Pipeline parameters accepted by the target project config" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["id", "state", "number"],
-                "properties": {
-                    "id": { "type": "string" },
-                    "state": { "type": "string" },
-                    "number": { "type": "integer", "minimum": 0 }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_PIPELINES_WRITE),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to trigger a new CI/CD pipeline run".into(),
-                common_mistakes: vec![
-                    "Only specify branch OR tag, not both".into(),
-                    "Pipeline parameters must match the project configuration".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_PIPELINES_LIST)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Policy),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_WORKFLOWS_LIST),
-            summary: "List workflows for a pipeline".into(),
-            description: Some("Returns workflows triggered by a specific pipeline".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["pipeline_id"],
-                "additionalProperties": false,
-                "properties": {
-                    "pipeline_id": { "type": "string", "description": "Pipeline UUID" },
-                    "page_token": { "type": "string", "description": "Pagination token" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["items"],
-                "additionalProperties": false,
-                "properties": {
-                    "items": { "type": "array" },
-                    "next_page_token": { "type": ["string", "null"] }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WORKFLOWS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to see workflows triggered by a pipeline".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_WORKFLOWS_GET)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_WORKFLOWS_GET),
-            summary: "Get a workflow by ID".into(),
-            description: Some("Returns details for a specific workflow".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["workflow_id"],
-                "additionalProperties": false,
-                "properties": {
-                    "workflow_id": { "type": "string", "description": "Workflow UUID" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["id", "name", "status"],
-                "properties": {
-                    "id": { "type": "string" },
-                    "name": { "type": "string" },
-                    "status": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WORKFLOWS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need details about a specific workflow".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_WORKFLOWS_LIST)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_WORKFLOWS_CANCEL),
-            summary: "Cancel a running workflow".into(),
-            description: Some("Cancels a currently running workflow".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["workflow_id"],
-                "additionalProperties": false,
-                "properties": {
-                    "workflow_id": { "type": "string", "description": "Workflow UUID" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["message"],
-                "additionalProperties": false,
-                "properties": {
-                    "message": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WORKFLOWS_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to cancel a running workflow".into(),
-                common_mistakes: vec!["Cannot cancel already-completed workflows".into()],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_WORKFLOWS_RERUN)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_WORKFLOWS_RERUN),
-            summary: "Rerun a workflow".into(),
-            description: Some("Reruns a workflow, optionally from failed jobs only".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["workflow_id"],
-                "additionalProperties": false,
-                "properties": {
-                    "workflow_id": { "type": "string", "description": "Workflow UUID" },
-                    "from_failed": { "type": "boolean", "description": "Only rerun failed jobs", "default": false }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["message"],
-                "additionalProperties": false,
-                "properties": {
-                    "message": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WORKFLOWS_WRITE),
-            risk_level: RiskLevel::High,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to rerun a failed or completed workflow".into(),
-                common_mistakes: vec!["Use from_failed=true to save time on partial reruns".into()],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_WORKFLOWS_CANCEL)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::Policy),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_JOBS_LIST),
-            summary: "List jobs for a workflow".into(),
-            description: Some("Returns all jobs in a specific workflow".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["workflow_id"],
-                "additionalProperties": false,
-                "properties": {
-                    "workflow_id": { "type": "string", "description": "Workflow UUID" },
-                    "page_token": { "type": "string", "description": "Pagination token" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["items"],
-                "additionalProperties": false,
-                "properties": {
-                    "items": { "type": "array" },
-                    "next_page_token": { "type": ["string", "null"] }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_JOBS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list jobs in a workflow".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_JOBS_GET)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_JOBS_GET),
-            summary: "Get a job by project and number".into(),
-            description: Some("Returns details for a specific job in a project".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["project_slug", "job_number"],
-                "additionalProperties": false,
-                "properties": {
-                    "project_slug": { "type": "string", "description": "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" },
-                    "job_number": { "type": "integer", "minimum": 0, "description": "CircleCI job number" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["id", "name", "status"],
-                "properties": {
-                    "id": { "type": "string" },
-                    "name": { "type": "string" },
-                    "status": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_JOBS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need details about a specific job".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_JOBS_LIST)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_PROJECTS_LIST),
-            summary: "List followed projects".into(),
-            description: Some("Returns projects the authenticated user follows".into()),
-            input_schema: json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "page_token": { "type": "string", "description": "Pagination token" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["items"],
-                "additionalProperties": false,
-                "properties": {
-                    "items": { "type": "array" },
-                    "next_page_token": { "type": ["string", "null"] }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_PROJECTS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list projects the user has access to".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_HEALTH),
-            summary: "Check CircleCI API health".into(),
-            description: Some("Validates CircleCI API reachability and auth".into()),
-            input_schema: json!({ "type": "object", "additionalProperties": false }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["status"],
-                "additionalProperties": false,
-                "properties": {
-                    "status": { "type": "string", "enum": ["ok"] }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_PROJECTS_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to verify CircleCI connectivity".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-    ]
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded CircleCI manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    Some(ApprovalMode::from(mode))
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 fcp_core::impl_fcp_sealed!(CircleCiConnector);
@@ -1166,8 +862,153 @@ impl CircleCiConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use fcp_prelude::{IdempotencyClass, RiskLevel, SafetyTier};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+
+    #[derive(Clone, Copy)]
+    struct ResponseSpec {
+        status: u16,
+        headers: &'static [(&'static str, &'static str)],
+        body: &'static str,
+    }
+
+    impl ResponseSpec {
+        const fn json(status: u16, body: &'static str) -> Self {
+            Self {
+                status,
+                headers: &[("content-type", "application/json")],
+                body,
+            }
+        }
+
+        const fn with_headers(
+            status: u16,
+            headers: &'static [(&'static str, &'static str)],
+            body: &'static str,
+        ) -> Self {
+            Self {
+                status,
+                headers,
+                body,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct RequestObservation {
+        request_line: String,
+    }
+
+    struct LoopbackFixture {
+        base_url: String,
+        handle: Option<JoinHandle<Vec<RequestObservation>>>,
+    }
+
+    impl LoopbackFixture {
+        fn start(responses: Vec<ResponseSpec>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+            let address = listener.local_addr().expect("read listener address");
+            let handle = thread::spawn(move || {
+                responses
+                    .into_iter()
+                    .map(|response| {
+                        let (stream, _) = listener.accept().expect("accept request");
+                        handle_request(stream, response)
+                    })
+                    .collect()
+            });
+
+            Self {
+                base_url: format!("http://{address}"),
+                handle: Some(handle),
+            }
+        }
+
+        fn base_url(&self) -> &str {
+            &self.base_url
+        }
+
+        fn join(mut self) -> Vec<RequestObservation> {
+            self.handle
+                .take()
+                .expect("loopback handle present")
+                .join()
+                .expect("loopback thread completed")
+        }
+    }
+
+    fn handle_request(mut stream: TcpStream, response: ResponseSpec) -> RequestObservation {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set request read timeout");
+        let raw = read_http_request(&mut stream);
+        let header_end = find_header_end(&raw).expect("request contains header terminator");
+        let request = String::from_utf8_lossy(&raw[..header_end]);
+        let request_line = request.lines().next().unwrap_or_default().to_string();
+
+        write_response(&mut stream, response);
+
+        RequestObservation { request_line }
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let bytes_read = stream.read(&mut buffer).expect("read request");
+            assert!(bytes_read > 0, "request should not close early");
+            request.extend_from_slice(&buffer[..bytes_read]);
+            if let Some(header_end) = find_header_end(&request) {
+                let expected_body_len = content_length(&request[..header_end]);
+                let body_bytes = request.len().saturating_sub(header_end + 4);
+                if body_bytes >= expected_body_len {
+                    return request;
+                }
+            }
+        }
+    }
+
+    fn find_header_end(request: &[u8]) -> Option<usize> {
+        request.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &[u8]) -> usize {
+        let text = String::from_utf8_lossy(headers);
+        text.lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
+    fn write_response(stream: &mut TcpStream, response: ResponseSpec) {
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\nconnection: close\r\ncontent-length: {}\r\n",
+            response.status,
+            status_reason(response.status),
+            response.body.len()
+        )
+        .expect("write response status");
+        for (name, value) in response.headers {
+            write!(stream, "{name}: {value}\r\n").expect("write response header");
+        }
+        write!(stream, "\r\n{}", response.body).expect("write response body");
+    }
+
+    const fn status_reason(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            _ => "Status",
+        }
+    }
 
     fn all_caps() -> Vec<CapabilityId> {
         vec![
@@ -1424,46 +1265,44 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_invalid_token_reason_code() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/me"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
+        let fixture = LoopbackFixture::start(vec![ResponseSpec::json(401, "")]);
 
         let mut connector = CircleCiConnector::new();
         connector
             .configure(json!({
                 "api_token": "bad",
-                "base_url": mock_server.uri()
+                "base_url": fixture.base_url()
             }))
             .await
             .unwrap();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Failed);
         assert_eq!(report.reason_code.as_deref(), Some("invalid_api_token"));
+        let observations = fixture.join();
+        assert_eq!(observations[0].request_line, "GET /me HTTP/1.1");
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_rate_limited_reason_code() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/me"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "2"))
-            .mount(&mock_server)
-            .await;
+        let fixture = LoopbackFixture::start(vec![ResponseSpec::with_headers(
+            429,
+            &[("retry-after", "2")],
+            "",
+        )]);
 
         let mut connector = CircleCiConnector::new();
         connector
             .configure(json!({
                 "api_token": "tok",
-                "base_url": mock_server.uri()
+                "base_url": fixture.base_url()
             }))
             .await
             .unwrap();
         let report = connector.self_check().await.unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
         assert_eq!(report.reason_code.as_deref(), Some("circleci_rate_limited"));
+        let observations = fixture.join();
+        assert_eq!(observations[0].request_line, "GET /me HTTP/1.1");
     }
 
     #[fcp_async_core::runtime::test]
@@ -1504,19 +1343,97 @@ mod tests {
     fn test_introspection_operations() {
         let connector = CircleCiConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 11);
         let ops: Vec<&str> = intro.operations.iter().map(|o| o.id.as_str()).collect();
-        assert!(ops.contains(&OP_PIPELINES_LIST));
-        assert!(ops.contains(&OP_PIPELINES_GET));
-        assert!(ops.contains(&OP_PIPELINES_TRIGGER));
-        assert!(ops.contains(&OP_WORKFLOWS_LIST));
-        assert!(ops.contains(&OP_WORKFLOWS_GET));
-        assert!(ops.contains(&OP_WORKFLOWS_CANCEL));
-        assert!(ops.contains(&OP_WORKFLOWS_RERUN));
-        assert!(ops.contains(&OP_JOBS_LIST));
-        assert!(ops.contains(&OP_JOBS_GET));
-        assert!(ops.contains(&OP_PROJECTS_LIST));
-        assert!(ops.contains(&OP_HEALTH));
+
+        assert_eq!(intro.operations.len(), OPERATION_ORDER.len());
+        assert_eq!(ops, OPERATION_ORDER);
+    }
+
+    fn strict_circleci_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_circleci_manifest()?;
+        let operations = operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).map_err(|error| error.to_string())?,
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .map_err(|error| error.to_string())?
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn operations_info_json_exposes_manifest_approval_modes() {
+        let result = serde_json::to_value(CircleCiConnector::new().introspect()).unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let trigger = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_PIPELINES_TRIGGER))
+            .unwrap();
+        let cancel = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_WORKFLOWS_CANCEL))
+            .unwrap();
+        let rerun = ops
+            .iter()
+            .find(|op| op["id"].as_str() == Some(OP_WORKFLOWS_RERUN))
+            .unwrap();
+
+        assert_eq!(trigger["requires_approval"], "policy");
+        assert_eq!(cancel["requires_approval"], "none");
+        assert_eq!(rerun["requires_approval"], "policy");
     }
 
     #[test]

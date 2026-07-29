@@ -22,6 +22,7 @@ workspace = true
 [dependencies]
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-core = { path = "../../crates/fcp-core" }
+fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 
@@ -35,6 +36,6 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-fcp-manifest.workspace = true
+fcp-testkit.workspace = true
 jsonschema.workspace = true
 wiremock.workspace = true

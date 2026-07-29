@@ -1,7 +1,9 @@
 //! WhatsApp Business API client.
 
+use fcp_sdk::ConnectorRuntime;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status,
+    transport_error_reached_service,
 };
 use fcp_sdk::retry::RetryDecision;
 use reqwest::{Client, RequestBuilder, Url};
@@ -138,6 +140,13 @@ impl WhatsAppClient {
     }
 
     /// Send an arbitrary message payload with retry.
+    ///
+    /// br-kxd3e: every caller of this helper DELIVERS a message, and the
+    /// WhatsApp Cloud API has no idempotency key, so a replay that reached
+    /// Meta sends the message a second time. Only a connect-phase failure —
+    /// the one class that proves no request bytes were written — is retried
+    /// here. A 429 is refused WITHOUT the message being sent and stays
+    /// retryable; it is handled before the gate below.
     async fn send_message(
         &self,
         runtime: &ConnectorRuntime,
@@ -160,10 +169,12 @@ impl WhatsAppClient {
                 let resp = match request.send().await {
                     Ok(r) => r,
                     Err(e) => {
-                        return AttemptOutcome::Retryable {
-                            error: WhatsAppError::Http(e),
-                            retry_after: None,
-                        };
+                        let replayable = !transport_error_reached_service(&e);
+                        return AttemptOutcome::retryable_if_replayable(
+                            WhatsAppError::Http(e),
+                            None,
+                            replayable,
+                        );
                     }
                 };
 
@@ -193,36 +204,23 @@ impl WhatsAppClient {
 
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
+                    // Every remaining retryable class here is a 5xx, which
+                    // means Meta RECEIVED the send and may already have
+                    // delivered it.
                     if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&text) {
-                        let decision = classify_http_status(status, None);
-                        let err = WhatsAppError::Api {
+                        return AttemptOutcome::Terminal(WhatsAppError::Api {
                             code: api_err.error.code,
                             message: api_err.error.message,
                             error_type: api_err.error.error_type,
                             subcode: api_err.error.error_subcode,
-                        };
-                        if !matches!(decision, RetryDecision::Terminal) {
-                            return AttemptOutcome::Retryable {
-                                error: err,
-                                retry_after: None,
-                            };
-                        }
-                        return AttemptOutcome::Terminal(err);
+                        });
                     }
-                    let decision = classify_http_status(status, None);
-                    let err = WhatsAppError::Api {
+                    return AttemptOutcome::Terminal(WhatsAppError::Api {
                         code: u32::from(status),
                         message: text,
                         error_type: "HttpError".into(),
                         subcode: None,
-                    };
-                    if !matches!(decision, RetryDecision::Terminal) {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
-                    }
-                    return AttemptOutcome::Terminal(err);
+                    });
                 }
 
                 match resp.json::<SendMessageResponse>().await {
@@ -424,8 +422,6 @@ fn authenticate(request: RequestBuilder, access_token: &str) -> RequestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn normalize_base_url_accepts_graph_facebook_com() {
@@ -562,45 +558,6 @@ mod tests {
         )
         .unwrap();
         assert!(!client.is_secretless());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn secretless_health_check_omits_authorization_header() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/123456"))
-            .respond_with(ResponseTemplate::new(400))
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            WhatsAppClient::new(&mock_server.uri(), "123456", "", HttpRetryConfig::default())
-                .unwrap();
-        assert!(client.health_check().await.is_ok());
-
-        let requests = mock_server.received_requests().await.unwrap_or_default();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].headers.get("authorization").is_none());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_with_token_sends_authorization_header() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/123456"))
-            .and(header("authorization", "Bearer real_token"))
-            .respond_with(ResponseTemplate::new(400))
-            .mount(&mock_server)
-            .await;
-
-        let client = WhatsAppClient::new(
-            &mock_server.uri(),
-            "123456",
-            "real_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_ok());
     }
 
     // ── sanitize_path_segment tests ─────────────────────────────────

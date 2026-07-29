@@ -21,6 +21,10 @@ pub enum HostError {
     #[error("preflight failed: {0}")]
     PreflightFailed(String),
 
+    /// Connector inventory is missing an explicit zone envelope.
+    #[error("zone envelope required: {0}")]
+    ZoneEnvelopeRequired(String),
+
     /// Cache error.
     #[error("cache error: {0}")]
     CacheError(String),
@@ -67,6 +71,13 @@ mod tests {
         let err = HostError::PreflightFailed("budget exceeded".into());
         assert!(err.to_string().contains("preflight failed"));
         assert!(err.to_string().contains("budget exceeded"));
+    }
+
+    #[test]
+    fn zone_envelope_required_display() {
+        let err = HostError::ZoneEnvelopeRequired("connector missing allowed_zones".into());
+        assert!(err.to_string().contains("zone envelope required"));
+        assert!(err.to_string().contains("allowed_zones"));
     }
 
     #[test]
@@ -132,6 +143,12 @@ mod tests {
     }
 
     #[test]
+    fn zone_envelope_required_empty_string() {
+        let err = HostError::ZoneEnvelopeRequired(String::new());
+        assert!(err.to_string().contains("zone envelope required"));
+    }
+
+    #[test]
     fn cache_error_empty_string() {
         let err = HostError::CacheError(String::new());
         assert!(err.to_string().contains("cache error"));
@@ -185,9 +202,10 @@ mod tests {
             HostError::InvalidFilter("b".into()),
             HostError::RegistryError("c".into()),
             HostError::PreflightFailed("d".into()),
-            HostError::CacheError("e".into()),
-            HostError::Unavailable("f".into()),
-            HostError::Internal("g".into()),
+            HostError::ZoneEnvelopeRequired("e".into()),
+            HostError::CacheError("f".into()),
+            HostError::Unavailable("g".into()),
+            HostError::Internal("h".into()),
         ];
         for err in &variants {
             let dbg = format!("{err:?}");

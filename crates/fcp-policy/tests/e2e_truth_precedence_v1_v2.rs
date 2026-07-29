@@ -1,7 +1,7 @@
 //! E2E truth-precedence + revocation interaction
 //! (testing-perfect-e2e-integration-tests-with-logging-and-no-mocks).
 //!
-//! AmberLark, 2026-05-02 — alpha-domain coverage sweep.
+//! `AmberLark`, 2026-05-02 — alpha-domain coverage sweep.
 //!
 //! ## What this exercises
 //!
@@ -81,6 +81,8 @@ fn build_revocation(zone_id: &ZoneId, revoked_id: ObjectId, effective_at: u64) -
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::cast_possible_truncation)]
 fn e2e_truth_precedence_v1_v2_revocation_invariant() {
     // Initialise tracing with a test-scoped subscriber. The subscriber
     // is local to this test (tracing::subscriber::set_default returns

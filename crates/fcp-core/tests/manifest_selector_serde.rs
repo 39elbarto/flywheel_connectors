@@ -1,5 +1,5 @@
 //! Pin `ConnectorTarget` JSON+CBOR shape + `ManifestVersion::is_compatible_with`
-//! selector truth table — the closest analogue to "ManifestSelector serde"
+//! selector truth table — the closest analogue to "`ManifestSelector` serde"
 //! (flywheel_connectors-46kt1).
 //!
 //! Bead asks for `ManifestSelector` JSON+CBOR roundtrip pinning. No type
@@ -12,19 +12,19 @@
 //!     — the version axis with `is_compatible_with` selector predicate
 //!     (stricter than plain semver ordering).
 //!
-//! Existing `connector_bundle_serde_extended.rs` covers RegistryEntry full
-//! shape + roundtrip and ConnectorTarget Display via the bundle. This pin
+//! Existing `connector_bundle_serde_extended.rs` covers `RegistryEntry` full
+//! shape + roundtrip and `ConnectorTarget` Display via the bundle. This pin
 //! adds the residual axes:
-//!   * ConnectorTarget standalone JSON + CBOR shape per os/arch combo,
-//!   * ConnectorTarget::as_string() format pinning,
-//!   * ConnectorTarget::from_env() returns a non-empty pair,
-//!   * ManifestVersion #[serde(transparent)] scalar form,
-//!   * ManifestVersion Display + FromStr fixed point,
+//!   * `ConnectorTarget` standalone JSON + CBOR shape per os/arch combo,
+//!   * `ConnectorTarget::as_string()` format pinning,
+//!   * `ConnectorTarget::from_env()` returns a non-empty pair,
+//!   * `ManifestVersion` `#[serde(transparent)]` scalar form,
+//!   * `ManifestVersion` Display + `FromStr` fixed point,
 //!   * `is_compatible_with` selector truth table:
 //!     same-major, equal/higher → compatible; lower → NOT compatible;
 //!     different-major → NEVER compatible (the loud cross-major sentinel),
-//!   * ManifestVersion Ord matches semver ordering,
-//!   * ConnectorVersion alias points to ManifestVersion.
+//!   * `ManifestVersion` Ord matches semver ordering,
+//!   * `ConnectorVersion` alias points to `ManifestVersion`.
 
 use ciborium::Value as CborValue;
 use fcp_core::{ConnectorTarget, ConnectorVersion, ManifestVersion};
@@ -233,7 +233,7 @@ fn is_compatible_with_zero_major_pre_release_handling() {
 
 #[test]
 fn manifest_version_ord_matches_semver_ordering() {
-    let mut versions = vec![
+    let mut versions = [
         ver("2.0.0"),
         ver("1.0.0"),
         ver("1.10.0"),

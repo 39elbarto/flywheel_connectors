@@ -348,7 +348,7 @@ fn revocation_is_active_handles_u64_max_endpoints() {
     let r2 = RevocationObject {
         expires_at: Some(u64::MAX),
         effective_at: 0,
-        ..r.clone()
+        ..r
     };
     assert!(r2.is_active(0));
     assert!(r2.is_active(u64::MAX - 1));

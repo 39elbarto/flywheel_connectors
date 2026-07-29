@@ -9,7 +9,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.bitwarden`. The connector exposes a focused Bitwarden vault-management surface for collection listing, item listing, item retrieval, item creation, and item deletion.
+This document fixes the operator-facing contract for `fcp.bitwarden`. The connector exposes a focused Bitwarden surface for Public API collection listing plus Vault Management API collection listing, item listing, item retrieval, item creation, and item deletion.
 
 The connector is intentionally a private-zone vault bridge. It is not a full Bitwarden organization admin client, event-log client, policy client, attachment bridge, Send bridge, directory-sync client, or account-recovery tool.
 
@@ -25,12 +25,16 @@ The current crate exposes these operations:
 
 Important runtime truths the contract preserves:
 
-- Configuration requires exactly one of `access_token` or `credential_id`.
-- `access_token` mode sends `Authorization: Bearer ...`.
+- Configuration requires exactly one auth mode: `access_token`, `credential_id`, or Public API `client_id` + `client_secret` + `organization_id`.
+- `access_token` mode sends `Authorization: Bearer ...` to Vault Management API style paths.
 - `credential_id` mode sends `X-FCP-Credential-Id: ...`.
 - `credential_id` must be a valid UUID.
+- Public API client-credentials mode exchanges `client_id` and `client_secret` at `identity_url` using `grant_type=client_credentials` and `scope=api.organization`, then calls `GET /public/collections`.
+- Public API client-credentials mode only supports `bitwarden.collections.list`; vault item operations require `access_token` or `credential_id` against a Vault Management API compatible endpoint.
 - Access tokens are trimmed and redacted in debug output.
+- Public API client id, client secret, organization id, and identity URL are redacted in debug output.
 - Default base URL is `https://api.bitwarden.com`.
+- Default Public API identity URL is `https://identity.bitwarden.com/connect/token`.
 - The implemented request paths are Vault Management API / `bw serve` style paths: `/collections`, `/list/object/items`, `/object/item`, and `/object/item/{item_id}`.
 - The client strips trailing slashes from `base_url` but does not fully parse or normalize it during configure.
 - Doctor and self-check perform a live `collections.list` call when configured.
@@ -47,7 +51,8 @@ The runtime and manifest describe different operational assumptions:
 - The runtime paths match Bitwarden Vault Management API / `bw serve` behavior, and the official Bitwarden docs state that this API requires the CLI `serve` command to start a local HTTP server.
 - The manifest network constraints allow `*.bitwarden.com` and `*.bitwarden.eu`, require TLS/SNI, and deny localhost, private ranges, tailnet ranges, and IP literals for live operations.
 - The runtime diagnostics still allow loopback for deterministic tests, while live manifest policy would deny loopback unless routed through a host-approved proxy or a future manifest update.
-- The default `https://api.bitwarden.com` value is the current code default, but the implemented `/collections` and `/object/item` path shapes should be treated as Vault Management API compatible, not as a broad Bitwarden Public API claim.
+- The default `https://api.bitwarden.com` value is valid for Public API client-credentials collection listing through `/public/collections`.
+- The Vault Management `/collections` and `/object/item` path shapes should not be treated as Bitwarden Public API item-management claims; upstream Bitwarden documentation states the Public API does not manage individual vault items.
 
 This README documents the runtime truth while keeping the endpoint-policy drift visible. A follow-up manifest/runtime parity bead should reconcile whether this connector's production target is a host-proxied `bw serve` endpoint, a self-hosted Vault Management API endpoint, or a different Bitwarden API surface.
 
@@ -55,9 +60,10 @@ This README documents the runtime truth while keeping the endpoint-policy drift 
 
 The current Bitwarden README slice documents the existing runtime surface:
 
-- direct bearer-token and host credential-reference configuration
+- direct bearer-token, host credential-reference, and Public API organization client-credentials configuration
 - Vault Management API style item and collection paths
-- collection listing through `GET /collections`
+- Public API collection listing through `GET /public/collections`
+- Vault Management collection listing through `GET /collections`
 - item listing through `GET /list/object/items`
 - optional `collection_id` and `folder_id` filters on item listing
 - item retrieval through `GET /object/item/{item_id}`
@@ -68,7 +74,7 @@ The current Bitwarden README slice documents the existing runtime surface:
 
 ## Auth And Scope Boundary
 
-- Authentication mechanisms: bearer token or host credential reference.
+- Authentication mechanisms: Vault Management bearer token, host credential reference, or Bitwarden Public API organization client credentials.
 - Home zone: `z:private`.
 - Allowed source zones: `z:owner` and `z:private`.
 - Allowed target zone: `z:private`.
@@ -109,7 +115,7 @@ The current Bitwarden README slice documents the existing runtime surface:
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Rationale |
 |-----------|----------------|------------|------------|-----------|-------------|-----------|
-| `bitwarden.collections.list` | `GET /collections` | `bitwarden.collections.read` | `Safe` | `Low` | `Strict` | Read-only collection inventory. |
+| `bitwarden.collections.list` | `GET /public/collections` with Public API auth; `GET /collections` with Vault Management auth | `bitwarden.collections.read` | `Safe` | `Low` | `Strict` | Read-only collection inventory. |
 | `bitwarden.items.list` | `GET /list/object/items` | `bitwarden.items.read` | `Safe` | `Low` | `Strict` | Read-only item listing with optional collection and folder filters. |
 | `bitwarden.items.get` | `GET /object/item/{item_id}` | `bitwarden.items.read` | `Risky` | `Medium` | `Strict` | Retrieves one item and can include passwords, TOTP seeds, and notes. |
 | `bitwarden.items.create` | `POST /object/item` | `bitwarden.items.write` | `Risky` | `Medium` | `None` | Creates a provider-visible vault item. |
@@ -119,7 +125,7 @@ The current Bitwarden README slice documents the existing runtime surface:
 
 The current implementation does not include:
 
-- Bitwarden Public API organization management for members, groups, policies, collections, event logs, or organization API keys
+- Bitwarden Public API organization management beyond read-only collection listing, including members, groups, policies, collection mutation, event logs, or organization API key rotation
 - login/unlock/session-key management, `bw serve` process management, or CLI orchestration
 - folder listing, folder creation, collection creation, collection updates, or item movement between collections
 - item update/edit, restore, trash listing, permanent-delete toggles, attachment upload/download, Send, emergency access, or account recovery
@@ -161,7 +167,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 ## Source Notes
 
 - `connectors/bitwarden/src/connector.rs` defines configuration parsing, auth mode selection, lifecycle handlers, diagnostics, live self-check behavior, introspection, simulation, and invoke dispatch.
-- `connectors/bitwarden/src/client.rs` defines Vault Management API style paths, bearer and credential-reference headers, timeout, retry metadata, request helpers, and provider error mapping.
+- `connectors/bitwarden/src/client.rs` defines Public API client-credentials token exchange, Public API collection listing, Vault Management API style paths, bearer and credential-reference headers, timeout, retry metadata, request helpers, and provider error mapping.
 - `connectors/bitwarden/src/error.rs` defines connector error classes and FCP error conversion.
 - `connectors/bitwarden/src/types.rs` defines provider error response parsing.
 - `connectors/bitwarden/manifest.toml` defines operation schemas, network constraints, sandbox boundary, zone policy, rate limits, and AI hints.
@@ -171,10 +177,20 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 There is no dedicated tracked `scripts/e2e/bitwarden_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
 
+`connectors/bitwarden/tests/live_verification.rs` uses `EnvironmentManifest::sandbox(...)` and the Bitwarden Public API sandbox contract:
+
+- Required gate: `FCP_LIVE_SANDBOX=1`.
+- Required secrets: `BITWARDEN_SANDBOX_CLIENT_ID`, `BITWARDEN_SANDBOX_CLIENT_SECRET`.
+- Required non-secrets: `BITWARDEN_SANDBOX_ORG_ID`, `FCP_SANDBOX_RUN_NAMESPACE`.
+- Defaulted endpoints: `BITWARDEN_SANDBOX_BASE_URL=https://api.bitwarden.com`, `BITWARDEN_SANDBOX_IDENTITY_URL=https://identity.bitwarden.com/connect/token`.
+- Operation: `bitwarden.collections.list` only; live suite does not list, read, create, or delete vault items.
+- JSONL prefix: `BITWARDEN_LIVE_SANDBOX_JSONL`.
+
 The verification surface captures:
 
 - manifest/runtime operation agreement
 - deterministic WireMock coverage for all five operations
+- Public API client-credentials token exchange and collection-listing path coverage
 - auth, base URL diagnostics, provider error, lifecycle, simulation, and introspection tests
 - formatting, check, and clippy proof through `rch`
 - UBS on changed files before commit
@@ -183,10 +199,12 @@ The verification surface captures:
 
 **Prerequisites**:
 
-- Use a disposable Bitwarden vault or test organization for live mutation checks.
+- Use a disposable Bitwarden Teams or Enterprise organization API key for live Public API collection-listing proof.
+- Use a disposable Bitwarden vault or test organization for Vault Management mutation checks.
 - Prefer a host-approved Vault Management API endpoint or proxy that matches the manifest/network policy before live use.
 - Use WireMock loopback fixtures for routine proof.
 - Treat `credential_id` as a host egress-proxy reference, not a Bitwarden credential itself.
+- Treat `client_id` and `client_secret` as Bitwarden organization Public API credentials, not as vault bearer tokens or FCP credential ids.
 
 **Dedicated environment**:
 
@@ -202,9 +220,10 @@ The verification surface captures:
 
 **Common remediation**:
 
-- If configuration fails, provide exactly one of `access_token` or `credential_id`.
+- If configuration fails, provide exactly one auth mode: `access_token`, `credential_id`, or the complete Public API trio `client_id`, `client_secret`, and `organization_id`.
 - If credential-id configuration fails, pass a valid UUID.
-- If live checks fail against `https://api.bitwarden.com`, verify whether the target actually exposes the Vault Management API path family expected by this connector.
+- If Public API live checks fail against `https://api.bitwarden.com`, verify that the sandbox organization API key is a Teams or Enterprise organization key and that `identity_url` matches the organization region.
+- If Vault Management checks fail against `https://api.bitwarden.com`, verify whether the target actually exposes the Vault Management API path family expected by this connector.
 - If manifest policy denies loopback `bw serve`, route through an approved host-side proxy or file a manifest/runtime parity follow-up instead of bypassing policy.
 - If item creation fails validation, include integer `type` and string `name`.
 - If item retrieval or deletion fails validation, pass an item ID rather than a name, URL, or provider object.

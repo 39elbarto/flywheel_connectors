@@ -68,6 +68,31 @@ impl std::fmt::Display for BootstrapMode {
     }
 }
 
+/// Validate `MultiDevice` threshold parameters before they reach the
+/// asserting `ThresholdConfig::new`.
+///
+/// Mirrors the ceremony's invariants (`1 <= threshold <= device_count`) but
+/// returns a typed [`BootstrapError::Config`] instead of panicking, so a
+/// caller-supplied bad config fails closed at the boundary.
+fn validate_multi_device_params(threshold: u32, device_count: u32) -> BootstrapResult<()> {
+    if device_count < 1 {
+        return Err(BootstrapError::Config(
+            "multi-device bootstrap requires device_count >= 1".to_string(),
+        ));
+    }
+    if threshold < 1 {
+        return Err(BootstrapError::Config(
+            "multi-device bootstrap requires threshold >= 1".to_string(),
+        ));
+    }
+    if threshold > device_count {
+        return Err(BootstrapError::Config(format!(
+            "multi-device threshold {threshold} must not exceed device_count {device_count}"
+        )));
+    }
+    Ok(())
+}
+
 /// Configuration for the bootstrap workflow.
 #[derive(Debug)]
 pub struct BootstrapConfig {
@@ -165,6 +190,14 @@ impl BootstrapConfigBuilder {
         let mode = self
             .mode
             .ok_or_else(|| BootstrapError::Config("mode is required".to_string()))?;
+
+        if let BootstrapMode::MultiDevice {
+            device_count,
+            threshold,
+        } = &mode
+        {
+            validate_multi_device_params(*threshold, *device_count)?;
+        }
 
         Ok(BootstrapConfig {
             data_dir,
@@ -465,7 +498,7 @@ impl BootstrapWorkflow {
     /// operator; the previous implementation logged only
     /// `"Recovery phrase generated. Store it securely!"` without the
     /// actual words, and the sibling `save_recovery_phrase` was a
-    /// tracing::debug no-op — a successful bootstrap left the
+    /// `tracing::debug` no-op — a successful bootstrap left the
     /// operator with no recovery phrase in-hand and no persisted
     /// copy, so total loss of the device = total loss of owner
     /// identity with no recovery path.
@@ -477,7 +510,7 @@ impl BootstrapWorkflow {
     /// (e.g., "Type the first and last word back to confirm") before
     /// proceeding. The `RecoveryPhrase` in the returned outcome is
     /// the single in-memory copy; when the CLI drops it after
-    /// displaying, ZeroizeOnDrop wipes the bytes. If the CLI never
+    /// displaying, `ZeroizeOnDrop` wipes the bytes. If the CLI never
     /// reads the phrase out of `BootstrapOutcome`, it still gets
     /// zeroized on drop — safe default, bad UX (no recovery path),
     /// which the regression test at
@@ -516,6 +549,14 @@ impl BootstrapWorkflow {
         threshold: u32,
         total: u32,
     ) -> BootstrapResult<GenesisState> {
+        // Fail closed on an invalid threshold BEFORE writing the phase lock:
+        // `ThresholdConfig::new` panics on `threshold < 1` or `threshold >
+        // total`, and writing the CeremonySetup lock first would leave a
+        // resumable partial-state marker that re-panics on every `resume()`
+        // (a stuck loop until `force_overwrite`). Validate all external config
+        // as hostile and surface a typed error instead of a panic.
+        validate_multi_device_params(threshold, total)?;
+
         self.phase = BootstrapPhase::CeremonySetup {
             participant_count: total,
             threshold,
@@ -667,7 +708,7 @@ impl BootstrapWorkflow {
         // match on the specific "not implemented" signal instead of
         // substring-matching the legacy HardwareToken message.
         Err(BootstrapError::HardwareTokenEnrollmentNotImplemented {
-            token_display: token_display.to_string(),
+            token_display,
             key_material: provisioning_material.pair.key.key_type.to_string(),
         })
     }
@@ -767,7 +808,7 @@ fn ensure_secure_data_dir(path: &Path) -> std::io::Result<()> {
         builder.recursive(true).mode(0o700);
         builder.create(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -966,6 +1007,55 @@ mod tests {
     }
 
     #[test]
+    fn multi_device_builder_rejects_invalid_threshold() {
+        let dir = tempdir().unwrap();
+        // threshold > device_count previously panicked inside
+        // ThresholdConfig::new; it must now fail closed with a typed error.
+        let result = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::MultiDevice {
+                device_count: 2,
+                threshold: 3,
+            })
+            .build();
+        assert!(matches!(result, Err(BootstrapError::Config(_))));
+
+        // threshold == 0 and device_count == 0 are also rejected.
+        assert!(matches!(
+            BootstrapConfig::builder()
+                .data_dir(dir.path())
+                .mode(BootstrapMode::MultiDevice {
+                    device_count: 3,
+                    threshold: 0,
+                })
+                .build(),
+            Err(BootstrapError::Config(_))
+        ));
+        assert!(matches!(
+            BootstrapConfig::builder()
+                .data_dir(dir.path())
+                .mode(BootstrapMode::MultiDevice {
+                    device_count: 0,
+                    threshold: 0,
+                })
+                .build(),
+            Err(BootstrapError::Config(_))
+        ));
+
+        // A valid 2-of-3 config still builds.
+        assert!(
+            BootstrapConfig::builder()
+                .data_dir(dir.path())
+                .mode(BootstrapMode::MultiDevice {
+                    device_count: 3,
+                    threshold: 2,
+                })
+                .build()
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn test_workflow_creation() {
         let dir = tempdir().unwrap();
         let config = BootstrapConfig::builder()
@@ -1019,7 +1109,7 @@ mod tests {
     /// Regression for br-sy5ks: a successful single-device bootstrap
     /// MUST hand the recovery phrase back to the caller. Before this
     /// fix the phrase was generated, logged as "generated" without
-    /// words, fed to a tracing::debug no-op `save_recovery_phrase`,
+    /// words, fed to a `tracing::debug` no-op `save_recovery_phrase`,
     /// then silently dropped — total device loss = total owner
     /// identity loss with no recovery path.
     #[fcp_async_core::runtime::test]
@@ -1858,7 +1948,7 @@ mod tests {
             .build()
             .unwrap();
 
-        BootstrapWorkflow::new(config)
+        let _ = BootstrapWorkflow::new(config)
             .unwrap()
             .run()
             .unwrap()

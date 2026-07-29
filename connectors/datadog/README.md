@@ -203,9 +203,20 @@ The verification surface captures:
 
 - runtime operation inventory and capability metadata
 - deterministic WireMock coverage for the eight operations
+- live sandbox verification through `connectors/datadog/tests/live_verification.rs`
 - auth, URL policy, provider error, lifecycle, simulation, and introspection tests
 - formatting, check, and clippy proof through `rch`
 - UBS on changed files before commit
+
+Live sandbox verification requires:
+
+- `FCP_LIVE_SANDBOX=1`
+- `DATADOG_SANDBOX_SITE`
+- `DATADOG_SANDBOX_API_KEY`
+- `DATADOG_SANDBOX_APP_KEY`
+- `FCP_SANDBOX_RUN_NAMESPACE`
+
+The live suite performs one bounded `datadog.events.list` call and one low-priority namespaced `datadog.events.create` call. Datadog events are immutable, so closeout evidence records the created event as a namespaced sandbox artifact rather than claiming provider-side deletion.
 
 ## Operator Guidance
 

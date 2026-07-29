@@ -10,13 +10,18 @@
 )]
 
 use chrono::{Duration, Utc};
-use fcp_calendly::connector::{CalendlyConnector, operations_info};
+use fcp_calendly::{
+    client::CalendlyClient,
+    connector::{CalendlyConnector, operations_info},
+    error::CalendlyError,
+};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
-    RiskLevel, SafetyTier, ZoneId,
+    HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus, OperationId,
+    RequestId, RiskLevel, SafetyTier, ZoneId,
 };
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
@@ -62,7 +67,11 @@ fn capability_for_operation(op: &'static str) -> &'static str {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -78,7 +87,9 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should be valid")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -130,6 +141,59 @@ async fn setup_connector(base_url: &str) -> (CalendlyConnector, Ed25519SigningKe
         .await
         .unwrap();
     (connector, signing_key)
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_success() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me"))
+        .and(header("authorization", "Bearer test_tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "resource": {
+                "uri": "https://api.calendly.com/users/abc",
+                "name": "Test",
+                "email": "test@example.com"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = CalendlyClient::new(&server.uri(), "test_tok", HttpRetryConfig::default())
+        .expect("loopback Calendly client should build");
+    assert!(client.health_check().await.is_ok());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_401() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me"))
+        .and(header("authorization", "Bearer bad_tok"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let client = CalendlyClient::new(&server.uri(), "bad_tok", HttpRetryConfig::default())
+        .expect("loopback Calendly client should build");
+    let result = client.health_check().await;
+    assert!(matches!(result, Err(CalendlyError::Unauthorized(_))));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_429() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me"))
+        .and(header("authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+
+    let client = CalendlyClient::new(&server.uri(), "tok", HttpRetryConfig::default())
+        .expect("loopback Calendly client should build");
+    let result = client.health_check().await;
+    assert!(matches!(result, Err(CalendlyError::RateLimited { .. })));
 }
 
 #[fcp_async_core::runtime::test]
@@ -287,7 +351,11 @@ async fn invoke_scheduling_link_create_emits_mutation_evidence() {
                 "owner_type": "EventType",
                 "max_event_count": 1
             }),
-            generate_valid_token(&signing_key, OP_SCHEDULING_LINKS_CREATE),
+            generate_valid_token(
+                &signing_key,
+                OP_SCHEDULING_LINKS_CREATE,
+                connector.instance_id(),
+            ),
         ))
         .await
         .unwrap();
@@ -331,7 +399,7 @@ async fn invoke_cancel_event_emits_mutation_evidence() {
                 "event_uuid": "event-123",
                 "reason": "Rescheduled by operator"
             }),
-            generate_valid_token(&signing_key, OP_EVENTS_CANCEL),
+            generate_valid_token(&signing_key, OP_EVENTS_CANCEL, connector.instance_id()),
         ))
         .await
         .unwrap();

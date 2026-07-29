@@ -38,14 +38,15 @@ The current crate exposes these operations:
 
 Important implementation truths from `connector.rs`, `main.rs`, and `manifest.toml`:
 
-- Configuration is `relay_urls`, `secret_key_hex`, bounded `request_timeout_ms`, `default_query_limit`, local-harness relay opt-in, relay circuit-breaker thresholds, and nested `inbound_dm` policy/replay/rate-limit settings.
+- Configuration is `relay_urls`, `secret_key_hex`, bounded `request_timeout_ms`, `default_query_limit`, local-harness relay opt-in, relay circuit-breaker thresholds, nested `inbound_dm` policy/replay/rate-limit settings, and outbound `chat_coordination` settings.
 - One connector instance is bound to one secp256k1 secret key and therefore one derived x-only public key.
 - The connector accepts `secret_key_hex` as raw 64-character hex or NIP-19 `nsec`; secrets are redacted in Debug and error paths.
 - Signing happens locally in-process; the connector derives `public_key_hex` and keeps the configured secret key in memory only.
-- `nostr.notes.publish` signs one kind-`1` note locally and sends `["EVENT", <event>]` to every configured relay.
+- `nostr.notes.publish` claims chat-thread ownership before signing/fanout. Tagged replies coordinate on the root/first `e` tag; threadless public notes coordinate on a redacted connector-identity channel unless `chat_coordination.dm_mode = "skip"`.
 - `nostr.notes.publish` accepts optional `tags`, but the runtime rejects non-note kinds so the capability boundary stays aligned with `nostr.notes.write`.
-- `nostr.dm.send` normalizes `recipient`, `recipient_pubkey`, or `target` from raw hex, NIP-19 `npub`, or `nostr:npub`, encrypts `plaintext`/`content` with NIP-04 AES-256-CBC, signs a kind-`4` event with a recipient `p` tag, and sends `["EVENT", <event>]` to every configured relay.
-- DM operation output returns event id, kind, sender/recipient public metadata, tags, and per-relay delivery diagnostics; it intentionally omits plaintext and encrypted content.
+- `nostr.dm.send` claims the redacted recipient conversation before normalizing/encrypting/signing/fanout; duplicate active owners receive `FcpError::Unauthorized { code: 4090, message: "thread_owned_by_peer:{owner_agent_id}" }` before any relay WebSocket publish.
+- Successful public-note and DM outputs include `coordination` audit records (`claim_attempt`, `claim_outcome`, and `send_executed`) that do not contain note/DM plaintext, ciphertext, raw recipient keys, or raw event-thread IDs.
+- DM operation output returns event id, kind, sender/recipient public metadata, tags, coordination audit records, and per-relay delivery diagnostics; it intentionally omits plaintext and encrypted content.
 - Self-send DMs are rejected unless `allow_self_send` is explicitly true.
 - `nostr.profile.publish` validates a NIP-01 profile object, requires profile URLs to be `https://` and not loopback/private/link-local/`.local`/`.internal`, signs one kind-`0` event with the connector key, fans out to configured relays, and recommends/persists state only after at least one relay accepts.
 - `nostr.profile.state` reads connector-owned profile publish state from handshake `zone_dir` when present. It stores public event/profile metadata only.
@@ -119,6 +120,15 @@ This slice is intentionally closer to "public-note publish plus NIP-01 profile m
 - DM publish fanout currently targets every configured relay; there is no per-request relay override or policy filter
 - Health proves websocket reachability and local key derivation, while `nostr.relays.health` probes relay kind support and resilience state
 
+## Outbound Chat Coordination
+
+- Outbound coordination is tracked under parent bead `flywheel_connectors-6n7.16`.
+- `chat_coordination` supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`.
+- The connector default uses the SDK in-memory checker for local/loopback operation until the host wires a durable backend. Operators can still select `agent_mail` or `mesh_gossip` in config so audit records reflect the intended backend.
+- Allowlist entries must use the connector's redaction-safe coordination channel ids, not raw Nostr public keys or event ids.
+- For DMs without a native thread id, the default `dm_mode = "treat_as_thread"` treats the redacted recipient conversation as both channel and thread. Set `dm_mode = "skip"` to bypass coordination for threadless sends.
+- Coordination audit records are intentionally redacted: they contain claim outcomes, backend, and deterministic redacted identifiers only.
+
 ## Capability Families
 
 | Capability | Purpose |
@@ -135,8 +145,8 @@ This slice is intentionally closer to "public-note publish plus NIP-01 profile m
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `nostr.notes.publish` | websocket `["EVENT", <event>]` per relay | `nostr.notes.write` | `Risky` | `Medium` | `None` | Publishes one locally signed kind-1 public note to every configured relay. It stays separate from encrypted DM sends and rejects other event kinds. |
-| `nostr.dm.send` | websocket `["EVENT", <kind-4 event>]` per relay | `nostr.dm.write` | `Risky` | `High` | `None` | Encrypts plaintext with NIP-04, signs one kind-4 event with a recipient `p` tag, returns public event metadata and per-relay diagnostics, and omits plaintext/ciphertext from operation output. |
+| `nostr.notes.publish` | chat coordination claim, then websocket `["EVENT", <event>]` per relay | `nostr.notes.write` | `Risky` | `Medium` | `None` | Publishes one locally signed kind-1 public note to every configured relay after duplicate-owner denial. It stays separate from encrypted DM sends and rejects other event kinds. |
+| `nostr.dm.send` | chat coordination claim, then websocket `["EVENT", <kind-4 event>]` per relay | `nostr.dm.write` | `Risky` | `High` | `None` | Encrypts plaintext with NIP-04, signs one kind-4 event with a recipient `p` tag, returns public event metadata, coordination audit records, and per-relay diagnostics, and omits plaintext/ciphertext from operation output. |
 | `nostr.profile.publish` | websocket `["EVENT", <kind-0 event>]` per relay | `nostr.profile.write` | `Risky` | `Medium` | `None` | Validates profile fields and URL safety, signs one kind-0 event, fans out to configured relays, and persists publish state only after relay acceptance. |
 | `nostr.profile.state` | local inspection only | `nostr.profile.read` | `Safe` | `Low` | `Strict` | Returns last profile event id, timestamp, per-relay publish results, and profile fields from connector-owned state. |
 | `nostr.profile.import` | websocket `["REQ", <sub_id>, <kind-0 filter>]` until `EOSE` | `nostr.profile.read` | `Safe` | `Low` | `Strict` | Imports the newest verified kind-0 profile from configured relays, drops unsafe URL fields, and returns display-sanitized/merge-ready profile data. |

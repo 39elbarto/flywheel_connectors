@@ -4,7 +4,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/package_registry_connector/${RUN_ID}}"
+OUT_BASE="${OUT_BASE:-${REPO_ROOT}/.codex-targets/package-registry-verification}"
+OUT_ROOT="${OUT_ROOT:-${OUT_BASE}/${RUN_ID}}"
+TARGET_DIR="${FCP_PACKAGE_REGISTRY_TARGET_DIR:-/tmp/fcp-package-registry-e2e-target}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -38,12 +43,19 @@ run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
+  mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
   echo "[package-registry-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && requires_rch_remote_proof "${name}" && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 run_capture_stdout() {
@@ -51,12 +63,19 @@ run_capture_stdout() {
   local stdout_path="$2"
   shift 2
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
+  mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
   echo "[package-registry-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${stdout_path}" 2>"${log_path}"
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && requires_rch_remote_proof "${name}" && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 promote_overall_status() {
@@ -77,8 +96,81 @@ promote_overall_status() {
 
 classify_manifest_failure() {
   local log_path="$1"
-  if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
+  if [[ ! -f "${log_path}" ]]; then
     echo "infra_blocked"
+    return
+  fi
+
+  # shellcheck disable=SC2016
+  if grep -Eq 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
+    echo "infra_blocked"
+  else
+    echo "failed"
+  fi
+}
+
+classify_step_failure() {
+  local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+
+  if grep -Eq 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process' "${log_path}"; then
+    echo "infra_blocked"
+  else
+    echo "failed"
+  fi
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+
+  if [[ ! -f "${log_path}" ]]; then
+    echo "[package-registry-verification] ${name}: log file missing before rch proof check" >&2
+    return 1
+  fi
+
+  if grep -Fq "[RCH] remote" "${log_path}"; then
+    return 0
+  fi
+
+  echo "[package-registry-verification] ${name}: rch command did not produce remote proof" >&2
+  mkdir -p "$(dirname "${log_path}")"
+  echo "rch command did not produce remote proof" >>"${log_path}"
+  return 1
+}
+
+requires_rch_remote_proof() {
+  case "$1" in
+    format_check)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+derive_integration_evidence_status() {
+  local name="$1"
+  local test_name="$2"
+  local integration_log="${OUT_ROOT}/logs/integration_suite.log"
+  local evidence_log="${OUT_ROOT}/logs/${name}.log"
+
+  mkdir -p "${OUT_ROOT}/logs"
+  if [[ -f "${integration_log}" ]]; then
+    cp "${integration_log}" "${evidence_log}"
+  fi
+
+  if [[ "${integration_suite_status}" != "passed" ]]; then
+    echo "${integration_suite_status}"
+    return
+  fi
+
+  if [[ -f "${integration_log}" ]] && grep -Fq "test ${test_name} ... ok" "${integration_log}"; then
+    echo "passed"
   else
     echo "failed"
   fi
@@ -86,37 +178,28 @@ classify_manifest_failure() {
 
 require_cmd rch
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-manifest_check_cmd=()
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
-  manifest_check_cmd=(
-    "${FWC_MANIFEST_BIN}"
-    manifest
-    fix
-    connectors/package-registry/manifest.toml
-    --check
-    --json
-  )
-else
-  manifest_check_runner="rch:cargo-run"
-  manifest_check_cmd=(
-    rch
-    exec
-    --
-    cargo
-    run
-    -q
-    -p
-    fwc
-    --
-    manifest
-    fix
-    connectors/package-registry/manifest.toml
-    --check
-    --json
-  )
-fi
+manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
+manifest_check_cmd=(
+  env
+  RCH_VISIBILITY=verbose
+  rch
+  exec
+  --
+  env
+  "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}"
+  CARGO_TARGET_DIR="${TARGET_DIR}"
+  cargo
+  run
+  -q
+  -p
+  fwc
+  --
+  manifest
+  fix
+  connectors/package-registry/manifest.toml
+  --check
+  --json
+)
 
 if run_capture_stdout \
   manifest_check \
@@ -128,7 +211,11 @@ then
 else
   manifest_status="$(classify_manifest_failure "${OUT_ROOT}/logs/manifest_check.log")"
   if [[ "${manifest_status}" == "infra_blocked" ]]; then
-    manifest_note="rch worker image missing dbus-1.pc while building fwc for manifest validation"
+    if grep -Fq "rch command did not produce remote proof" "${OUT_ROOT}/logs/manifest_check.log"; then
+      manifest_note="rch command did not produce remote proof for manifest validation"
+    else
+      manifest_note="infrastructure blocked manifest validation; inspect logs/manifest_check.log"
+    fi
   else
     manifest_note="manifest validation command failed; inspect logs/manifest_check.log"
   fi
@@ -145,113 +232,85 @@ fi
 
 if run_logged \
   cargo_check \
-  rch exec -- cargo check -p fcp-package-registry --all-targets
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-package-registry --all-targets
 then
   cargo_check_status="passed"
 else
-  cargo_check_status="failed"
-  promote_overall_status failed
+  cargo_check_status="$(classify_step_failure "${OUT_ROOT}/logs/cargo_check.log")"
+  promote_overall_status "${cargo_check_status}"
 fi
 
 if run_logged \
   format_check \
-  rch exec -- cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
+  env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
 then
   format_check_status="passed"
 else
-  format_check_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  health_guidance_evidence \
-  rch exec -- cargo test -p fcp-package-registry --test integration health_unconfigured_includes_guidance -- --nocapture
-then
-  health_guidance_status="passed"
-else
-  health_guidance_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  doctor_guidance_evidence \
-  rch exec -- cargo test -p fcp-package-registry --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-then
-  doctor_guidance_status="passed"
-else
-  doctor_guidance_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  self_check_evidence \
-  rch exec -- cargo test -p fcp-package-registry --test integration self_check_ready_with_crates_override_and_evidence -- --nocapture
-then
-  self_check_status="passed"
-else
-  self_check_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  retryable_self_check_evidence \
-  rch exec -- cargo test -p fcp-package-registry --test integration self_check_retryable_registry_failure_reports_degraded -- --nocapture
-then
-  retryable_self_check_status="passed"
-else
-  retryable_self_check_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  pagination_evidence \
-  rch exec -- cargo test -p fcp-package-registry --test integration invoke_search_uses_npm_pagination_offset -- --nocapture
-then
-  pagination_evidence_status="passed"
-else
-  pagination_evidence_status="failed"
-  promote_overall_status failed
-fi
-
-if run_logged \
-  compliance_evidence \
-  rch exec -- cargo test -p fcp-package-registry --test integration introspection_emits_v3_compliance_evidence -- --nocapture
-then
-  compliance_status="passed"
-else
-  compliance_status="failed"
-  promote_overall_status failed
+  format_check_status="$(classify_step_failure "${OUT_ROOT}/logs/format_check.log")"
+  promote_overall_status "${format_check_status}"
 fi
 
 if run_logged \
   integration_suite \
-  rch exec -- cargo test -p fcp-package-registry --test integration -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry --test integration -- --nocapture
 then
   integration_suite_status="passed"
 else
-  integration_suite_status="failed"
-  promote_overall_status failed
+  integration_suite_status="$(classify_step_failure "${OUT_ROOT}/logs/integration_suite.log")"
+  promote_overall_status "${integration_suite_status}"
+fi
+
+health_guidance_status="$(derive_integration_evidence_status health_guidance_evidence health_unconfigured_includes_guidance)"
+if [[ "${health_guidance_status}" != "passed" ]]; then
+  promote_overall_status "${health_guidance_status}"
+fi
+
+doctor_guidance_status="$(derive_integration_evidence_status doctor_guidance_evidence doctor_unconfigured_reports_operator_guidance)"
+if [[ "${doctor_guidance_status}" != "passed" ]]; then
+  promote_overall_status "${doctor_guidance_status}"
+fi
+
+self_check_status="$(derive_integration_evidence_status self_check_evidence self_check_ready_with_crates_override_and_evidence)"
+if [[ "${self_check_status}" != "passed" ]]; then
+  promote_overall_status "${self_check_status}"
+fi
+
+retryable_self_check_status="$(derive_integration_evidence_status retryable_self_check_evidence self_check_retryable_registry_failure_reports_degraded)"
+if [[ "${retryable_self_check_status}" != "passed" ]]; then
+  promote_overall_status "${retryable_self_check_status}"
+fi
+
+pagination_evidence_status="$(derive_integration_evidence_status pagination_evidence invoke_search_uses_npm_pagination_offset)"
+if [[ "${pagination_evidence_status}" != "passed" ]]; then
+  promote_overall_status "${pagination_evidence_status}"
+fi
+
+compliance_status="$(derive_integration_evidence_status compliance_evidence introspection_emits_v3_compliance_evidence)"
+if [[ "${compliance_status}" != "passed" ]]; then
+  promote_overall_status "${compliance_status}"
 fi
 
 if run_logged \
   crate_suite \
-  rch exec -- cargo test -p fcp-package-registry -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-package-registry -- --nocapture
 then
   crate_suite_status="passed"
 else
-  crate_suite_status="failed"
-  promote_overall_status failed
+  crate_suite_status="$(classify_step_failure "${OUT_ROOT}/logs/crate_suite.log")"
+  promote_overall_status "${crate_suite_status}"
 fi
 
 if run_logged \
   clippy \
-  rch exec -- cargo clippy -p fcp-package-registry --all-targets -- -D warnings
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-package-registry --all-targets -- -D warnings
 then
   clippy_status="passed"
 else
-  clippy_status="failed"
-  promote_overall_status failed
+  clippy_status="$(classify_step_failure "${OUT_ROOT}/logs/clippy.log")"
+  promote_overall_status "${clippy_status}"
 fi
+
+mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
 cat > "${OUT_ROOT}/environment.json" <<EOF
 {
@@ -260,32 +319,28 @@ cat > "${OUT_ROOT}/environment.json" <<EOF
   "repo_root": "${REPO_ROOT}",
   "verification_script": "scripts/e2e/package_registry_connector_verification.sh",
   "artifact_root": "${OUT_ROOT}",
+  "target_dir": "${TARGET_DIR}",
   "manifest_check_runner": "${manifest_check_runner}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "scope_note": "first slice is read-only metadata and readiness; no publish or mutation workflows are exercised"
 }
 EOF
 
-cat > "${OUT_ROOT}/replay.sh" <<'EOF'
+cat > "${OUT_ROOT}/replay.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  "${FWC_MANIFEST_BIN}" manifest fix connectors/package-registry/manifest.toml --check --json
-else
-  rch exec -- cargo run -q -p fwc -- manifest fix connectors/package-registry/manifest.toml --check --json
-fi
-rch exec -- cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
-rch exec -- cargo check -p fcp-package-registry --all-targets
-rch exec -- cargo test -p fcp-package-registry --test integration health_unconfigured_includes_guidance -- --nocapture
-rch exec -- cargo test -p fcp-package-registry --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-rch exec -- cargo test -p fcp-package-registry --test integration self_check_ready_with_crates_override_and_evidence -- --nocapture
-rch exec -- cargo test -p fcp-package-registry --test integration self_check_retryable_registry_failure_reports_degraded -- --nocapture
-rch exec -- cargo test -p fcp-package-registry --test integration invoke_search_uses_npm_pagination_offset -- --nocapture
-rch exec -- cargo test -p fcp-package-registry --test integration introspection_emits_v3_compliance_evidence -- --nocapture
-rch exec -- cargo test -p fcp-package-registry --test integration -- --nocapture
-rch exec -- cargo test -p fcp-package-registry -- --nocapture
-rch exec -- cargo clippy -p fcp-package-registry --all-targets -- -D warnings
+TARGET_DIR="\${FCP_PACKAGE_REGISTRY_TARGET_DIR:-${TARGET_DIR}}"
+REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
+export RCH_FORCE_REMOTE=1
+
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/package-registry/manifest.toml --check --json
+env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --manifest-path connectors/package-registry/Cargo.toml --check
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-package-registry --all-targets
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry --test integration -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test -p fcp-package-registry -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-package-registry --all-targets -- -D warnings
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 
@@ -295,6 +350,8 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
   "connector": "fcp-package-registry",
   "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "steps": {
     "manifest_check": {
       "status": "${manifest_status}",

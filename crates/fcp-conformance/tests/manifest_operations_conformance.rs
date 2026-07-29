@@ -852,11 +852,11 @@ fn connector_names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
-fn expected_input_schema_gap_connectors() -> Vec<String> {
+const fn expected_input_schema_gap_connectors() -> Vec<String> {
     Vec::new()
 }
 
-fn expected_output_schema_gap_connectors() -> Vec<String> {
+const fn expected_output_schema_gap_connectors() -> Vec<String> {
     expected_input_schema_gap_connectors()
 }
 
@@ -865,17 +865,11 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
 }
 
 fn expected_sandbox_gap_connectors() -> Vec<String> {
-    connector_names(&["anthropic-vertex", "inworld"])
+    connector_names(&[])
 }
 
 fn expected_ai_hints_gap_connectors() -> Vec<String> {
-    connector_names(&[
-        "google-people",
-        "google-workspace-events",
-        "mastodon",
-        "nostr",
-        "telnyx",
-    ])
+    connector_names(&[])
 }
 
 fn connectors_with_gap<F>(records: &[ManifestFieldCoverageRecord], gap: F) -> Vec<String>

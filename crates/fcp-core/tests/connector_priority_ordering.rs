@@ -1,39 +1,41 @@
 //! Pin `RiskTier` documented-ordinal ordering + `required_quorum` priority
-//! ladder — the closest analogue to "ConnectorPriority ordering"
+//! ladder — the closest analogue to "`ConnectorPriority` ordering"
 //! (flywheel_connectors-os77d).
 //!
 //! Bead asks for `ConnectorPriority` Display + ordering pinning. No type
 //! literally named `ConnectorPriority` exists in fcp-core. The closest
 //! priority-ordered classifier directly tied to per-operation enforcement
 //! is [`RiskTier`] at `crates/fcp-core/src/quorum.rs:56` — a 4-variant
-//! enum (Safe / Risky / Dangerous / CriticalWrite) that drives signature-
+//! enum (Safe / Risky / Dangerous / `CriticalWrite`) that drives signature-
 //! count requirements via [`required_quorum`].
 //!
-//! `intent_priority_ordering.rs` already pins TrustLevel as another
-//! priority analogue. RiskTier serde + Display + truth-table-against-
-//! QuorumPurpose is pinned by `mesh_node_role_serde_tag.rs`. Residual
-//! axes (and the closest "ordering" surface): RiskTier does NOT derive
+//! `intent_priority_ordering.rs` already pins `TrustLevel` as another
+//! priority analogue. `RiskTier` serde + Display + truth-table-against-
+//! `QuorumPurpose` is pinned by `mesh_node_role_serde_tag.rs`. Residual
+//! axes (and the closest "ordering" surface): `RiskTier` does NOT derive
 //! Ord/PartialOrd, but the variant declaration order Safe → Risky →
-//! Dangerous → CriticalWrite IS the documented priority ladder, and
+//! Dangerous → `CriticalWrite` IS the documented priority ladder, and
 //! `required_quorum(n, f, tier)` pins the ladder via a monotonic
 //! signature-count function.
 //!
 //! Coverage:
-//!   * RiskTier documented-ordinal helper (Safe=0, Risky=1, Dangerous=2,
-//!     CriticalWrite=3) — pin the variant declaration order so a future
+//!   * `RiskTier` documented-ordinal helper (Safe=0, Risky=1, Dangerous=2,
+//!     `CriticalWrite`=3) — pin the variant declaration order so a future
 //!     enum-body shuffle is caught loudly,
-//!   * required_quorum monotonic ladder across (n, f) configurations:
-//!     1 ≤ f+1 ≤ n-f for sensible n,f → Safe ≤ Risky ≤ Dangerous = CriticalWrite,
+//!   * `required_quorum` monotonic ladder across (n, f) configurations:
+//!     1 ≤ f+1 ≤ n-f for sensible n,f → Safe ≤ Risky ≤ Dangerous =
+//!     `CriticalWrite`,
 //!   * Loud Dangerous-equals-CriticalWrite signature-count sentinel: both
 //!     tiers MUST require the same n-f count (they're disjoint by
 //!     classification but unified in BFT quorum size — pin so a future
 //!     attempt to differentiate them silently breaks BFT semantics),
-//!   * is_quorum_met truth table: signature_count ≥ required_signatures,
-//!   * can_proceed_degraded enforcement: ONLY Safe permitted under
+//!   * `is_quorum_met` truth table: `signature_count` ≥
+//!     `required_signatures`,
+//!   * `can_proceed_degraded` enforcement: ONLY Safe permitted under
 //!     degraded mode (the highest-priority safety contract — pin so a
 //!     future relaxation that lets Risky-or-higher proceed in degraded
 //!     mode is caught),
-//!   * default_risk_tier projection from QuorumPurpose for the four
+//!   * `default_risk_tier` projection from `QuorumPurpose` for the four
 //!     non-Safe-Lease purposes (sanity sentinel for the priority ladder).
 
 use fcp_core::{QuorumPolicy, QuorumPurpose, RiskTier, ZoneId, required_quorum};
@@ -45,9 +47,9 @@ const ALL_TIERS: &[RiskTier] = &[
     RiskTier::CriticalWrite,
 ];
 
-/// Documented ordinal mapping for the priority ladder. RiskTier does NOT
+/// Documented ordinal mapping for the priority ladder. `RiskTier` does NOT
 /// derive Ord; this helper IS the canonical mapping.
-fn tier_ordinal(t: RiskTier) -> u8 {
+const fn tier_ordinal(t: RiskTier) -> u8 {
     match t {
         RiskTier::Safe => 0,
         RiskTier::Risky => 1,

@@ -37,13 +37,14 @@ fn qq_manifest_operations(manifest: &toml::Value) -> &toml::Table {
 
 fn expected_qq_manifest_operations() -> BTreeSet<String> {
     [
-        "messages_send_channel",
-        "messages_send_group",
-        "messages_send_c2c",
-        "gateway_get",
-        "events_normalize",
-        "gateway_project_event",
-        "health",
+        "qq.messages.send_channel",
+        "qq.messages.send_group",
+        "qq.messages.send_c2c",
+        "qq.gateway.get",
+        "qq.events.normalize",
+        "qq.gateway.project_event",
+        "qq.gateway.drain_events",
+        "qq.health",
     ]
     .into_iter()
     .map(str::to_owned)

@@ -624,7 +624,7 @@ impl CommandAvailability {
             },
             Self::Unsupported => vec![
                 "Check if a newer connector version supports this operation.".to_owned(),
-                format!("Use `fwc ops <connector>` to see available operations."),
+                "Use `fwc ops <connector>` to see available operations.".to_owned(),
             ],
             Self::Planned => vec![
                 "This feature is under development and not yet available.".to_owned(),
@@ -2228,11 +2228,13 @@ fn normalize_manifest_for_discovery(raw: &str) -> Result<Option<toml::Value>> {
 fn parse_connector_status_label(value: &str) -> Option<ConnectorStatus> {
     match value.trim().to_ascii_lowercase().as_str() {
         "ready" => Some(ConnectorStatus::Ready),
+        "proven" => Some(ConnectorStatus::Proven),
         "stub" => Some(ConnectorStatus::Stub),
         "experimental" => Some(ConnectorStatus::Experimental),
         "deprecated" => Some(ConnectorStatus::Deprecated),
         "incubating" => Some(ConnectorStatus::Incubating),
         "quarantined" => Some(ConnectorStatus::Quarantined),
+        "adversarial" => Some(ConnectorStatus::Adversarial),
         _ => None,
     }
 }

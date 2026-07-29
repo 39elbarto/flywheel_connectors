@@ -184,7 +184,11 @@ impl FcpConnector for GoogleDriveAdapter {
     }
 }
 
-fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    capabilities: &[&str],
+    instance_id: &InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -197,11 +201,15 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id.clone()),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey, operation: &'static str) -> CapabilityToken {
+fn build_token(
+    signing_key: &Ed25519SigningKey,
+    operation: &'static str,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".to_string()],
@@ -213,6 +221,7 @@ fn build_token(signing_key: &Ed25519SigningKey, operation: &'static str) -> Capa
     let cose = CapabilityTokenBuilder::new()
         .capability_id("drive.read")
         .zone_id("z:work")
+        .target_instance(instance_id.as_str())
         .principal("user:test")
         .operations(&[operation])
         .issuer("node:test")
@@ -226,6 +235,7 @@ fn build_token(signing_key: &Ed25519SigningKey, operation: &'static str) -> Capa
 
 fn drive_invoke(
     signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
     id: &'static str,
     operation: &'static str,
     input: serde_json::Value,
@@ -237,7 +247,7 @@ fn drive_invoke(
         operation: OperationId::from_static(operation),
         zone_id: ZoneId::work(),
         input,
-        capability_token: build_token(signing_key, operation),
+        capability_token: build_token(signing_key, operation, instance_id),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -277,9 +287,15 @@ async fn connector_suite_happy_path_lists_files() {
 
     let mut connector = GoogleDriveAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["drive.read"]);
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["drive.read"],
+        &instance_id,
+    );
     let invoke = drive_invoke(
         &signing_key,
+        &instance_id,
         "drive-happy-path",
         "drive.list_files",
         json!({ "query": "name contains 'Report'" }),
@@ -351,9 +367,15 @@ async fn connector_suite_error_path_reports_not_found_file() {
 
     let mut connector = GoogleDriveAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["drive.read"]);
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["drive.read"],
+        &instance_id,
+    );
     let invoke = drive_invoke(
         &signing_key,
+        &instance_id,
         "drive-not-found",
         "drive.get_file",
         json!({ "file_id": "file_missing" }),

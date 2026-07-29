@@ -1,0 +1,19 @@
+name = "packet_reorder"
+blast_radius = 2
+recovery_objective_secs = 45
+
+[[rollback_steps]]
+name = "clear_packet_reorder"
+action = "clear_tc_netem"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+reorder_pct = "25"
+
+[[rollback_steps]]
+name = "verify_packet_order_normalized"
+action = "wait_for_reorder_below_threshold"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+threshold_pct = "0.1"

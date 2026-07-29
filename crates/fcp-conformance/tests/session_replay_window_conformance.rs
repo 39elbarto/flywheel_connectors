@@ -6,7 +6,7 @@
 //! so an attacker replaying captured frames cannot force the receiver
 //! into a CPU-exhaustion loop. This is distinct from
 //! `HelloReplayWindow` (session-handshake nonce, pinned in
-//! session_nonce_replay_conformance.rs) — that one keys by
+//! `session_nonce_replay_conformance.rs`) — that one keys by
 //! (`from_node`, `nonce`); this one keys by sequence number alone
 //! within an already-authenticated session.
 //!

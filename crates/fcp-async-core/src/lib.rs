@@ -104,20 +104,27 @@ pub struct NoopInstrumentation;
 
 impl Instrumentation for NoopInstrumentation {}
 
-/// Return the current `asupersync::Cx` or a testing fallback.
+/// Return the current `asupersync::Cx`.
 ///
 /// Downstream crates should call this instead of importing `asupersync::Cx`
-/// directly, keeping the raw runtime dependency encapsulated.
+/// directly, keeping the raw runtime dependency encapsulated. Callers must run
+/// under an active asupersync runtime context.
+///
+/// # Panics
+///
+/// Panics when called outside an active asupersync runtime context.
 #[must_use]
 pub fn compatibility_cx() -> asupersync::Cx {
-    asupersync::Cx::current().unwrap_or_else(asupersync::Cx::for_testing)
+    asupersync::Cx::current().expect(
+        "fcp_async_core::compatibility_cx called outside an active asupersync runtime context",
+    )
 }
 
 /// Runtime bridging helpers.
 pub mod runtime {
     use std::cell::RefCell;
     use std::io;
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
 
     #[cfg(test)]
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -221,6 +228,7 @@ pub mod runtime {
     pub struct Builder {
         inner: AsupersyncRuntimeBuilder,
         flavor: RuntimeFlavor,
+        io_enabled: bool,
     }
 
     impl Builder {
@@ -230,6 +238,7 @@ pub mod runtime {
             Self {
                 inner: AsupersyncRuntimeBuilder::current_thread(),
                 flavor: RuntimeFlavor::CurrentThread,
+                io_enabled: false,
             }
         }
 
@@ -239,12 +248,14 @@ pub mod runtime {
             Self {
                 inner: AsupersyncRuntimeBuilder::multi_thread(),
                 flavor: RuntimeFlavor::MultiThread,
+                io_enabled: false,
             }
         }
 
         /// Enable all runtime services.
         #[must_use]
-        pub const fn enable_all(self) -> Self {
+        pub const fn enable_all(mut self) -> Self {
+            self.io_enabled = true;
             self
         }
 
@@ -256,7 +267,8 @@ pub mod runtime {
 
         /// Enable I/O services.
         #[must_use]
-        pub const fn enable_io(self) -> Self {
+        pub const fn enable_io(mut self) -> Self {
+            self.io_enabled = true;
             self
         }
 
@@ -266,13 +278,77 @@ pub mod runtime {
         ///
         /// Returns I/O errors from runtime initialization.
         pub fn build(self) -> io::Result<Runtime> {
-            self.inner
+            let inner = if self.io_enabled {
+                match platform_reactor()? {
+                    // A reactor without a timer driver leaves sleep/timeout
+                    // deadlines invisible to the scheduler's I/O poll, which
+                    // then falls back to its 250ms idle cap: sub-250ms timers
+                    // quantize to ~250ms and racing `timeout(d, fut)` pairs
+                    // resolve in the wrong order. Wire the wall-clock timer
+                    // driver alongside the reactor so `drive_io_phase` clamps
+                    // its poll to the earliest pending timer deadline.
+                    Some(reactor) => self
+                        .inner
+                        .with_reactor(reactor)
+                        .with_timer_driver(asupersync::time::TimerDriverHandle::with_wall_clock()),
+                    None => self.inner,
+                }
+            } else {
+                self.inner
+            };
+
+            inner
                 .build()
                 .map(|inner| Runtime {
                     inner,
                     flavor: self.flavor,
                 })
                 .map_err(|err| io::Error::other(err.to_string()))
+        }
+    }
+
+    fn platform_reactor() -> io::Result<Option<Arc<dyn asupersync::runtime::reactor::Reactor>>> {
+        // Exactly one of the mutually exclusive cfg blocks below compiles on
+        // any given platform, so each block is that platform's tail
+        // expression (no `return`, which clippy flags as needless).
+        #[cfg(target_os = "linux")]
+        {
+            asupersync::runtime::reactor::EpollReactor::new().map(|reactor| {
+                Some(Arc::new(reactor) as Arc<dyn asupersync::runtime::reactor::Reactor>)
+            })
+        }
+
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        {
+            asupersync::runtime::reactor::KqueueReactor::new().map(|reactor| {
+                Some(Arc::new(reactor) as Arc<dyn asupersync::runtime::reactor::Reactor>)
+            })
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            asupersync::runtime::reactor::IocpReactor::new().map(|reactor| {
+                Some(Arc::new(reactor) as Arc<dyn asupersync::runtime::reactor::Reactor>)
+            })
+        }
+
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly",
+            target_os = "windows"
+        )))]
+        {
+            Ok(None)
         }
     }
 
@@ -354,9 +430,11 @@ pub mod runtime {
 pub mod time {
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::task::{Context, Poll};
-    use std::time::Duration;
+    use std::thread::{self, JoinHandle, Thread};
+    use std::time::{Duration, Instant};
 
     use asupersync::types::Time;
 
@@ -376,15 +454,95 @@ pub mod time {
     }
 
     /// Sleep future abstraction owned by async-core.
+    struct SleepState {
+        ready: AtomicBool,
+        cancelled: AtomicBool,
+        waker: Mutex<Option<std::task::Waker>>,
+    }
+
     pub struct Sleep {
-        inner: Pin<Box<asupersync::time::Sleep>>,
+        duration: Duration,
+        state: Arc<SleepState>,
+        thread: Option<Thread>,
+        join: Option<JoinHandle<()>>,
+        started: bool,
+    }
+
+    impl Sleep {
+        fn start(&mut self) {
+            if self.started {
+                return;
+            }
+            self.started = true;
+
+            if self.duration.is_zero() {
+                self.state.ready.store(true, Ordering::Release);
+                return;
+            }
+
+            let state = Arc::clone(&self.state);
+            let duration = self.duration;
+            let join = thread::spawn(move || {
+                let deadline = super::saturating_instant_add(Instant::now(), duration);
+                loop {
+                    if state.cancelled.load(Ordering::Acquire) {
+                        return;
+                    }
+
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+
+                    thread::park_timeout(remaining);
+                }
+
+                state.ready.store(true, Ordering::Release);
+                let waker = state
+                    .waker
+                    .lock()
+                    .expect("sleep waker mutex poisoned")
+                    .take();
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+            });
+            self.thread = Some(join.thread().clone());
+            self.join = Some(join);
+        }
     }
 
     impl Future for Sleep {
         type Output = ();
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            self.inner.as_mut().poll(cx)
+            self.start();
+            if self.state.ready.load(Ordering::Acquire) {
+                return Poll::Ready(());
+            }
+
+            {
+                let mut waker = self.state.waker.lock().expect("sleep waker mutex poisoned");
+                if !waker.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+                    *waker = Some(cx.waker().clone());
+                }
+            }
+
+            if self.state.ready.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for Sleep {
+        fn drop(&mut self) {
+            self.state.cancelled.store(true, Ordering::Release);
+            if let Some(thread) = &self.thread {
+                thread.unpark();
+            }
+            let _ = self.join.take();
         }
     }
 
@@ -402,16 +560,31 @@ pub mod time {
                     return instant_from_time(self.inner.tick(now));
                 }
 
-                asupersync::time::sleep_until(self.inner.deadline()).await;
+                let delay = self
+                    .inner
+                    .deadline()
+                    .as_nanos()
+                    .saturating_sub(now.as_nanos());
+                sleep(Duration::from_nanos(delay)).await;
             }
         }
     }
 
     /// Sleep for a duration.
+    // Arc::new is not const on the active toolchain despite clippy's suggestion.
+    #[allow(clippy::missing_const_for_fn)]
     #[must_use]
     pub fn sleep(duration: Duration) -> Sleep {
         Sleep {
-            inner: Box::pin(asupersync::time::sleep(wall_now(), duration)),
+            duration,
+            state: Arc::new(SleepState {
+                ready: AtomicBool::new(false),
+                cancelled: AtomicBool::new(false),
+                waker: Mutex::new(None),
+            }),
+            thread: None,
+            join: None,
+            started: false,
         }
     }
 
@@ -432,11 +605,13 @@ pub mod time {
     where
         F: Future<Output = T>,
     {
-        asupersync::time::timeout(asupersync::time::wall_now(), duration, future)
-            .await
-            .map_err(|_| AsyncError::Timeout {
-                timeout_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
-            })
+        let timeout_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+
+        crate::select! {
+            biased;
+            () = sleep(duration) => Err(AsyncError::Timeout { timeout_ms }),
+            output = future => Ok(output),
+        }
     }
 }
 
@@ -725,7 +900,10 @@ pub mod channel {
             pub fn send(&self, value: T) -> Result<usize, SendError<T>> {
                 let cx = compatibility_cx();
                 self.inner.send(&cx, value).map_err(|err| match err {
-                    asupersync::channel::broadcast::SendError::Closed(value) => SendError(value),
+                    asupersync::channel::broadcast::SendError::Closed(value)
+                    | asupersync::channel::broadcast::SendError::Cancelled(value) => {
+                        SendError(value)
+                    }
                 })
             }
 
@@ -769,6 +947,7 @@ pub mod channel {
     /// Tokio mpsc compatibility surface owned by async-core.
     pub mod mpsc {
         use std::sync::Arc;
+        use std::time::Duration;
 
         use super::{AtomicUsize, Ordering, StdMutex, VecDeque, decrement_depth};
         use crate::compatibility_cx;
@@ -826,12 +1005,24 @@ pub mod channel {
             impl std::error::Error for TryRecvError {}
         }
 
+        /// Longest a parked [`Sender::closed`] waits before re-checking
+        /// `is_closed()` on its own initiative.
+        ///
+        /// The wrapper signals the closures it can observe (receiver drop and
+        /// explicit `Receiver::close`) through `close_signal`, so the common
+        /// case wakes immediately. This bound only covers closures that
+        /// originate inside the underlying asupersync channel, which the
+        /// wrapper never sees. It exists so `closed()` can never hang, and so
+        /// that waiting for it always parks the task instead of spinning.
+        const CLOSED_RECHECK_INTERVAL: Duration = Duration::from_millis(250);
+
         /// Bounded sender wrapper.
         #[derive(Debug)]
         pub struct Sender<T> {
             inner: asupersync::channel::mpsc::Sender<T>,
             capacity: usize,
             depth: Arc<AtomicUsize>,
+            close_signal: Arc<asupersync::sync::Notify>,
         }
 
         impl<T> Clone for Sender<T> {
@@ -840,6 +1031,7 @@ pub mod channel {
                     inner: self.inner.clone(),
                     capacity: self.capacity,
                     depth: Arc::clone(&self.depth),
+                    close_signal: Arc::clone(&self.close_signal),
                 }
             }
         }
@@ -850,6 +1042,16 @@ pub mod channel {
             inner: asupersync::channel::mpsc::Receiver<T>,
             capacity: usize,
             depth: Arc<AtomicUsize>,
+            close_signal: Arc<asupersync::sync::Notify>,
+        }
+
+        impl<T> Drop for Receiver<T> {
+            fn drop(&mut self) {
+                // Dropping the receiver is what closes the channel for every
+                // sender. Wake anyone parked in `Sender::closed` so they observe
+                // it now rather than at the next re-check.
+                self.close_signal.notify_waiters();
+            }
         }
 
         struct UnboundedState<T> {
@@ -1013,9 +1215,25 @@ pub mod channel {
                 self.inner.is_closed()
             }
 
+            /// Resolve once the receiving half is gone.
+            ///
+            /// This parks the task. It must never busy-wait: this future is
+            /// typically one arm of a `select!` against socket I/O, and a
+            /// self-waking arm keeps the task permanently runnable, which
+            /// starves the runtime's I/O phase — readiness for every other
+            /// socket on the runtime then goes unobserved while only timers
+            /// keep firing.
             pub async fn closed(&self) {
-                while !self.is_closed() {
-                    crate::task::yield_now().await;
+                loop {
+                    // Register with the signal BEFORE re-testing. `Notified`
+                    // captures the notify generation when it is constructed, so a
+                    // close landing between this check and the park still
+                    // completes the future instead of being missed.
+                    let signalled = self.close_signal.notified();
+                    if self.is_closed() {
+                        return;
+                    }
+                    let _ = crate::time::timeout(CLOSED_RECHECK_INTERVAL, signalled).await;
                 }
             }
         }
@@ -1060,6 +1278,7 @@ pub mod channel {
 
             pub fn close(&mut self) {
                 self.inner.close();
+                self.close_signal.notify_waiters();
             }
 
             #[must_use]
@@ -1118,16 +1337,19 @@ pub mod channel {
         pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             let (sender, receiver) = asupersync::channel::mpsc::channel(capacity);
             let depth = Arc::new(AtomicUsize::new(0));
+            let close_signal = Arc::new(asupersync::sync::Notify::new());
             (
                 Sender {
                     inner: sender,
                     capacity,
                     depth: Arc::clone(&depth),
+                    close_signal: Arc::clone(&close_signal),
                 },
                 Receiver {
                     inner: receiver,
                     capacity,
                     depth,
+                    close_signal,
                 },
             )
         }
@@ -1456,6 +1678,7 @@ pub mod channel {
 
             pub fn send_modify<F>(&self, f: F)
             where
+                T: Clone,
                 F: FnOnce(&mut T),
             {
                 let _ = self.inner.send_modify(f);
@@ -1687,10 +1910,30 @@ pub mod sync {
 
     pub use asupersync::sync::OwnedSemaphorePermit;
     use asupersync::sync::{
-        MutexGuard, RwLockReadGuard, RwLockWriteGuard, SemaphorePermit as AsupersyncSemaphorePermit,
+        LockError, MutexGuard, RwLockReadGuard, RwLockWriteGuard,
+        SemaphorePermit as AsupersyncSemaphorePermit,
     };
 
     use crate::compatibility_cx;
+
+    /// Builds a detached, non-root [`Cx`](asupersync::Cx) for scoping a
+    /// semaphore-permit obligation.
+    ///
+    /// asupersync refuses to create an obligation in the runtime *root* region:
+    /// `ObligationToken::reserve` panics with "obligations must be scoped to
+    /// non-root regions". The fcp-async-core runtime polls `block_on` futures —
+    /// and every `task::spawn`ed task — in the root region, so the ambient
+    /// `Cx::current()` there is root and acquiring a permit against it would
+    /// always panic (a compatibility break introduced by asupersync 0.3.4). A
+    /// permit's real effect is concurrency limiting via its `Drop`; the
+    /// obligation is only leak bookkeeping. `detached_cancel_context` provides a
+    /// synthetic non-root region intended for exactly this case — it cannot
+    /// create a root-scoped obligation. `compatibility_cx()` is still consulted
+    /// first so acquiring outside a runtime keeps its clear panic.
+    fn permit_scope_cx() -> asupersync::Cx<asupersync::cx::NoCaps> {
+        let _ambient = compatibility_cx();
+        asupersync::Cx::<asupersync::cx::NoCaps>::detached_cancel_context()
+    }
 
     /// Async mutex compatibility wrapper.
     #[derive(Debug, Default)]
@@ -1718,6 +1961,33 @@ pub mod sync {
                 .expect("fcp_async_core::sync::Mutex lock cancelled or poisoned")
         }
 
+        /// Acquire the mutex, tolerating poison instead of panicking.
+        ///
+        /// Returns `None` when the mutex is (or becomes) poisoned — i.e. a task
+        /// panicked while holding the guard. Callers that use the lock purely as
+        /// an optimization (e.g. single-flight guards) can degrade to an
+        /// unsynchronized path on `None` rather than propagating a poison panic
+        /// forever. Cancellation still panics, matching [`Self::lock`].
+        ///
+        /// # Panics
+        /// Panics if the underlying lock operation is cancelled.
+        pub async fn lock_poison_tolerant(&self) -> Option<MutexGuard<'_, T>> {
+            let cx = compatibility_cx();
+            match self.inner.lock(&cx).await {
+                Ok(guard) => Some(guard),
+                Err(LockError::Poisoned) => None,
+                Err(other) => {
+                    panic!("fcp_async_core::sync::Mutex lock_poison_tolerant failed: {other:?}")
+                }
+            }
+        }
+
+        /// Returns `true` if the mutex has been poisoned by a panic while held.
+        #[must_use]
+        pub fn is_poisoned(&self) -> bool {
+            self.inner.is_poisoned()
+        }
+
         /// Try to acquire the mutex without waiting.
         ///
         /// # Errors
@@ -1726,12 +1996,24 @@ pub mod sync {
             self.inner.try_lock().map_err(|_| TryLockError(()))
         }
 
+        /// Returns a mutable reference to the protected value.
+        ///
+        /// # Panics
+        /// Panics if the underlying mutex has been cancelled or poisoned.
         pub fn get_mut(&mut self) -> &mut T {
-            self.inner.get_mut()
+            self.inner
+                .get_mut()
+                .expect("fcp_async_core::sync::Mutex get_mut cancelled or poisoned")
         }
 
+        /// Consumes the mutex and returns the protected value.
+        ///
+        /// # Panics
+        /// Panics if the underlying mutex has been cancelled or poisoned.
         pub fn into_inner(self) -> T {
-            self.inner.into_inner()
+            self.inner
+                .into_inner()
+                .expect("fcp_async_core::sync::Mutex into_inner cancelled or poisoned")
         }
     }
 
@@ -1797,12 +2079,24 @@ pub mod sync {
             self.inner.try_write().map_err(|_| TryLockError(()))
         }
 
+        /// Returns a mutable reference to the protected value.
+        ///
+        /// # Panics
+        /// Panics if the underlying lock has been cancelled or poisoned.
         pub fn get_mut(&mut self) -> &mut T {
-            self.inner.get_mut()
+            self.inner
+                .get_mut()
+                .expect("fcp_async_core::sync::RwLock get_mut cancelled or poisoned")
         }
 
+        /// Consumes the lock and returns the protected value.
+        ///
+        /// # Panics
+        /// Panics if the underlying lock has been cancelled or poisoned.
         pub fn into_inner(self) -> T {
-            self.inner.into_inner()
+            self.inner
+                .into_inner()
+                .expect("fcp_async_core::sync::RwLock into_inner cancelled or poisoned")
         }
     }
 
@@ -1836,6 +2130,13 @@ pub mod sync {
         /// # Errors
         /// Returns `TryAcquireError` when no permit is currently available.
         pub fn try_acquire(&self) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+            // asupersync's synchronous `try_acquire` scopes the permit obligation
+            // to `Cx::current()`, which panics with no active context or in the
+            // root region (see `permit_scope_cx`). Because this call never awaits,
+            // temporarily installing a detached non-root context is safe and keeps
+            // the obligation off the root region.
+            let _cx_guard = asupersync::Cx::<asupersync::cx::NoCaps>::detached_cancel_context()
+                .set_current_restricted();
             self.inner.try_acquire(1).map_err(|_| TryAcquireError(()))
         }
 
@@ -1844,7 +2145,7 @@ pub mod sync {
         /// # Errors
         /// Returns `AcquireError` when the semaphore is closed before a permit is acquired.
         pub async fn acquire(&self) -> Result<SemaphorePermit<'_>, AcquireError> {
-            let cx = compatibility_cx();
+            let cx = permit_scope_cx();
             self.inner
                 .acquire(&cx, 1)
                 .await
@@ -1860,6 +2161,10 @@ pub mod sync {
         /// # Errors
         /// Returns `TryAcquireError` when no permit is currently available.
         pub fn try_acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+            // See `try_acquire`: scope the permit obligation to a detached
+            // non-root context for the duration of this non-awaiting call.
+            let _cx_guard = asupersync::Cx::<asupersync::cx::NoCaps>::detached_cancel_context()
+                .set_current_restricted();
             asupersync::sync::OwnedSemaphorePermit::try_acquire_arc(&self.inner, 1)
                 .map_err(|_| TryAcquireError(()))
         }
@@ -1869,7 +2174,7 @@ pub mod sync {
         /// # Errors
         /// Returns `AcquireError` when the semaphore is closed before a permit is acquired.
         pub async fn acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, AcquireError> {
-            let cx = compatibility_cx();
+            let cx = permit_scope_cx();
             asupersync::sync::OwnedSemaphorePermit::acquire(Arc::clone(&self.inner), &cx, 1)
                 .await
                 .map_err(|_| AcquireError(()))
@@ -2043,19 +2348,53 @@ pub mod task {
         }
     }
 
-    /// A future wrapper that enters a Tokio runtime context on every poll,
-    /// ensuring crates that depend on `tokio` (e.g., `reqwest`, `wiremock`)
-    /// work correctly on asupersync worker threads.
-    struct TokioContextFuture<F> {
+    /// A future wrapper that re-establishes both ambient runtime contexts on
+    /// EVERY poll: the Tokio compatibility context (so crates depending on
+    /// `tokio`, e.g. `reqwest` and `wiremock`, work on asupersync worker threads)
+    /// and the `fcp_async_core` runtime context (so the task can itself spawn).
+    ///
+    /// Per-poll rather than once-per-task, and that distinction is the whole
+    /// point. Both contexts live in thread-locals, and on a work-stealing
+    /// multi-threaded scheduler a task may resume on a different worker after
+    /// every await. A context installed at the first poll and held across an
+    /// await is simply not present on the thread the task resumes on, so the next
+    /// `task::spawn` from inside a perfectly healthy task panics with "called
+    /// outside an active runtime".
+    ///
+    /// The Tokio side was already per-poll; the `fcp_async_core` side was not,
+    /// which is the bug br-2ak6l traced back to here from two failing `fcp-host`
+    /// dispatcher tests.
+    ///
+    /// Cost: one thread-local read plus a handle clone and a `Vec` push/pop per
+    /// poll, the same order as the `Handle::enter` immediately above it that this
+    /// path already paid. The alternative — falling back to the ambient handle
+    /// inside `current_runtime_context` instead — would be free per poll but has
+    /// to GUESS the runtime flavor, since the ambient asupersync handle does not
+    /// carry it. Carrying the spawner's flavor explicitly is worth the read: it
+    /// also makes `runtime::flavor()` report the truth inside a migrated task.
+    struct TaskContextFuture<F> {
         inner: Pin<Box<F>>,
         handle: tokio::runtime::Handle,
+        /// Flavor of the runtime this task was spawned from, so the re-derived
+        /// context reports the same flavor the spawner had.
+        flavor: crate::runtime::RuntimeFlavor,
     }
 
-    impl<F: Future> Future for TokioContextFuture<F> {
+    impl<F: Future> Future for TaskContextFuture<F> {
         type Output = F::Output;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let _guard = self.handle.enter();
+            let _tokio_guard = self.handle.enter();
+            // Re-derive from the polling thread's ambient asupersync handle
+            // rather than carrying a cloned handle in this future. asupersync
+            // installs a WEAK handle on each worker thread; holding a strong
+            // clone inside the task would risk dropping the runtime's final
+            // reference on a worker during shutdown, which is the hazard
+            // `detached_task_shutdown_does_not_drop_final_runtime_reference_on_worker`
+            // exists to pin.
+            let flavor = self.flavor;
+            let _runtime_guard = crate::runtime::worker_runtime_context(flavor)
+                .map(crate::runtime::RuntimeGuard::enter);
             self.inner.as_mut().poll(cx)
         }
     }
@@ -2119,14 +2458,13 @@ pub mod task {
             abort_registration,
         );
 
-        let wrapped = TokioContextFuture {
+        let wrapped = TaskContextFuture {
             inner: Box::pin(future),
             handle: tokio_handle,
+            flavor: runtime_flavor,
         };
 
         std::mem::drop(runtime.spawn(async move {
-            let _guard = crate::runtime::worker_runtime_context(runtime_flavor)
-                .map(crate::runtime::RuntimeGuard::enter);
             let result = match wrapped.await {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(payload)) => Err(JoinError::panicked(payload.as_ref())),
@@ -2669,10 +3007,36 @@ mod tests {
     #[test]
     fn block_on_sync_supports_io_driver() {
         let result = runtime::block_on_sync(async {
+            use super::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
             let listener = super::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind local listener");
-            drop(listener);
+            let addr = listener.local_addr().expect("local listener addr");
+            let server = task::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept client");
+                let mut buf = [0_u8; 4];
+                stream
+                    .read_exact(&mut buf)
+                    .await
+                    .expect("server read request");
+                assert_eq!(&buf, b"ping");
+                stream.write_all(b"pong").await.expect("server write reply");
+            });
+            let mut client = super::net::TcpStream::connect(addr)
+                .await
+                .expect("connect client");
+            client
+                .write_all(b"ping")
+                .await
+                .expect("client write request");
+            let mut reply = [0_u8; 4];
+            client
+                .read_exact(&mut reply)
+                .await
+                .expect("client read reply");
+            assert_eq!(&reply, b"pong");
+            server.await.expect("server task should join");
         });
         assert!(result.is_ok());
     }
@@ -3963,6 +4327,83 @@ mod tests {
         assert_eq!(rx.capacity(), 3);
     }
 
+    /// Complements `mpsc_sender_closed_returns_when_receiver_dropped`, which
+    /// drops the receiver before the sender ever parks and so only exercises
+    /// the fast path. Here the drop happens while the sender is already parked,
+    /// which is the path that depends on the close signal actually firing.
+    #[runtime::test]
+    async fn mpsc_sender_closed_wakes_when_receiver_drops_after_parking() {
+        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        task::spawn_detached(async move {
+            time::sleep(Duration::from_millis(20)).await;
+            drop(rx);
+        });
+        time::timeout(Duration::from_secs(5), tx.closed())
+            .await
+            .expect("closed() must wake once the receiver is dropped");
+        assert!(tx.is_closed());
+    }
+
+    /// br-4h5ph: `Sender::closed()` must PARK, never busy-wait.
+    ///
+    /// It was implemented as `while !is_closed() { yield_now().await }`. A
+    /// self-waking future keeps its task permanently runnable, so the
+    /// scheduler's run queue never empties and the runtime's I/O phase is
+    /// starved: socket readiness for every other connection on the runtime goes
+    /// unobserved while timers keep firing normally. That made two fcp-graphql
+    /// subscription tests hang for ~40s, because the real producer loop races
+    /// `tx.closed()` against socket reads in a `select!`.
+    ///
+    /// This pins the observable consequence rather than the implementation: a
+    /// task parked on `closed()` inside a `select!` must not prevent an
+    /// unrelated loopback socket from delivering bytes.
+    #[runtime::test]
+    async fn mpsc_sender_closed_does_not_starve_io_readiness() {
+        use io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = super::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        // Peer parks on a read that only completes once the client writes.
+        let peer = task::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut byte = [0u8; 1];
+            let started = Instant::now();
+            stream.read_exact(&mut byte).await.expect("peer read");
+            started.elapsed()
+        });
+
+        let mut client = super::net::TcpStream::connect(format!("{addr}"))
+            .await
+            .expect("connect");
+
+        // Hold a task in `select!` on `closed()` for the whole exchange. The
+        // receiver is kept alive so this arm never completes.
+        let (tx, rx) = channel::mpsc::channel::<u32>(4);
+        let _keep_receiver_alive = rx;
+        task::spawn_detached(async move {
+            crate::select! {
+                () = tx.closed() => {},
+                () = time::sleep(Duration::from_secs(30)) => {},
+            }
+        });
+
+        // Give the peer time to reach its parked read, then write.
+        time::sleep(Duration::from_millis(50)).await;
+        client.write_all(&[42u8]).await.expect("client write");
+
+        let observed = time::timeout(Duration::from_secs(5), peer)
+            .await
+            .expect("peer never observed the byte: the I/O phase was starved")
+            .expect("peer task");
+        assert!(
+            observed < Duration::from_secs(1),
+            "read wakeup was delayed by {observed:?}; closed() is starving the I/O phase"
+        );
+    }
+
     #[runtime::test]
     async fn mpsc_sender_clone() {
         let (tx, mut rx) = channel::mpsc::channel::<u32>(4);
@@ -4479,6 +4920,90 @@ mod tests {
         assert_eq!(result, 11);
     }
 
+    /// The same nested spawn, but AFTER an await — which is a different test.
+    ///
+    /// `spawned_task_inherits_fcp_runtime_context_for_nested_spawn` above nests
+    /// immediately, so the nested spawn always runs on the same thread that ran
+    /// the outer task's first poll. That cannot detect a runtime context which is
+    /// established once per task rather than once per poll.
+    ///
+    /// On a work-stealing multi-threaded scheduler a task may resume on a
+    /// different worker after every await. A thread-local context installed at the
+    /// first poll and held across the await is then simply absent on the thread
+    /// the task resumes on, and the next `task::spawn` panics with "called outside
+    /// an active runtime" — on a healthy runtime, from inside a live task.
+    ///
+    /// Several awaits, and a spawn after each, because which poll lands on which    /// worker is a scheduling decision this test does not control: one await is
+    /// not reliably enough to force a migration.
+    #[runtime::test(flavor = "multi_thread")]
+    async fn nested_spawn_survives_thread_migration_across_awaits() {
+        let handle = task::spawn(async {
+            let mut total = 0_u32;
+            for round in 0..8_u32 {
+                // Yield and sleep both hand the task back to the scheduler,
+                // which is where a migration to another worker can happen.
+                task::yield_now().await;
+                time::sleep(Duration::from_millis(1)).await;
+
+                // The assertion is simply that this does not panic. Spawning is
+                // what a task does after awaiting anything, so if the context is
+                // lost here it is lost for effectively every real task.
+                let nested = task::spawn(async move { round });
+                total += nested.await.expect("nested task should join");
+            }
+            total
+        });
+
+        assert_eq!(
+            handle.await.expect("outer task should join"),
+            (0..8_u32).sum::<u32>()
+        );
+    }
+
+    /// `spawn_detached` must survive the same migration.
+    ///
+    /// This is the exact shape that broke the `fcp-host` subprocess-dispatcher
+    /// tests (br-2ak6l): a long-lived dispatcher loop awaits on a channel and then
+    /// detaches a task to answer the request. The panic surfaced there as a
+    /// dropped oneshot — "dispatcher stopped before replying" and `RecvError` —
+    /// which points at the channel rather than at the spawn that actually died.
+    #[runtime::test(flavor = "multi_thread")]
+    async fn detached_spawn_survives_thread_migration_across_awaits() {
+        let (tx, mut rx) = channel::mpsc::channel::<u32>(8);
+        let (done_tx, mut done_rx) = channel::mpsc::channel::<u32>(8);
+
+        let loop_task = task::spawn(async move {
+            while let Some(value) = rx.recv().await {
+                let done_tx = done_tx.clone();
+                // Yield and sleep before detaching. Awaiting the channel alone did
+                // NOT reliably migrate the task off its original worker, so without
+                // these the test passed with the bug still present — it has to be
+                // able to fail to be evidence of anything.
+                task::yield_now().await;
+                time::sleep(Duration::from_millis(1)).await;
+                // Detached spawn from a task that has already awaited — the
+                // dispatcher shape.
+                task::spawn_detached(async move {
+                    let _ = done_tx.send(value * 2).await;
+                });
+            }
+        });
+
+        for value in 1..=5_u32 {
+            tx.send(value).await.expect("send should succeed");
+        }
+        drop(tx);
+
+        let mut seen = Vec::new();
+        for _ in 1..=5_u32 {
+            seen.push(done_rx.recv().await.expect("each reply should arrive"));
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, vec![2, 4, 6, 8, 10]);
+
+        loop_task.await.expect("dispatcher loop should join");
+    }
+
     #[test]
     fn detached_task_shutdown_does_not_drop_final_runtime_reference_on_worker() {
         let _panic_hook_guard = PANIC_HOOK_LOCK.lock().expect("panic hook lock");
@@ -4701,6 +5226,22 @@ mod tests {
     }
 
     #[runtime::test]
+    async fn execution_context_sleep_uses_requested_duration_not_deadline() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+        let start = Instant::now();
+
+        ctx.sleep(Duration::from_millis(10))
+            .await
+            .expect("short sleep should finish before request deadline");
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "short sleep waited too long: {elapsed:?}"
+        );
+    }
+
+    #[runtime::test]
     async fn background_context_cancellation() {
         let ctx = ExecutionContext::background();
         assert!(!ctx.is_cancelled());
@@ -4906,6 +5447,43 @@ mod tests {
         assert_eq!(sem.available_permits(), 0);
         drop(permit);
         assert_eq!(sem.available_permits(), 1);
+    }
+
+    // Regression (nwclu): the runtime polls `runtime::test`/`block_on` futures in
+    // the *root* region, where asupersync 0.3.4 refuses to create a permit
+    // obligation. Every permit acquisition — owned or borrowed, async or
+    // `try_*` — must scope its obligation off the root region rather than
+    // panicking. This mirrors how the fcp-host bulkhead acquires owned permits
+    // from spawned request handlers (which also run in the root region).
+    #[runtime::test]
+    async fn semaphore_permit_acquisition_never_panics_in_root_region() {
+        let sem = Arc::new(super::sync::Semaphore::new(2));
+
+        // Owned async acquire while another owned permit is held.
+        let first = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("owned async acquire in root region should not panic");
+        let second = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("second owned async acquire should not panic");
+        assert_eq!(sem.available_permits(), 0);
+
+        // Non-blocking try paths must also avoid the root-region obligation.
+        assert!(Arc::clone(&sem).try_acquire_owned().is_err());
+        assert!(sem.try_acquire().is_err());
+
+        drop(first);
+        assert_eq!(sem.available_permits(), 1);
+        let borrowed = sem
+            .try_acquire()
+            .expect("borrowed try_acquire in root region should not panic");
+        assert_eq!(sem.available_permits(), 0);
+
+        drop(second);
+        drop(borrowed);
+        assert_eq!(sem.available_permits(), 2);
     }
 
     // ─────────────────────────────────────────────────────────────────────

@@ -5,9 +5,12 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
+use serde::Deserialize;
 use tracing::{debug, instrument};
+use url::form_urlencoded;
 
 use crate::{
     error::{BitwardenError, BitwardenResult},
@@ -16,14 +19,23 @@ use crate::{
 
 /// Default `Bitwarden` API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.bitwarden.com";
+/// Default `Bitwarden` identity token endpoint for Public API client credentials.
+pub const DEFAULT_IDENTITY_URL: &str = "https://identity.bitwarden.com/connect/token";
 
 /// Authentication mode for the `Bitwarden` API.
 #[derive(Clone)]
 pub enum BitwardenAuth {
-    /// Bearer token (from client credentials).
+    /// Vault Management API bearer token.
     BearerToken(String),
     /// Secretless credential reference (egress proxy injection).
     CredentialId(CredentialId),
+    /// Public API organization client credentials.
+    PublicApiClientCredentials {
+        client_id: String,
+        client_secret: String,
+        organization_id: String,
+        identity_url: String,
+    },
 }
 
 impl BitwardenAuth {
@@ -32,12 +44,20 @@ impl BitwardenAuth {
         match self {
             Self::BearerToken(_) => "bearer_token:redacted".to_string(),
             Self::CredentialId(id) => format!("credential_id:{id}"),
+            Self::PublicApiClientCredentials { .. } => {
+                "public_api_client_credentials:redacted".to_string()
+            }
         }
     }
 
     #[must_use]
     pub const fn is_secretless(&self) -> bool {
         matches!(self, Self::CredentialId(_))
+    }
+
+    #[must_use]
+    pub const fn is_public_api(&self) -> bool {
+        matches!(self, Self::PublicApiClientCredentials { .. })
     }
 }
 
@@ -46,8 +66,21 @@ impl fmt::Debug for BitwardenAuth {
         match self {
             Self::BearerToken(_) => f.debug_tuple("BearerToken").field(&"<redacted>").finish(),
             Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+            Self::PublicApiClientCredentials { .. } => f
+                .debug_struct("PublicApiClientCredentials")
+                .field("client_id", &"<redacted>")
+                .field("client_secret", &"<redacted>")
+                .field("organization_id", &"<redacted>")
+                .field("identity_url", &"<redacted>")
+                .finish(),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct PublicApiTokenResponse {
+    access_token: String,
+    token_type: Option<String>,
 }
 
 /// `Bitwarden` API client.
@@ -102,14 +135,27 @@ impl BitwardenClient {
         match &self.auth {
             BitwardenAuth::BearerToken(token) => req.bearer_auth(token),
             BitwardenAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
+            BitwardenAuth::PublicApiClientCredentials { .. } => req,
         }
+    }
+
+    fn ensure_vault_management_auth(&self, operation: &str) -> BitwardenResult<()> {
+        if self.auth.is_public_api() {
+            return Err(BitwardenError::InvalidInput(format!(
+                "{operation} requires Vault Management API auth; Public API client credentials only support bitwarden.collections.list"
+            )));
+        }
+        Ok(())
     }
 
     async fn handle_response(&self, resp: Response) -> BitwardenResult<serde_json::Value> {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
+            if status == StatusCode::NO_CONTENT {
+                return Ok(serde_json::json!({}));
+            }
+            if body.trim().is_empty() {
                 return Ok(serde_json::json!({}));
             }
             Ok(serde_json::from_str(&body)?)
@@ -155,6 +201,7 @@ impl BitwardenClient {
         path: &str,
         query: Option<&[(&str, String)]>,
     ) -> BitwardenResult<serde_json::Value> {
+        self.ensure_vault_management_auth(path)?;
         let url = format!("{}{path}", self.base_url);
         debug!(url = %redact_url(&url), "GET request");
         let mut req = self
@@ -173,6 +220,7 @@ impl BitwardenClient {
         path: &str,
         body: &serde_json::Value,
     ) -> BitwardenResult<serde_json::Value> {
+        self.ensure_vault_management_auth(path)?;
         let url = format!("{}{path}", self.base_url);
         debug!(url = %redact_url(&url), "POST request");
         let req = self
@@ -185,6 +233,7 @@ impl BitwardenClient {
 
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> BitwardenResult<serde_json::Value> {
+        self.ensure_vault_management_auth(path)?;
         let url = format!("{}{path}", self.base_url);
         debug!(url = %redact_url(&url), "DELETE request");
         let req = self
@@ -198,7 +247,74 @@ impl BitwardenClient {
 
     /// List all collections.
     pub async fn list_collections(&self) -> BitwardenResult<serde_json::Value> {
-        self.get("/collections", None).await
+        if self.auth.is_public_api() {
+            self.public_api_get("/public/collections").await
+        } else {
+            self.get("/collections", None).await
+        }
+    }
+
+    async fn public_api_get(&self, path: &str) -> BitwardenResult<serde_json::Value> {
+        let token = self.public_api_access_token().await?;
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %redact_url(&url), "GET Public API request");
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(token)
+            .header("Accept", "application/json")
+            .send()
+            .await?;
+        self.handle_response(resp).await
+    }
+
+    async fn public_api_access_token(&self) -> BitwardenResult<String> {
+        let BitwardenAuth::PublicApiClientCredentials {
+            client_id,
+            client_secret,
+            identity_url,
+            ..
+        } = &self.auth
+        else {
+            return Err(BitwardenError::InvalidInput(
+                "Public API access token requested without Public API credentials".into(),
+            ));
+        };
+        let form_body = form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "client_credentials")
+            .append_pair("scope", "api.organization")
+            .append_pair("client_id", client_id)
+            .append_pair("client_secret", client_secret)
+            .finish();
+        let resp = self
+            .client
+            .post(identity_url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(form_body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return self.handle_error(status, resp).await.map(|_| String::new());
+        }
+        let token: PublicApiTokenResponse = resp.json().await?;
+        if token
+            .token_type
+            .as_deref()
+            .is_some_and(|token_type| !token_type.eq_ignore_ascii_case("bearer"))
+        {
+            return Err(BitwardenError::InvalidInput(
+                "Bitwarden Public API token response did not use bearer token type".into(),
+            ));
+        }
+        let access_token = token.access_token.trim().to_string();
+        if access_token.is_empty() {
+            return Err(BitwardenError::InvalidInput(
+                "Bitwarden Public API token response did not include an access token".into(),
+            ));
+        }
+        Ok(access_token)
     }
 
     // -- Items --
@@ -260,6 +376,14 @@ mod tests {
         assert!(!token.is_secretless());
         let cred = BitwardenAuth::CredentialId(CredentialId::new());
         assert!(cred.is_secretless());
+        let public = BitwardenAuth::PublicApiClientCredentials {
+            client_id: "organization.client".into(),
+            client_secret: "secret".into(),
+            organization_id: "org".into(),
+            identity_url: DEFAULT_IDENTITY_URL.into(),
+        };
+        assert!(!public.is_secretless());
+        assert!(public.is_public_api());
     }
 
     #[test]
@@ -276,8 +400,35 @@ mod tests {
     }
 
     #[test]
+    fn public_api_auth_debug_redacts_secrets() {
+        let auth = BitwardenAuth::PublicApiClientCredentials {
+            client_id: "organization.client".into(),
+            client_secret: "client-secret".into(),
+            organization_id: "org-id".into(),
+            identity_url: DEFAULT_IDENTITY_URL.into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("organization.client"));
+        assert!(!dbg.contains("client-secret"));
+        assert!(!dbg.contains("org-id"));
+        assert!(dbg.contains("redacted"));
+        assert_eq!(
+            auth.redacted_label(),
+            "public_api_client_credentials:redacted"
+        );
+    }
+
+    #[test]
     fn default_base_url_value() {
         assert_eq!(DEFAULT_BASE_URL, "https://api.bitwarden.com");
+    }
+
+    #[test]
+    fn default_identity_url_value() {
+        assert_eq!(
+            DEFAULT_IDENTITY_URL,
+            "https://identity.bitwarden.com/connect/token"
+        );
     }
 
     #[test]

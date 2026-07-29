@@ -41,8 +41,8 @@ pub struct DeepSeekProvider {
 impl DeepSeekProvider {
     pub fn new(base_url: impl Into<String>, auth: DeepSeekAuth) -> Self {
         Self {
-            base_url: base_url.into(),
             auth,
+            base_url: base_url.into(),
         }
     }
 
@@ -138,10 +138,8 @@ pub fn normalize_deepseek_base_url(raw: Option<&str>) -> Result<String, String> 
     let host = parsed
         .host_str()
         .ok_or_else(|| "base_url must include a host".to_string())?;
-    let normalized_host = host
-        .trim_matches(|c| c == '[' || c == ']')
-        .to_ascii_lowercase();
-    let local = matches!(normalized_host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let normalized_host = normalize_host(host);
+    let local = is_loopback_host(&normalized_host);
     let path = parsed.path().trim_end_matches('/');
     let valid_path = path.is_empty() || path == "/v1";
     let valid_scheme = if local {
@@ -162,6 +160,15 @@ pub fn normalize_deepseek_base_url(raw: Option<&str>) -> Result<String, String> 
         ));
     }
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase()
+}
+
+fn is_loopback_host(normalized_host: &str) -> bool {
+    matches!(normalized_host, "localhost" | "127.0.0.1" | "::1")
 }
 
 pub fn validate_auth_material(field: &str, value: &str) -> Result<String, String> {

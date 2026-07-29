@@ -22,6 +22,8 @@ struct LiveAuth {
     instance_id: String,
 }
 
+const LIVE_GATE_ENV: &str = "FCP_LIVE_READ";
+
 // ============================================================================
 // Skip guard
 // ============================================================================
@@ -32,8 +34,27 @@ fn anthropic_api_key() -> Option<String> {
         .filter(|k| !k.is_empty())
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn skip_without_live_gate() -> bool {
+    if live_gate_enabled() {
+        return false;
+    }
+
+    eprintln!(
+        "SKIP: {LIVE_GATE_ENV} is not enabled; set {LIVE_GATE_ENV}=1 before running live Anthropic connector verification."
+    );
+    true
+}
+
 macro_rules! skip_without_key {
     ($var:ident) => {
+        if skip_without_live_gate() {
+            return;
+        }
         let Some($var) = anthropic_api_key() else {
             eprintln!(
                 "SKIP: ANTHROPIC_API_KEY not set — skipping live Anthropic connector verification. \
@@ -155,6 +176,10 @@ async fn live_messages_create() {
 
 #[fcp_async_core::test]
 async fn live_error_mapping_invalid_key() {
+    if skip_without_live_gate() {
+        return;
+    }
+
     // Test with a deliberately invalid key to verify ConnectorErrorMapping
     // works correctly: should get a structured FCP auth error, not a raw HTTP 401.
     let mut connector = AnthropicConnector::new();

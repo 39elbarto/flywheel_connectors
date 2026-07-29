@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use serde::Deserialize;
 
 /// Result alias for Firebase operations.
@@ -79,6 +79,23 @@ impl FirebaseError {
             Self::Http(_) => true,
             Self::InvalidInput(_) | Self::Unauthorized { .. } | Self::Json(_) => false,
             Self::Async(_) => false,
+        }
+    }
+
+    /// Whether replaying the request that produced this error cannot duplicate
+    /// a side effect (br-kxd3e).
+    ///
+    /// Distinct from `is_retryable`: a rate-limited request was refused
+    /// WITHOUT being performed, so it stays safe to replay; a 5xx means the
+    /// service received the request and may already have applied it.
+    #[must_use]
+    pub fn replay_is_safe(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } => true,
+            // Firestore marks a 429 retryable through this flag as well.
+            Self::Api { status_code, .. } => *status_code == 429,
+            Self::Http(e) => !fcp_sdk::migration::transport_error_reached_service(e),
+            _ => false,
         }
     }
 

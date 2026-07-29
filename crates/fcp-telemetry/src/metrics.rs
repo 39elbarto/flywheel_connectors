@@ -25,6 +25,37 @@ const OVERFLOW_LABEL_BUCKET: &str = "__fcp_other";
 const TOO_LONG_LABEL_BUCKET: &str = "__fcp_too_long";
 const CONTROL_LABEL_BUCKET: &str = "__fcp_control";
 
+/// Counter emitted when a lease is issued.
+pub const LEASE_ISSUED_METRIC: &str = "fcp.lease.issued";
+/// Counter emitted when a lease is renewed in place.
+pub const LEASE_RENEWED_METRIC: &str = "fcp.lease.renewed";
+/// Counter emitted when authority hands off to a new lease holder.
+pub const LEASE_HANDED_OFF_METRIC: &str = "fcp.lease.handed_off";
+/// Counter emitted when a stale or non-holder lease attempt is fenced.
+pub const LEASE_FENCED_METRIC: &str = "fcp.lease.fenced";
+/// Counter emitted when a lease is revoked or voluntarily relinquished.
+pub const LEASE_REVOKED_METRIC: &str = "fcp.lease.revoked";
+/// Counter emitted when a holder flushes state before yielding a lease.
+pub const LEASE_FLUSHED_ON_YIELD_METRIC: &str = "fcp.lease.flushed_on_yield";
+/// Counter emitted for lease handoffs, labelled by cause.
+pub const LEASE_HANDOFFS_TOTAL_METRIC: &str = "fcp_lease_handoffs_total";
+/// Histogram of lease handoff duration in seconds.
+pub const LEASE_HANDOFF_DURATION_SECONDS_METRIC: &str = "fcp_lease_handoff_duration_seconds";
+/// Histogram of serialized `HierVV` revocation-frontier size by zone.
+pub const REVOCATION_HIERVV_SIZE_BYTES_METRIC: &str = "fcp.mesh.revocation.hiervv_size_bytes";
+/// Histogram of masked IBLT decode latency, in microseconds, by zone and peer.
+pub const MESH_IBLT_DECODE_US_METRIC: &str = "fcp.mesh.iblt.decode_us";
+
+/// Stable public lease event metric names surfaced by operator status commands.
+pub const LEASE_EVENT_NAMES: [&str; 6] = [
+    LEASE_ISSUED_METRIC,
+    LEASE_RENEWED_METRIC,
+    LEASE_HANDED_OFF_METRIC,
+    LEASE_FENCED_METRIC,
+    LEASE_REVOKED_METRIC,
+    LEASE_FLUSHED_ON_YIELD_METRIC,
+];
+
 /// Initialize the metrics system with standard FCP metrics descriptions.
 pub fn init_metrics() {
     if METRICS_INITIALIZED.set(true).is_err() {
@@ -77,6 +108,16 @@ pub fn init_metrics() {
     describe_counter!("fcp_events_emitted_total", "Total events emitted");
     describe_counter!("fcp_events_dropped_total", "Total events dropped");
 
+    describe_lease_metrics();
+    describe_histogram!(
+        REVOCATION_HIERVV_SIZE_BYTES_METRIC,
+        "Serialized Hierarchical Version Vector revocation frontier size in bytes"
+    );
+    describe_histogram!(
+        MESH_IBLT_DECODE_US_METRIC,
+        "Masked IBLT reconciliation decode latency in microseconds"
+    );
+
     // Symbol coverage and diversity metrics
     describe_gauge!(
         "fcp_symbol_coverage_distinct_nodes",
@@ -109,6 +150,41 @@ pub fn init_metrics() {
     describe_counter!(
         "fcp_symbol_coverage_evaluations_total",
         "Total coverage evaluations performed"
+    );
+}
+
+fn describe_lease_metrics() {
+    describe_counter!(
+        LEASE_ISSUED_METRIC,
+        "Total singleton-writer lease issuance events"
+    );
+    describe_counter!(
+        LEASE_RENEWED_METRIC,
+        "Total singleton-writer lease renewal events"
+    );
+    describe_counter!(
+        LEASE_HANDED_OFF_METRIC,
+        "Total singleton-writer lease handoff events"
+    );
+    describe_counter!(
+        LEASE_FENCED_METRIC,
+        "Total stale or non-holder lease attempts fenced"
+    );
+    describe_counter!(
+        LEASE_REVOKED_METRIC,
+        "Total singleton-writer lease revocation or release events"
+    );
+    describe_counter!(
+        LEASE_FLUSHED_ON_YIELD_METRIC,
+        "Total flush-on-yield events before lease relinquish"
+    );
+    describe_counter!(
+        LEASE_HANDOFFS_TOTAL_METRIC,
+        "Total lease handoffs labelled by cause"
+    );
+    describe_histogram!(
+        LEASE_HANDOFF_DURATION_SECONDS_METRIC,
+        "Lease handoff duration in seconds"
     );
 }
 
@@ -413,6 +489,91 @@ pub fn record_event_dropped(connector: &str, event_type: &str, reason: &str) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Lease Coordination Metrics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Record a lease issuance event.
+pub fn record_lease_issued(purpose: &str, outcome: &str) {
+    increment_counter(
+        LEASE_ISSUED_METRIC,
+        &[("purpose", purpose), ("outcome", outcome)],
+    );
+}
+
+/// Record a lease renewal event.
+pub fn record_lease_renewed(purpose: &str, outcome: &str) {
+    increment_counter(
+        LEASE_RENEWED_METRIC,
+        &[("purpose", purpose), ("outcome", outcome)],
+    );
+}
+
+/// Record a lease handoff and optional duration.
+pub fn record_lease_handed_off(cause: &str, duration_seconds: Option<f64>) {
+    increment_counter(LEASE_HANDED_OFF_METRIC, &[("cause", cause)]);
+    increment_counter(LEASE_HANDOFFS_TOTAL_METRIC, &[("cause", cause)]);
+
+    if let Some(duration_seconds) = duration_seconds {
+        let bounded_duration = if duration_seconds.is_finite() && duration_seconds >= 0.0 {
+            duration_seconds
+        } else {
+            0.0
+        };
+        record_histogram(
+            LEASE_HANDOFF_DURATION_SECONDS_METRIC,
+            bounded_duration,
+            &[("cause", cause)],
+        );
+    }
+}
+
+/// Record a lease fence event.
+pub fn record_lease_fenced(purpose: &str, reason: &str) {
+    increment_counter(
+        LEASE_FENCED_METRIC,
+        &[("purpose", purpose), ("reason", reason)],
+    );
+}
+
+/// Record a lease revocation or release event.
+pub fn record_lease_revoked(purpose: &str, cause: &str) {
+    increment_counter(
+        LEASE_REVOKED_METRIC,
+        &[("purpose", purpose), ("cause", cause)],
+    );
+}
+
+/// Record a flush-on-yield event before a lease is yielded.
+pub fn record_lease_flushed_on_yield(purpose: &str, outcome: &str) {
+    increment_counter(
+        LEASE_FLUSHED_ON_YIELD_METRIC,
+        &[("purpose", purpose), ("outcome", outcome)],
+    );
+}
+
+/// Record masked IBLT reconciliation decode latency.
+pub fn record_mesh_iblt_decode_latency_us(
+    zone_id: &str,
+    peer_id: &str,
+    scheme: &str,
+    overflow: bool,
+    decode_us: u64,
+) {
+    let overflow_label = if overflow { "true" } else { "false" };
+    let histogram_value = f64::from(u32::try_from(decode_us).unwrap_or(u32::MAX));
+    record_histogram(
+        MESH_IBLT_DECODE_US_METRIC,
+        histogram_value,
+        &[
+            ("zone", zone_id),
+            ("peer", peer_id),
+            ("scheme", scheme),
+            ("overflow", overflow_label),
+        ],
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Symbol Coverage and Diversity Metrics
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -686,6 +847,44 @@ mod tests {
     #[test]
     fn test_record_event_dropped_no_panic() {
         record_event_dropped("test-connector", "message", "buffer_full");
+    }
+
+    #[test]
+    fn test_lease_event_names_match_public_status_contract() {
+        assert_eq!(
+            LEASE_EVENT_NAMES,
+            [
+                "fcp.lease.issued",
+                "fcp.lease.renewed",
+                "fcp.lease.handed_off",
+                "fcp.lease.fenced",
+                "fcp.lease.revoked",
+                "fcp.lease.flushed_on_yield",
+            ]
+        );
+        assert_eq!(LEASE_HANDOFFS_TOTAL_METRIC, "fcp_lease_handoffs_total");
+        assert_eq!(
+            LEASE_HANDOFF_DURATION_SECONDS_METRIC,
+            "fcp_lease_handoff_duration_seconds"
+        );
+    }
+
+    #[test]
+    fn test_lease_metrics_helpers_no_panic() {
+        record_lease_issued("singleton_writer", "granted");
+        record_lease_renewed("singleton_writer", "renewed");
+        record_lease_handed_off("leader_offline", Some(0.250));
+        record_lease_handed_off("partition_heal", Some(f64::NAN));
+        record_lease_fenced("connector_state_write", "stale_lease_seq");
+        record_lease_revoked("singleton_writer", "manual_revoke");
+        record_lease_flushed_on_yield("singleton_writer", "success");
+    }
+
+    #[test]
+    fn test_mesh_iblt_decode_latency_metric_no_panic() {
+        assert_eq!(MESH_IBLT_DECODE_US_METRIC, "fcp.mesh.iblt.decode_us");
+        record_mesh_iblt_decode_latency_us("z:work", "node-a", "masked", false, 250);
+        record_mesh_iblt_decode_latency_us("z:work", "node-b", "masked", true, u64::MAX);
     }
 
     #[test]

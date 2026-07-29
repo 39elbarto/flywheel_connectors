@@ -142,9 +142,23 @@ pub use proof_graph::{
 pub mod proof_graph_indexer;
 
 pub use proof_graph_indexer::{
-    BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
-    ProofGraphCorpus, ProofGraphIndexError, ProofGraphIndexer, ReadinessMatrixRow,
-    ReadmeFeatureRow, SourceLocation, VerificationScriptRecord,
+    AgentReadinessProofRecord, BeadIssueRecord, BeadProofComment, EvidenceBundleRecord,
+    PROOF_GRAPH_INDEXER_CORPUS_SCHEMA, ProofGraphCorpus, ProofGraphIndexError, ProofGraphIndexer,
+    ReadinessMatrixRow, ReadmeFeatureRow, SourceLocation, VerificationScriptRecord,
+};
+
+// ── Proof Bundle Registry (8fhsm.1) ───────────────────────────────
+
+pub mod proof_bundle_registry;
+
+pub use proof_bundle_registry::{
+    ArtifactDigest, ArtifactDigestAlgorithm, ExpectedProofArtifact, FreshnessClassification,
+    FreshnessPolicy, ObservedProofArtifact, PROOF_BUNDLE_REGISTRY_SCHEMA, ProofBundleEntry,
+    ProofBundleRegistry, ProofBundleRegistryError, ProofBundleSource, ProofBundleSourceKind,
+    ProofBundleValidationReport, ProofBundleValidationRow, ProofBundleValidator, ProofClass,
+    ProofFreshnessStatus, ProofRedaction, ProofRegistryCommand, ProofSourceDocumentRow,
+    ProofValidationReasonCode, ProofValidationStatus, RedactionClassification, StaleProofAction,
+    StructuredSkipReason, VerificationResult, VerifierObservation,
 };
 
 // ── Proof Runner Contract (b88ec.5) ───────────────────────────────
@@ -155,7 +169,10 @@ pub use proof_runner::{
     CargoProofInvocation, PROOF_RUNNER_EVENT_SCHEMA, PROOF_RUNNER_SUMMARY_SCHEMA,
     ProofCommandFingerprint, ProofCommandSpec, ProofRun, ProofRunClassification, ProofRunError,
     ProofRunEvent, ProofRunEventKind, ProofRunJsonlEvent, ProofRunPolicy, ProofRunStage,
-    ProofRunnerKind, RedactedEnvValue, TargetDirPolicy, WorkerAffinityHint,
+    ProofRunnerKind, RCH_REMOTE_PROOF_EVIDENCE_SCHEMA, RchRemoteProofBlockerReason,
+    RchRemoteProofClassification, RchRemoteProofEvidence, RchRemoteProofExitKind,
+    RchRemoteProofRedaction, RchRemoteProofRedactionFlag, RchRemoteProofSummary,
+    RchRemoteProofSummaryLocation, RedactedEnvValue, TargetDirPolicy, WorkerAffinityHint,
 };
 
 // ── Mesh Failover Flight Recorder (b88ec.6) ───────────────────────
@@ -179,6 +196,29 @@ pub use high_core_swarm_evidence::{
     SwarmEvidenceRequirements, SwarmHardwareClass, SwarmHardwareProfile, SwarmOutcomeCounters,
     SwarmProofDebtItem, SwarmProofDebtKind, SwarmProofValue, SwarmScenarioKind, SwarmScenarioShape,
     rank_swarm_proof_debt,
+};
+
+// ── Agent Readiness Evidence (y2mlu.1) ────────────────────────────
+
+pub mod agent_readiness;
+
+pub use agent_readiness::{
+    AGENT_READINESS_EVENT_SCHEMA, AGENT_READINESS_REPORT_SCHEMA, AgentMailReadiness,
+    AgentReadinessError, AgentReadinessJsonlEvent, AgentReadinessPolicyMapping,
+    AgentReadinessProbes, AgentReadinessReport, BeadsReadiness, DiskMountState, DiskReadiness,
+    ForbiddenAgentAction, GitReadiness, LockState, PathKind, PathRedactionScope, ProbeResult,
+    RchAdmissionDecision, RchAdmissionObservation, RchAdmissionReasonCode, RchProofSummaryLine,
+    RchProofSummaryLocation, RchReadiness, ReadinessAction, ReadinessDecision, ReadinessEventKind,
+    ReadinessOperatingMode, ReadinessRedactionContract, ReadinessStatus, ReadinessSubsystem,
+    RedactedPath, RedactionTarget, TelemetryState, WorktreeReadiness,
+};
+
+pub mod agent_readiness_probe;
+
+pub use agent_readiness_probe::{
+    AGENT_READINESS_PROBE_PLAN_SCHEMA, AgentStartupProbePlan, NoNetworkProbeFixture,
+    NoNetworkProbeScenario, ProbeCommandPlan, ProbeExecutionMode, ProbeMutationScope,
+    ProbeNetworkPolicy, ProbeRetryPolicy,
 };
 
 #[cfg(test)]

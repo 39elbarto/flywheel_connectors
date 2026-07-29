@@ -13,10 +13,10 @@
 //!    bytes" property (not first).
 //! 3. **Monotonic `total_written`.** Counts every byte ever
 //!    written, including bytes that were subsequently evicted, so
-//!    operators can compute drop = total_written - len when reading
+//!    operators can compute drop = `total_written` - len when reading
 //!    the captured tail.
 //! 4. **`has_overflow` telemetry signal.** True iff
-//!    total_written > capacity. The on-the-wire signal that a
+//!    `total_written` > capacity. The on-the-wire signal that a
 //!    triage report is incomplete.
 //! 5. **`clear()` preserves `total_written`.** This is a forensic
 //!    invariant — clearing the visible buffer MUST NOT reset the

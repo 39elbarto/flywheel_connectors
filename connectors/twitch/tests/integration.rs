@@ -6,12 +6,13 @@ use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, FcpError,
     HandshakeRequest, InstanceId, InvokeRequest, OperationId, RequestId, ShutdownRequest, ZoneId,
 };
-use fcp_twitch::TwitchConnector;
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_twitch::{TwitchConnector, client::TwitchClient, error::TwitchError};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path, query_param},
+    matchers::{body_string_contains, header, method, path, query_param},
 };
 
 const CLIENT_ID: &str = "test-client";
@@ -20,6 +21,115 @@ const ACCESS_TOKEN: &str = "fixture-token";
 const CONNECTOR_ID: &str = "fcp.twitch";
 const READ_CAPABILITY: &str = "twitch.read";
 const ZONE: &str = "z:private";
+
+#[fcp_async_core::runtime::test]
+async fn client_acquire_token_success() -> Result<(), String> {
+    let server = MockServer::start().await;
+    mount_token(&server).await;
+
+    let mut client = loopback_client(&server, CLIENT_ID, CLIENT_SECRET)?;
+
+    client
+        .acquire_token()
+        .await
+        .map_err(|error| format!("token acquisition should succeed: {error}"))?;
+    assert!(client.has_token());
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_acquire_token_failure() -> Result<(), String> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth2/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("invalid_client"))
+        .mount(&server)
+        .await;
+
+    let mut client = loopback_client(&server, "bad-id", "bad-secret")?;
+
+    let error = client
+        .acquire_token()
+        .await
+        .expect_err("invalid client credentials should fail token acquisition");
+    assert!(matches!(error, TwitchError::TokenError(_)));
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_validate_token_success() -> Result<(), String> {
+    let server = MockServer::start().await;
+    mount_token(&server).await;
+    mount_validate(&server).await;
+
+    let mut client = loopback_client(&server, CLIENT_ID, CLIENT_SECRET)?;
+    client
+        .acquire_token()
+        .await
+        .map_err(|error| format!("token acquisition should succeed: {error}"))?;
+
+    let validated = client
+        .validate_token()
+        .await
+        .map_err(|error| format!("token validation should succeed: {error}"))?;
+    assert_eq!(validated.client_id, CLIENT_ID);
+    assert_eq!(validated.expires_in, 3600);
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_success() -> Result<(), String> {
+    let server = MockServer::start().await;
+    mount_token(&server).await;
+    mount_validate(&server).await;
+    mount_health_probe(&server).await;
+
+    let mut client = loopback_client(&server, CLIENT_ID, CLIENT_SECRET)?;
+    client
+        .acquire_token()
+        .await
+        .map_err(|error| format!("token acquisition should succeed: {error}"))?;
+
+    let validated = client
+        .health_check()
+        .await
+        .map_err(|error| format!("health check should succeed: {error}"))?;
+    assert_eq!(validated.client_id, CLIENT_ID);
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_401() -> Result<(), String> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth2/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "bad-token",
+            "expires_in": 3600,
+            "token_type": "bearer"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2/validate"))
+        .and(header("authorization", "Bearer bad-token"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let mut client = loopback_client(&server, CLIENT_ID, CLIENT_SECRET)?;
+    client
+        .acquire_token()
+        .await
+        .map_err(|error| format!("token acquisition should succeed: {error}"))?;
+
+    let error = client
+        .health_check()
+        .await
+        .expect_err("unauthorized validation should fail health check");
+    assert!(matches!(error, TwitchError::Unauthorized(_)));
+    Ok(())
+}
 
 #[fcp_async_core::runtime::test]
 async fn configure_handshake_health_and_shutdown_lifecycle() -> Result<(), String> {
@@ -341,6 +451,23 @@ async fn configured_connector(server: &MockServer) -> Result<TwitchConnector, St
     Ok(connector)
 }
 
+fn loopback_client(
+    server: &MockServer,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<TwitchClient, String> {
+    TwitchClient::new(
+        &server.uri(),
+        &format!("{}/oauth2/token", server.uri()),
+        &format!("{}/oauth2/validate", server.uri()),
+        client_id,
+        client_secret,
+        HttpRetryConfig::default(),
+        std::time::Duration::from_secs(30),
+    )
+    .map_err(|error| format!("loopback Twitch client should build: {error}"))
+}
+
 async fn handshake(connector: &mut TwitchConnector) -> Result<Ed25519SigningKey, String> {
     let signing_key = Ed25519SigningKey::generate();
     let response = connector
@@ -577,11 +704,16 @@ async fn assert_timeout_error() -> Result<(), String> {
 }
 
 async fn mount_token(server: &MockServer) {
+    // The OAuth client-credentials params must travel in the form-encoded body,
+    // never the URL query string (a secret in the query leaks via reqwest's
+    // Error Display). Matching on the body enforces that contract.
     Mock::given(method("POST"))
         .and(path("/oauth2/token"))
-        .and(query_param("client_id", CLIENT_ID))
-        .and(query_param("client_secret", CLIENT_SECRET))
-        .and(query_param("grant_type", "client_credentials"))
+        .and(body_string_contains(format!("client_id={CLIENT_ID}")))
+        .and(body_string_contains(format!(
+            "client_secret={CLIENT_SECRET}"
+        )))
+        .and(body_string_contains("grant_type=client_credentials"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": ACCESS_TOKEN,
             "expires_in": 3600,

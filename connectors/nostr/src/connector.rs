@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use fcp_prelude::{
@@ -17,8 +17,14 @@ use fcp_prelude::{
     SubscribeResult, TrustLevel, UnsubscribeRequest, ZoneId,
 };
 use fcp_sdk::prelude::*;
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::client::{
     InboundDmGuardSnapshot, InboundDmGuardState, InboundDmRateLimits, InboundDmSubscriptionOutcome,
@@ -34,6 +40,116 @@ use crate::types::{
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+fn default_nostr_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_nostr_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
 
 fn empty_input_schema() -> Value {
     json!({
@@ -247,6 +363,14 @@ fn relay_metrics_schema() -> Value {
     })
 }
 
+fn coordination_output_schema() -> Value {
+    json!({
+        "type": "array",
+        "description": "Redaction-safe chat coordination audit records for the send attempt",
+        "items": { "type": "object" }
+    })
+}
+
 fn nostr_event_schema() -> Value {
     json!({
         "type": "object",
@@ -312,6 +436,7 @@ fn output_schema_for(operation_id: &str) -> Value {
                 "event",
                 "accepted_relays",
                 "rejected_relays",
+                "coordination",
                 "relay_resilience",
                 "relay_metrics"
             ],
@@ -320,6 +445,7 @@ fn output_schema_for(operation_id: &str) -> Value {
                 "event": nostr_event_schema(),
                 "accepted_relays": relay_diagnostics_schema(),
                 "rejected_relays": relay_diagnostics_schema(),
+                "coordination": coordination_output_schema(),
                 "relay_resilience": relay_resilience_schema(),
                 "relay_metrics": relay_metrics_schema()
             }
@@ -336,6 +462,7 @@ fn output_schema_for(operation_id: &str) -> Value {
                 "created_at",
                 "accepted_relays",
                 "rejected_relays",
+                "coordination",
                 "relay_resilience",
                 "relay_metrics"
             ],
@@ -356,6 +483,7 @@ fn output_schema_for(operation_id: &str) -> Value {
                 "created_at": { "type": "integer" },
                 "accepted_relays": relay_diagnostics_schema(),
                 "rejected_relays": relay_diagnostics_schema(),
+                "coordination": coordination_output_schema(),
                 "relay_resilience": relay_resilience_schema(),
                 "relay_metrics": relay_metrics_schema()
             }
@@ -893,7 +1021,101 @@ impl NostrProfileStateStore {
     }
 }
 
-#[derive(Debug)]
+fn nostr_coordination_material_hash(scope: &str, material: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(scope.len().to_be_bytes());
+    hasher.update(scope.as_bytes());
+    hasher.update(material.len().to_be_bytes());
+    hasher.update(material.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn nostr_coordination_dm_channel_id(recipient_pubkey_hex: &str) -> ChannelId {
+    ChannelId::new(format!(
+        "nostr:dm:{}",
+        nostr_coordination_material_hash("dm-recipient", recipient_pubkey_hex)
+    ))
+}
+
+fn nostr_coordination_public_identity_channel_id(public_key_hex: &str) -> ChannelId {
+    ChannelId::new(format!(
+        "nostr:public-identity:{}",
+        nostr_coordination_material_hash("public-identity", public_key_hex)
+    ))
+}
+
+fn nostr_coordination_public_thread_channel_id() -> ChannelId {
+    ChannelId::new("nostr:public-thread")
+}
+
+fn nostr_coordination_thread_id(event_id_hex: &str) -> ThreadId {
+    ThreadId::new(format!(
+        "nostr:event:{}",
+        nostr_coordination_material_hash("event-thread", event_id_hex)
+    ))
+}
+
+fn nostr_note_thread_event_id(input: &Value) -> Option<String> {
+    let tags = input.get("tags")?.as_array()?;
+    let mut first_event_id = None;
+    for tag in tags {
+        let Some(parts) = tag.as_array() else {
+            continue;
+        };
+        if parts.first().and_then(Value::as_str) != Some("e") {
+            continue;
+        }
+        let Some(event_id) = parts.get(1).and_then(Value::as_str) else {
+            continue;
+        };
+        if !is_nostr_event_id(event_id) {
+            continue;
+        }
+        let normalized = event_id.to_ascii_lowercase();
+        if parts.get(3).and_then(Value::as_str) == Some("root") {
+            return Some(normalized);
+        }
+        first_event_id.get_or_insert(normalized);
+    }
+    first_event_id
+}
+
+fn is_nostr_event_id(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn nostr_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
+fn nostr_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let object = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Serialized Nostr publish response was not an object".into(),
+    })?;
+    object.insert(
+        "coordination".into(),
+        json!(nostr_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
+}
+
 pub struct NostrConnector {
     base: BaseConnector,
     client: Option<NostrClient>,
@@ -904,7 +1126,28 @@ pub struct NostrConnector {
     subscriptions: Mutex<BTreeMap<String, NostrSubscriptionTaskSet>>,
     subscription_diagnostics: Arc<Mutex<Vec<Value>>>,
     subscription_events: Arc<Mutex<Vec<EventEnvelope>>>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
     started_at: Instant,
+}
+
+impl std::fmt::Debug for NostrConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NostrConnector")
+            .field("base", &self.base)
+            .field("client", &self.client)
+            .field("verifier", &self.verifier)
+            .field("zone_id", &self.zone_id)
+            .field("inbound_state", &self.inbound_state)
+            .field("profile_state", &self.profile_state)
+            .field("subscriptions", &self.subscriptions)
+            .field("subscription_diagnostics", &self.subscription_diagnostics)
+            .field("subscription_events", &self.subscription_events)
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .field("thread_ownership_checker", &"<thread-ownership-checker>")
+            .field("started_at", &self.started_at)
+            .finish()
+    }
 }
 
 impl NostrConnector {
@@ -920,8 +1163,22 @@ impl NostrConnector {
             subscriptions: Mutex::new(BTreeMap::new()),
             subscription_diagnostics: Arc::new(Mutex::new(Vec::new())),
             subscription_events: Arc::new(Mutex::new(Vec::new())),
+            chat_coordination_config: default_nostr_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
             started_at: Instant::now(),
         }
+    }
+
+    /// Replace the thread-ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     fn manifest_hash() -> String {
@@ -1108,6 +1365,9 @@ impl NostrConnector {
                     "`secret_key_hex` accepts either raw 64-character hex or NIP-19 `nsec`; secrets are redacted in Debug and error paths.",
                     "Publishing fans out to every configured relay; there is no per-request relay override.",
                 ],
+                &[
+                    r#"{"input":{"content":"Release notes are ready for review.","kind":1,"tags":[["t","release"]]},"output":{"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}],"rejected_relays":[]}}"#,
+                ],
                 &[CAP_HEALTH_READ, CAP_RELAYS_READ, CAP_EVENTS_READ],
             ),
             operation(
@@ -1125,6 +1385,9 @@ impl NostrConnector {
                     "`plaintext` and `content` are accepted as input aliases, capped at 4096 bytes, and never returned in operation output.",
                     "Self-send is rejected unless `allow_self_send` is explicitly true.",
                     "The operation returns event id, kind, public sender/recipient metadata, and per-relay delivery diagnostics; it omits plaintext and encrypted content.",
+                ],
+                &[
+                    r#"{"input":{"recipient_pubkey":"1111111111111111111111111111111111111111111111111111111111111111","plaintext":"Can you review the incident summary?"},"output":{"event_kind":4,"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}]}}"#,
                 ],
                 &[CAP_HEALTH_READ, CAP_RELAYS_READ],
             ),
@@ -1144,6 +1407,9 @@ impl NostrConnector {
                     "State is persisted only after at least one configured relay accepts the event.",
                     "`last_published_at` can provide host state, but connector-persisted state also enforces monotonic timestamps.",
                 ],
+                &[
+                    r#"{"input":{"profile":{"display_name":"FCP Operations","about":"Automation status and handoff notes","website":"https://example.com/fcp"}},"output":{"event_kind":0,"persisted":true,"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}]}}"#,
+                ],
                 &[CAP_PROFILE_READ, CAP_RELAYS_READ, CAP_HEALTH_READ],
             ),
             operation(
@@ -1159,6 +1425,9 @@ impl NostrConnector {
                 &[
                     "This operation does not import profile data from relays; use `nostr.profile.import` for bounded relay reads.",
                     "No secret key material is persisted or returned.",
+                ],
+                &[
+                    r#"{"input":{},"output":{"persistence":"zone_dir","last_published_event_id":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","last_profile":{"display_name":"FCP Operations"}}}"#,
                 ],
                 &[CAP_PROFILE_WRITE, CAP_RELAYS_READ],
             ),
@@ -1176,6 +1445,9 @@ impl NostrConnector {
                     "Import uses the configured relay list; there is no per-request relay override.",
                     "Unsafe URL fields from imported content are omitted and reported rather than returned for display/fetch use.",
                     "If `pubkey` is omitted, the connector imports its own bound public key profile.",
+                ],
+                &[
+                    r#"{"input":{"pubkey":"2222222222222222222222222222222222222222222222222222222222222222","local_profile":{"display_name":"Local fallback"}},"output":{"ok":true,"pubkey_hex":"2222222222222222222222222222222222222222222222222222222222222222","relays_queried":["wss://relay.example.com"]}}"#,
                 ],
                 &[CAP_EVENTS_READ, CAP_RELAYS_READ, CAP_PROFILE_WRITE],
             ),
@@ -1195,6 +1467,9 @@ impl NostrConnector {
                     "`authors` accepts raw hex, NIP-19 `npub`, and `nostr:npub`; filters sent to relays use canonical hex.",
                     "Results are returned per relay and may contain duplicates across relays.",
                 ],
+                &[
+                    r#"{"input":{"authors":["3333333333333333333333333333333333333333333333333333333333333333"],"kinds":[1],"limit":20},"output":{"subscription_id":"sub-001","results":[{"relay":"wss://relay.example.com","events":[]}]}}"#,
+                ],
                 &[CAP_RELAYS_READ, CAP_HEALTH_READ],
             ),
             operation(
@@ -1211,6 +1486,9 @@ impl NostrConnector {
                     "This does not discover relays from NIP metadata or mutate relay policy.",
                     "The relay list is static configuration for this request-response slice.",
                 ],
+                &[
+                    r#"{"input":{},"output":{"relays":["wss://relay.example.com"],"public_key_hex":"4444444444444444444444444444444444444444444444444444444444444444"}}"#,
+                ],
                 &[CAP_HEALTH_READ, CAP_EVENTS_READ],
             ),
             operation(
@@ -1226,6 +1504,9 @@ impl NostrConnector {
                 &[
                     "Health checks websocket reachability only; it does not prove encrypted DM support.",
                     "Health does not score, rank, or deduplicate relays.",
+                ],
+                &[
+                    r#"{"input":{},"output":{"public_key_hex":"5555555555555555555555555555555555555555555555555555555555555555","relay_health":[{"relay":"wss://relay.example.com","ok":true}]}}"#,
                 ],
                 &[CAP_RELAYS_READ, CAP_NOTES_WRITE],
             ),
@@ -1244,9 +1525,118 @@ impl NostrConnector {
                     "NIP-44 support is inferred from kind=1059 (gift-wrapped) event indexing, not direct NIP-44 negotiation.",
                     "Latency measures WebSocket connection time only, not query round-trip time.",
                 ],
+                &[
+                    r#"{"input":{},"output":{"public_key_hex":"6666666666666666666666666666666666666666666666666666666666666666","relay_scores":[{"relay":"wss://relay.example.com","score":100}],"scored_count":1}}"#,
+                ],
                 &[CAP_RELAYS_READ, CAP_NOTES_WRITE, CAP_EVENTS_READ],
             ),
         ]
+    }
+
+    fn chat_coordination_agent_id(&self) -> AgentId {
+        AgentId::new(self.base.instance_id.as_str().to_owned())
+    }
+
+    async fn claim_before_nostr_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
+
+    async fn invoke_publish_note_with_coordination(
+        &self,
+        zone_id: &ZoneId,
+        input: &Value,
+        client: &NostrClient,
+    ) -> FcpResult<Value> {
+        let _ = required_string(input, "content")?;
+        let _ = note_kind(input)?;
+        let _ = note_tags(input)?;
+        let thread_id = nostr_note_thread_event_id(input)
+            .as_deref()
+            .map(nostr_coordination_thread_id);
+        let channel_id = if thread_id.is_some() {
+            nostr_coordination_public_thread_channel_id()
+        } else {
+            nostr_coordination_public_identity_channel_id(client.public_key_hex())
+        };
+        let claimant_agent_id = self.chat_coordination_agent_id();
+        let coordination = self
+            .claim_before_nostr_send(
+                zone_id.clone(),
+                channel_id,
+                thread_id,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                operation = OP_PUBLISH_NOTE,
+                "Nostr notes.publish denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
+        let mut output = Box::pin(client.publish_note(input)).await?;
+        nostr_insert_coordination(
+            &mut output,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(output)
+    }
+
+    async fn invoke_send_dm_with_coordination(
+        &self,
+        zone_id: &ZoneId,
+        input: &Value,
+        client: &NostrClient,
+    ) -> FcpResult<Value> {
+        let request = parse_dm_send_input(input, client.public_key_hex())?;
+        let thread_id = request
+            .reply_to_event_id()
+            .map(nostr_coordination_thread_id);
+        let claimant_agent_id = self.chat_coordination_agent_id();
+        let coordination = self
+            .claim_before_nostr_send(
+                zone_id.clone(),
+                nostr_coordination_dm_channel_id(request.recipient_pubkey()),
+                thread_id,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                operation = OP_SEND_DM,
+                "Nostr dm.send denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
+        let mut output = Box::pin(client.send_dm(input)).await?;
+        nostr_insert_coordination(
+            &mut output,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(output)
     }
 
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
@@ -1257,8 +1647,14 @@ impl NostrConnector {
         verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])?;
 
         let output = match req.operation.as_str() {
-            OP_PUBLISH_NOTE => Box::pin(client.publish_note(&req.input)).await?,
-            OP_SEND_DM => Box::pin(client.send_dm(&req.input)).await?,
+            OP_PUBLISH_NOTE => {
+                self.invoke_publish_note_with_coordination(&req.zone_id, &req.input, client)
+                    .await?
+            }
+            OP_SEND_DM => {
+                self.invoke_send_dm_with_coordination(&req.zone_id, &req.input, client)
+                    .await?
+            }
             OP_PROFILE_PUBLISH => {
                 let profile_state = self.profile_state.as_ref().ok_or(FcpError::NotHandshaken)?;
                 let publish_input = parse_profile_publish_input(&req.input)?;
@@ -1400,6 +1796,10 @@ impl FcpConnector for NostrConnector {
     }
 
     async fn configure(&mut self, config: Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_nostr_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config: NostrConfig =
             serde_json::from_value(config).map_err(|error| FcpError::InvalidRequest {
                 code: 1003,
@@ -1414,6 +1814,7 @@ impl FcpConnector for NostrConnector {
         self.zone_id = None;
         self.inbound_state = None;
         self.profile_state = None;
+        self.chat_coordination_config = chat_coordination_config;
         Ok(())
     }
 
@@ -1814,6 +2215,7 @@ fn operation(
     input_schema: Value,
     when_to_use: &str,
     common_mistakes: &[&str],
+    examples: &[&str],
     related: &[&'static str],
 ) -> OperationInfo {
     OperationInfo {
@@ -1832,7 +2234,7 @@ fn operation(
                 .iter()
                 .map(|item| (*item).to_string())
                 .collect(),
-            examples: Vec::new(),
+            examples: examples.iter().map(|item| (*item).to_string()).collect(),
             related: related
                 .iter()
                 .map(|capability| CapabilityId::from_static(capability))
@@ -1878,6 +2280,7 @@ fn record_subscription_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::NostrKeyMaterial;
     use crate::types::NIP01_KIND_PROFILE;
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -1947,6 +2350,32 @@ mod tests {
         CapabilityToken::from_raw(raw)
     }
 
+    fn invoke_request(
+        signing_key: &Ed25519SigningKey,
+        operation: &'static str,
+        capability: &'static str,
+        instance_id: &str,
+        input: Value,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new(format!("test-{operation}")),
+            connector_id: ConnectorId::from_static("fcp.nostr"),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input,
+            capability_token: capability_token(signing_key, capability, operation, instance_id),
+            holder_proof: None,
+            context: None,
+            idempotency_key: Some(format!("idem-{operation}")),
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
     const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
         (OP_PUBLISH_NOTE, "notes_publish"),
         (OP_SEND_DM, "dm_send"),
@@ -1991,6 +2420,38 @@ mod tests {
         }
         serde_json::to_value(schema)
             .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn operation_ai_hints<'a>(
+        manifest: &'a toml::Value,
+        operation_key: &str,
+    ) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+        manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get("ai_hints"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("{operation_key} should declare ai_hints"))
+    }
+
+    fn hint_string_array(
+        hints: &toml::map::Map<String, toml::Value>,
+        field: &str,
+    ) -> Result<Vec<String>, String> {
+        let values = hints
+            .get(field)
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| format!("ai_hints.{field} should be an array"))?;
+        values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("ai_hints.{field} entries should be non-empty strings"))
+            })
+            .collect()
     }
 
     const RELAY_NETWORK_CONSTRAINT_OPS: &[&str] = &[
@@ -2231,6 +2692,35 @@ mod tests {
         ])
     }
 
+    fn sample_coordination() -> Value {
+        json!([
+            {
+                "event": "claim_attempt",
+                "backend": "in_memory",
+                "claim_key": "claim:abc123",
+                "channel_id": "channel:def456",
+                "claimant_agent_id": "agent:abc123"
+            },
+            {
+                "event": "claim_outcome",
+                "backend": "in_memory",
+                "claim_key": "claim:abc123",
+                "channel_id": "channel:def456",
+                "claimant_agent_id": "agent:abc123",
+                "owner_agent_id": "agent:abc123",
+                "outcome": "granted"
+            },
+            {
+                "event": "send_executed",
+                "backend": "in_memory",
+                "claim_key": "claim:abc123",
+                "channel_id": "channel:def456",
+                "claimant_agent_id": "agent:abc123",
+                "outcome": "executed"
+            }
+        ])
+    }
+
     fn sample_profile_state() -> Value {
         json!({
             "load_result": "state_loaded",
@@ -2383,6 +2873,7 @@ mod tests {
                 "event": sample_event(1),
                 "accepted_relays": sample_relay_diagnostics(),
                 "rejected_relays": [],
+                "coordination": sample_coordination(),
                 "relay_resilience": sample_relay_resilience(),
                 "relay_metrics": sample_relay_metrics()
             }),
@@ -2402,6 +2893,7 @@ mod tests {
                 "created_at": 1_715_000_000_u64,
                 "accepted_relays": sample_relay_diagnostics(),
                 "rejected_relays": [],
+                "coordination": sample_coordination(),
                 "relay_resilience": sample_relay_resilience(),
                 "relay_metrics": sample_relay_metrics()
             }),
@@ -2418,6 +2910,7 @@ mod tests {
                 "created_at": 1_715_000_000_u64,
                 "accepted_relays": [],
                 "rejected_relays": [],
+                "coordination": [],
                 "relay_resilience": [],
                 "relay_metrics": []
             }),
@@ -2515,6 +3008,66 @@ mod tests {
                 "relay_metrics": []
             }),
         )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_ai_hints_cover_all_operations_and_runtime_examples() -> Result<(), String> {
+        let manifest = nostr_manifest()?;
+        let operation_catalog = NostrConnector::operations();
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            let hints = operation_ai_hints(&manifest, manifest_key)?;
+            let when_to_use = hints
+                .get("when_to_use")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("{manifest_key}.ai_hints.when_to_use missing"))?;
+            if when_to_use.trim().is_empty() {
+                return Err(format!("{manifest_key}.ai_hints.when_to_use is empty"));
+            }
+
+            let common_mistakes = hint_string_array(hints, "common_mistakes")?;
+            if common_mistakes.len() < 2 {
+                return Err(format!(
+                    "{manifest_key}.ai_hints.common_mistakes should have at least 2 entries"
+                ));
+            }
+
+            let examples = hint_string_array(hints, "examples")?;
+            for example in &examples {
+                serde_json::from_str::<Value>(example).map_err(|err| {
+                    format!("{manifest_key}.ai_hints example should parse as JSON: {err}")
+                })?;
+                let lower = example.to_ascii_lowercase();
+                for forbidden in ["secret", "token", "password", "private_key", "nsec"] {
+                    if lower.contains(forbidden) {
+                        return Err(format!(
+                            "{manifest_key}.ai_hints example contains forbidden sample text `{forbidden}`"
+                        ));
+                    }
+                }
+            }
+
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            if operation.ai_hints.when_to_use.trim().is_empty() {
+                return Err(format!("{operation_id} runtime when_to_use is empty"));
+            }
+            if operation.ai_hints.common_mistakes.is_empty() {
+                return Err(format!("{operation_id} runtime common_mistakes is empty"));
+            }
+            if operation.ai_hints.examples.is_empty() {
+                return Err(format!("{operation_id} runtime examples are empty"));
+            }
+            for example in &operation.ai_hints.examples {
+                serde_json::from_str::<Value>(example).map_err(|err| {
+                    format!("{operation_id} runtime example should parse as JSON: {err}")
+                })?;
+            }
+        }
 
         Ok(())
     }
@@ -2853,6 +3406,82 @@ mod tests {
         assert!(!response.would_succeed);
         assert_eq!(response.denial_code.as_deref(), Some("FCP-3003"));
         assert!(response.missing_capabilities.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_dm_send_denies_duplicate_claim_before_relay_publish() -> Result<(), String> {
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let checker_for_connector: Arc<dyn ThreadOwnershipChecker> = checker.clone();
+        let mut connector = NostrConnector::new().with_thread_ownership_checker(
+            checker_for_connector,
+            ChatCoordinationBackend::InMemory,
+        );
+        connector
+            .configure(json!({
+                "relay_urls": ["wss://relay.example.com"],
+                "secret_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+                "chat_coordination": { "backend": "in_memory" }
+            }))
+            .await
+            .expect("configure should accept Nostr coordination config");
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request_for(
+                signing_key.verifying_key().to_bytes(),
+            ))
+            .await
+            .expect("handshake should succeed");
+
+        let recipient_pubkey = NostrKeyMaterial::from_secret_key_input(
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        )
+        .expect("recipient fixture key should parse")
+        .public_key_hex()
+        .to_owned();
+        let claim_key = fcp_sdk::ClaimKey::for_chat_message(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.nostr"),
+            nostr_coordination_dm_channel_id(&recipient_pubkey),
+            None,
+            DmMode::TreatAsThread,
+        )
+        .expect("DM coordination should use conversation as thread");
+        assert!(matches!(
+            checker.claim_now(claim_key, AgentId::new("peer-agent"), Instant::now(),),
+            fcp_sdk::ClaimOutcome::Granted(_)
+        ));
+
+        let error = connector
+            .invoke(invoke_request(
+                &signing_key,
+                OP_SEND_DM,
+                CAP_DM_WRITE,
+                connector.base.instance_id.as_str(),
+                json!({
+                    "recipient": recipient_pubkey,
+                    "plaintext": "secret Nostr body"
+                }),
+            ))
+            .await
+            .expect_err("duplicate active claim should deny before relay WebSocket publish");
+
+        match error {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 4090);
+                assert!(message.starts_with("thread_owned_by_peer:"));
+                assert!(
+                    !message.contains("secret Nostr body"),
+                    "coordination denial must not leak plaintext"
+                );
+            }
+            other => {
+                return Err(format!(
+                    "expected Unauthorized duplicate-claim denial, got {other:?}"
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     // ── Configure / handshake / shutdown lifecycle tests ─────────────

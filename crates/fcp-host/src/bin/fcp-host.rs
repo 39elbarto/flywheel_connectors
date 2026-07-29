@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, Request, StatusCode, Uri,
         header::{CACHE_CONTROL, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, VARY},
@@ -51,10 +51,11 @@ use fcp_evidence::{
     TrustedV3OwnerMap, verify_hybrid_owner_object,
 };
 use fcp_host::{
-    BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
-    BatchOptions, BatchScheduleHint, BatchScheduleReport, BatchSchedulerMode, BatchStatus,
-    BudgetAction, BudgetPolicyEngine, BudgetReportRequest, BudgetReportResponse, CacheMetadata,
-    CacheValidator, CancellationController, CancellationRequest, CancellationResponse,
+    AdaptiveWarmPoolConfig, AdaptiveWarmPoolController, BatchExecutor, BatchInvokeRequest,
+    BatchInvokeResponse, BatchOperation, BatchOperationError, BatchOptions, BatchScheduleHint,
+    BatchScheduleReport, BatchSchedulerMode, BatchStatus, BudgetAction, BudgetPolicyEngine,
+    BudgetReportRequest, BudgetReportResponse, CacheMetadata, CacheValidator,
+    CancellationController, CancellationRequest, CancellationResponse,
     CapabilityTokenVerifyRequest, ConfigRevisionRecord, ConnectorAdminState, ConnectorAdminStatus,
     ConnectorArchetype, ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
     ConnectorArtifactRegistrationResponse, ConnectorConfigApplyRequest,
@@ -71,12 +72,16 @@ use fcp_host::{
     EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
     HostHealthStatus, HostPreflightRequest, HostSimulateRequest, HostSimulateResponse,
     IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
-    LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
-    ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
+    LifecycleTransitionResponse, LocalPlacementController, LocalPlacementPlan,
+    LocalPlacementPressureSnapshot, LocalPlacementRequest, LogQueryRequest, LogQueryResponse,
+    ManagedConnectorConfig, ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
     NativeProxyOnlySandboxDecision, NativeProxyOnlySandboxSupport, OperationResult,
-    OperationResultStatus, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
-    PreflightResponse, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary,
-    RequestPriority, ResilienceError, ResilienceLayer, RevocationCascadeVerifier,
+    OperationResultStatus, PLACEMENT_EVIDENCE_EVENT, PlacementHintDerivationInput,
+    PlacementOperationClass, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
+    PreflightResponse, PrewarmCheckoutDecision, PrewarmCheckoutObservation, PrewarmCredentialState,
+    PrewarmHealthState, PrewarmManifestState, PrewarmPoolState, PrewarmSandboxState,
+    PrewarmStrategy, PrewarmZoneBinding, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse,
+    ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer, RevocationCascadeVerifier,
     RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
     RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
     SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
@@ -84,7 +89,8 @@ use fcp_host::{
     StickyCredentialPolicy, SupplyChainGate, SupplyChainGateConfig,
     TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE, ToolDescriptor, TruthPrecedenceBootError,
     TruthPrecedenceBootResolution, TruthPrecedenceBootSelection, V2_DEFAULT_GRADUATED_ENV,
-    V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV, V2_MIN_HEALTHY_MESH_PEERS_ENV, admit_safety_tier,
+    V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV, V2_MIN_HEALTHY_MESH_PEERS_ENV, WARM_POOL_EVIDENCE_EVENT,
+    WarmPoolEntrySnapshot, WarmPoolKey, WarmPoolPressureSnapshot, admit_safety_tier,
     capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
     emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
     native_proxy_only_sandbox_decision, resolve_truth_precedence_boot_resolution,
@@ -93,8 +99,8 @@ use fcp_host::{
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError,
-    LifecycleManager, LifecycleState, LifecycleStatus, LimitType, OperationId,
+    HealthSnapshot, HealthState, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, LimitType, OperationId,
     RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
     RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
@@ -108,14 +114,16 @@ use fcp_policy::{
     RequestDescriptor, TRUTH_PRECEDENCE_DEFAULT_ENV,
 };
 use fcp_prelude::{
-    ApprovalToken, CapabilityConstraints, CapabilityVerifier, CorrelationId,
-    CostEstimateConfidence, CredentialId, Decision, LeasePurpose as CoreLeasePurpose, ObjectId,
-    PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier, TailscaleNodeId,
-    TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
-    simulate_policy_decision,
+    ApprovalToken, CapabilityConstraints, CapabilityVerifier, ConnectorStateCanonicalStatus,
+    CorrelationId, CostEstimateConfidence, CredentialId, Decision, InstanceId, Lease as CoreLease,
+    LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
+    ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject, TailscaleNodeId, TransportMode,
+    UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
-use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
+use fcp_prelude::{
+    ConnectorStateModel, DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy,
+};
 use fcp_provider_auth::{
     ApiKeyAuth, AuthError, AuthMethod, AuthMethodKind, AuthProfile, AuthProfileStore,
     InMemoryAuthProfileStore, OAuthAuthCodeAuth, OAuthAuthCodeCallback, OAuthAuthCodeConfig,
@@ -132,6 +140,7 @@ use fcp_sandbox::{
     EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector, TlsVerifier, WasiConfig,
     WasiConnectorRunner, host_matches_allow_list,
 };
+use fcp_telemetry::{TelemetryConfig, TelemetryError, metrics, otlp_readiness};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -141,13 +150,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tower::ServiceExt;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 type ConnectorConfig = ManagedConnectorConfig;
 
 const CONNECTOR_STATE_DIR_ENV: &str = "FCP_CONNECTOR_STATE";
+const CONNECTOR_STATE_OBJECT_ID_KEY_ENV: &str = "FCP_CONNECTOR_STATE_OBJECT_ID_KEY";
+const FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV: &str = "FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY";
 const FCP_CONFIG_DIR_ENV: &str = "FCP_CONFIG_DIR";
+const CONNECTOR_STATE_CANONICAL_STORE_DIR: &str = "store";
+const CONNECTOR_STATE_CANONICAL_OBJECTS_DIR: &str = "objects";
+const CONNECTOR_STATE_CANONICAL_SYMBOLS_DIR: &str = "symbols";
 const HYBRID_OWNER_EVIDENCE_TAG: &str = "fcp.hybrid_owner.evidence_cbor";
+const LOCAL_PLACEMENT_OPERATION: &str = "fcp.host.placement/launch";
 const HYBRID_OWNER_CONTEXT_FILE_ENV: &str = "FCP_HOST_HYBRID_OWNER_CONTEXT_FILE";
 const BLUEBUBBLES_INGRESS_ROUTE: &str = "/bluebubbles-webhook";
 const BLUEBUBBLES_INGRESS_OPERATION: &str = "imessage.ingest_webhook_request";
@@ -352,13 +366,97 @@ struct ConnectorRpcRequest {
     response_tx: oneshot::Sender<std::io::Result<serde_json::Value>>,
 }
 
+fn connector_placement_request(
+    config: &ConnectorConfig,
+    operation_class: PlacementOperationClass,
+) -> LocalPlacementRequest {
+    let mut input = PlacementHintDerivationInput::new(config.id.clone());
+    input.manifest_archetypes = config.categories.clone();
+    input.operation_ids = config
+        .allowed_operations
+        .iter()
+        .chain(config.operation_network_constraints.keys())
+        .cloned()
+        .collect();
+    input.sandbox_strict = config
+        .runtime_network_enforcement
+        .requires_runtime_enforcement();
+    input.prewarm_strategy = config.prewarm.strategy;
+
+    LocalPlacementRequest::new(config.id.clone(), operation_class, input.derive_hint())
+}
+
+fn connector_placement_pressure(
+    resilience: &ResilienceLayer,
+    connector_id: &ConnectorId,
+    operation_class: PlacementOperationClass,
+) -> LocalPlacementPressureSnapshot {
+    LocalPlacementPressureSnapshot::from_decision(resilience.backpressure_decision(
+        connector_id,
+        operation_class.request_priority(),
+        LOCAL_PLACEMENT_OPERATION,
+    ))
+}
+
+fn emit_placement_plan(plan: &LocalPlacementPlan) {
+    tracing::info!(
+        event = PLACEMENT_EVIDENCE_EVENT,
+        bead_id = %plan.bead_id,
+        connector_id = %plan.connector_id,
+        operation_class = %plan.operation_class.as_str(),
+        hint_class = %plan.hint_class.as_str(),
+        selected_lane = %plan.selected_lane.as_str(),
+        admitted = plan.admitted,
+        affinity_applied = plan.affinity_applied,
+        no_op_reason = %plan.no_op_reason.as_str(),
+        pressure_verdict = %plan.pressure_verdict.as_str(),
+        pressure_state = plan.pressure_state.as_deref().unwrap_or("unavailable"),
+        pressure_action = plan.pressure_action.as_deref().unwrap_or("unavailable"),
+        pressure_replay_matches = ?plan.pressure_replay_matches,
+        queue_wait_ms = plan.queue_wait_ms,
+        security_influence = plan.security_influence,
+        "local connector placement decision"
+    );
+}
+
 impl SubprocessConnector {
     async fn spawn(
         config: ConnectorConfig,
         resilience: Arc<ResilienceLayer>,
         capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
     ) -> HostResult<Self> {
+        Self::spawn_with_placement(
+            config,
+            resilience,
+            capability_verifying_key,
+            PlacementOperationClass::LifecycleCritical,
+        )
+        .await
+    }
+
+    async fn spawn_with_placement(
+        config: ConnectorConfig,
+        resilience: Arc<ResilienceLayer>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+        placement_operation_class: PlacementOperationClass,
+    ) -> HostResult<Self> {
         let summary = connector_summary_from_config(&config)?;
+        resilience.ensure_connector(&summary.id);
+        let placement_request = connector_placement_request(&config, placement_operation_class);
+        let pressure =
+            connector_placement_pressure(&resilience, &summary.id, placement_operation_class);
+        let placement_plan =
+            LocalPlacementController::default().plan_launch(&placement_request, &pressure);
+        emit_placement_plan(&placement_plan);
+        if !placement_plan.admitted {
+            return Err(HostError::Unavailable(format!(
+                "connector '{}' launch refused by local placement: pressure_verdict={} lane={}",
+                summary.id,
+                placement_plan.pressure_verdict.as_str(),
+                placement_plan.selected_lane.as_str()
+            )));
+        }
+
         let runner = ConnectorProcessRunner::spawn(&config.binary, &config.args, &config.env)
             .await
             .map_err(|err| HostError::Internal(format!("spawn failed: {err}")))?;
@@ -382,7 +480,6 @@ impl SubprocessConnector {
             state_root,
             handshaken_zone: Mutex::new(None),
         };
-        connector.resilience.ensure_connector(&connector.summary.id);
 
         if let Some(config_payload) = config.config {
             connector.configure(config_payload).await?;
@@ -437,7 +534,7 @@ impl SubprocessConnector {
                 })?;
                 if let Some(error) = response.get("error") {
                     return Err(HostError::RegistryError(format!(
-                        "connector error: {error}"
+                        "{CONNECTOR_JSON_RPC_ERROR_PREFIX}{error}"
                     )));
                 }
                 Ok(response.get("result").cloned().unwrap_or(json!({})))
@@ -458,15 +555,75 @@ impl SubprocessConnector {
             .map_err(|err| HostError::RegistryError(format!("health parse error: {err}")))
     }
 
+    async fn ensure_handshake(&self, zone: &ZoneId) -> HostResult<()> {
+        if self.capability_verifying_key.is_none() {
+            return Ok(());
+        }
+
+        let mut handshaken_zone = self.handshaken_zone.lock().await;
+        let _lock_hold_monitor = HandshakenZoneLockHoldMonitor {
+            connector_id: self.summary.id.as_str(),
+            acquired_at: Instant::now(),
+            threshold: HANDSHAKEN_ZONE_LOCK_HOLD_WARN_THRESHOLD,
+        };
+        self.handshake_if_needed(zone, &mut handshaken_zone).await
+    }
+
+    async fn handshake_if_needed(
+        &self,
+        zone: &ZoneId,
+        handshaken_zone: &mut Option<ZoneId>,
+    ) -> HostResult<()> {
+        let Some(host_public_key) = self.capability_verifying_key else {
+            return Ok(());
+        };
+
+        if handshaken_zone.as_ref() == Some(zone) {
+            return Ok(());
+        }
+
+        let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
+        let request = HandshakeRequest {
+            protocol_version: "1.0.0".to_string(),
+            zone: zone.clone(),
+            zone_dir: Some(self.zone_dir_for(zone)?),
+            host_public_key,
+            nonce,
+            capabilities_requested: Vec::new(),
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        };
+        let handshake_params = serde_json::to_value(request)
+            .map_err(|err| HostError::RegistryError(format!("handshake encode error: {err}")))?;
+        let response: HandshakeResponse =
+            serde_json::from_value(self.rpc("handshake", handshake_params).await?)
+                .map_err(|err| HostError::RegistryError(format!("handshake parse error: {err}")))?;
+        if response.status != "accepted" {
+            return Err(HostError::RegistryError(format!(
+                "handshake rejected by connector '{}': {}",
+                self.summary.id, response.status
+            )));
+        }
+        if response.nonce != nonce {
+            return Err(HostError::RegistryError(format!(
+                "handshake nonce mismatch for connector '{}'",
+                self.summary.id
+            )));
+        }
+        *handshaken_zone = Some(zone.clone());
+        Ok(())
+    }
+
     async fn rpc_in_handshaken_zone(
         &self,
         zone: &ZoneId,
         method: &str,
         params: serde_json::Value,
     ) -> HostResult<serde_json::Value> {
-        let Some(host_public_key) = self.capability_verifying_key else {
+        if self.capability_verifying_key.is_none() {
             return self.rpc(method, params).await;
-        };
+        }
 
         // br-j1pjg serialized same-zone handshakes, but the lock still
         // dropped before the follow-up invoke/simulate RPC. A later
@@ -493,40 +650,7 @@ impl SubprocessConnector {
             acquired_at: Instant::now(),
             threshold: HANDSHAKEN_ZONE_LOCK_HOLD_WARN_THRESHOLD,
         };
-        if handshaken_zone.as_ref() != Some(zone) {
-            let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
-            let request = HandshakeRequest {
-                protocol_version: "1.0.0".to_string(),
-                zone: zone.clone(),
-                zone_dir: Some(self.zone_dir_for(zone)?),
-                host_public_key,
-                nonce,
-                capabilities_requested: Vec::new(),
-                host: None,
-                transport_caps: None,
-                requested_instance_id: None,
-            };
-            let handshake_params = serde_json::to_value(request).map_err(|err| {
-                HostError::RegistryError(format!("handshake encode error: {err}"))
-            })?;
-            let response: HandshakeResponse = serde_json::from_value(
-                self.rpc("handshake", handshake_params).await?,
-            )
-            .map_err(|err| HostError::RegistryError(format!("handshake parse error: {err}")))?;
-            if response.status != "accepted" {
-                return Err(HostError::RegistryError(format!(
-                    "handshake rejected by connector '{}': {}",
-                    self.summary.id, response.status
-                )));
-            }
-            if response.nonce != nonce {
-                return Err(HostError::RegistryError(format!(
-                    "handshake nonce mismatch for connector '{}'",
-                    self.summary.id
-                )));
-            }
-            *handshaken_zone = Some(zone.clone());
-        }
+        self.handshake_if_needed(zone, &mut handshaken_zone).await?;
 
         self.rpc(method, params).await
     }
@@ -595,6 +719,563 @@ impl SubprocessConnector {
         }
         summary
     }
+}
+
+const NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES: u64 = 96 * 1024 * 1024;
+const NATIVE_WARM_POOL_OPERATION: &str = "fcp.host.warm_pool/checkout";
+const NATIVE_WARM_POOL_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+struct NativeWarmPoolEntry {
+    key: WarmPoolKey,
+    connector: Arc<SubprocessConnector>,
+    created_at: Instant,
+    last_used_at: Instant,
+    rss_bytes: u64,
+    /// Last observed subprocess health, refreshed at checkout and by the
+    /// background maintenance sweep so retention planning sees real liveness
+    /// instead of a synthetic always-Ready snapshot (bead
+    /// warmpool-snapshot-ready-imtdj).
+    last_health: PrewarmHealthState,
+}
+
+impl NativeWarmPoolEntry {
+    fn snapshot(&self, now: Instant) -> WarmPoolEntrySnapshot {
+        let mut snapshot = WarmPoolEntrySnapshot::ready(
+            self.key.clone(),
+            duration_ms(now.saturating_duration_since(self.last_used_at)),
+            self.rss_bytes,
+        );
+        snapshot.age_ms = duration_ms(now.saturating_duration_since(self.created_at));
+        snapshot.health = self.last_health;
+        snapshot
+    }
+}
+
+struct NativeWarmPoolCheckout {
+    entry: NativeWarmPoolEntry,
+    warm_checkout: bool,
+    activation_latency_ms: u64,
+}
+
+struct NativeWarmPoolConnector {
+    config: ConnectorConfig,
+    connector_id: ConnectorId,
+    control: Arc<SubprocessConnector>,
+    resilience: Arc<ResilienceLayer>,
+    capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    controller: AdaptiveWarmPoolController,
+    entries: Mutex<Vec<NativeWarmPoolEntry>>,
+    /// Background maintenance task handle. Dropping the pool drops the handle,
+    /// which aborts the task (the task itself only holds a `Weak` back-pointer
+    /// so it never keeps the pool alive).
+    maintainer: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl NativeWarmPoolConnector {
+    async fn spawn(
+        config: ConnectorConfig,
+        resilience: Arc<ResilienceLayer>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    ) -> HostResult<Arc<Self>> {
+        let control = Arc::new(
+            SubprocessConnector::spawn(
+                config.clone(),
+                Arc::clone(&resilience),
+                capability_verifying_key,
+            )
+            .await?,
+        );
+        let connector_id = control.summary.id.clone();
+        let per_connector_max_idle = usize::try_from(config.prewarm.max_idle)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let global_rss_cap_bytes = NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES
+            .saturating_mul(u64::from(config.prewarm.max_idle.max(1)));
+        let connector = Arc::new(Self {
+            config,
+            connector_id,
+            control,
+            resilience,
+            capability_verifying_key,
+            controller: AdaptiveWarmPoolController::new(AdaptiveWarmPoolConfig::new(
+                per_connector_max_idle,
+                global_rss_cap_bytes,
+            )),
+            entries: Mutex::new(Vec::new()),
+            maintainer: Mutex::new(None),
+        });
+        connector.maintain_min_idle().await?;
+        let handle = Self::start_maintainer(&connector);
+        *connector.maintainer.lock().await = Some(handle);
+        Ok(connector)
+    }
+
+    /// Spawn the periodic warm-pool maintainer.
+    ///
+    /// Each tick refreshes cached health for idle pooled entries, re-plans
+    /// retention so liveness-aware eviction can act on the refreshed truth
+    /// (bead warmpool-snapshot-ready-imtdj), and regrows the pool toward
+    /// `prewarm.min_idle` once pressure allows (bead
+    /// warmpool-pressure-regrow-hyjqg). The task holds only a `Weak` reference
+    /// and exits when the pool is dropped.
+    fn start_maintainer(connector: &Arc<Self>) -> JoinHandle<()> {
+        let weak = Arc::downgrade(connector);
+        task::spawn(async move {
+            loop {
+                fcp_async_core::time::sleep(NATIVE_WARM_POOL_MAINTENANCE_INTERVAL).await;
+                let Some(connector) = weak.upgrade() else {
+                    break;
+                };
+                connector.run_maintenance_once().await;
+            }
+        })
+    }
+
+    /// One maintenance pass: refresh idle-entry health, apply retention, and
+    /// regrow toward `min_idle` when the pressure controller permits.
+    async fn run_maintenance_once(&self) {
+        self.refresh_idle_entry_health().await;
+        let pool_enabled = {
+            let mut entries = self.entries.lock().await;
+            self.apply_retention_locked(&mut entries)
+        };
+        // Regrow only while the pressure controller is not actively shedding
+        // the pool: inline replenishment during sustained pressure would fight
+        // the controller (spawn -> immediate re-evict thrash).
+        if pool_enabled && let Err(error) = self.maintain_min_idle().await {
+            tracing::warn!(
+                event = WARM_POOL_EVIDENCE_EVENT,
+                action = "regrow_failed",
+                connector_id = %self.connector_id,
+                error = %error,
+                "failed to regrow native warm pool toward min_idle during maintenance"
+            );
+        }
+    }
+
+    /// Probe the health of currently pooled entries and cache the result so
+    /// retention planning sees real liveness. Probes run without holding the
+    /// pool lock; an entry checked out mid-probe is simply skipped.
+    async fn refresh_idle_entry_health(&self) {
+        let probes: Vec<Arc<SubprocessConnector>> = {
+            let entries = self.entries.lock().await;
+            entries
+                .iter()
+                .map(|entry| Arc::clone(&entry.connector))
+                .collect()
+        };
+        for connector in probes {
+            let health = match connector.health().await {
+                Ok(snapshot) => prewarm_health_state(&snapshot),
+                Err(_) => PrewarmHealthState::Failed,
+            };
+            let mut entries = self.entries.lock().await;
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| Arc::ptr_eq(&entry.connector, &connector))
+            {
+                entry.last_health = health;
+            }
+        }
+    }
+
+    /// Top the warm pool back up toward `prewarm.min_idle`.
+    ///
+    /// This is count-aware: it spawns only the current deficit
+    /// (`min_idle - live_entries`), never over-provisioning past the target, and
+    /// is a cheap lock + length check when the pool is already at or above it. At
+    /// initial spawn the pool is empty so it spawns the full `min_idle` target.
+    /// It is also called after a fatal invoke/simulate error drops an entry, so
+    /// the min_idle warm-start guarantee is restored rather than silently
+    /// decaying to cold starts (bead warmpool-min-idle-restore). Each spawned
+    /// entry is inserted through [`insert_pool_entry`], which re-applies
+    /// retention, so the pressure/RSS controller keeps final say over whether the
+    /// replacement is actually retained.
+    async fn maintain_min_idle(&self) -> HostResult<()> {
+        let zones = self
+            .config
+            .allowed_zones
+            .iter()
+            .filter_map(|zone| zone.parse::<ZoneId>().ok())
+            .collect::<Vec<_>>();
+        if zones.is_empty() || self.config.prewarm.min_idle == 0 {
+            return Ok(());
+        }
+
+        let target = usize::try_from(self.config.prewarm.min_idle).unwrap_or(usize::MAX);
+        let current = self.entries.lock().await.len();
+        let Some(deficit) = target.checked_sub(current).filter(|deficit| *deficit > 0) else {
+            return Ok(());
+        };
+        for zone in zones.iter().cycle().take(deficit) {
+            let entry = self.spawn_pool_entry(zone).await?;
+            self.insert_pool_entry(entry).await;
+        }
+        Ok(())
+    }
+
+    /// Best-effort warm-pool top-up after a fatal error destroyed an entry. A
+    /// respawn failure must never mask the original invoke/simulate error, so
+    /// this swallows and logs the error rather than propagating it.
+    async fn replenish_after_fatal_drop(&self) {
+        if let Err(error) = self.maintain_min_idle().await {
+            tracing::warn!(
+                event = WARM_POOL_EVIDENCE_EVENT,
+                action = "replenish_failed",
+                connector_id = %self.connector_id,
+                error = %error,
+                "failed to replenish native warm pool toward min_idle after fatal error"
+            );
+        }
+    }
+
+    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        let checkout = self.checkout(&request.zone_id).await?;
+        tracing::info!(
+            event = WARM_POOL_EVIDENCE_EVENT,
+            action = if checkout.warm_checkout {
+                "reused"
+            } else {
+                "created"
+            },
+            connector_id = %checkout.entry.key.connector_id,
+            zone_hash = %warm_pool_log_label("zone", &checkout.entry.key.zone),
+            manifest_hash = %checkout.entry.key.manifest_hash,
+            reason = if checkout.warm_checkout {
+                "warm_checkout"
+            } else {
+                "cold_start"
+            },
+            idle_ms = checkout.entry.snapshot(Instant::now()).idle_ms,
+            rss_bytes = checkout.entry.rss_bytes,
+            activation_latency_ms = checkout.activation_latency_ms,
+            "native warm-pool checkout"
+        );
+
+        let mut entry = checkout.entry;
+        let response = entry.connector.invoke(request).await;
+        match response {
+            Ok(response) => {
+                entry.last_used_at = Instant::now();
+                self.insert_pool_entry(entry).await;
+                Ok(response)
+            }
+            Err(error) => {
+                if warm_entry_survives_error(&error) {
+                    // Request-level rejection (shed/circuit/bulkhead) or a
+                    // connector JSON-RPC error — the subprocess is healthy, so
+                    // return it to the pool instead of destroying warm capacity.
+                    entry.last_used_at = Instant::now();
+                    tracing::debug!(
+                        event = WARM_POOL_EVIDENCE_EVENT,
+                        action = "retained",
+                        connector_id = %entry.key.connector_id,
+                        zone_hash = %warm_pool_log_label("zone", &entry.key.zone),
+                        manifest_hash = %entry.key.manifest_hash,
+                        reason = "request_level_invoke_error",
+                        "retaining native warm-pool entry after request-level invoke error"
+                    );
+                    self.insert_pool_entry(entry).await;
+                } else {
+                    tracing::warn!(
+                        event = WARM_POOL_EVIDENCE_EVENT,
+                        action = "evicted",
+                        connector_id = %entry.key.connector_id,
+                        zone_hash = %warm_pool_log_label("zone", &entry.key.zone),
+                        manifest_hash = %entry.key.manifest_hash,
+                        reason = "fatal_invoke_error",
+                        idle_ms = entry.snapshot(Instant::now()).idle_ms,
+                        rss_bytes = entry.rss_bytes,
+                        "dropping native warm-pool entry after fatal invoke error"
+                    );
+                    self.replenish_after_fatal_drop().await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
+        let checkout = self.checkout(&request.zone_id).await?;
+        let mut entry = checkout.entry;
+        let response = entry.connector.simulate(request).await;
+        match response {
+            Ok(response) => {
+                entry.last_used_at = Instant::now();
+                self.insert_pool_entry(entry).await;
+                Ok(response)
+            }
+            Err(error) => {
+                if warm_entry_survives_error(&error) {
+                    // Same taxonomy as `invoke`: a healthy subprocess that
+                    // merely rejected or errored this request stays warm.
+                    entry.last_used_at = Instant::now();
+                    self.insert_pool_entry(entry).await;
+                } else {
+                    // Fatal error dropped the entry; restore warm capacity
+                    // toward min_idle so it does not decay to cold starts.
+                    self.replenish_after_fatal_drop().await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn introspect(&self) -> HostResult<Introspection> {
+        self.control.introspect().await
+    }
+
+    async fn summary_snapshot(&self) -> ConnectorSummary {
+        self.control.summary_snapshot().await
+    }
+
+    fn static_summary(&self) -> ConnectorSummary {
+        self.control.summary.clone()
+    }
+
+    async fn self_check(&self) -> HostResult<SelfCheckReport> {
+        self.control.self_check().await
+    }
+
+    async fn checkout(&self, zone: &ZoneId) -> HostResult<NativeWarmPoolCheckout> {
+        let key = self.warm_pool_key(zone);
+        self.apply_retention().await;
+        if let Some(entry) = self.take_pool_entry(&key).await
+            && let Some(checkout) = self.try_admit_entry(entry, zone).await?
+        {
+            return Ok(checkout);
+        }
+
+        let started_at = Instant::now();
+        let entry = self.spawn_pool_entry(zone).await?;
+        Ok(NativeWarmPoolCheckout {
+            entry,
+            warm_checkout: false,
+            activation_latency_ms: duration_ms(started_at.elapsed()),
+        })
+    }
+
+    async fn try_admit_entry(
+        &self,
+        mut entry: NativeWarmPoolEntry,
+        zone: &ZoneId,
+    ) -> HostResult<Option<NativeWarmPoolCheckout>> {
+        let health = match entry.connector.health().await {
+            Ok(snapshot) => prewarm_health_state(&snapshot),
+            Err(_) => PrewarmHealthState::Failed,
+        };
+        entry.last_health = health;
+        let observation = PrewarmCheckoutObservation {
+            pool_state: PrewarmPoolState::WarmHit,
+            manifest: PrewarmManifestState::Current,
+            zone_binding: PrewarmZoneBinding::Bound,
+            sandbox: PrewarmSandboxState::LimitsActive,
+            credential: PrewarmCredentialState::Deferred,
+            health,
+            entry_age: entry.created_at.elapsed(),
+            previous_exit: None,
+        };
+
+        match self.config.prewarm.decide_checkout(&observation) {
+            PrewarmCheckoutDecision::AdmitWarm { .. } => {
+                entry.connector.ensure_handshake(zone).await?;
+                Ok(Some(NativeWarmPoolCheckout {
+                    entry,
+                    warm_checkout: true,
+                    activation_latency_ms: 0,
+                }))
+            }
+            decision => {
+                tracing::warn!(
+                    event = WARM_POOL_EVIDENCE_EVENT,
+                    action = "rejected_for_health",
+                    connector_id = %entry.key.connector_id,
+                    zone_hash = %warm_pool_log_label("zone", &entry.key.zone),
+                    manifest_hash = %entry.key.manifest_hash,
+                    reason = ?decision,
+                    idle_ms = entry.snapshot(Instant::now()).idle_ms,
+                    rss_bytes = entry.rss_bytes,
+                    "native warm-pool candidate rejected before checkout"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    async fn spawn_pool_entry(&self, zone: &ZoneId) -> HostResult<NativeWarmPoolEntry> {
+        let connector = Arc::new(
+            SubprocessConnector::spawn_with_placement(
+                self.config.clone(),
+                Arc::clone(&self.resilience),
+                self.capability_verifying_key,
+                PlacementOperationClass::BulkPrewarm,
+            )
+            .await?,
+        );
+        connector.ensure_handshake(zone).await?;
+        let now = Instant::now();
+        Ok(NativeWarmPoolEntry {
+            key: self.warm_pool_key(zone),
+            connector,
+            created_at: now,
+            last_used_at: now,
+            rss_bytes: NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES,
+            last_health: PrewarmHealthState::Ready,
+        })
+    }
+
+    async fn insert_pool_entry(&self, entry: NativeWarmPoolEntry) {
+        let mut entries = self.entries.lock().await;
+        entries.push(entry);
+        self.apply_retention_locked(&mut entries);
+    }
+
+    async fn take_pool_entry(&self, key: &WarmPoolKey) -> Option<NativeWarmPoolEntry> {
+        let mut entries = self.entries.lock().await;
+        let index = entries.iter().position(|entry| &entry.key == key)?;
+        Some(entries.remove(index))
+    }
+
+    async fn apply_retention(&self) {
+        let mut entries = self.entries.lock().await;
+        self.apply_retention_locked(&mut entries);
+    }
+
+    /// Plan and apply retention over the locked pool. Returns `false` when the
+    /// pressure controller disabled the pool for this pass, so callers (the
+    /// background maintainer) know not to regrow into active pressure.
+    fn apply_retention_locked(&self, entries: &mut Vec<NativeWarmPoolEntry>) -> bool {
+        let pressure = self.pressure_snapshot();
+        let now = Instant::now();
+        let snapshots = entries
+            .iter()
+            .map(|entry| entry.snapshot(now))
+            .collect::<Vec<_>>();
+        let plan = self.controller.plan_retention(&snapshots, &pressure);
+        if plan.disabled {
+            let reason = plan
+                .disabled_reason
+                .map_or("unknown", fcp_host::WarmPoolEvictionReason::as_str);
+            tracing::warn!(
+                event = WARM_POOL_EVIDENCE_EVENT,
+                action = "rejected_for_pressure",
+                connector_id = %self.connector_id,
+                reason,
+                "native warm-pool disabled by pressure controller"
+            );
+        }
+        for evidence in &plan.evidence {
+            tracing::info!(
+                event = WARM_POOL_EVIDENCE_EVENT,
+                action = "evicted",
+                connector_id = %evidence.connector_id,
+                zone_hash = %evidence.zone_hash,
+                manifest_hash = %evidence.manifest_hash,
+                reason = %evidence.reason_code,
+                idle_ms = evidence.idle_ms,
+                rss_bytes = evidence.rss_bytes,
+                "native warm-pool eviction"
+            );
+        }
+        // Apply eviction by entry index, not by `WarmPoolKey`: several live
+        // entries can share one key (same connector/zone/manifest/credential
+        // class), so a key-membership filter would retain every same-key entry
+        // and silently drop the controller's planned per-connector/RSS-cap
+        // evictions. `plan.retained_indices` indexes into `snapshots`, which was
+        // built from `entries` in order just above, so the indices line up 1:1.
+        let retained: std::collections::HashSet<usize> =
+            plan.retained_indices.iter().copied().collect();
+        let mut index = 0usize;
+        entries.retain(|_entry| {
+            let keep = retained.contains(&index);
+            index += 1;
+            keep
+        });
+        !plan.disabled
+    }
+
+    fn pressure_snapshot(&self) -> WarmPoolPressureSnapshot {
+        let decision = self.resilience.backpressure_decision(
+            &self.connector_id,
+            RequestPriority::Low,
+            NATIVE_WARM_POOL_OPERATION,
+        );
+        if !decision.replay_matches() {
+            return WarmPoolPressureSnapshot::Unavailable {
+                reason: "backpressure replay mismatch".to_string(),
+            };
+        }
+        WarmPoolPressureSnapshot::Available {
+            telemetry: decision.replay.input.telemetry,
+            calibration: decision.replay.input.calibration,
+        }
+    }
+
+    fn warm_pool_key(&self, zone: &ZoneId) -> WarmPoolKey {
+        WarmPoolKey::new(
+            self.connector_id.as_str(),
+            native_warm_pool_manifest_hash(&self.config),
+            self.config.runtime_network_enforcement.as_str(),
+            zone.as_str(),
+            native_warm_pool_credential_profile_class(&self.config),
+        )
+    }
+}
+
+fn prewarm_health_state(snapshot: &HealthSnapshot) -> PrewarmHealthState {
+    match &snapshot.status {
+        HealthState::Ready => PrewarmHealthState::Ready,
+        HealthState::Starting => PrewarmHealthState::Starting,
+        HealthState::Degraded { .. } | HealthState::Error { .. } | HealthState::Stopping => {
+            PrewarmHealthState::Failed
+        }
+    }
+}
+
+fn native_warm_pool_manifest_hash(config: &ConnectorConfig) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(config.id.as_bytes());
+    hasher.update(config.binary.as_bytes());
+    if let Some(version) = &config.version {
+        hasher.update(version.as_bytes());
+    }
+    hasher.update(config.runtime_network_enforcement.as_str().as_bytes());
+    if let Some(path) = &config.manifest_path {
+        hasher.update(path.as_bytes());
+        if let Ok(bytes) = std::fs::read(path) {
+            hasher.update(&bytes);
+        }
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn native_warm_pool_credential_profile_class(config: &ConnectorConfig) -> &'static str {
+    match &config.config {
+        Some(value) if value_contains_credential_reference(value) => "credential_reference",
+        Some(_) => "config_deferred",
+        None => "none",
+    }
+}
+
+fn value_contains_credential_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            key.to_ascii_lowercase().contains("credential_id")
+                || value_contains_credential_reference(value)
+        }),
+        Value::Array(values) => values.iter().any(value_contains_credential_reference),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
+fn warm_pool_log_label(prefix: &str, raw: &str) -> String {
+    let digest = blake3::hash(raw.as_bytes()).to_hex().to_string();
+    format!("{prefix}:blake3:{}", &digest[..16])
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 struct WasiConnector {
@@ -911,6 +1592,7 @@ impl UnavailableNativeProxyOnlyConnector {
 #[derive(Clone)]
 enum ConnectorRuntime {
     Native(Arc<SubprocessConnector>),
+    NativeWarmPool(Arc<NativeWarmPoolConnector>),
     Wasi(Arc<WasiConnector>),
     UnavailableNativeProxyOnly(Arc<UnavailableNativeProxyOnlyConnector>),
 }
@@ -947,6 +1629,12 @@ impl ConnectorRuntime {
                 UnavailableNativeProxyOnlyConnector::new(&config, support)?,
             )));
         }
+        if config.prewarm.strategy == PrewarmStrategy::WarmPool {
+            return Ok(Self::NativeWarmPool(
+                NativeWarmPoolConnector::spawn(config, resilience, capability_verifying_key)
+                    .await?,
+            ));
+        }
         Ok(Self::Native(Arc::new(
             SubprocessConnector::spawn(config, resilience, capability_verifying_key).await?,
         )))
@@ -955,6 +1643,7 @@ impl ConnectorRuntime {
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
         match self {
             Self::Native(connector) => connector.invoke(request).await,
+            Self::NativeWarmPool(connector) => connector.invoke(request).await,
             Self::Wasi(connector) => connector.invoke(request).await,
             Self::UnavailableNativeProxyOnly(connector) => connector.invoke(request).await,
         }
@@ -963,6 +1652,7 @@ impl ConnectorRuntime {
     async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
         match self {
             Self::Native(connector) => connector.simulate(request).await,
+            Self::NativeWarmPool(connector) => connector.simulate(request).await,
             Self::Wasi(connector) => connector.simulate(request).await,
             Self::UnavailableNativeProxyOnly(connector) => connector.simulate(request).await,
         }
@@ -971,6 +1661,7 @@ impl ConnectorRuntime {
     async fn introspect(&self) -> HostResult<Introspection> {
         match self {
             Self::Native(connector) => connector.introspect().await,
+            Self::NativeWarmPool(connector) => connector.introspect().await,
             Self::Wasi(connector) => connector.introspect(),
             Self::UnavailableNativeProxyOnly(connector) => connector.introspect(),
         }
@@ -979,14 +1670,25 @@ impl ConnectorRuntime {
     async fn summary_snapshot(&self) -> ConnectorSummary {
         match self {
             Self::Native(connector) => connector.summary_snapshot().await,
+            Self::NativeWarmPool(connector) => connector.summary_snapshot().await,
             Self::Wasi(connector) => connector.summary_snapshot(),
             Self::UnavailableNativeProxyOnly(connector) => connector.summary_snapshot(),
+        }
+    }
+
+    fn static_summary(&self) -> ConnectorSummary {
+        match self {
+            Self::Native(connector) => connector.summary.clone(),
+            Self::NativeWarmPool(connector) => connector.static_summary(),
+            Self::Wasi(connector) => connector.summary.clone(),
+            Self::UnavailableNativeProxyOnly(connector) => connector.summary.clone(),
         }
     }
 
     async fn self_check(&self) -> HostResult<SelfCheckReport> {
         match self {
             Self::Native(connector) => connector.self_check().await,
+            Self::NativeWarmPool(connector) => connector.self_check().await,
             Self::Wasi(connector) => connector.self_check(),
             Self::UnavailableNativeProxyOnly(connector) => Ok(connector.self_check()),
         }
@@ -1080,11 +1782,42 @@ fn load_manifest_operation_constraints(
     ))
 }
 
+fn validate_production_prewarm_policy(config: &ConnectorConfig) -> HostResult<()> {
+    if let Err(error) = config.prewarm.validate() {
+        return Err(HostError::InvalidFilter(format!(
+            "invalid prewarm policy for connector '{}': {error}",
+            config.id
+        )));
+    }
+
+    match config.prewarm.strategy {
+        PrewarmStrategy::OnDemand => Ok(()),
+        PrewarmStrategy::WarmPool => {
+            if config.runtime_network_enforcement == RuntimeNetworkEnforcement::WasiSandbox {
+                return Err(HostError::InvalidFilter(format!(
+                    "connector '{}' requested warm_pool prewarm for WASI, but production fcp-host \
+                     has only native subprocess warm checkout wired; require host-backed WASI \
+                     production-soak evidence before enabling warm checkout",
+                    config.id
+                )));
+            }
+            Ok(())
+        }
+        PrewarmStrategy::Zygote => Err(HostError::InvalidFilter(format!(
+            "connector '{}' requested zygote prewarm, but zygote startup is rejected until \
+             credential isolation, zone binding, sandbox limits, and manifest freshness have a \
+             security proof",
+            config.id
+        ))),
+    }
+}
+
 async fn build_registry_entry(
     config: ConnectorConfig,
     resilience: Arc<ResilienceLayer>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
 ) -> HostResult<RegistryEntry> {
+    validate_production_prewarm_policy(&config)?;
     validate_runtime_network_claim(
         &config.id,
         config.runtime_network_enforcement,
@@ -1093,6 +1826,8 @@ async fn build_registry_entry(
         config.config.as_ref(),
     )?;
     let manifest_constraints = load_manifest_operation_constraints(&config)?;
+    let hrw_routing = current_hrw_lease_routing_config()?;
+    enforce_hrw_singleton_writer_launch_route(&config, hrw_routing.as_ref())?;
     let connector =
         ConnectorRuntime::spawn(config.clone(), resilience, capability_verifying_key).await?;
     Ok(RegistryEntry {
@@ -1249,6 +1984,22 @@ impl SubprocessRegistry {
             .values()
             .map(|entry| entry.config.clone())
             .collect()
+    }
+
+    async fn zone_envelope_status(&self, connector_id: &ConnectorId) -> HostResult<()> {
+        let state = self.state.read().await;
+        let entry = state
+            .connectors
+            .get(connector_id)
+            .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+        require_allowed_zones_configured(connector_id, &entry.config.allowed_zones)
+    }
+
+    async fn first_zone_envelope_error(&self) -> Option<HostError> {
+        let state = self.state.read().await;
+        state.connectors.iter().find_map(|(connector_id, entry)| {
+            require_allowed_zones_configured(connector_id, &entry.config.allowed_zones).err()
+        })
     }
 
     async fn prepare_configs(
@@ -1837,35 +2588,64 @@ impl ConnectorRegistry for SubprocessRegistry {
             let state = self.state.read().await;
             state
                 .connectors
-                .values()
-                .map(|entry| entry.connector.clone())
+                .iter()
+                .map(|(connector_id, entry)| {
+                    (
+                        entry.connector.clone(),
+                        require_allowed_zones_configured(connector_id, &entry.config.allowed_zones)
+                            .err(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         let mut results = Vec::new();
-        for connector in connectors {
-            results.push(connector.summary_snapshot().await);
+        for (connector, zone_envelope_error) in connectors {
+            if let Some(error) = zone_envelope_error {
+                let mut summary = connector.static_summary();
+                summary.health = ConnectorHealth::unavailable(error.to_string());
+                summary.last_health_check = Some(chrono::Utc::now());
+                results.push(summary);
+            } else {
+                results.push(connector.summary_snapshot().await);
+            }
         }
         results
     }
 
     async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
-        let connector = {
+        let (connector, zone_envelope_error) = {
             let state = self.state.read().await;
-            state
-                .connectors
-                .get(id)
-                .map(|entry| entry.connector.clone())
+            state.connectors.get(id).map(|entry| {
+                (
+                    entry.connector.clone(),
+                    require_allowed_zones_configured(id, &entry.config.allowed_zones).err(),
+                )
+            })
         }?;
-        Some(connector.summary_snapshot().await)
+        if let Some(error) = zone_envelope_error {
+            let mut summary = connector.static_summary();
+            summary.health = ConnectorHealth::unavailable(error.to_string());
+            summary.last_health_check = Some(chrono::Utc::now());
+            Some(summary)
+        } else {
+            Some(connector.summary_snapshot().await)
+        }
     }
 
     async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
         let connector = {
             let state = self.state.read().await;
-            state
-                .connectors
-                .get(id)
-                .map(|entry| entry.connector.clone())
+            let entry = state.connectors.get(id)?;
+            if let Err(error) = require_allowed_zones_configured(id, &entry.config.allowed_zones) {
+                tracing::warn!(
+                    event = "introspection_zone_envelope_required",
+                    connector_id = %id,
+                    error = %error,
+                    "rejecting connector introspection before connector RPC"
+                );
+                return None;
+            }
+            Some(entry.connector.clone())
         }?;
         connector.introspect().await.ok()
     }
@@ -2076,6 +2856,43 @@ fn configured_connector_state_root(config: &ConnectorConfig) -> Option<PathBuf> 
         .map(PathBuf::from)
 }
 
+fn configured_connector_state_object_id_key(
+    config: &ConnectorConfig,
+) -> Result<Option<ObjectIdKey>, String> {
+    for env_key in [
+        FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV,
+        CONNECTOR_STATE_OBJECT_ID_KEY_ENV,
+    ] {
+        let Some(raw) = config.env.get(env_key).map(String::as_str).map(str::trim) else {
+            continue;
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        return parse_connector_state_object_id_key(raw).map(Some);
+    }
+    Ok(None)
+}
+
+fn parse_connector_state_object_id_key(raw: &str) -> Result<ObjectIdKey, String> {
+    let encoded = raw
+        .trim()
+        .strip_prefix("hex:")
+        .or_else(|| raw.trim().strip_prefix("0x"))
+        .unwrap_or_else(|| raw.trim());
+    let bytes = hex::decode(encoded)
+        .map_err(|_| "connector state object-id key must be 32 bytes of hex".to_string())?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "connector state object-id key must decode to 32 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let mut key = [0_u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(ObjectIdKey::from_bytes(key))
+}
+
 fn connector_state_root_dir() -> PathBuf {
     if let Some(path) = non_empty_os_env(CONNECTOR_STATE_DIR_ENV) {
         return PathBuf::from(path);
@@ -2098,6 +2915,27 @@ fn connector_state_cache_dir(root: &StdPath, connector_id: &ConnectorId) -> Path
         .join("cache")
 }
 
+fn connector_state_canonical_store_dir(root: &StdPath, connector_id: &ConnectorId) -> PathBuf {
+    root.join(sanitize_state_path_segment(connector_id.as_str()))
+        .join(CONNECTOR_STATE_CANONICAL_STORE_DIR)
+}
+
+fn connector_state_canonical_object_store_dir(
+    root: &StdPath,
+    connector_id: &ConnectorId,
+) -> PathBuf {
+    connector_state_canonical_store_dir(root, connector_id)
+        .join(CONNECTOR_STATE_CANONICAL_OBJECTS_DIR)
+}
+
+fn connector_state_canonical_symbol_store_dir(
+    root: &StdPath,
+    connector_id: &ConnectorId,
+) -> PathBuf {
+    connector_state_canonical_store_dir(root, connector_id)
+        .join(CONNECTOR_STATE_CANONICAL_SYMBOLS_DIR)
+}
+
 fn connector_zone_state_dir(root: &StdPath, connector_id: &ConnectorId, zone: &ZoneId) -> PathBuf {
     connector_state_cache_dir(root, connector_id).join(sanitize_state_path_segment(zone.as_ref()))
 }
@@ -2106,6 +2944,14 @@ fn connector_zone_state_dir(root: &StdPath, connector_id: &ConnectorId, zone: &Z
 enum ConnectorStateCacheMarkerStatus {
     Created,
     Present,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectorStateCacheMarkerObservation {
+    Present,
+    Missing,
+    NotFile,
+    Unreadable,
 }
 
 impl ConnectorStateCacheMarkerStatus {
@@ -2209,6 +3055,784 @@ fn record_connector_state_cache_marker(
     );
 }
 
+impl ConnectorStateCacheMarkerObservation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::Missing => "missing",
+            Self::NotFile => "not_file",
+            Self::Unreadable => "unreadable",
+        }
+    }
+
+    const fn present(self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
+fn inspect_connector_state_cache_marker(
+    dir: &StdPath,
+    warnings: &mut Vec<String>,
+) -> ConnectorStateCacheMarkerObservation {
+    let marker_path = dir.join(fcp_store::CONNECTOR_STATE_CACHE_MARKER);
+    match std::fs::metadata(&marker_path) {
+        Ok(metadata) if metadata.is_file() => ConnectorStateCacheMarkerObservation::Present,
+        Ok(_) => {
+            warnings.push(format!(
+                "Connector state cache marker `{}` exists but is not a file.",
+                marker_path.display()
+            ));
+            ConnectorStateCacheMarkerObservation::NotFile
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ConnectorStateCacheMarkerObservation::Missing
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "Failed to inspect connector state cache marker `{}`: {error}",
+                marker_path.display()
+            ));
+            ConnectorStateCacheMarkerObservation::Unreadable
+        }
+    }
+}
+
+#[cfg(test)]
+#[must_use]
+fn host_connector_state_explain_payload(
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    state_root: &StdPath,
+) -> Value {
+    host_connector_state_explain_payload_with_canonical_status(connector_id, zone, state_root, None)
+}
+
+struct HostConnectorStateExplainContext {
+    state_root: PathBuf,
+    canonical_status: Option<ConnectorStateCanonicalStatus>,
+    warnings: Vec<String>,
+}
+
+async fn connector_state_explain_context_for_registered_connector(
+    state: &AppState,
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+) -> HostConnectorStateExplainContext {
+    let inventory = state.registry.inventory().await;
+    let config = find_connector_inventory_entry(&inventory, connector_id);
+    let state_root = config
+        .and_then(configured_connector_state_root)
+        .unwrap_or_else(connector_state_root_dir);
+    let mut warnings = Vec::new();
+    let canonical_status = match config {
+        Some(config) => match connector_state_canonical_status_from_config(
+            config,
+            connector_id,
+            zone,
+            &state_root,
+        )
+        .await
+        {
+            Ok(status) => status,
+            Err(warning) => {
+                warnings.push(warning);
+                None
+            }
+        },
+        None => None,
+    };
+    HostConnectorStateExplainContext {
+        state_root,
+        canonical_status,
+        warnings,
+    }
+}
+
+async fn connector_state_canonical_status_from_config(
+    config: &ConnectorConfig,
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    state_root: &StdPath,
+) -> Result<Option<ConnectorStateCanonicalStatus>, String> {
+    let Some(zone) = zone else {
+        return Ok(None);
+    };
+    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
+    if !object_store_dir.exists() {
+        return Ok(None);
+    }
+    let object_id_key = configured_connector_state_object_id_key(config)?.ok_or_else(|| {
+        format!(
+            "Canonical fcp-store object store exists at `{}`, but neither `{}` nor `{}` is configured; host explain cannot verify connector-state object IDs.",
+            object_store_dir.display(),
+            FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV,
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV
+        )
+    })?;
+    let object_store = fcp_store::DurableObjectStore::open(
+        fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+    )
+    .map_err(|error| {
+        format!(
+            "Canonical fcp-store object store at `{}` could not be opened: {error}",
+            object_store_dir.display()
+        )
+    })?;
+    let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(object_store);
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        object_store,
+        object_id_key,
+        connector_id.clone(),
+        zone.clone(),
+    );
+    let symbol_store_dir = connector_state_canonical_symbol_store_dir(state_root, connector_id);
+    if symbol_store_dir.exists() {
+        let symbol_store = fcp_store::DurableSymbolStore::open(
+            fcp_store::DurableSymbolStoreConfig::new(&symbol_store_dir),
+        )
+        .map_err(|error| {
+            format!(
+                "Canonical fcp-store symbol store at `{}` could not be opened: {error}",
+                symbol_store_dir.display()
+            )
+        })?;
+        return state_store
+            .canonical_status(Some(&symbol_store))
+            .await
+            .map(Some)
+            .map_err(|error| {
+                format!(
+                    "Canonical fcp-store status at `{}` could not be read: {error}",
+                    object_store_dir.display()
+                )
+            });
+    }
+    state_store
+        .canonical_status(None)
+        .await
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "Canonical fcp-store status at `{}` could not be read: {error}",
+                object_store_dir.display()
+            )
+        })
+}
+
+async fn connector_lease_durable_evidence_from_config(
+    config: &ConnectorConfig,
+    connector_id: &ConnectorId,
+    zone: &ZoneId,
+    state_root: &StdPath,
+) -> ConnectorLeaseDurableEvidence {
+    let mut evidence = ConnectorLeaseDurableEvidence::default();
+    if !connector_config_declares_singleton_writer(config) {
+        evidence.warnings.push(format!(
+            "Connector `{connector_id}` does not declare singleton_writer state, so no durable singleton-writer lease object is expected."
+        ));
+        return evidence;
+    }
+
+    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
+    if !object_store_dir.exists() {
+        evidence.warnings.push(format!(
+            "No canonical fcp-store object store exists at `{}`; durable signed lease expiry and quorum signatures are unavailable.",
+            object_store_dir.display()
+        ));
+        return evidence;
+    }
+
+    let object_id_key = match configured_connector_state_object_id_key(config) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            evidence.warnings.push(format!(
+                "Canonical fcp-store object store exists at `{}`, but neither `{}` nor `{}` is configured; host lease status cannot verify durable lease object IDs.",
+                object_store_dir.display(),
+                FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV,
+                CONNECTOR_STATE_OBJECT_ID_KEY_ENV
+            ));
+            return evidence;
+        }
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Canonical fcp-store object-id key for connector `{connector_id}` is invalid: {error}"
+            ));
+            return evidence;
+        }
+    };
+
+    let object_store = match fcp_store::DurableObjectStore::open(
+        fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+    ) {
+        Ok(store) => store,
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Canonical fcp-store object store at `{}` could not be opened for lease status: {error}",
+                object_store_dir.display()
+            ));
+            return evidence;
+        }
+    };
+    let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(object_store);
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        Arc::clone(&object_store),
+        object_id_key,
+        connector_id.clone(),
+        zone.clone(),
+    );
+    let chain = match state_store.read_chain(None, usize::MAX).await {
+        Ok(chain) => chain,
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Canonical fcp-store state at `{}` could not be read for lease status: {error}",
+                object_store_dir.display()
+            ));
+            return evidence;
+        }
+    };
+    let Some((_head_object_id, head)) = chain.last() else {
+        evidence.warnings.push(format!(
+            "Canonical fcp-store state at `{}` has no head object; durable signed lease metadata is unavailable.",
+            object_store_dir.display()
+        ));
+        return evidence;
+    };
+
+    evidence.lease_object_id = Some(head.lease_object_id);
+    evidence.lease_seq = Some(head.lease_seq);
+
+    let stored = match object_store.get(&head.lease_object_id).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` referenced by canonical connector state could not be read: {error}",
+                head.lease_object_id
+            ));
+            return evidence;
+        }
+    };
+    match StoredObject::derive_id(&stored.header, &stored.body, &object_id_key) {
+        Ok(computed) if computed == head.lease_object_id => {}
+        Ok(computed) => {
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` failed content-id verification; computed `{computed}`.",
+                head.lease_object_id
+            ));
+            return evidence;
+        }
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` could not be content-id verified: {error}",
+                head.lease_object_id
+            ));
+            return evidence;
+        }
+    }
+
+    let lease = match fcp_cbor::CanonicalSerializer::deserialize::<CoreLease>(
+        &stored.body,
+        &stored.header.schema,
+    ) {
+        Ok(lease) => lease,
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` could not be decoded as an fcp lease: {error}",
+                head.lease_object_id
+            ));
+            return evidence;
+        }
+    };
+    evidence.lease_seq = Some(lease.lease_seq);
+    evidence.expiry_unix_secs = Some(lease.exp);
+    evidence.quorum_signers_count = Some(lease.quorum_signatures.len());
+    evidence.source = Some("canonical-fcp-store-lease-object");
+
+    let expected_subject = singleton_writer_connector_lease_subject_id(connector_id, zone);
+    if lease.subject_object_id != expected_subject {
+        evidence.mark_invalid_lease(
+            head.lease_object_id,
+            format!(
+                "subject mismatch: got `{}`, expected singleton-writer subject `{expected_subject}`",
+                lease.subject_object_id
+            ),
+        );
+        return evidence;
+    }
+    if lease.header.zone_id != *zone {
+        evidence.mark_invalid_lease(
+            head.lease_object_id,
+            format!(
+                "zone mismatch: got `{}`, expected `{}`",
+                lease.header.zone_id.as_str(),
+                zone.as_str()
+            ),
+        );
+        return evidence;
+    }
+    if lease.purpose != CoreLeasePurpose::ConnectorStateWrite {
+        evidence.mark_invalid_lease(
+            head.lease_object_id,
+            format!(
+                "purpose mismatch: got `{:?}`, expected connector-state write",
+                lease.purpose
+            ),
+        );
+        return evidence;
+    }
+    if lease.lease_seq != head.lease_seq {
+        evidence.mark_invalid_lease(
+            head.lease_object_id,
+            format!(
+                "lease sequence mismatch: durable lease has lease_seq {}, but canonical connector state head references lease_seq {}",
+                lease.lease_seq, head.lease_seq
+            ),
+        );
+        return evidence;
+    }
+
+    let validated_at_unix_secs = current_unix_secs_u64();
+    evidence.validated_at_unix_secs = Some(validated_at_unix_secs);
+    match validate_connector_state_core_lease_for_status(
+        &lease,
+        &expected_subject,
+        zone,
+        head.lease_seq,
+        validated_at_unix_secs,
+    ) {
+        Ok(()) => evidence.validation_status = Some("valid"),
+        Err(error) => {
+            evidence.validation_status = Some("invalid");
+            evidence.validation_error = Some(error.to_string());
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` failed live lease validation: {error}",
+                head.lease_object_id
+            ));
+        }
+    }
+    evidence
+}
+
+fn current_unix_secs_u64() -> u64 {
+    u64::try_from(Utc::now().timestamp()).unwrap_or(0)
+}
+
+fn validate_connector_state_core_lease_for_status(
+    lease: &CoreLease,
+    expected_subject: &ObjectId,
+    expected_zone: &ZoneId,
+    current_known_seq: u64,
+    now_unix_secs: u64,
+) -> Result<(), fcp_core::LeaseValidationError> {
+    fcp_core::validate_lease(
+        lease,
+        expected_subject,
+        expected_zone,
+        CoreLeasePurpose::ConnectorStateWrite,
+        current_known_seq,
+        now_unix_secs,
+        CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES,
+    )
+}
+
+struct HostConnectorLeaseYieldFlushContext {
+    state_root: PathBuf,
+    flush: fcp_store::ConnectorStateLeaseYieldFlush,
+    warnings: Vec<String>,
+}
+
+async fn connector_lease_yield_flush_context_for_registered_connector(
+    state: &AppState,
+    connector_id: &ConnectorId,
+    zone: &ZoneId,
+) -> Result<HostConnectorLeaseYieldFlushContext, String> {
+    let inventory = state.registry.inventory().await;
+    let config = find_connector_inventory_entry(&inventory, connector_id)
+        .ok_or_else(|| format!("connector `{connector_id}` is not present in the host registry"))?;
+    if !connector_config_declares_singleton_writer(config) {
+        return Err(format!(
+            "connector `{connector_id}` does not declare singleton_writer state; refusing lease-yield flush"
+        ));
+    }
+
+    let state_root =
+        configured_connector_state_root(config).unwrap_or_else(connector_state_root_dir);
+    let object_store_dir = connector_state_canonical_object_store_dir(&state_root, connector_id);
+    let object_id_key = configured_connector_state_object_id_key(config)?.ok_or_else(|| {
+        format!(
+            "Cannot flush connector-state for `{connector_id}` before lease yield because neither `{}` nor `{}` is configured.",
+            FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV, CONNECTOR_STATE_OBJECT_ID_KEY_ENV
+        )
+    })?;
+    let object_store = fcp_store::DurableObjectStore::open(
+        fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+    )
+    .map_err(|error| {
+        format!(
+            "Canonical fcp-store object store at `{}` could not be opened for lease-yield flush: {error}",
+            object_store_dir.display()
+        )
+    })?;
+    let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(object_store);
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        object_store,
+        object_id_key,
+        connector_id.clone(),
+        zone.clone(),
+    );
+    let flush = state_store
+        .flush_before_lease_yield()
+        .await
+        .map_err(|error| {
+            format!(
+                "Canonical fcp-store state at `{}` could not be flushed before lease yield: {error}",
+                object_store_dir.display()
+            )
+        })?;
+    Ok(HostConnectorLeaseYieldFlushContext {
+        state_root,
+        flush,
+        warnings: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+#[must_use]
+fn host_connector_state_explain_payload_with_canonical_status(
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    state_root: &StdPath,
+    canonical_status: Option<&ConnectorStateCanonicalStatus>,
+) -> Value {
+    host_connector_state_explain_payload_with_canonical_status_and_warnings(
+        connector_id,
+        zone,
+        state_root,
+        canonical_status,
+        Vec::new(),
+    )
+}
+
+#[must_use]
+fn host_connector_state_explain_payload_with_canonical_status_and_warnings(
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    state_root: &StdPath,
+    canonical_status: Option<&ConnectorStateCanonicalStatus>,
+    extra_warnings: Vec<String>,
+) -> Value {
+    let mut warnings = extra_warnings;
+    let connector_cache_dir = connector_state_cache_dir(state_root, connector_id);
+    let zone_cache_dir = zone.map(|zone| connector_zone_state_dir(state_root, connector_id, zone));
+    let connector_marker =
+        inspect_connector_state_cache_marker(&connector_cache_dir, &mut warnings);
+    let zone_marker = zone_cache_dir
+        .as_deref()
+        .map(|dir| inspect_connector_state_cache_marker(dir, &mut warnings));
+    let local_cache_present = connector_cache_dir.is_dir()
+        || zone_cache_dir.as_deref().is_some_and(StdPath::is_dir)
+        || connector_marker.present()
+        || zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present);
+    let canonical_status = usable_connector_state_canonical_status(
+        canonical_status,
+        connector_id,
+        zone,
+        &mut warnings,
+    );
+    let canonical_root_present = canonical_status.is_some_and(|status| status.root_present);
+    let canonical_storage = if canonical_root_present
+        || connector_marker.present()
+        || zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present)
+    {
+        "mesh"
+    } else {
+        "local"
+    };
+
+    if !canonical_root_present
+        && !connector_marker.present()
+        && !zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present)
+    {
+        warnings.push(
+            "No connector state cache marker was found, so host explain treats the local state path as canonical until cache-only markers exist."
+            .to_string(),
+        );
+    }
+    if canonical_root_present && !connector_marker.present() {
+        warnings.push(format!(
+            "Canonical fcp-store state is present, but connector cache marker `{}` is missing at `{}`; keep local state files read-only until the host rewrites cache-only markers.",
+            fcp_store::CONNECTOR_STATE_CACHE_MARKER,
+            connector_cache_dir
+                .join(fcp_store::CONNECTOR_STATE_CACHE_MARKER)
+                .display()
+        ));
+    }
+    if canonical_root_present
+        && let Some(zone) = zone
+        && !zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present)
+    {
+        let zone_marker_path = connector_zone_state_dir(state_root, connector_id, zone)
+            .join(fcp_store::CONNECTOR_STATE_CACHE_MARKER);
+        warnings.push(format!(
+            "Canonical fcp-store state is present for zone `{}`, but zone cache marker `{}` is missing at `{}`; keep that zone cache read-only until marker creation succeeds.",
+            zone.as_str(),
+            fcp_store::CONNECTOR_STATE_CACHE_MARKER,
+            zone_marker_path.display()
+        ));
+    }
+    match canonical_status {
+        Some(status) if status.root_present => {
+            if status.mesh_replica_count.is_none() {
+                warnings.push(
+                    "Canonical fcp-store status is available, but mesh replica count is not proven because symbol distribution evidence was not supplied."
+                        .to_string(),
+                );
+            }
+        }
+        _ => warnings.push(
+            "Last canonical sequence and mesh replica count are not proven by cache markers; they remain null until the canonical fcp-store route exposes them."
+                .to_string(),
+        ),
+    }
+
+    json!({
+        "status": "ok",
+        "command": "fcp-host",
+        "subcommand": "connector state explain",
+        "schema_version": "1.0.0",
+        "source": if canonical_root_present {
+            "host-canonical-state"
+        } else {
+            "host-cache-markers"
+        },
+        "connector_id": connector_id.to_string(),
+        "state_root": {
+            "path": state_root.display().to_string(),
+            "source": "host",
+        },
+        "canonical_storage": canonical_storage,
+        "last_canonical_seq": canonical_status
+            .and_then(|status| status.last_canonical_seq)
+            .map_or(Value::Null, Value::from),
+        "mesh_replica_count": canonical_status
+            .and_then(|status| status.mesh_replica_count)
+            .map_or(Value::Null, |count| json!(count)),
+        "canonical_state": {
+            "root_present": canonical_status.is_some_and(|status| status.root_present),
+            "connector_id": canonical_status
+                .map(|status| status.connector_id.to_string()),
+            "zone_id": canonical_status
+                .and_then(|status| status.zone_id.as_ref())
+                .map(ZoneId::as_str),
+            "instance_id": canonical_status
+                .and_then(|status| status.instance_id.as_ref())
+                .map(InstanceId::as_str),
+            "model": canonical_status
+                .and_then(|status| status.model.as_ref())
+                .map(ToString::to_string),
+            "root_object_id": canonical_status
+                .and_then(|status| status.root_object_id)
+                .map(|object_id| object_id.to_string()),
+            "head_object_id": canonical_status
+                .and_then(|status| status.head_object_id)
+                .map(|object_id| object_id.to_string()),
+            "state_schema_version": canonical_status
+                .and_then(|status| status.state_schema_version),
+            "status_source": if canonical_status.is_some() {
+                "fcp-store"
+            } else {
+                "not-supplied"
+            },
+        },
+        "local_cache_path": connector_cache_dir.display().to_string(),
+        "local_cache_present": local_cache_present,
+        "local_cache_marker_present": connector_marker.present(),
+        "cache_marker": {
+            "filename": fcp_store::CONNECTOR_STATE_CACHE_MARKER,
+            "path": connector_cache_dir
+                .join(fcp_store::CONNECTOR_STATE_CACHE_MARKER)
+                .display()
+                .to_string(),
+            "present": connector_marker.present(),
+            "status": connector_marker.as_str(),
+        },
+        "zone": {
+            "requested": zone.map(ZoneId::as_str),
+            "local_cache_path": zone_cache_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            "local_cache_marker_present": zone_marker
+                .is_some_and(ConnectorStateCacheMarkerObservation::present),
+            "cache_marker_status": zone_marker
+                .map(ConnectorStateCacheMarkerObservation::as_str),
+        },
+        "live_host": {
+            "requested": true,
+            "state": "queried",
+            "route_available": true,
+            "route": "/rpc/admin/connectors/{connector_id}/state/explain",
+        },
+        "telemetry": {
+            "cache_hit_counter": fcp_store::CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC,
+            "fall_through_counter": fcp_store::CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC,
+            "fall_through_event": fcp_store::CONNECTOR_STATE_FALL_THROUGH_EVENT,
+        },
+        "warnings": warnings,
+    })
+}
+
+fn usable_connector_state_canonical_status<'a>(
+    canonical_status: Option<&'a ConnectorStateCanonicalStatus>,
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    warnings: &mut Vec<String>,
+) -> Option<&'a ConnectorStateCanonicalStatus> {
+    let status = canonical_status?;
+    if &status.connector_id != connector_id {
+        warnings.push(
+            "Canonical fcp-store status was supplied for a different connector; ignoring it."
+                .to_string(),
+        );
+        return None;
+    }
+    if status.root_present
+        && let Some(requested_zone) = zone
+        && status.zone_id.as_ref() != Some(requested_zone)
+    {
+        warnings.push(
+            "Canonical fcp-store status was supplied for a different zone; ignoring it."
+                .to_string(),
+        );
+        return None;
+    }
+    Some(status)
+}
+
+const HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION: &str = "fcp-host-cutover-gates/v1";
+
+fn host_mesh_cutover_gates_payload(catalog_connector_count: usize) -> Value {
+    let node_count = 1_usize;
+    let gates = vec![
+        json!({
+            "gate_id": "mesh-inventory-placement",
+            "name": "Mesh-backed connector inventory with placement evidence",
+            "predicate_text": "At least 3 connectors have placement.has_mesh_replica=true and placement.replica_count >= 2.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "catalog_connector_count": catalog_connector_count,
+                "connectors_meeting_predicate": 0,
+                "node_count": node_count,
+                "missing_fields": ["placement.has_mesh_replica", "placement.replica_count"]
+            },
+            "target": {
+                "connectors_meeting_predicate": 3,
+                "placement.has_mesh_replica": true,
+                "placement.replica_count": 2,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc mesh explain-availability <connector> --host <endpoint> --json"],
+            "remediation": "Expose live placement replica telemetry from a real mesh; this host route remains skipped until the direct telemetry is available."
+        }),
+        json!({
+            "gate_id": "mesh-lifecycle-state-replication",
+            "name": "Mesh-backed lifecycle state replication",
+            "predicate_text": "ConnectorStateRoot for at least 3 connectors is mesh-replicated with replica_count >= 2 and last_replicated_seq advancing within 60s.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "catalog_connector_count": catalog_connector_count,
+                "connectors_meeting_predicate": 0,
+                "node_count": node_count,
+                "missing_fields": [
+                    "connector_state_root.replica_count",
+                    "connector_state_root.last_replicated_seq",
+                    "connector_state_root.last_replicated_age_seconds"
+                ]
+            },
+            "target": {
+                "connectors_meeting_predicate": 3,
+                "replica_count": 2,
+                "last_replicated_age_seconds_lte": 60,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "future: fwc mesh state status --json"],
+            "remediation": "Publish ConnectorStateRoot replication telemetry from the mesh state store before this gate can turn green."
+        }),
+        json!({
+            "gate_id": "mesh-audit-chain-quorum",
+            "name": "Mesh-backed audit chain quorum across at least two nodes",
+            "predicate_text": "Audit chain status reports quorum_signed_checkpoints >= 1 and quorum_signers >= 2 within 60s.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "quorum_signed_checkpoints": 0,
+                "quorum_signers": 0,
+                "node_count": node_count,
+                "available_route": "fwc audit chain status --json",
+                "missing_fields": ["live_quorum_checkpoint_snapshot"]
+            },
+            "target": {
+                "quorum_signed_checkpoints": 1,
+                "quorum_signers": 2,
+                "checkpoint_age_seconds_lte": 60,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc audit chain status --json"],
+            "remediation": "Wire live quorum checkpoint telemetry into the audit status route before this gate can turn green."
+        }),
+        json!({
+            "gate_id": "mesh-policy-object-distribution",
+            "name": "Mesh-backed policy-object distribution",
+            "predicate_text": "Policy bundles for the active zone are present on at least 2 mesh peers with verified owner signatures.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "peer_count": 0,
+                "verified_owner_signatures": false,
+                "node_count": node_count,
+                "missing_route": "fwc policy distribution --json"
+            },
+            "target": {
+                "peer_count": 2,
+                "verified_owner_signatures": true,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc policy distribution --json"],
+            "remediation": "Expose policy bundle distribution and owner-signature verification telemetry before this gate can turn green."
+        }),
+    ];
+
+    json!({
+        "status": "ok",
+        "schema_version": HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        "source": "fcp-host-direct-skip",
+        "overall_status": "skip",
+        "catalog_connector_count": catalog_connector_count,
+        "node_count": node_count,
+        "message": "fcp-host exposes the cutover-gates route, but no direct mesh cutover telemetry is available yet; all gates remain skipped and do not count as green.",
+        "gates": gates,
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ConnectorStateExplainQuery {
+    zone: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ConnectorLeaseStatusQuery {
+    zone: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ConnectorLeaseFlushBeforeYieldQuery {
+    zone: Option<String>,
+}
+
 fn sanitize_state_path_segment(value: &str) -> String {
     let segment = value
         .chars()
@@ -2266,6 +3890,11 @@ enum ResponseIdDisposition {
 
 const CONNECTOR_RPC_QUEUE_CAPACITY: usize = 64;
 const CONNECTOR_RPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Message prefix stamped on `HostError::RegistryError` when a connector replies
+/// with a JSON-RPC error object (as opposed to a transport/dispatcher failure).
+/// Single-sourced so the warm-pool retention classifier and the constructor can
+/// never drift apart. See [`warm_entry_survives_error`].
+const CONNECTOR_JSON_RPC_ERROR_PREFIX: &str = "connector error: ";
 const CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES: usize = 64 * 1024;
 const CONNECTOR_RPC_MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
 
@@ -2709,6 +4338,7 @@ struct AppState {
     /// from connector inventory so a connector-config rollout cannot
     /// accidentally drop policy state.
     zone_policies: Arc<RwLock<HashMap<ZoneId, ZonePolicyObject>>>,
+    telemetry_config: TelemetryConfig,
     /// Per-zone hash-linked invoke audit chain (br-mvax3).
     ///
     /// Appended at four phases of every `/rpc/invoke`: preflight allow,
@@ -2804,6 +4434,7 @@ Startup configuration is supplied via environment variables:
   FCP_HOST_SUPPLY_CHAIN_*
   FCP_HOST_HRW_LEASE_LOCAL_NODE
   FCP_HOST_HRW_LEASE_NODES
+  FCP_HOST_HRW_LEASE_CURRENT_SEQ
 ",
         env!("CARGO_PKG_VERSION")
     );
@@ -3735,26 +5366,58 @@ fn emit_deployment_tier_denial_audit_event(
 
 const HRW_LEASE_LOCAL_NODE_ENV: &str = "FCP_HOST_HRW_LEASE_LOCAL_NODE";
 const HRW_LEASE_NODES_ENV: &str = "FCP_HOST_HRW_LEASE_NODES";
+const HRW_LEASE_CURRENT_SEQ_ENV: &str = "FCP_HOST_HRW_LEASE_CURRENT_SEQ";
+const CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL: &str = "connector_state_write";
+const CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HrwLeaseRoutingConfig {
     local_node: TailscaleNodeId,
     eligible_nodes: Vec<TailscaleNodeId>,
+    current_lease_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConnectorLeaseDurableEvidence {
+    lease_object_id: Option<ObjectId>,
+    lease_seq: Option<u64>,
+    expiry_unix_secs: Option<u64>,
+    quorum_signers_count: Option<usize>,
+    validation_status: Option<&'static str>,
+    validation_error: Option<String>,
+    validated_at_unix_secs: Option<u64>,
+    source: Option<&'static str>,
+    warnings: Vec<String>,
+}
+
+impl ConnectorLeaseDurableEvidence {
+    fn mark_invalid_lease(&mut self, lease_object_id: ObjectId, error: String) {
+        self.validation_status = Some("invalid");
+        self.validation_error = Some(error.clone());
+        self.validated_at_unix_secs = Some(current_unix_secs_u64());
+        self.warnings.push(format!(
+            "Durable lease object `{lease_object_id}` failed live lease validation: {error}"
+        ));
+    }
 }
 
 #[cfg(test)]
 static TEST_HRW_LEASE_ROUTING_OVERRIDE: std::sync::Mutex<Option<Option<HrwLeaseRoutingConfig>>> =
     std::sync::Mutex::new(None);
+#[cfg(test)]
+static TEST_HRW_LEASE_ROUTING_OVERRIDE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
-struct TestHrwLeaseRoutingOverrideGuard;
+struct TestHrwLeaseRoutingOverrideGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
 
 #[cfg(test)]
 impl Drop for TestHrwLeaseRoutingOverrideGuard {
     fn drop(&mut self) {
         *TEST_HRW_LEASE_ROUTING_OVERRIDE
             .lock()
-            .expect("HRW lease routing override lock poisoned") = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -3762,12 +5425,15 @@ impl Drop for TestHrwLeaseRoutingOverrideGuard {
 fn set_test_hrw_lease_routing_override(
     config: Option<HrwLeaseRoutingConfig>,
 ) -> TestHrwLeaseRoutingOverrideGuard {
+    let serial = TEST_HRW_LEASE_ROUTING_OVERRIDE_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut guard = TEST_HRW_LEASE_ROUTING_OVERRIDE
         .lock()
-        .expect("HRW lease routing override lock poisoned");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert!(guard.is_none(), "HRW lease routing override already set");
     *guard = Some(config);
-    TestHrwLeaseRoutingOverrideGuard
+    TestHrwLeaseRoutingOverrideGuard { _serial: serial }
 }
 
 fn parse_hrw_lease_node_id(raw: &str, env_name: &str) -> HostResult<TailscaleNodeId> {
@@ -3800,9 +5466,13 @@ fn parse_hrw_lease_node_set(raw: &str, env_name: &str) -> HostResult<Vec<Tailsca
 fn parse_hrw_lease_routing_config_from_env_values(
     local_node: Option<&str>,
     eligible_nodes: Option<&str>,
+    current_lease_seq: Option<u64>,
 ) -> HostResult<Option<HrwLeaseRoutingConfig>> {
     match (local_node, eligible_nodes) {
-        (None, None) => Ok(None),
+        (None, None) if current_lease_seq.is_none() => Ok(None),
+        (None, None) => Err(HostError::InvalidFilter(format!(
+            "set {HRW_LEASE_LOCAL_NODE_ENV} and {HRW_LEASE_NODES_ENV} when using {HRW_LEASE_CURRENT_SEQ_ENV}"
+        ))),
         (Some(local_node), Some(eligible_nodes)) => {
             let local_node = parse_hrw_lease_node_id(local_node, HRW_LEASE_LOCAL_NODE_ENV)?;
             let eligible_nodes = parse_hrw_lease_node_set(eligible_nodes, HRW_LEASE_NODES_ENV)?;
@@ -3815,6 +5485,7 @@ fn parse_hrw_lease_routing_config_from_env_values(
             Ok(Some(HrwLeaseRoutingConfig {
                 local_node,
                 eligible_nodes,
+                current_lease_seq,
             }))
         }
         (Some(_), None) | (None, Some(_)) => Err(HostError::InvalidFilter(format!(
@@ -3837,7 +5508,12 @@ fn current_hrw_lease_routing_config() -> HostResult<Option<HrwLeaseRoutingConfig
 
     let local_node = read_optional_trimmed_env_string(HRW_LEASE_LOCAL_NODE_ENV)?;
     let eligible_nodes = read_optional_trimmed_env_string(HRW_LEASE_NODES_ENV)?;
-    parse_hrw_lease_routing_config_from_env_values(local_node.as_deref(), eligible_nodes.as_deref())
+    let current_lease_seq = read_env_u64(HRW_LEASE_CURRENT_SEQ_ENV)?;
+    parse_hrw_lease_routing_config_from_env_values(
+        local_node.as_deref(),
+        eligible_nodes.as_deref(),
+        current_lease_seq,
+    )
 }
 
 fn json_schema_declares_singleton_writer(value: &Value) -> bool {
@@ -3851,24 +5527,6 @@ fn json_schema_declares_singleton_writer(value: &Value) -> bool {
             if state_model == Some("singleton_writer") {
                 return true;
             }
-            if map
-                .get("properties")
-                .and_then(Value::as_object)
-                .is_some_and(|properties| properties.contains_key("lease_seq"))
-            {
-                return true;
-            }
-            if map
-                .get("required")
-                .and_then(Value::as_array)
-                .is_some_and(|required| {
-                    required
-                        .iter()
-                        .any(|field| field.as_str() == Some("lease_seq"))
-                })
-            {
-                return true;
-            }
             map.values().any(json_schema_declares_singleton_writer)
         }
         Value::Array(values) => values.iter().any(json_schema_declares_singleton_writer),
@@ -3878,12 +5536,9 @@ fn json_schema_declares_singleton_writer(value: &Value) -> bool {
 
 fn operation_requires_hrw_lease(
     tool: &ToolDescriptor,
-    request: &InvokeRequest,
     connector_declares_singleton_writer: bool,
 ) -> bool {
-    connector_declares_singleton_writer
-        || request.lease_seq.is_some()
-        || json_schema_declares_singleton_writer(&tool.input_schema)
+    connector_declares_singleton_writer || json_schema_declares_singleton_writer(&tool.input_schema)
 }
 
 fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
@@ -3892,55 +5547,476 @@ fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 }
 
 fn singleton_writer_lease_subject_id(request: &InvokeRequest) -> ObjectId {
+    singleton_writer_connector_lease_subject_id(&request.connector_id, &request.zone_id)
+}
+
+fn singleton_writer_connector_lease_subject_id(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> ObjectId {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"FCP-HOST-SINGLETON-WRITER-HRW-LEASE-V1");
-    update_len_prefixed(&mut hasher, request.connector_id.as_str().as_bytes());
-    update_len_prefixed(&mut hasher, request.operation.as_str().as_bytes());
-    update_len_prefixed(&mut hasher, request.zone_id.as_str().as_bytes());
+    hasher.update(b"FCP-HOST-SINGLETON-WRITER-HRW-LEASE-V2");
+    update_len_prefixed(&mut hasher, connector_id.as_str().as_bytes());
+    update_len_prefixed(&mut hasher, zone_id.as_str().as_bytes());
     ObjectId::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn hrw_lease_refusal_message(reason: &fcp_mesh::planner::LeaseTransferReason) -> String {
-    let payload = serde_json::to_string(reason).unwrap_or_else(|error| {
-        format!("{{\"reason\":\"serialization_error\",\"message\":\"{error}\"}}")
-    });
-    format!("HRW lease routing refused singleton_writer invoke: {payload}")
+fn lease_node_id_hash(node: &TailscaleNodeId) -> String {
+    format!(
+        "blake3:{}",
+        hex::encode(blake3::hash(node.as_str().as_bytes()).as_bytes())
+    )
 }
 
-fn enforce_hrw_lease_route(
+fn lease_expiry_rfc3339(expiry_unix_secs: u64) -> Option<String> {
+    let secs = i64::try_from(expiry_unix_secs).ok()?;
+    DateTime::<Utc>::from_timestamp(secs, 0)
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+fn connector_lease_status_payload(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    routing: Option<&HrwLeaseRoutingConfig>,
+    durable: &ConnectorLeaseDurableEvidence,
+) -> Value {
+    const SCHEMA_VERSION: &str = "1.0.0";
+
+    let subject_id = singleton_writer_connector_lease_subject_id(connector_id, zone_id);
+    let mut warnings = durable.warnings.clone();
+    let mut ranked_holders = Vec::new();
+    let mut holder_node_id_hash = Value::Null;
+    let mut local_node_id_hash = Value::Null;
+    let mut local_is_holder = Value::Null;
+    let routing_lease_seq = routing.and_then(|routing| routing.current_lease_seq);
+    let durable_lease_seq = durable.lease_seq;
+    let fencing_token = routing_lease_seq.or(durable_lease_seq);
+    if let (Some(routing_seq), Some(durable_seq)) = (routing_lease_seq, durable_lease_seq)
+        && routing_seq != durable_seq
+    {
+        warnings.push(format!(
+            "Host HRW routing fencing token {routing_seq} differs from durable fcp-store lease_seq {durable_seq}; host enforcement follows routing while durable evidence follows the stored lease object."
+        ));
+    }
+    let expiry = durable
+        .expiry_unix_secs
+        .and_then(lease_expiry_rfc3339)
+        .map_or(Value::Null, Value::String);
+    let expiry_unix_secs = durable.expiry_unix_secs.map_or(Value::Null, Value::from);
+    let quorum_signers_count =
+        u64::try_from(durable.quorum_signers_count.unwrap_or(0)).unwrap_or(u64::MAX);
+    let required_quorum_signers_count =
+        u64::try_from(CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES).unwrap_or(u64::MAX);
+    let quorum_satisfied = durable
+        .quorum_signers_count
+        .map(|count| count >= CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES);
+    if let Some(count) = durable.quorum_signers_count
+        && count < CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES
+    {
+        warnings.push(format!(
+            "Durable lease object has {count} quorum signatures, below the required {CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES}; host status treats this as non-quorum lease evidence."
+        ));
+    }
+
+    if let Some(routing) = routing {
+        let ranked = fcp_mesh::planner::rank_lease_holders_by_hrw(
+            zone_id,
+            &subject_id,
+            &routing.eligible_nodes,
+        );
+        for (index, node) in ranked.iter().enumerate() {
+            ranked_holders.push(json!({
+                "rank": index + 1,
+                "node_id_hash": lease_node_id_hash(node),
+                "is_local_node": node == &routing.local_node,
+            }));
+        }
+        if let Some(holder) = ranked.first() {
+            holder_node_id_hash = json!(lease_node_id_hash(holder));
+            local_node_id_hash = json!(lease_node_id_hash(&routing.local_node));
+            local_is_holder = json!(holder == &routing.local_node);
+        } else {
+            warnings.push(
+                "HRW lease routing is configured, but no eligible lease holder was available."
+                    .to_owned(),
+            );
+        }
+        if routing.current_lease_seq.is_none() {
+            warnings.push(
+                "No current fencing token floor is configured; stale lease_seq values cannot be fenced by this status snapshot."
+                    .to_owned(),
+            );
+        }
+    } else {
+        warnings.push(
+            "Singleton-writer HRW lease routing is not configured for this host process."
+                .to_owned(),
+        );
+    }
+
+    json!({
+        "status": "ok",
+        "command": "fcp-host",
+        "subcommand": "connector lease status",
+        "schema_version": SCHEMA_VERSION,
+        "source": if routing.is_some() { "host-hrw-routing" } else { "host-unconfigured-hrw-routing" },
+        "connector_id": connector_id.to_string(),
+        "zone_id": zone_id.as_str(),
+        "subject_id": subject_id.to_string(),
+        "purpose": CoreLeasePurpose::ConnectorStateWrite,
+        "holder_node_id_hash": holder_node_id_hash,
+        "fencing_token": fencing_token,
+        "durable_lease_seq": durable_lease_seq,
+        "expiry": expiry,
+        "expiry_unix_secs": expiry_unix_secs,
+        "quorum_signers_count": quorum_signers_count,
+        "required_quorum_signers_count": required_quorum_signers_count,
+        "quorum_satisfied": quorum_satisfied,
+        "durable_validation": {
+            "status": durable.validation_status.unwrap_or("unavailable"),
+            "error": durable.validation_error,
+            "validated_at_unix_secs": durable.validated_at_unix_secs,
+        },
+        "lease_object_id": durable.lease_object_id.map(|object_id| object_id.to_string()),
+        "lease_evidence_source": durable.source.unwrap_or("unavailable"),
+        "local_node_id_hash": local_node_id_hash,
+        "local_is_holder": local_is_holder,
+        "ranked_holders": ranked_holders,
+        "live_host": {
+            "requested": true,
+            "state": "queried",
+            "route_available": true,
+            "route": "/rpc/admin/connectors/{connector_id}/lease/status",
+        },
+        "telemetry": {
+            "event_names": metrics::LEASE_EVENT_NAMES,
+            "handoffs_counter": metrics::LEASE_HANDOFFS_TOTAL_METRIC,
+            "handoff_duration_histogram": metrics::LEASE_HANDOFF_DURATION_SECONDS_METRIC,
+            "redaction_scope": "public"
+        },
+        "warnings": warnings,
+    })
+}
+
+#[must_use]
+fn connector_lease_flush_before_yield_payload(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    state_root: &StdPath,
+    flush: &fcp_store::ConnectorStateLeaseYieldFlush,
+    warnings: Vec<String>,
+) -> Value {
+    json!({
+        "status": "ok",
+        "command": "fcp-host",
+        "subcommand": "connector lease flush-before-yield",
+        "schema_version": "1.0.0",
+        "source": "host-canonical-state-flush",
+        "connector_id": connector_id.to_string(),
+        "zone_id": zone_id.as_str(),
+        "state_root": {
+            "path": state_root.display().to_string(),
+            "source": "host",
+        },
+        "purpose": CoreLeasePurpose::ConnectorStateWrite,
+        "flush": {
+            "root_present": flush.root_object_id.is_some(),
+            "connector_id": flush.connector_id.to_string(),
+            "zone_id": flush.zone_id.as_str(),
+            "instance_id": flush.instance_id.as_ref().map(InstanceId::as_str),
+            "root_object_id": flush.root_object_id.as_ref().map(ToString::to_string),
+            "head_object_id": flush.head_object_id.as_ref().map(ToString::to_string),
+            "last_canonical_seq": flush.last_canonical_seq,
+            "lease_seq": flush.lease_seq,
+            "lease_object_id": flush.lease_object_id.as_ref().map(ToString::to_string),
+            "status_source": "fcp-store",
+        },
+        "telemetry": {
+            "event_name": metrics::LEASE_FLUSHED_ON_YIELD_METRIC,
+            "purpose_label": CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "outcome_label": "success",
+            "redaction_scope": "public",
+        },
+        "warnings": warnings,
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "code")]
+enum HrwLeaseRouteRefusal<'a> {
+    LeaseRoutingConfigMissing {
+        local_node_env: &'static str,
+        node_set_env: &'static str,
+    },
+    LeaseQuorumConfigInvalid {
+        configured_eligible_nodes_count: usize,
+        required_quorum_signers_count: usize,
+        node_set_env: &'static str,
+    },
+    NotSelectedCoordinator {
+        #[serde(flatten)]
+        reason: &'a fcp_mesh::planner::LeaseTransferReason,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        yield_flush: Option<HrwLeaseYieldFlushEvidence>,
+    },
+    LeaseFenced {
+        zone_id: ZoneId,
+        subject_id: ObjectId,
+        purpose: CoreLeasePurpose,
+        current_lease_seq: u64,
+        provided_lease_seq: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handoff_reason: Option<&'a fcp_mesh::planner::LeaseTransferReason>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        yield_flush: Option<HrwLeaseYieldFlushEvidence>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct HrwLeaseYieldFlushEvidence {
+    status: &'static str,
+    root_present: bool,
+    root_object_id: Option<String>,
+    head_object_id: Option<String>,
+    last_canonical_seq: Option<u64>,
+    lease_seq: Option<u64>,
+    lease_object_id: Option<String>,
+}
+
+impl From<&fcp_store::ConnectorStateLeaseYieldFlush> for HrwLeaseYieldFlushEvidence {
+    fn from(flush: &fcp_store::ConnectorStateLeaseYieldFlush) -> Self {
+        Self {
+            status: "flushed",
+            root_present: flush.root_object_id.is_some(),
+            root_object_id: flush.root_object_id.as_ref().map(ToString::to_string),
+            head_object_id: flush.head_object_id.as_ref().map(ToString::to_string),
+            last_canonical_seq: flush.last_canonical_seq,
+            lease_seq: flush.lease_seq,
+            lease_object_id: flush.lease_object_id.as_ref().map(ToString::to_string),
+        }
+    }
+}
+
+fn hrw_lease_refusal_message(refusal: &HrwLeaseRouteRefusal<'_>) -> String {
+    hrw_lease_refusal_message_for("invoke", refusal)
+}
+
+fn hrw_lease_refusal_message_for(action: &str, refusal: &HrwLeaseRouteRefusal<'_>) -> String {
+    let payload = serde_json::to_string(refusal).unwrap_or_else(|error| {
+        format!("{{\"reason\":\"serialization_error\",\"message\":\"{error}\"}}")
+    });
+    format!("HRW lease routing refused singleton_writer {action}: {payload}")
+}
+
+fn missing_hrw_lease_routing_config_error(action: &str) -> HostError {
+    let refusal = HrwLeaseRouteRefusal::LeaseRoutingConfigMissing {
+        local_node_env: HRW_LEASE_LOCAL_NODE_ENV,
+        node_set_env: HRW_LEASE_NODES_ENV,
+    };
+    HostError::PreflightFailed(hrw_lease_refusal_message_for(action, &refusal))
+}
+
+fn enforce_hrw_singleton_writer_quorum_config(
+    action: &str,
+    routing: &HrwLeaseRoutingConfig,
+) -> HostResult<()> {
+    if routing.eligible_nodes.len() >= CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES {
+        return Ok(());
+    }
+    let refusal = HrwLeaseRouteRefusal::LeaseQuorumConfigInvalid {
+        configured_eligible_nodes_count: routing.eligible_nodes.len(),
+        required_quorum_signers_count: CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES,
+        node_set_env: HRW_LEASE_NODES_ENV,
+    };
+    Err(HostError::PreflightFailed(hrw_lease_refusal_message_for(
+        action, &refusal,
+    )))
+}
+
+fn parse_hrw_launch_zone_id(
+    connector_id: &ConnectorId,
+    allowed_zones: &[String],
+) -> HostResult<ZoneId> {
+    match allowed_zones {
+        [zone] => zone.parse::<ZoneId>().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid singleton_writer HRW launch zone `{zone}` for connector `{connector_id}`: {error}"
+            ))
+        }),
+        [] => Err(zone_envelope_required_error(connector_id)),
+        zones => Err(HostError::InvalidFilter(format!(
+            "singleton_writer HRW launch routing for connector `{connector_id}` requires exactly one allowed_zones entry, got {}",
+            zones.len()
+        ))),
+    }
+}
+
+fn connector_lease_query_zone_id(
+    connector_id: &ConnectorId,
+    config: &ConnectorConfig,
+    query_zone: Option<&str>,
+    action: &str,
+) -> HostResult<ZoneId> {
+    if let Some(zone) = query_zone.map(str::trim).filter(|zone| !zone.is_empty()) {
+        return zone.parse::<ZoneId>().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid connector lease {action} zone `{zone}`: {error}"
+            ))
+        });
+    }
+
+    if !connector_config_declares_singleton_writer(config) {
+        return Ok(ZoneId::work());
+    }
+
+    match config.allowed_zones.as_slice() {
+        [zone] => zone.parse::<ZoneId>().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid singleton_writer lease {action} zone `{zone}` for connector `{connector_id}`: {error}"
+            ))
+        }),
+        [] => Err(zone_envelope_required_error(connector_id)),
+        zones => Err(HostError::InvalidFilter(format!(
+            "singleton_writer lease {action} for connector `{connector_id}` requires an explicit zone query because allowed_zones has {} entries",
+            zones.len()
+        ))),
+    }
+}
+
+fn connector_lease_status_zone_id(
+    connector_id: &ConnectorId,
+    config: &ConnectorConfig,
+    query_zone: Option<&str>,
+) -> HostResult<ZoneId> {
+    connector_lease_query_zone_id(connector_id, config, query_zone, "status")
+}
+
+fn connector_lease_flush_before_yield_zone_id(
+    connector_id: &ConnectorId,
+    config: &ConnectorConfig,
+    query_zone: Option<&str>,
+) -> HostResult<ZoneId> {
+    connector_lease_query_zone_id(connector_id, config, query_zone, "flush-before-yield")
+}
+
+fn enforce_hrw_singleton_writer_launch_route(
+    config: &ConnectorConfig,
+    routing: Option<&HrwLeaseRoutingConfig>,
+) -> HostResult<()> {
+    if !connector_config_declares_singleton_writer(config) {
+        return Ok(());
+    }
+    let Some(routing) = routing else {
+        return Err(missing_hrw_lease_routing_config_error("launch"));
+    };
+    enforce_hrw_singleton_writer_quorum_config("launch", routing)?;
+
+    let connector_id: ConnectorId = config.id.parse().map_err(|err| {
+        HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
+    })?;
+    let zone_id = parse_hrw_launch_zone_id(&connector_id, &config.allowed_zones)?;
+    let subject_id = singleton_writer_connector_lease_subject_id(&connector_id, &zone_id);
+    let selection = fcp_mesh::planner::admit_lease_holder(
+        &zone_id,
+        &subject_id,
+        CoreLeasePurpose::ConnectorStateWrite,
+        &routing.eligible_nodes,
+        &routing.local_node,
+    )
+    .map_err(|reason| {
+        metrics::record_lease_fenced(
+            CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "launch_not_selected_coordinator",
+        );
+        tracing::warn!(
+            event = "hrw_lease_launch_refused",
+            connector_id = %connector_id,
+            zone_id = %zone_id,
+            reason = ?reason,
+            "singleton_writer connector launch refused by HRW lease routing"
+        );
+        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
+            reason: &reason,
+            yield_flush: None,
+        };
+        HostError::PreflightFailed(hrw_lease_refusal_message_for("launch", &refusal))
+    })?;
+
+    tracing::debug!(
+        event = "hrw_lease_launch_admitted",
+        connector_id = %connector_id,
+        zone_id = %zone_id,
+        subject_id = %selection.subject_id,
+        holder = %selection.holder.as_str(),
+        "singleton_writer connector launch admitted by HRW lease routing"
+    );
+    Ok(())
+}
+
+async fn flush_singleton_writer_before_hrw_yield(
+    state: &AppState,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    reason: &fcp_mesh::planner::LeaseTransferReason,
+) -> HostResult<HrwLeaseYieldFlushEvidence> {
+    connector_lease_yield_flush_context_for_registered_connector(state, connector_id, zone_id)
+        .await
+        .map(|context| {
+            metrics::record_lease_flushed_on_yield(
+                CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                "success",
+            );
+            tracing::warn!(
+                event = "hrw_lease_yield_flush_before_refusal",
+                connector_id = %connector_id,
+                zone_id = %zone_id,
+                root_object_id = context.flush.root_object_id.as_ref().map(ToString::to_string),
+                head_object_id = context.flush.head_object_id.as_ref().map(ToString::to_string),
+                last_canonical_seq = ?context.flush.last_canonical_seq,
+                lease_seq = ?context.flush.lease_seq,
+                "flushed singleton_writer connector state before HRW lease yield"
+            );
+            HrwLeaseYieldFlushEvidence::from(&context.flush)
+        })
+        .map_err(|error| {
+            metrics::record_lease_flushed_on_yield(
+                CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                "error",
+            );
+            let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
+                reason,
+                yield_flush: None,
+            };
+            HostError::PreflightFailed(format!(
+                "{}; flush-before-yield failed: {error}",
+                hrw_lease_refusal_message(&refusal)
+            ))
+        })
+}
+
+async fn enforce_hrw_lease_route(
+    state: &AppState,
     request: &InvokeRequest,
     routing: Option<&HrwLeaseRoutingConfig>,
+    connector_declares_singleton_writer: bool,
 ) -> HostResult<()> {
     let subject_id = singleton_writer_lease_subject_id(request);
     let Some(routing) = routing else {
-        let reason = fcp_mesh::planner::LeaseTransferReason::NoEligibleHolder {
-            zone_id: request.zone_id.clone(),
-            subject_id,
-            purpose: CoreLeasePurpose::ConnectorStateWrite,
-        };
-        return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
-            &reason,
-        )));
+        metrics::record_lease_fenced(
+            CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "invoke_missing_routing_config",
+        );
+        return Err(missing_hrw_lease_routing_config_error("invoke"));
     };
+    enforce_hrw_singleton_writer_quorum_config("invoke", routing)?;
 
-    fcp_mesh::planner::admit_lease_holder(
+    let selection = fcp_mesh::planner::admit_lease_holder(
         &request.zone_id,
         &subject_id,
         CoreLeasePurpose::ConnectorStateWrite,
         &routing.eligible_nodes,
         &routing.local_node,
     )
-    .map(|selection| {
-        tracing::debug!(
-            event = "hrw_lease_route_admitted",
-            connector_id = %request.connector_id,
-            operation = %request.operation,
-            zone_id = %request.zone_id,
-            subject_id = %selection.subject_id,
-            holder = %selection.holder.as_str(),
-            "singleton_writer invoke admitted by HRW lease routing"
-        );
-    })
     .map_err(|reason| {
         tracing::warn!(
             event = "hrw_lease_route_refused",
@@ -3950,8 +6026,116 @@ fn enforce_hrw_lease_route(
             reason = ?reason,
             "singleton_writer invoke refused by HRW lease routing"
         );
-        HostError::PreflightFailed(hrw_lease_refusal_message(&reason))
-    })
+        reason
+    });
+    let selection = match selection {
+        Ok(selection) => selection,
+        Err(reason) => {
+            let yield_flush =
+                if connector_declares_singleton_writer && routing.current_lease_seq.is_some() {
+                    Some(
+                        flush_singleton_writer_before_hrw_yield(
+                            state,
+                            &request.connector_id,
+                            &request.zone_id,
+                            &reason,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+            if let Some(current_lease_seq) = routing.current_lease_seq
+                && request
+                    .lease_seq
+                    .is_none_or(|provided| provided < current_lease_seq)
+            {
+                let refusal = HrwLeaseRouteRefusal::LeaseFenced {
+                    zone_id: request.zone_id.clone(),
+                    subject_id,
+                    purpose: CoreLeasePurpose::ConnectorStateWrite,
+                    current_lease_seq,
+                    provided_lease_seq: request.lease_seq,
+                    handoff_reason: Some(&reason),
+                    yield_flush,
+                };
+                metrics::record_lease_fenced(
+                    CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                    "stale_or_missing_lease_seq_after_handoff",
+                );
+                tracing::warn!(
+                    event = "hrw_lease_route_fenced_after_handoff",
+                    connector_id = %request.connector_id,
+                    operation = %request.operation,
+                    zone_id = %request.zone_id,
+                    subject_id = %subject_id,
+                    current_lease_seq,
+                    provided_lease_seq = ?request.lease_seq,
+                    reason = ?reason,
+                    "singleton_writer invoke refused by stale HRW handoff fence"
+                );
+                return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
+                    &refusal,
+                )));
+            }
+            metrics::record_lease_fenced(
+                CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                "invoke_not_selected_coordinator",
+            );
+            let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
+                reason: &reason,
+                yield_flush,
+            };
+            return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
+                &refusal,
+            )));
+        }
+    };
+
+    if let Some(current_lease_seq) = routing.current_lease_seq
+        && request
+            .lease_seq
+            .is_none_or(|provided| provided < current_lease_seq)
+    {
+        let refusal = HrwLeaseRouteRefusal::LeaseFenced {
+            zone_id: request.zone_id.clone(),
+            subject_id,
+            purpose: CoreLeasePurpose::ConnectorStateWrite,
+            current_lease_seq,
+            provided_lease_seq: request.lease_seq,
+            handoff_reason: None,
+            yield_flush: None,
+        };
+        metrics::record_lease_fenced(
+            CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "stale_or_missing_lease_seq",
+        );
+        tracing::warn!(
+            event = "hrw_lease_route_fenced",
+            connector_id = %request.connector_id,
+            operation = %request.operation,
+            zone_id = %request.zone_id,
+            subject_id = %subject_id,
+            current_lease_seq,
+            provided_lease_seq = ?request.lease_seq,
+            "singleton_writer invoke refused by HRW lease fence"
+        );
+        return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
+            &refusal,
+        )));
+    }
+
+    tracing::debug!(
+        event = "hrw_lease_route_admitted",
+        connector_id = %request.connector_id,
+        operation = %request.operation,
+        zone_id = %request.zone_id,
+        subject_id = %selection.subject_id,
+        holder = %selection.holder.as_str(),
+        current_lease_seq = ?routing.current_lease_seq,
+        "singleton_writer invoke admitted by HRW lease routing"
+    );
+    Ok(())
 }
 
 fn enforce_live_deployment_tier(request: &InvokeRequest, tier: SafetyTier) -> HostResult<()> {
@@ -4059,15 +6243,11 @@ async fn verify_live_request(
     // from a `z:secure` request). The gateway never consulted any
     // connector-side zone declaration before this check.
     //
-    // Enforcement is opt-in: when `allowed_zones` is empty (the default for
-    // existing inventories), the gateway preserves pre-binding behavior.
-    // Operators set the list per-connector to fail-closed against
-    // unintended zones. The error path emits a distinct rejection message
-    // so receipts and logs distinguish zone-binding violations from
-    // generic preflight failures.
-    // br-v2kt4: explicit fail-closed semantics for empty allowed_zones
-    // when the operator opted in via enforce_empty_allow_lists. Default
-    // (false) preserves the back-compat permissive path.
+    // Enforcement is mandatory: an empty `allowed_zones` list means the
+    // connector has no explicit zone envelope, so host-facing RPC rejects
+    // before consulting connector self-report. The error path emits a
+    // distinct rejection message so receipts and logs distinguish missing
+    // zone-envelope inventory from generic preflight failures.
     //
     // br-l9tt6: snapshot ALL THREE allow-list fields under one registry
     // read-lock so the zone gate and the operation gate that follows
@@ -4083,16 +6263,8 @@ async fn verify_live_request(
         .await;
     if let Some(snapshot) = &allow_snapshot {
         let allowed = &snapshot.allowed_zones;
-        if allowed.is_empty() {
-            if snapshot.enforce_empty_allow_lists {
-                return Err(HostError::PreflightFailed(format!(
-                    "connector `{}` has no `allowed_zones` and is configured \
-                     enforce_empty_allow_lists=true; deny-all (br-v2kt4)",
-                    request.connector_id
-                )));
-            }
-            // empty + !enforce_empty -> back-compat permissive path
-        } else if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
+        require_allowed_zones_configured(&request.connector_id, allowed)?;
+        if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
             return Err(HostError::PreflightFailed(format!(
                 "connector `{}` is not bound to zone `{}` (allowed: [{}])",
                 request.connector_id,
@@ -4128,7 +6300,8 @@ async fn verify_live_request(
                     request.connector_id
                 )));
             }
-            // empty + !enforce_empty -> back-compat permissive path
+            // Empty allowed_operations with the legacy flag disabled falls
+            // through to the connector introspection operation check.
         } else if !allowed_ops
             .iter()
             .any(|op| op == request.operation.as_str())
@@ -4218,9 +6391,15 @@ async fn verify_live_request(
         .registry
         .connector_requires_singleton_writer(&request.connector_id)
         .await;
-    if operation_requires_hrw_lease(tool, request, connector_declares_singleton_writer) {
+    if operation_requires_hrw_lease(tool, connector_declares_singleton_writer) {
         let routing = current_hrw_lease_routing_config()?;
-        enforce_hrw_lease_route(request, routing.as_ref())?;
+        enforce_hrw_lease_route(
+            state,
+            request,
+            routing.as_ref(),
+            connector_declares_singleton_writer,
+        )
+        .await?;
     }
 
     // SECURITY: holder-bound tokens (`holder_node` claim present) must never
@@ -5158,8 +7337,8 @@ fn main() -> HostResult<()> {
             return Ok(());
         }
     }
-    init_tracing();
-    match fcp_async_core::runtime::block_on_sync(async_main()) {
+    let telemetry_config = init_host_telemetry()?;
+    match fcp_async_core::runtime::block_on_sync(async_main(telemetry_config)) {
         Ok(result) => result,
         Err(err) => Err(HostError::Internal(format!(
             "runtime bootstrap failed: {err}"
@@ -5167,24 +7346,59 @@ fn main() -> HostResult<()> {
     }
 }
 
-fn init_tracing() {
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,fcp_host=debug")),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .flatten_event(true)
-                .with_ansi(false)
-                .with_current_span(false)
-                .with_writer(std::io::stderr),
-        )
-        .init();
+#[cfg(test)]
+fn default_host_telemetry_config() -> TelemetryConfig {
+    let mut config = TelemetryConfig::new("fcp-host");
+    config.log_level = "info,fcp_host=debug".to_string();
+    config
 }
 
-async fn async_main() -> HostResult<()> {
+fn host_telemetry_config_from_env() -> Result<TelemetryConfig, TelemetryError> {
+    let mut config = TelemetryConfig::from_env()?;
+    let default_service_name = TelemetryConfig::default().service_name;
+    let explicit_service_name = std::env::var(fcp_telemetry::OTEL_SERVICE_NAME_ENV_VAR)
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then_some(())
+        })
+        .is_some()
+        || config
+            .otlp_resource_attributes
+            .iter()
+            .any(|attribute| attribute.key == "service.name");
+
+    if config.service_name == default_service_name && !explicit_service_name {
+        config.service_name = "fcp-host".to_string();
+    }
+    config.log_level = "info,fcp_host=debug".to_string();
+    Ok(config)
+}
+
+fn telemetry_error_to_host(error: TelemetryError) -> HostError {
+    match error {
+        TelemetryError::Config(message) => {
+            HostError::InvalidFilter(format!("telemetry configuration error: {message}"))
+        }
+        TelemetryError::LoggingInit(message)
+        | TelemetryError::MetricsInit(message)
+        | TelemetryError::TracingInit(message) => {
+            HostError::Internal(format!("telemetry initialization error: {message}"))
+        }
+    }
+}
+
+fn init_host_telemetry() -> HostResult<TelemetryConfig> {
+    let config = host_telemetry_config_from_env().map_err(telemetry_error_to_host)?;
+    let mut init_config = config.clone();
+    if init_config.otlp_enabled && !fcp_telemetry::otlp_feature_compiled() {
+        init_config.otlp_enabled = false;
+    }
+    fcp_telemetry::init_telemetry(init_config).map_err(telemetry_error_to_host)?;
+    Ok(config)
+}
+
+async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
     let bind_target = resolve_bind_target()?;
     let capability_verifying_key = resolve_verifying_key(
         "FCP_HOST_CAPABILITY_PUBLIC_KEY",
@@ -5262,6 +7476,7 @@ async fn async_main() -> HostResult<()> {
         admin_bearer_token: resolve_admin_bearer_token()?,
         connectors_file: loaded_configs.connectors_file,
         zone_policies: Arc::new(RwLock::new(zone_policies)),
+        telemetry_config,
         invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
         started_at: Instant::now(),
     });
@@ -5289,6 +7504,18 @@ async fn async_main() -> HostResult<()> {
         .route(
             "/rpc/connectors/{connector_id}/config/revisions/{revision_id}",
             get(connector_config_revision_handler),
+        )
+        .route(
+            "/rpc/admin/connectors/{connector_id}/state/explain",
+            get(connector_state_explain_handler),
+        )
+        .route(
+            "/rpc/admin/connectors/{connector_id}/lease/status",
+            get(connector_lease_status_handler),
+        )
+        .route(
+            "/rpc/admin/connectors/{connector_id}/lease/flush-before-yield",
+            post(connector_lease_flush_before_yield_handler),
         )
         .route(
             "/rpc/connectors/{connector_id}/config/diff",
@@ -5337,6 +7564,10 @@ async fn async_main() -> HostResult<()> {
             get(journal_connector_handler),
         )
         .route("/rpc/admin/logs", post(log_query_handler))
+        .route(
+            "/rpc/admin/audit/chain/status",
+            get(audit_chain_status_handler),
+        )
         .route("/rpc/admin/receipts", post(receipt_query_handler))
         .route(
             "/rpc/admin/simulate-receipts",
@@ -5346,6 +7577,10 @@ async fn async_main() -> HostResult<()> {
         .route(
             "/rpc/admin/events/acknowledge",
             post(event_acknowledge_handler),
+        )
+        .route(
+            "/rpc/admin/telemetry/otlp/readiness",
+            get(host_telemetry_otlp_readiness_handler),
         )
         .route(
             "/rpc/admin/credentials/pools",
@@ -5475,6 +7710,7 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
         .route("/rpc/simulate", post(simulate_handler))
+        .route("/rpc/mesh/cutover-gates", get(mesh_cutover_gates_handler))
         .route("/rpc/health", get(health_handler))
         .merge(protected_routes)
         .with_state(Arc::clone(&state));
@@ -6673,7 +8909,7 @@ async fn auth_refresh_profile_snapshot_with_transport(
         Ok(transport) => transport,
         Err(error) => return TokenRefreshOutcome::Failed { decision, error },
     };
-    let cx = fcp_async_core::Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     let refresh_result = match &mut profile.method {
         AuthMethodKind::OAuthDeviceCode(method) => {
             method.refresh_with_transport(&cx, &transport).await
@@ -6740,7 +8976,7 @@ async fn auth_profile_upsert_handler(
     .map_err(map_auth_profile_error)?;
     profile
         .method
-        .validate(&fcp_async_core::Cx::for_testing())
+        .validate(&fcp_async_core::compatibility_cx())
         .await
         .map_err(map_auth_profile_error)?;
     let store = auth_profile_store();
@@ -6835,7 +9071,7 @@ async fn auth_profile_oauth_device_start_handler(
         .map_err(map_auth_profile_error)?;
     let config = oauth_device_config_from_profile(&profile).map_err(map_auth_profile_error)?;
     let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
-    let flow = OAuthDeviceCodeFlow::start(&fcp_async_core::Cx::for_testing(), config, &transport)
+    let flow = OAuthDeviceCodeFlow::start(&fcp_async_core::compatibility_cx(), config, &transport)
         .await
         .map_err(map_auth_profile_error)?;
     let challenge = flow.challenge().clone();
@@ -6890,7 +9126,7 @@ async fn auth_profile_oauth_device_poll_handler(
     let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
     let poll = pending
         .flow
-        .poll(&fcp_async_core::Cx::for_testing(), &transport)
+        .poll(&fcp_async_core::compatibility_cx(), &transport)
         .await;
     match poll {
         Ok(OAuthDeviceCodePoll::Pending { retry_after }) => {
@@ -7026,7 +9262,7 @@ async fn auth_profile_oauth_auth_code_complete_handler(
     let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
     let tokens = pending
         .flow
-        .exchange(&fcp_async_core::Cx::for_testing(), &transport, &grant)
+        .exchange(&fcp_async_core::compatibility_cx(), &transport, &grant)
         .await
         .map_err(map_auth_profile_error)?;
 
@@ -7133,6 +9369,15 @@ async fn introspect_handler(
     Path(connector_id): Path<String>,
 ) -> Result<(HeaderMap, Json<IntrospectionResponse>), (StatusCode, String)> {
     let connector_id = parse_connector_id(&connector_id)?;
+    if let Err(error) = state.registry.zone_envelope_status(&connector_id).await {
+        tracing::warn!(
+            event = "introspect_zone_envelope_required",
+            connector_id = %connector_id,
+            error = %error,
+            "rejecting introspection before connector RPC"
+        );
+        return Err(map_host_error(error));
+    }
     let cache_validator = cache_validator_from_headers(&headers);
     let started_at = Instant::now();
     tracing::debug!(
@@ -7248,6 +9493,182 @@ async fn connector_status_handler(
             Err(map_host_error(host_error))
         }
     }
+}
+
+async fn connector_state_explain_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Query(query): Query<ConnectorStateExplainQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    if state.registry.get(&connector_id).await.is_none() {
+        return Err(map_host_error(HostError::ConnectorNotFound(
+            connector_id.to_string(),
+        )));
+    }
+    let zone = match query
+        .zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+    {
+        Some(zone) => Some(zone.parse::<ZoneId>().map_err(|error| {
+            map_host_error(HostError::InvalidFilter(format!(
+                "invalid connector state explain zone `{zone}`: {error}"
+            )))
+        })?),
+        None => None,
+    };
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_state_explain_request",
+        connector_id = %connector_id,
+        zone_id = zone.as_ref().map(ZoneId::as_str),
+        "processing connector state explain request"
+    );
+    let HostConnectorStateExplainContext {
+        state_root,
+        canonical_status,
+        warnings,
+    } = connector_state_explain_context_for_registered_connector(
+        &state,
+        &connector_id,
+        zone.as_ref(),
+    )
+    .await;
+    let payload = host_connector_state_explain_payload_with_canonical_status_and_warnings(
+        &connector_id,
+        zone.as_ref(),
+        &state_root,
+        canonical_status.as_ref(),
+        warnings,
+    );
+    tracing::debug!(
+        event = "connector_state_explain_response",
+        connector_id = %connector_id,
+        zone_id = zone.as_ref().map(ZoneId::as_str),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector state explain request complete"
+    );
+    Ok(Json(payload))
+}
+
+async fn connector_lease_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Query(query): Query<ConnectorLeaseStatusQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let inventory = state.registry.inventory().await;
+    let config = find_connector_inventory_entry(&inventory, &connector_id)
+        .ok_or_else(|| map_host_error(HostError::ConnectorNotFound(connector_id.to_string())))?;
+    let zone = connector_lease_status_zone_id(&connector_id, config, query.zone.as_deref())
+        .map_err(map_host_error)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_lease_status_request",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        "processing connector lease status request"
+    );
+    let routing = current_hrw_lease_routing_config().map_err(map_host_error)?;
+    let state_root =
+        configured_connector_state_root(config).unwrap_or_else(connector_state_root_dir);
+    let durable =
+        connector_lease_durable_evidence_from_config(config, &connector_id, &zone, &state_root)
+            .await;
+    let payload = connector_lease_status_payload(&connector_id, &zone, routing.as_ref(), &durable);
+    let holder_node_id_hash = payload
+        .get("holder_node_id_hash")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    tracing::debug!(
+        event = "connector_lease_status_response",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        holder_node_id_hash = ?holder_node_id_hash,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector lease status request complete"
+    );
+    Ok(Json(payload))
+}
+
+async fn connector_lease_flush_before_yield_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Query(query): Query<ConnectorLeaseFlushBeforeYieldQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let inventory = state.registry.inventory().await;
+    let config = find_connector_inventory_entry(&inventory, &connector_id)
+        .ok_or_else(|| map_host_error(HostError::ConnectorNotFound(connector_id.to_string())))?;
+    let zone =
+        connector_lease_flush_before_yield_zone_id(&connector_id, config, query.zone.as_deref())
+            .map_err(map_host_error)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_lease_flush_before_yield_request",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        "processing connector lease flush-before-yield request"
+    );
+    let HostConnectorLeaseYieldFlushContext {
+        state_root,
+        flush,
+        warnings,
+    } = match connector_lease_yield_flush_context_for_registered_connector(
+        &state,
+        &connector_id,
+        &zone,
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            metrics::record_lease_flushed_on_yield(
+                CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                "error",
+            );
+            return Err(map_host_error(HostError::PreflightFailed(error)));
+        }
+    };
+    metrics::record_lease_flushed_on_yield(CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL, "success");
+    let payload = connector_lease_flush_before_yield_payload(
+        &connector_id,
+        &zone,
+        &state_root,
+        &flush,
+        warnings,
+    );
+    tracing::debug!(
+        event = "connector_lease_flush_before_yield_response",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        root_object_id = flush.root_object_id.as_ref().map(ToString::to_string),
+        head_object_id = flush.head_object_id.as_ref().map(ToString::to_string),
+        last_canonical_seq = ?flush.last_canonical_seq,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector lease flush-before-yield request complete"
+    );
+    Ok(Json(payload))
+}
+
+async fn mesh_cutover_gates_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    let catalog_connector_count = state.registry.list().await.len();
+    let payload = host_mesh_cutover_gates_payload(catalog_connector_count);
+    tracing::debug!(
+        event = "mesh_cutover_gates_response",
+        schema_version = HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        catalog_connector_count,
+        node_count = 1_usize,
+        overall_status = "skip",
+        duration_ms = %started_at.elapsed().as_millis(),
+        "mesh cutover-gates request complete"
+    );
+    Ok(Json(payload))
 }
 
 async fn connector_artifact_metadata_handler(
@@ -9840,7 +12261,7 @@ async fn refresh_host_egress_credential_after_unauthorized(
     let transport = BlockingOAuthTransport::new().map_err(|err| {
         HostError::PreflightFailed(format!("host-egress OAuth refresh transport failed: {err}"))
     })?;
-    let cx = fcp_async_core::Cx::for_testing();
+    let cx = fcp_async_core::compatibility_cx();
     let refresh_result = match &mut profile.method {
         AuthMethodKind::OAuthDeviceCode(method) => {
             method.refresh_with_transport(&cx, &transport).await
@@ -10997,6 +13418,7 @@ fn batch_error_from_host_error(err: HostError) -> BatchOperationError {
         HostError::InvalidFilter(_) => "INVALID_REQUEST",
         HostError::RegistryError(_) => "CONNECTOR_ERROR",
         HostError::PreflightFailed(_) => "PREFLIGHT_DENIED",
+        HostError::ZoneEnvelopeRequired(_) => "ZONE_ENVELOPE_REQUIRED",
         HostError::CacheError(_) => "CACHE_ERROR",
         HostError::Unavailable(_) => "UNAVAILABLE",
         HostError::Internal(_) => "INTERNAL_ERROR",
@@ -11242,6 +13664,19 @@ async fn batch_invoke_handler(
                 continue;
             }
 
+            // stop_on_first_error tripped in an earlier chunk of this tier:
+            // short-circuit the remaining chunks instead of executing them
+            // (the tier-level check above only catches subsequent tiers).
+            if aborted {
+                for operation_id in chunk {
+                    results_map.insert(
+                        operation_id.clone(),
+                        skipped_batch_result(operation_id.clone(), None),
+                    );
+                }
+                continue;
+            }
+
             let mut ready = Vec::new();
             for operation_id in chunk {
                 let operation = operation_map
@@ -11355,8 +13790,18 @@ async fn supply_chain_verify_handler(
     }
 }
 
-async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthResponse> {
+async fn health_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<HostHealthResponse>, (StatusCode, String)> {
     let started_at = Instant::now();
+    if let Some(error) = state.registry.first_zone_envelope_error().await {
+        tracing::warn!(
+            event = "health_zone_envelope_required",
+            error = %error,
+            "rejecting host health before connector health RPC"
+        );
+        return Err(map_host_error(error));
+    }
     let summaries = state.registry.list().await;
     let mut connectors = HashMap::with_capacity(summaries.len());
     let mut status = HostHealthStatus::Healthy;
@@ -11392,7 +13837,28 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthRe
         duration_ms = started_at.elapsed().as_millis() as u64,
         "health request complete"
     );
-    Json(response)
+    Ok(Json(response))
+}
+
+fn host_telemetry_otlp_readiness_message(status: &str) -> &'static str {
+    match status {
+        "ready" => "OTLP export is configured and supported by this host build",
+        "unavailable" => "OTLP export is configured but this host build lacks exporter support",
+        "fail" => "OTLP export configuration is invalid or incomplete",
+        "disabled" => "OTLP export is disabled by configuration",
+        _ => "OTLP readiness status is unknown",
+    }
+}
+
+async fn host_telemetry_otlp_readiness_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let readiness = otlp_readiness(&state.telemetry_config);
+    let status = readiness.status;
+    Json(json!({
+        "status": status,
+        "source": "host-admin-api",
+        "message": host_telemetry_otlp_readiness_message(status),
+        "readiness": readiness,
+    }))
 }
 
 async fn ensure_registered_connector(
@@ -11836,6 +14302,47 @@ async fn journal_connector_handler(
 
 // ── Log, event, and receipt handlers ────────────────────────────────────────
 
+#[derive(Debug, Deserialize)]
+struct AuditChainStatusQuery {
+    zone: Option<String>,
+    max_age_seconds: Option<u64>,
+    now_unix_secs: Option<u64>,
+}
+
+fn audit_chain_status_query_zone(query: &AuditChainStatusQuery) -> String {
+    query
+        .zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| ZoneId::work().to_string())
+}
+
+async fn audit_chain_status_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AuditChainStatusQuery>,
+) -> Json<fcp_host::InvokeAuditChainStatusSnapshot> {
+    let zone_id = audit_chain_status_query_zone(&query);
+    let max_age_seconds = query.max_age_seconds.unwrap_or(60);
+    let now_unix_secs = query
+        .now_unix_secs
+        .unwrap_or_else(|| u64::try_from(Utc::now().timestamp()).unwrap_or_default());
+
+    tracing::debug!(
+        event = "audit_chain_status_request",
+        zone_id = %zone_id,
+        max_age_seconds,
+        "processing live audit chain status query"
+    );
+
+    Json(
+        state
+            .invoke_audit
+            .status_for_zone(&zone_id, now_unix_secs, max_age_seconds),
+    )
+}
+
 async fn log_query_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<LogQueryRequest>,
@@ -11952,6 +14459,42 @@ fn map_resilience_error(
     }
 }
 
+/// Decides whether a connector subprocess is healthy enough to return to the
+/// warm pool after an `invoke`/`simulate` error.
+///
+/// Evicting a warm entry on *any* error is a self-inflicted wound: a
+/// request-level rejection (resilience load-shed / circuit-open / bulkhead-full
+/// / queue-timeout, or a connector JSON-RPC error reply) leaves the subprocess
+/// fully alive. Dropping it there destroys warm capacity for no reason — and
+/// because those rejections are *most* frequent exactly when the host is under
+/// load, the eviction storm feeds back into more cold starts and more pressure.
+/// Only genuinely process-fatal failures (dispatcher gone, transport/IO error,
+/// unexpected internal state) should drop the entry.
+fn warm_entry_survives_error(error: &HostError) -> bool {
+    match error {
+        // Every resilience-layer rejection maps to `Unavailable`
+        // (see `map_resilience_error`); the process itself is healthy.
+        HostError::Unavailable(_)
+        // Authorization / zone / filter / lookup denials are request-level.
+        | HostError::PreflightFailed(_)
+        | HostError::ZoneEnvelopeRequired(_)
+        | HostError::InvalidFilter(_)
+        | HostError::ConnectorNotFound(_)
+        | HostError::CacheError(_) => true,
+        // `RegistryError` is overloaded: a connector that replied with a
+        // JSON-RPC error is alive and reusable (retain), whereas a
+        // dispatcher/transport/IO failure means the subprocess is unusable
+        // (drop). Distinguish by the single message the JSON-RPC-error path
+        // stamps; any other `RegistryError` — including a future message change
+        // — falls through to the safe "drop".
+        HostError::RegistryError(message) => {
+            message.starts_with(CONNECTOR_JSON_RPC_ERROR_PREFIX)
+        }
+        // Unexpected internal/protocol state: assume the subprocess is broken.
+        HostError::Internal(_) => false,
+    }
+}
+
 fn map_lifecycle_host_error(error: LifecycleError) -> HostError {
     match error {
         LifecycleError::NotFound { connector_id } => {
@@ -11965,13 +14508,32 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
     match err {
         HostError::ConnectorNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
         HostError::InvalidFilter(_) => (StatusCode::BAD_REQUEST, err.to_string()),
-        HostError::PreflightFailed(_) => (StatusCode::FORBIDDEN, err.to_string()),
+        HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => {
+            (StatusCode::FORBIDDEN, err.to_string())
+        }
         HostError::CacheError(_) | HostError::Unavailable(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, err.to_string())
         }
         HostError::RegistryError(_) | HostError::Internal(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
         }
+    }
+}
+
+fn zone_envelope_required_error(connector_id: &ConnectorId) -> HostError {
+    HostError::ZoneEnvelopeRequired(format!(
+        "connector `{connector_id}` has no `allowed_zones`; configure at least one explicit zone before host RPC"
+    ))
+}
+
+fn require_allowed_zones_configured(
+    connector_id: &ConnectorId,
+    allowed_zones: &[String],
+) -> HostResult<()> {
+    if allowed_zones.is_empty() {
+        Err(zone_envelope_required_error(connector_id))
+    } else {
+        Ok(())
     }
 }
 
@@ -11995,6 +14557,11 @@ mod tests {
     use fcp_policy::OperationalModelVersion;
     use fcp_prelude::{CapabilityId, RiskLevel};
     use fcp_telegram::connector::TelegramConnector;
+    use fcp_testkit::evidence_helpers::{
+        SWARM_PREWARM_COLD_START_SCHEMA_VERSION, SwarmEvidenceExecutionMode,
+        SwarmEvidenceSourceKind, SwarmPrewarmColdStartEvidence, SwarmPrewarmLatencyPercentiles,
+        validate_swarm_prewarm_cold_start_evidence_bundle,
+    };
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
         if let Some(path) = option_env!("CARGO_BIN_EXE_fcp-test-connector") {
@@ -12036,11 +14603,12 @@ mod tests {
             config: Some(json!({})),
             categories: vec!["test".to_string()],
             version: None,
-            allowed_zones: Vec::new(),
+            allowed_zones: vec![ZoneId::work().as_str().to_string()],
             allowed_operations: Vec::new(),
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         }
     }
@@ -12063,6 +14631,7 @@ mod tests {
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let incoming = ConnectorConfig {
@@ -12081,6 +14650,7 @@ mod tests {
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
 
@@ -12173,7 +14743,7 @@ deny_ptrace = true
         manifest_constraints: ManifestOperationConstraintCatalog,
     ) -> AllowListSnapshot {
         AllowListSnapshot {
-            allowed_zones: Vec::new(),
+            allowed_zones: vec![ZoneId::work().as_str().to_string()],
             allowed_operations: Vec::new(),
             enforce_operation_network_constraints: enforce,
             enforce_empty_allow_lists: false,
@@ -12421,6 +14991,7 @@ deny_ptrace = true
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(zone_policies)),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
@@ -12484,13 +15055,60 @@ deny_ptrace = true
             config: None,
             categories: vec!["test".to_string()],
             version: None,
-            allowed_zones: Vec::new(),
+            allowed_zones: vec![ZoneId::work().as_str().to_string()],
             allowed_operations: Vec::new(),
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         }
+    }
+
+    fn zone_gate_dispatcher_state(
+        connector_id: &'static str,
+        allowed_zones: Vec<String>,
+    ) -> Arc<AppState> {
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_introspection(
+                                "test.echo",
+                                "cap.test.echo",
+                                SafetyTier::Safe,
+                            ),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": {
+                                "message": format!(
+                                    "zone gate test should not dispatch `{method}`"
+                                )
+                            },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.allowed_zones = allowed_zones;
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            None,
+            HashMap::new(),
+        )
     }
 
     fn runtime_network_test_constraints(
@@ -13285,6 +15903,123 @@ deny_ptrace = true
         assert_eq!(repeated, zone_dir);
     }
 
+    #[test]
+    fn host_connector_state_explain_payload_reports_cache_marker_evidence() {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let connector_id = ConnectorId::from_static("fcp.test:state:1.0.0");
+        let zone_id: ZoneId = "z:project:alpha".parse().expect("zone should parse");
+        let zone_dir = prepare_connector_zone_state_dir(tempdir.path(), &connector_id, &zone_id)
+            .expect("cache markers should be created");
+
+        let payload =
+            host_connector_state_explain_payload(&connector_id, Some(&zone_id), tempdir.path());
+
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["source"], "host-cache-markers");
+        assert_eq!(payload["connector_id"], connector_id.to_string());
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["local_cache_present"], true);
+        assert_eq!(payload["local_cache_marker_present"], true);
+        assert_eq!(payload["cache_marker"]["status"], "present");
+        assert_eq!(payload["zone"]["requested"], zone_id.as_str());
+        assert_eq!(payload["zone"]["local_cache_marker_present"], true);
+        assert_eq!(payload["zone"]["cache_marker_status"], "present");
+        assert_eq!(
+            payload["zone"]["local_cache_path"],
+            zone_dir.display().to_string()
+        );
+        assert_eq!(
+            payload["telemetry"]["fall_through_event"],
+            fcp_store::CONNECTOR_STATE_FALL_THROUGH_EVENT
+        );
+        assert_eq!(payload["live_host"]["route_available"], true);
+    }
+
+    #[test]
+    fn host_connector_state_explain_payload_reports_canonical_status_evidence() {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let connector_id = ConnectorId::from_static("fcp.test:state:1.0.0");
+        let zone_id: ZoneId = "z:project:alpha".parse().expect("zone should parse");
+        let root_object_id = ObjectId::from_unscoped_bytes(b"connector-state-root");
+        let head_object_id = ObjectId::from_unscoped_bytes(b"connector-state-head");
+        let status = ConnectorStateCanonicalStatus {
+            connector_id: connector_id.clone(),
+            instance_id: None,
+            zone_id: Some(zone_id.clone()),
+            model: Some(ConnectorStateModel::SingletonWriter),
+            root_present: true,
+            root_object_id: Some(root_object_id),
+            head_object_id: Some(head_object_id),
+            last_canonical_seq: Some(17),
+            state_schema_version: Some(1),
+            mesh_replica_count: Some(2),
+        };
+
+        let payload = host_connector_state_explain_payload_with_canonical_status(
+            &connector_id,
+            Some(&zone_id),
+            tempdir.path(),
+            Some(&status),
+        );
+
+        assert_eq!(payload["source"], "host-canonical-state");
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["last_canonical_seq"], 17);
+        assert_eq!(payload["mesh_replica_count"], 2);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            connector_id.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], zone_id.as_str());
+        assert_eq!(payload["canonical_state"]["instance_id"], Value::Null);
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["state_schema_version"], 1);
+        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
+        assert_eq!(payload["local_cache_present"], false);
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("connector cache marker"))),
+            "canonical status should warn when the connector cache-only marker is missing: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("zone cache marker"))),
+            "canonical status should warn when the zone cache-only marker is missing: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().all(|warning| !warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("not proven by cache markers"))),
+            "canonical status should suppress cache-marker-only proof warning: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("connector cache marker"))),
+            "canonical status without cache markers should warn about connector cache marker absence: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("zone cache marker"))),
+            "canonical status without zone cache marker should warn about zone cache marker absence: {warnings:?}"
+        );
+    }
+
     async fn test_app_state_with_connectors_file(
         configs: Vec<ConnectorConfig>,
         connectors_file: std::path::PathBuf,
@@ -13323,6 +16058,7 @@ deny_ptrace = true
             admin_bearer_token: None,
             connectors_file: Some(connectors_file),
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
@@ -13573,7 +16309,7 @@ deny_ptrace = true
     /// br-ike8x defense-in-depth: when allowed_operations is empty
     /// (the back-compat default), the gate must fall through to the
     /// pre-existing introspection-based check. This locks in the
-    /// "empty = permissive" semantic — same shape as allowed_zones.
+    /// legacy operation-only "empty = permissive" semantic.
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn verify_live_request_empty_allowed_operations_falls_through() {
         if maybe_compiled_test_connector_binary().is_none() {
@@ -13648,28 +16384,121 @@ deny_ptrace = true
         }
     }
 
-    /// br-v2kt4: explicit fail-closed for empty allowed_zones when
-    /// the operator opts in. Pre-fix, an empty allowed_zones list was
-    /// always treated as permissive ("no restriction"), so the
-    /// security ergonomics were inverted: a misconfigured operator
-    /// got the LEAST restrictive behaviour. With
-    /// enforce_empty_allow_lists=true, an empty list now means
-    /// deny-all.
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
-    async fn verify_live_request_v2kt4_empty_allowed_zones_with_enforce_flag_denies_all() {
+    async fn test_empty_zone_set_rejects_invoke() {
+        let connector_id = "fcp.test.empty-zones-invoke:utility:1.0.0";
+        let state = zone_gate_dispatcher_state(connector_id, Vec::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static(connector_id),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "empty zones reject before connector RPC" }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("empty allowed_zones must reject invoke");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("zone envelope required") && msg.contains("allowed_zones"),
+            "expected zone-envelope rejection, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn test_empty_zone_set_rejects_health_check() {
+        let connector_id = "fcp.test.empty-zones-health:utility:1.0.0";
+        let state = zone_gate_dispatcher_state(connector_id, Vec::new());
+
+        let (status, message) = health_handler(State(state))
+            .await
+            .expect_err("empty allowed_zones must reject host health before connector RPC");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            message.contains("zone envelope required") && message.contains("allowed_zones"),
+            "expected zone-envelope rejection, got: {message}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn test_empty_zone_set_rejects_introspect() {
+        let connector_id = "fcp.test.empty-zones-introspect:utility:1.0.0";
+        let state = zone_gate_dispatcher_state(connector_id, Vec::new());
+
+        let (status, message) = introspect_handler(
+            State(state),
+            HeaderMap::new(),
+            Path(connector_id.to_string()),
+        )
+        .await
+        .expect_err("empty allowed_zones must reject introspection before connector RPC");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            message.contains("zone envelope required") && message.contains("allowed_zones"),
+            "expected zone-envelope rejection, got: {message}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn test_one_zone_works() {
+        let connector_id = "fcp.test.one-zone-health:utility:1.0.0";
+        let state =
+            zone_gate_dispatcher_state(connector_id, vec![ZoneId::work().as_str().to_string()]);
+
+        let response = health_handler(State(state))
+            .await
+            .expect("one explicit allowed zone should permit health")
+            .0;
+        assert_eq!(response.status, HostHealthStatus::Healthy);
+        assert!(
+            response
+                .connectors
+                .contains_key(&ConnectorId::from_static(connector_id)),
+            "health response must include configured connector"
+        );
+    }
+
+    /// angoc.2.1: empty allowed_zones is no longer a permissive
+    /// back-compat path. A connector inventory entry without an
+    /// explicit zone envelope must reject before connector self-report.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_empty_allowed_zones_requires_zone_envelope() {
         if maybe_compiled_test_connector_binary().is_none() {
-            eprintln!("compiled fcp-test-connector missing; skipping v2kt4 zone deny-all test");
+            eprintln!("compiled fcp-test-connector missing; skipping empty-zone envelope test");
             return;
         }
 
-        let connector_id = "fcp.test.v2kt4-empty-zones-deny:utility:1.0.0";
+        let connector_id = "fcp.test.empty-zones-require-envelope:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
 
         let mut config = subprocess_test_connector_config(connector_id);
-        // Empty allowed_zones + enforce flag = deny-all.
-        assert!(config.allowed_zones.is_empty(), "test fixture starts empty");
-        config.enforce_empty_allow_lists = true;
+        config.allowed_zones.clear();
+        assert!(
+            config.allowed_zones.is_empty(),
+            "test fixture must be empty"
+        );
+        assert!(
+            !config.enforce_empty_allow_lists,
+            "zone envelope enforcement must not depend on the legacy operation flag"
+        );
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let connectors_file = tempdir.path().join("connectors.json");
@@ -13710,13 +16539,11 @@ deny_ptrace = true
 
         let error = verify_live_request(state.as_ref(), &request, None)
             .await
-            .expect_err("v2kt4: empty allowed_zones + enforce flag must deny-all");
+            .expect_err("empty allowed_zones must require an explicit zone envelope");
         let msg = error.to_string();
         assert!(
-            msg.contains("no `allowed_zones`")
-                && msg.contains("enforce_empty_allow_lists=true")
-                && msg.contains("br-v2kt4"),
-            "expected v2kt4 zone deny-all rejection naming the flag, got: {msg}"
+            msg.contains("zone envelope required") && msg.contains("no `allowed_zones`"),
+            "expected zone-envelope rejection, got: {msg}"
         );
     }
 
@@ -13790,24 +16617,23 @@ deny_ptrace = true
         );
     }
 
-    /// br-v2kt4 back-compat: with the flag at its default `false`,
-    /// empty allowed_zones / allowed_operations preserve the legacy
-    /// permissive path. Ensures the explicit-deny mechanism is opt-in
-    /// only — existing deployments that don't set the flag see no
-    /// behaviour change.
+    /// angoc.2.1: the legacy `enforce_empty_allow_lists=false`
+    /// default no longer makes empty allowed_zones permissive. The
+    /// flag still controls empty allowed_operations, but zones require
+    /// an explicit envelope unconditionally.
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
-    async fn verify_live_request_v2kt4_default_flag_preserves_legacy_permissive_path() {
+    async fn verify_live_request_default_flag_still_requires_allowed_zones() {
         if maybe_compiled_test_connector_binary().is_none() {
-            eprintln!("compiled fcp-test-connector missing; skipping v2kt4 back-compat test");
+            eprintln!("compiled fcp-test-connector missing; skipping default empty-zone test");
             return;
         }
 
-        let connector_id = "fcp.test.v2kt4-default-permissive:utility:1.0.0";
+        let connector_id = "fcp.test.default-empty-zones-required:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
 
-        let config = subprocess_test_connector_config(connector_id);
-        // Default config: empty allow-lists, enforce_empty_allow_lists=false.
+        let mut config = subprocess_test_connector_config(connector_id);
+        config.allowed_zones.clear();
         assert!(config.allowed_zones.is_empty());
         assert!(config.allowed_operations.is_empty());
         assert!(!config.enforce_empty_allow_lists, "default must be false");
@@ -13837,7 +16663,7 @@ deny_ptrace = true
             connector_id: connector_id.parse().expect("connector id"),
             operation: OperationId::from_static("test.echo"),
             zone_id: ZoneId::work(),
-            input: json!({ "message": "v2kt4 back-compat permissive" }),
+            input: json!({ "message": "default empty zones must reject" }),
             capability_token: token,
             holder_proof: None,
             context: None,
@@ -13849,18 +16675,14 @@ deny_ptrace = true
             approval_tokens: Vec::new(),
         };
 
-        let outcome = verify_live_request(state.as_ref(), &request, None).await;
-        // Either succeeds OR fails for some OTHER reason — just must NOT
-        // fail with the v2kt4 deny-all message (the back-compat permissive
-        // path must keep flowing through to the downstream introspection
-        // check, same as pre-v2kt4 behaviour).
-        if let Err(err) = outcome {
-            let msg = err.to_string();
-            assert!(
-                !msg.contains("br-v2kt4"),
-                "v2kt4 deny-all must NOT fire when flag is at default false: {msg}"
-            );
-        }
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("default false flag must not make empty allowed_zones permissive");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("zone envelope required") && msg.contains("allowed_zones"),
+            "expected zone-envelope rejection, got: {msg}"
+        );
     }
 
     /// br-l9tt6 (P2 review-mode): the v2kt4 fail-closed gates used to
@@ -13913,6 +16735,7 @@ deny_ptrace = true
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let registry = dispatcher_registry_with_connector(connector_id, connector, initial_config);
@@ -17260,14 +20083,15 @@ deny_ptrace = true
                 description: None,
                 args: Vec::new(),
                 env: BTreeMap::new(),
-                config: None,
+                config: Some(json!({ "state": { "model": "singleton_writer" } })),
                 categories: vec!["test".to_string()],
                 version: None,
-                allowed_zones: Vec::new(),
+                allowed_zones: vec![ZoneId::work().as_str().to_string()],
                 allowed_operations: Vec::new(),
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: Default::default(),
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -17301,6 +20125,31 @@ deny_ptrace = true
             approval_tokens: Vec::new(),
         };
         let subject_id = singleton_writer_lease_subject_id(&request);
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![TailscaleNodeId::new("node-a")],
+            current_lease_seq: None,
+        }));
+        let (status, message) = invoke_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(request.clone()),
+        )
+        .await
+        .expect_err("singleton_writer invoke must fail before dispatch without quorum");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains("HRW lease routing refused singleton_writer invoke"));
+        assert!(message.contains(r#""code":"LeaseQuorumConfigInvalid""#));
+        assert!(message.contains(r#""configured_eligible_nodes_count":1"#));
+        assert!(message.contains(r#""required_quorum_signers_count":2"#));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "LeaseQuorumConfigInvalid refusal must happen before connector dispatch"
+        );
+        drop(_guard);
+
         let eligible_nodes = vec![
             TailscaleNodeId::new("node-a"),
             TailscaleNodeId::new("node-b"),
@@ -17317,6 +20166,7 @@ deny_ptrace = true
         let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
             local_node: local_node.clone(),
             eligible_nodes: eligible_nodes.clone(),
+            current_lease_seq: None,
         }));
 
         let (status, message) = invoke_handler(
@@ -17329,6 +20179,7 @@ deny_ptrace = true
 
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(message.contains("HRW lease routing refused singleton_writer invoke"));
+        assert!(message.contains(r#""code":"NotSelectedCoordinator""#));
         assert!(message.contains(r#""reason":"wrong_holder""#));
         assert!(message.contains(expected.as_str()));
         assert!(message.contains(local_node.as_str()));
@@ -17342,8 +20193,34 @@ deny_ptrace = true
         policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
         *state.zone_policies.write().await = policies;
         let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: expected.clone(),
+            eligible_nodes: eligible_nodes.clone(),
+            current_lease_seq: Some(8),
+        }));
+
+        let (status, message) = invoke_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(request.clone()),
+        )
+        .await
+        .expect_err("stale singleton_writer lease sequence must be fenced");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains(r#""code":"LeaseFenced""#));
+        assert!(message.contains(r#""current_lease_seq":8"#));
+        assert!(message.contains(r#""provided_lease_seq":7"#));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "LeaseFenced refusal must happen before connector dispatch"
+        );
+        drop(_guard);
+
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
             local_node: expected,
             eligible_nodes,
+            current_lease_seq: Some(7),
         }));
 
         let Json(response) = invoke_handler(State(state), HeaderMap::new(), Json(request))
@@ -17360,6 +20237,783 @@ deny_ptrace = true
             1,
             "Elected holder should reach connector dispatch"
         );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_hrw_skips_non_singleton_connector_even_with_lease_seq_input() {
+        let connector_id = "fcp.test.hrw-non-singleton-skip:utility:1.0.0";
+        let operation_id = "test.non_singleton";
+        let capability_id = "cap.test.non_singleton";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let input_schema = json!({
+            "type": "object",
+            "required": ["lease_seq"],
+            "properties": {
+                "lease_seq": { "type": "integer" },
+                "message": { "type": "string" }
+            }
+        });
+        let introspection = serde_json::to_value(dispatcher_introspection_with_input_schema(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+            input_schema,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let invoke_request: InvokeRequest =
+                            serde_json::from_value(request.params.clone())
+                                .expect("invoke params decode");
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                invoke_request.id,
+                                json!({ "hrw_skipped_for_non_singleton": true }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let registry = dispatcher_registry_with_connector(
+            connector_id,
+            connector,
+            dispatcher_test_config(connector_id),
+        );
+        let mut policies: HashMap<ZoneId, ZonePolicyObject> = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            Some(signing_key.verifying_key()),
+            policies,
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static(connector_id),
+            operation: OperationId::from_static(operation_id),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "lease_seq alone must not trigger HRW", "lease_seq": 99 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                capability_id,
+                operation_id,
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(99),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![TailscaleNodeId::new("node-a")],
+            current_lease_seq: Some(100),
+        }));
+
+        let Json(response) = invoke_handler(State(state), HeaderMap::new(), Json(request))
+            .await
+            .expect("non-singleton connector must skip HRW even when lease_seq is present");
+
+        assert_eq!(response.status, InvokeStatus::Ok);
+        assert_eq!(
+            response.result,
+            Some(json!({ "hrw_skipped_for_non_singleton": true }))
+        );
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            1,
+            "non-singleton connector should reach dispatch instead of HRW preflight"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_hrw_not_selected_flushes_singleton_writer_state_before_yield() {
+        let connector_id = "fcp.test.hrw-yield-flush:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let capability_id = "cap.test.singleton";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xC7; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, state_signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x92; 32]),
+                ),
+                &state_signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let input_schema = json!({
+            "type": "object",
+            "required": ["lease_seq"],
+            "properties": {
+                "lease_seq": { "type": "integer" },
+                "message": { "type": "string" }
+            }
+        });
+        let introspection = serde_json::to_value(dispatcher_introspection_with_input_schema(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+            input_schema,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                RequestId::random(),
+                                json!({ "should_not_dispatch": true }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.allowed_zones = vec![zone_id.as_str().to_string()];
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            Some(signing_key.verifying_key()),
+            HashMap::new(),
+        );
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_key.clone(),
+            operation: OperationId::from_static(operation_id),
+            zone_id: zone_id.clone(),
+            input: json!({ "message": "lost majority must flush before yield", "lease_seq": 10 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                capability_id,
+                operation_id,
+                zone_id.as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(10),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let subject_id = singleton_writer_lease_subject_id(&request);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let expected =
+            fcp_mesh::planner::select_lease_holder(&request.zone_id, &subject_id, &eligible_nodes)
+                .expect("HRW holder selected");
+        let local_node = eligible_nodes
+            .iter()
+            .find(|node| *node != &expected)
+            .expect("test set includes non-holder")
+            .clone();
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: local_node.clone(),
+            eligible_nodes,
+            current_lease_seq: Some(10),
+        }));
+
+        let (status, message) = invoke_handler(State(state), HeaderMap::new(), Json(request))
+            .await
+            .expect_err("not-selected singleton_writer invoke must flush before refusing");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains(r#""code":"NotSelectedCoordinator""#));
+        assert!(message.contains(r#""yield_flush""#));
+        assert!(message.contains(r#""status":"flushed""#));
+        assert!(message.contains(&root_object_id.to_string()));
+        assert!(message.contains(&head_object_id.to_string()));
+        assert!(message.contains(r#""last_canonical_seq":0"#));
+        assert!(message.contains(r#""lease_seq":10"#));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "lease-yield flush must happen before connector dispatch"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn hrw_three_node_handoff_flushes_old_holder_and_new_holder_reads_state()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let connector_id = "fcp.test.hrw-three-node-handoff:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let capability_id = "cap.test.singleton";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xC8; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, state_signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x93; 32]),
+                ),
+                &state_signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let input_schema = json!({
+            "type": "object",
+            "required": ["lease_seq"],
+            "properties": {
+                "lease_seq": { "type": "integer" },
+                "message": { "type": "string" }
+            }
+        });
+        let introspection = serde_json::to_value(dispatcher_introspection_with_input_schema(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+            input_schema,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                RequestId::random(),
+                                json!({ "should_not_dispatch": true }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.allowed_zones = vec![zone_id.as_str().to_string()];
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            Some(signing_key.verifying_key()),
+            HashMap::new(),
+        );
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_key.clone(),
+            operation: OperationId::from_static(operation_id),
+            zone_id: zone_id.clone(),
+            input: json!({ "message": "partitioned holder must flush before handoff", "lease_seq": 10 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                capability_id,
+                operation_id,
+                zone_id.as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(10),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let subject_id = singleton_writer_lease_subject_id(&request);
+        let full_node_set = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let old_holder =
+            fcp_mesh::planner::select_lease_holder(&request.zone_id, &subject_id, &full_node_set)
+                .expect("initial HRW holder selected");
+        let handoff_node_set = full_node_set
+            .iter()
+            .filter(|node| *node != &old_holder)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            handoff_node_set.len(),
+            2,
+            "handoff test must model a two-node majority after isolating old holder"
+        );
+        let new_holder = fcp_mesh::planner::select_lease_holder(
+            &request.zone_id,
+            &subject_id,
+            &handoff_node_set,
+        )
+        .expect("handoff HRW holder selected");
+        assert_ne!(
+            old_holder, new_holder,
+            "removing the old holder from the online set must force a deterministic handoff"
+        );
+        fcp_mesh::planner::admit_lease_holder(
+            &request.zone_id,
+            &subject_id,
+            CoreLeasePurpose::ConnectorStateWrite,
+            &handoff_node_set,
+            &new_holder,
+        )
+        .expect("new holder should be admitted after handoff");
+
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: old_holder.clone(),
+            eligible_nodes: handoff_node_set.clone(),
+            current_lease_seq: Some(11),
+        }));
+        let (status, message) = invoke_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(request.clone()),
+        )
+        .await
+        .expect_err("isolated old holder must flush then yield to new HRW holder");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains(r#""code":"LeaseFenced""#));
+        assert!(message.contains(r#""current_lease_seq":11"#));
+        assert!(message.contains(r#""provided_lease_seq":10"#));
+        assert!(message.contains(r#""handoff_reason""#));
+        assert!(message.contains(r#""yield_flush""#));
+        assert!(message.contains(old_holder.as_str()));
+        assert!(message.contains(new_holder.as_str()));
+        assert!(message.contains(&root_object_id.to_string()));
+        assert!(message.contains(&head_object_id.to_string()));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "old holder must not dispatch after losing the HRW handoff"
+        );
+        drop(_guard);
+
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: new_holder,
+            eligible_nodes: handoff_node_set,
+            current_lease_seq: Some(10),
+        }));
+        let app = connector_state_explain_test_app(Arc::clone(&state));
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.hrw-three-node-handoff:utility:1.0.0/state/explain?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["source"], "host-canonical-state");
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(payload["last_canonical_seq"], 0);
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        Ok(())
+    }
+
+    #[test]
+    fn singleton_writer_hrw_lease_subject_is_connector_zone_scoped() {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector_id = ConnectorId::from_static("fcp.test.hrw-subject:utility:1.0.0");
+        let base = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.clone(),
+            operation: OperationId::from_static("test.write_a"),
+            zone_id: ZoneId::work(),
+            input: json!({ "lease_seq": 1 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "cap.test.write",
+                "test.write_a",
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(1),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let mut other_operation = base.clone();
+        other_operation.operation = OperationId::from_static("test.write_b");
+        let mut other_zone = base.clone();
+        other_zone.zone_id = ZoneId::try_from("z:secure".to_string()).expect("zone id");
+
+        assert_eq!(
+            singleton_writer_lease_subject_id(&base),
+            singleton_writer_lease_subject_id(&other_operation),
+            "singleton_writer lease subjects must fence all operations on the same connector+zone"
+        );
+        assert_ne!(
+            singleton_writer_lease_subject_id(&base),
+            singleton_writer_lease_subject_id(&other_zone),
+            "different zones need distinct singleton_writer lease subjects"
+        );
+        assert_eq!(
+            singleton_writer_lease_subject_id(&base),
+            singleton_writer_connector_lease_subject_id(&connector_id, &ZoneId::work())
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn build_registry_entry_hrw_launch_refuses_non_holder_before_spawn() {
+        let connector_id = "fcp.test.hrw-launch-refuse:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_id.to_string()];
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let expected =
+            fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
+                .expect("HRW holder selected");
+        let local_node = eligible_nodes
+            .iter()
+            .find(|node| *node != &expected)
+            .expect("test set includes non-holder")
+            .clone();
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: local_node.clone(),
+            eligible_nodes,
+            current_lease_seq: None,
+        }));
+
+        let error =
+            match build_registry_entry(config, Arc::new(ResilienceLayer::default()), None).await {
+                Ok(_) => panic!("non-holder singleton_writer launch must be refused before spawn"),
+                Err(error) => error,
+            };
+        let message = error.to_string();
+        assert!(message.contains("HRW lease routing refused singleton_writer launch"));
+        assert!(message.contains(r#""code":"NotSelectedCoordinator""#));
+        assert!(message.contains(r#""reason":"wrong_holder""#));
+        assert!(message.contains(expected.as_str()));
+        assert!(message.contains(local_node.as_str()));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn build_registry_entry_hrw_launch_rejects_missing_routing_config() {
+        let connector_id = "fcp.test.hrw-launch-missing-routing:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_id.to_string()];
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        let _guard = set_test_hrw_lease_routing_override(None);
+
+        let error =
+            match build_registry_entry(config, Arc::new(ResilienceLayer::default()), None).await {
+                Ok(_) => {
+                    panic!("singleton_writer launch must fail closed without HRW routing config")
+                }
+                Err(error) => error,
+            };
+        let message = error.to_string();
+        assert!(message.contains("HRW lease routing refused singleton_writer launch"));
+        assert!(message.contains(r#""code":"LeaseRoutingConfigMissing""#));
+        assert!(message.contains(HRW_LEASE_LOCAL_NODE_ENV));
+        assert!(message.contains(HRW_LEASE_NODES_ENV));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn build_registry_entry_hrw_launch_admits_elected_holder() {
+        let connector_id = "fcp.test.hrw-launch-admit:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_id.to_string()];
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let expected =
+            fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
+                .expect("HRW holder selected");
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: expected,
+            eligible_nodes,
+            current_lease_seq: None,
+        }));
+
+        let entry = build_registry_entry(config, Arc::new(ResilienceLayer::default()), None)
+            .await
+            .expect("elected holder should build singleton_writer registry entry");
+        assert_eq!(entry.config.id, connector_id);
+        assert!(matches!(entry.connector, ConnectorRuntime::Wasi(_)));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn build_registry_entry_hrw_launch_rejects_missing_quorum_config() {
+        let connector_id = "fcp.test.hrw-launch-quorum-config:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_id.to_string()];
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![TailscaleNodeId::new("node-a")],
+            current_lease_seq: None,
+        }));
+
+        let error =
+            match build_registry_entry(config, Arc::new(ResilienceLayer::default()), None).await {
+                Ok(_) => panic!("singleton_writer launch must fail before spawn without quorum"),
+                Err(error) => error,
+            };
+        let message = error.to_string();
+        assert!(message.contains("HRW lease routing refused singleton_writer launch"));
+        assert!(message.contains(r#""code":"LeaseQuorumConfigInvalid""#));
+        assert!(message.contains(r#""configured_eligible_nodes_count":1"#));
+        assert!(message.contains(r#""required_quorum_signers_count":2"#));
+        assert!(message.contains(HRW_LEASE_NODES_ENV));
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -17424,11 +21078,12 @@ deny_ptrace = true
                     config: None,
                     categories: vec!["test".to_string()],
                     version: None,
-                    allowed_zones: Vec::new(),
+                    allowed_zones: vec![ZoneId::work().as_str().to_string()],
                     allowed_operations: Vec::new(),
                     enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
                     runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                    prewarm: Default::default(),
                     operation_network_constraints: BTreeMap::new(),
                 },
                 connector: ConnectorRuntime::Native(connector),
@@ -17468,6 +21123,7 @@ deny_ptrace = true
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
@@ -17622,11 +21278,26 @@ deny_ptrace = true
                 config: Some(invoke_token_bucket_config(operation_id)),
                 categories: vec!["test".to_string()],
                 version: None,
-                allowed_zones: Vec::new(),
+                // TWO zones, deliberately. `invoke_token_bucket_is_partitioned_per_zone`
+                // proves that one rate-limit pool keeps an independent bucket per
+                // zone, which it can only observe by invoking the same pool from a
+                // SECOND zone. Zone binding is stage 5 of the enforcement pipeline
+                // and the rate-limit gate is stage 9, so a connector that is not
+                // bound to `z:private` is refused long before its `z:private`
+                // bucket is ever consulted — the test then fails on a zone-binding
+                // denial while appearing to be about rate limiting.
+                //
+                // That is exactly what happened: 8234bb06b (angoc.2.1, "require
+                // host allowed_zones") backfilled `vec![z:work]` into every test
+                // fixture uniformly, which was right everywhere except here, where
+                // it silently removed the test's premise. Do not "normalise" this
+                // back to a single zone.
+                allowed_zones: vec![ZoneId::work().as_str().to_string(), "z:private".to_string()],
                 allowed_operations: Vec::new(),
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: Default::default(),
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -17816,11 +21487,12 @@ deny_ptrace = true
                     config: None,
                     categories: vec!["test".to_string()],
                     version: None,
-                    allowed_zones: Vec::new(),
+                    allowed_zones: vec![ZoneId::work().as_str().to_string()],
                     allowed_operations: Vec::new(),
                     enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
                     runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                    prewarm: Default::default(),
                     operation_network_constraints: BTreeMap::new(),
                 },
                 connector: ConnectorRuntime::Native(connector),
@@ -17860,6 +21532,7 @@ deny_ptrace = true
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
@@ -17965,11 +21638,12 @@ deny_ptrace = true
                 config: None,
                 categories: vec!["test".to_string()],
                 version: None,
-                allowed_zones: Vec::new(),
+                allowed_zones: vec![ZoneId::work().as_str().to_string()],
                 allowed_operations: Vec::new(),
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: Default::default(),
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -19886,6 +23560,344 @@ done"#;
         );
     }
 
+    fn warm_pool_test_invoke_request(
+        connector_id: &str,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        message: &str,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": message }),
+            capability_token: test_capability_token(
+                signing_key,
+                "cap.test.echo",
+                "test.echo",
+                "z:work",
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    async fn subprocess_handshake_count(connector: &SubprocessConnector) -> u64 {
+        let report = connector
+            .self_check()
+            .await
+            .expect("fixture self_check should succeed");
+        report
+            .details
+            .as_ref()
+            .and_then(|details| details.get("handshake_count"))
+            .and_then(serde_json::Value::as_u64)
+            .expect("fixture self_check includes handshake_count")
+    }
+
+    async fn only_native_warm_pool_entry(
+        connector: &NativeWarmPoolConnector,
+    ) -> Arc<SubprocessConnector> {
+        let entries = connector.entries.lock().await;
+        assert_eq!(entries.len(), 1, "expected exactly one warm entry");
+        Arc::clone(&entries[0].connector)
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_reuses_prewarmed_handshake_with_fresh_requests() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping native warm-pool reuse test");
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            1,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+        let prewarmed = only_native_warm_pool_entry(&connector).await;
+        assert_eq!(subprocess_handshake_count(&prewarmed).await, 1);
+
+        let first = connector
+            .invoke(warm_pool_test_invoke_request(
+                connector_id,
+                &signing_key,
+                "first warm request",
+            ))
+            .await
+            .expect("first warm-pool invoke should succeed");
+        assert_eq!(first.status, InvokeStatus::Ok);
+        assert_eq!(
+            first.result.expect("result")["echo"]["message"],
+            "first warm request"
+        );
+        let pooled_after_first = only_native_warm_pool_entry(&connector).await;
+        assert!(Arc::ptr_eq(&prewarmed, &pooled_after_first));
+        assert_eq!(subprocess_handshake_count(&pooled_after_first).await, 1);
+
+        let second = connector
+            .invoke(warm_pool_test_invoke_request(
+                connector_id,
+                &signing_key,
+                "second warm request",
+            ))
+            .await
+            .expect("second warm-pool invoke should succeed");
+        assert_eq!(second.status, InvokeStatus::Ok);
+        assert_eq!(
+            second.result.expect("result")["echo"]["message"],
+            "second warm request"
+        );
+        let pooled_after_second = only_native_warm_pool_entry(&connector).await;
+        assert!(Arc::ptr_eq(&prewarmed, &pooled_after_second));
+        assert_eq!(subprocess_handshake_count(&pooled_after_second).await, 1);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_maintain_min_idle_is_count_aware_and_replenishes() {
+        // Regression (bead warmpool-min-idle-restore): maintain_min_idle must
+        // (a) not over-provision past min_idle when already satisfied, and
+        // (b) respawn the deficit after an entry is dropped, restoring the
+        // warm-start guarantee instead of decaying to cold starts.
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping native warm-pool min_idle test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool-min-idle:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        // min_idle 1 with max_idle headroom (3) so an accidental over-provision
+        // would be visible rather than masked by max_idle retention.
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            3,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+
+        // Startup prewarm fills exactly min_idle.
+        assert_eq!(connector.entries.lock().await.len(), 1);
+
+        // Count-aware: calling maintain_min_idle while already at target must not
+        // over-provision. Pre-fix it spawned an unconditional `min_idle` more,
+        // which max_idle=3 retention would have kept, leaving 2 entries.
+        connector
+            .maintain_min_idle()
+            .await
+            .expect("maintain_min_idle at target should succeed");
+        assert_eq!(
+            connector.entries.lock().await.len(),
+            1,
+            "maintain_min_idle must not over-provision past min_idle"
+        );
+
+        // Simulate a fatal drop by removing the only entry, then replenish.
+        {
+            let mut entries = connector.entries.lock().await;
+            entries.pop();
+            assert_eq!(entries.len(), 0);
+        }
+        connector
+            .maintain_min_idle()
+            .await
+            .expect("replenishment should respawn the deficit");
+        assert_eq!(
+            connector.entries.lock().await.len(),
+            1,
+            "maintain_min_idle must restore the pool to min_idle after a drop"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_maintenance_sweep_evicts_dead_idle_entry() {
+        // Regression (bead warmpool-snapshot-ready-imtdj): retention planning
+        // used a synthetic always-Ready snapshot, so an entry whose subprocess
+        // died or degraded while idle in the pool was invisible to the
+        // controller and lingered in a retention slot. The maintenance sweep
+        // must probe idle entries, cache real health, and let retention evict.
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping native warm-pool sweep test");
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool-sweep:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.env.insert(
+            "FCP_TEST_CONNECTOR_HEALTH".to_string(),
+            "degraded".to_string(),
+        );
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            1,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+
+        // The freshly prewarmed entry starts with cached Ready health; the
+        // degraded subprocess is undetected until a sweep runs.
+        let dead_entry = only_native_warm_pool_entry(&connector).await;
+        {
+            let entries = connector.entries.lock().await;
+            assert_eq!(
+                entries[0].snapshot(Instant::now()).health,
+                PrewarmHealthState::Ready,
+                "pre-sweep snapshot reports the synthetic initial health"
+            );
+        }
+
+        connector.run_maintenance_once().await;
+
+        // The sweep marked the entry Failed, retention evicted it, and the
+        // maintainer regrew toward min_idle with a fresh subprocess.
+        let entries = connector.entries.lock().await;
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| Arc::ptr_eq(&entry.connector, &dead_entry)),
+            "dead idle entry must be evicted by the maintenance sweep"
+        );
+        assert_eq!(
+            entries.len(),
+            1,
+            "pool must be regrown toward min_idle after the sweep eviction"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_maintenance_regrows_toward_min_idle() {
+        // Regression (bead warmpool-pressure-regrow-hyjqg): after pressure/RSS
+        // eviction shrinks the pool, nothing regrew it toward min_idle once
+        // pressure subsided. The background maintenance pass must top the pool
+        // back up when the pressure controller is healthy, and stay idempotent
+        // when the pool is already at target.
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping native warm-pool regrow test");
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool-regrow:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            3,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+        assert_eq!(connector.entries.lock().await.len(), 1);
+
+        // Simulate a pressure eviction emptying the pool.
+        {
+            let mut entries = connector.entries.lock().await;
+            entries.clear();
+        }
+
+        connector.run_maintenance_once().await;
+        assert_eq!(
+            connector.entries.lock().await.len(),
+            1,
+            "maintenance must regrow the pool toward min_idle after eviction"
+        );
+
+        // A tick at target must not over-provision.
+        connector.run_maintenance_once().await;
+        assert_eq!(
+            connector.entries.lock().await.len(),
+            1,
+            "maintenance at target must stay idempotent"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn native_warm_pool_evicts_degraded_entry_before_reuse() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping native warm-pool degraded-entry test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.native-warm-pool-degraded:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mut config = subprocess_test_connector_config_requiring_handshake(connector_id);
+        config.env.insert(
+            "FCP_TEST_CONNECTOR_HEALTH".to_string(),
+            "degraded".to_string(),
+        );
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            1,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let connector = NativeWarmPoolConnector::spawn(
+            config,
+            Arc::new(ResilienceLayer::default()),
+            Some(signing_key.verifying_key().to_bytes()),
+        )
+        .await
+        .expect("native warm-pool connector should spawn");
+        let degraded_entry = only_native_warm_pool_entry(&connector).await;
+
+        let checkout = connector
+            .checkout(&ZoneId::work())
+            .await
+            .expect("checkout should fall back to a fresh connector");
+        assert!(!checkout.warm_checkout);
+        assert!(
+            !Arc::ptr_eq(&degraded_entry, &checkout.entry.connector),
+            "degraded warm entry must not be reused"
+        );
+    }
+
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn subprocess_connector_simulate_performs_handshake_automatically() {
         let connector_id = "fcp.test.simulate-handshake:utility:1.0.0";
@@ -21165,6 +25177,7 @@ done"#;
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: true,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let registry =
@@ -21490,6 +25503,68 @@ done"#;
         assert!(error.to_string().contains("load shed"));
     }
 
+    #[test]
+    fn warm_entry_survives_request_level_errors_but_not_fatal_ones() {
+        let connector_id = ConnectorId::from_static("fcp.test:echo:1.0.0");
+
+        // Regression (z7kz4): every resilience-layer rejection maps to
+        // `Unavailable` and must keep the warm entry alive. Shedding a request
+        // under load must not also destroy warm capacity, or the eviction storm
+        // feeds back into more cold starts and more pressure.
+        let resilience_rejections: [ResilienceError<HostError>; 7] = [
+            ResilienceError::LoadShed {
+                load_per_mille: 950,
+            },
+            ResilienceError::CircuitOpen {
+                retry_after: Duration::from_millis(500),
+            },
+            ResilienceError::BulkheadFull,
+            ResilienceError::QueueTimeout {
+                timeout: Duration::from_millis(50),
+            },
+            ResilienceError::HalfOpenLimited,
+            ResilienceError::Unhealthy {
+                reason: "probe failed".to_string(),
+            },
+            ResilienceError::TimedOut {
+                timeout: Duration::from_millis(100),
+            },
+        ];
+        for rejection in resilience_rejections {
+            let error = map_resilience_error(&connector_id, "invoke", rejection);
+            assert!(
+                warm_entry_survives_error(&error),
+                "resilience rejection `{error}` should retain the warm entry"
+            );
+        }
+
+        // A connector that replied with a JSON-RPC error object is still alive.
+        let connector_reply = HostError::RegistryError(format!(
+            "{CONNECTOR_JSON_RPC_ERROR_PREFIX}{{\"code\":-32000,\"message\":\"bad request\"}}"
+        ));
+        assert!(warm_entry_survives_error(&connector_reply));
+
+        // Authorization / zone / filter denials are request-level.
+        assert!(warm_entry_survives_error(&HostError::PreflightFailed(
+            "capability denied".into()
+        )));
+        assert!(warm_entry_survives_error(&HostError::ZoneEnvelopeRequired(
+            "no allowed_zones".into()
+        )));
+
+        // Transport/dispatcher failures and unexpected internal state are fatal:
+        // the subprocess is unusable and must be dropped.
+        assert!(!warm_entry_survives_error(&HostError::RegistryError(
+            "connector dispatcher unavailable".into()
+        )));
+        assert!(!warm_entry_survives_error(&HostError::RegistryError(
+            "connector IO error: broken pipe".into()
+        )));
+        assert!(!warm_entry_survives_error(&HostError::Internal(
+            "protocol desync".into()
+        )));
+    }
+
     // ── parse_connector_id ──
 
     #[test]
@@ -21543,6 +25618,541 @@ done"#;
         assert!(config.config.is_some());
         assert_eq!(config.categories, vec!["utility", "test"]);
         assert_eq!(config.version.as_deref(), Some("2.3.4"));
+        assert_eq!(config.prewarm, Default::default());
+    }
+
+    #[test]
+    fn production_prewarm_policy_accepts_default_on_demand() {
+        let config = dispatcher_test_config("fcp.test.prewarm-default:utility:1.0.0");
+        validate_production_prewarm_policy(&config).expect("default on-demand prewarm is valid");
+    }
+
+    #[test]
+    fn production_prewarm_policy_accepts_native_warm_pool_and_rejects_wasi_gap() {
+        let mut config = dispatcher_test_config("fcp.test.prewarm-warm-pool:utility:1.0.0");
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            2,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        validate_production_prewarm_policy(&config)
+            .expect("native warm_pool prewarm has a wired production checkout path");
+
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        let error = validate_production_prewarm_policy(&config)
+            .expect_err("WASI warm_pool must fail closed before WASI checkout is wired");
+        let message = error.to_string();
+        assert!(message.contains("warm_pool"), "unexpected error: {message}");
+        assert!(message.contains("WASI"), "unexpected error: {message}");
+        assert!(
+            message.contains("production-soak evidence"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn production_prewarm_policy_rejects_zygote_security_gap() {
+        let mut config = dispatcher_test_config("fcp.test.prewarm-zygote:utility:1.0.0");
+        config.prewarm = fcp_host::ConnectorPrewarmConfig {
+            strategy: PrewarmStrategy::Zygote,
+            min_idle: 1,
+            max_idle: 1,
+            max_age: Duration::from_secs(30),
+            checkout_timeout: Duration::from_millis(50),
+        };
+
+        let error = validate_production_prewarm_policy(&config)
+            .expect_err("zygote must fail closed without a security proof");
+        let message = error.to_string();
+        assert!(
+            message.contains("zygote prewarm requires a security proof"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    struct ProductionPrewarmEvidenceScenario {
+        scenario_id: &'static str,
+        strategy: &'static str,
+        pool_state: &'static str,
+        admission_decision: &'static str,
+        sandbox_layer: &'static str,
+        fallback_reason: Option<&'static str>,
+        unsafe_rejection_reason: Option<&'static str>,
+        restart_reason: Option<&'static str>,
+        concurrent_startups: u32,
+    }
+
+    fn prewarm_blake3_hash(value: &str) -> String {
+        format!("blake3:{}", blake3::hash(value.as_bytes()).to_hex())
+    }
+
+    fn prewarm_evidence_git_revision() -> String {
+        if let Ok(revision) = std::env::var("PREWARM_EVIDENCE_GIT_REVISION")
+            && !revision.trim().is_empty()
+        {
+            return revision;
+        }
+
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .expect("resolve git revision for prewarm evidence");
+        assert!(
+            output.status.success(),
+            "git rev-parse should succeed for prewarm evidence"
+        );
+        String::from_utf8(output.stdout)
+            .expect("git revision is UTF-8")
+            .trim()
+            .to_string()
+    }
+
+    fn prewarm_evidence_target_dir() -> String {
+        std::env::var("PREWARM_EVIDENCE_CARGO_TARGET_DIR")
+            .ok()
+            .filter(|target_dir| !target_dir.trim().is_empty())
+            .unwrap_or_else(|| "/tmp/fcp-host-prewarm-production-soak".to_string())
+    }
+
+    fn prewarm_evidence_target_dir_class(target_dir: &str) -> &'static str {
+        if target_dir == "/tmp" || target_dir.starts_with("/tmp/") {
+            "tmp"
+        } else if target_dir.starts_with('/') {
+            "absolute"
+        } else {
+            "relative"
+        }
+    }
+
+    fn prewarm_evidence_command_line(target_dir: &str) -> Vec<String> {
+        [
+            "rch",
+            "exec",
+            "--",
+            "env",
+            "cargo",
+            "test",
+            "-p",
+            "fcp-host",
+            "--bin",
+            "fcp-host",
+            "production_prewarm_soak_evidence_emits_host_backed_measured_rejection_jsonl",
+            "--",
+            "--nocapture",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .enumerate()
+        .flat_map(|(index, part)| {
+            if index == 4 {
+                vec![format!("CARGO_TARGET_DIR={target_dir}"), part]
+            } else {
+                vec![part]
+            }
+        })
+        .collect()
+    }
+
+    fn native_warm_pool_evidence_command_line(target_dir: &str) -> Vec<String> {
+        [
+            "rch",
+            "exec",
+            "--",
+            "env",
+            "cargo",
+            "test",
+            "-p",
+            "fcp-host",
+            "--bin",
+            "fcp-host",
+            "native_warm_pool_fixture_evidence_emits_reuse_comparison_jsonl",
+            "--",
+            "--nocapture",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .enumerate()
+        .flat_map(|(index, part)| {
+            if index == 4 {
+                vec![format!("CARGO_TARGET_DIR={target_dir}"), part]
+            } else {
+                vec![part]
+            }
+        })
+        .collect()
+    }
+
+    fn prewarm_latency_percentiles(samples: &[u64]) -> SwarmPrewarmLatencyPercentiles {
+        assert!(!samples.is_empty(), "latency samples are required");
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let percentile = |numerator: usize, denominator: usize| -> u64 {
+            let rank = sorted.len().saturating_mul(numerator).div_ceil(denominator);
+            let index = rank.saturating_sub(1).min(sorted.len() - 1);
+            sorted[index]
+        };
+        let sample_count = u64::try_from(sorted.len()).expect("sample count fits in u64");
+        SwarmPrewarmLatencyPercentiles {
+            p50_ms: percentile(50, 100),
+            p95_ms: percentile(95, 100),
+            p99_ms: percentile(99, 100),
+            p999_ms: percentile(999, 1000),
+            max_ms: *sorted.last().expect("sorted samples are non-empty"),
+            mean_ms: sorted.iter().sum::<u64>() / sample_count,
+        }
+    }
+
+    fn production_prewarm_wasi_config(
+        connector_id: &'static str,
+        operation_id: &'static str,
+        component_path: &std::path::Path,
+    ) -> ConnectorConfig {
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations.push(operation_id.to_string());
+        config.binary = component_path.to_string_lossy().into_owned();
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config
+    }
+
+    fn production_prewarm_evidence_record(
+        scenario: ProductionPrewarmEvidenceScenario,
+        connector_id: &str,
+        target_dir: &str,
+        git_revision: &str,
+        latency: &SwarmPrewarmLatencyPercentiles,
+    ) -> SwarmPrewarmColdStartEvidence {
+        let activation_latency_ms = latency.p50_ms;
+        let error_mapping = match (
+            scenario.admission_decision,
+            scenario.fallback_reason,
+            scenario.unsafe_rejection_reason,
+        ) {
+            ("fallback_on_demand", Some(reason), None) => format!("fallback_on_demand:{reason}"),
+            ("reject_unsafe", None, Some(reason)) => format!("reject_unsafe:{reason}"),
+            ("admit_warm", None, None) => "ok".to_string(),
+            _ => "invalid".to_string(),
+        };
+
+        SwarmPrewarmColdStartEvidence {
+            schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+            execution_mode: SwarmEvidenceExecutionMode::Soak,
+            source_kind: SwarmEvidenceSourceKind::HostBacked,
+            scenario_id: scenario.scenario_id.to_string(),
+            connector_id: connector_id.to_string(),
+            command_line: prewarm_evidence_command_line(target_dir),
+            git_revision: git_revision.to_string(),
+            worker_id: "fcp-host-soak".to_string(),
+            cargo_target_dir: target_dir.to_string(),
+            cargo_target_dir_class: prewarm_evidence_target_dir_class(target_dir).to_string(),
+            cargo_target_dir_hash: prewarm_blake3_hash(target_dir),
+            connector_fixture_id: "fcp-host:wasi-minimal-command-component".to_string(),
+            host_boundary: "fcp-host::SubprocessRegistry::from_configs::WasiConnector::invoke"
+                .to_string(),
+            manifest_hash: prewarm_blake3_hash("fcp-host:wasi-minimal-command-component:v1"),
+            zone: prewarm_blake3_hash(ZoneId::work().as_str()),
+            strategy: scenario.strategy.to_string(),
+            pool_state: scenario.pool_state.to_string(),
+            pool_size: 1,
+            admission_decision: scenario.admission_decision.to_string(),
+            warm_checkout: false,
+            activation_latency_ms,
+            baseline_on_demand_latency_ms: activation_latency_ms,
+            latency: latency.clone(),
+            baseline_latency: latency.clone(),
+            sandbox_layer: scenario.sandbox_layer.to_string(),
+            sandbox_profile: "strict-profile-limits".to_string(),
+            sandbox_boundary: "fcp-sandbox::WasiConnectorRunner::load_and_validate".to_string(),
+            credential_mode: "deferred".to_string(),
+            rss_bytes: 96 * 1024 * 1024,
+            process_count: 1,
+            concurrent_startups: scenario.concurrent_startups,
+            error_mapping,
+            cleanup_result: "verified".to_string(),
+            restart_reason: scenario.restart_reason.map(str::to_string),
+            fallback_reason: scenario.fallback_reason.map(str::to_string),
+            unsafe_rejection_reason: scenario.unsafe_rejection_reason.map(str::to_string),
+            skip_reason: None,
+            shutdown_cleanup_verified: true,
+        }
+    }
+
+    #[test]
+    fn native_warm_pool_fixture_evidence_emits_reuse_comparison_jsonl() {
+        let target_dir = "/tmp/fcp-host-native-warm-pool-fixture".to_string();
+        let latency = prewarm_latency_percentiles(&[11, 12, 13, 14, 15, 16, 17, 18]);
+        let baseline_latency = prewarm_latency_percentiles(&[71, 74, 78, 81, 84, 87, 90, 94]);
+        let record = SwarmPrewarmColdStartEvidence {
+            schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+            execution_mode: SwarmEvidenceExecutionMode::Smoke,
+            source_kind: SwarmEvidenceSourceKind::Offline,
+            scenario_id: "prewarm_warm_hit".to_string(),
+            connector_id: "fcp.test.native-warm-pool:utility:1.0.0".to_string(),
+            command_line: native_warm_pool_evidence_command_line(&target_dir),
+            git_revision: "abc1234".to_string(),
+            worker_id: "rch-worker-fixture".to_string(),
+            cargo_target_dir: target_dir.clone(),
+            cargo_target_dir_class: prewarm_evidence_target_dir_class(&target_dir).to_string(),
+            cargo_target_dir_hash: prewarm_blake3_hash(&target_dir),
+            connector_fixture_id: "fcp-host:native-subprocess-test-connector".to_string(),
+            host_boundary: "fcp-host::NativeWarmPoolConnector::checkout".to_string(),
+            manifest_hash: prewarm_blake3_hash("fcp-host:native-warm-pool:v1"),
+            zone: prewarm_blake3_hash(ZoneId::work().as_str()),
+            strategy: "warm_pool".to_string(),
+            pool_state: "warm_hit".to_string(),
+            pool_size: 1,
+            admission_decision: "admit_warm".to_string(),
+            warm_checkout: true,
+            activation_latency_ms: latency.p50_ms,
+            baseline_on_demand_latency_ms: baseline_latency.p50_ms,
+            latency,
+            baseline_latency,
+            sandbox_layer: "native_subprocess".to_string(),
+            sandbox_profile: "legacy-unspecified-network".to_string(),
+            sandbox_boundary: "fcp-host::SubprocessConnector::spawn".to_string(),
+            credential_mode: "none".to_string(),
+            rss_bytes: NATIVE_WARM_POOL_ESTIMATED_RSS_BYTES,
+            process_count: 1,
+            concurrent_startups: 1,
+            error_mapping: "ok".to_string(),
+            cleanup_result: "verified".to_string(),
+            restart_reason: None,
+            fallback_reason: None,
+            unsafe_rejection_reason: None,
+            skip_reason: None,
+            shutdown_cleanup_verified: true,
+        };
+        let jsonl = record
+            .to_jsonl_value()
+            .expect("native warm-pool fixture evidence serializes");
+
+        assert_eq!(jsonl["warm_checkout"], true);
+        assert_eq!(jsonl["p50_activation_latency_ms"], 14);
+        assert_eq!(jsonl["p99_activation_latency_ms"], 18);
+        assert_eq!(jsonl["baseline_p50_activation_latency_ms"], 81);
+        assert_eq!(jsonl["baseline_p99_activation_latency_ms"], 94);
+        assert_eq!(jsonl["p50_activation_latency_improvement_ms"], 67);
+        assert_eq!(jsonl["p99_activation_latency_improvement_ms"], 76);
+
+        println!(
+            "FCP_PREWARM_COLD_START_JSONL {}",
+            serde_json::to_string(&jsonl).expect("native warm-pool JSONL serializes")
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
+    async fn production_prewarm_soak_evidence_emits_host_backed_measured_rejection_jsonl() {
+        let connector_id = "fcp.test.prewarm-production-soak:utility:1.0.0";
+        let operation_id = "test.echo";
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let component_path = tempdir.path().join("prewarm-production-soak.wat");
+        write_minimal_wasi_component(&component_path);
+
+        let config = production_prewarm_wasi_config(connector_id, operation_id, &component_path);
+        let mut samples = Vec::new();
+        for _ in 0..3 {
+            let started = Instant::now();
+            let registry = SubprocessRegistry::from_configs(vec![config.clone()], None)
+                .await
+                .expect("WASI registry uses production host config validation");
+            let response = registry
+                .invoke(runtime_network_test_request(connector_id, operation_id))
+                .await
+                .expect("WASI connector invokes through fcp-sandbox runner");
+            assert_eq!(response.status, InvokeStatus::Ok);
+            samples.push(
+                u64::try_from(started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX)
+                    .max(1),
+            );
+        }
+        let latency = prewarm_latency_percentiles(&samples);
+
+        let mut warm_pool_config = config.clone();
+        warm_pool_config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            1,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+        let warm_pool_error =
+            match SubprocessRegistry::from_configs(vec![warm_pool_config], None).await {
+                Ok(_) => panic!(
+                    "production warm_pool prewarm must fail closed until soak evidence ships"
+                ),
+                Err(error) => error.to_string(),
+            };
+        assert!(
+            warm_pool_error.contains("warm_pool")
+                && warm_pool_error.contains("production-soak evidence"),
+            "unexpected warm_pool rejection: {warm_pool_error}"
+        );
+
+        let mut zygote_config = config.clone();
+        zygote_config.prewarm = fcp_host::ConnectorPrewarmConfig {
+            strategy: PrewarmStrategy::Zygote,
+            min_idle: 1,
+            max_idle: 1,
+            max_age: Duration::from_secs(30),
+            checkout_timeout: Duration::from_millis(50),
+        };
+        let zygote_error = match SubprocessRegistry::from_configs(vec![zygote_config], None).await {
+            Ok(_) => panic!("production zygote prewarm must fail closed without a security proof"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            zygote_error.contains("zygote"),
+            "unexpected zygote rejection: {zygote_error}"
+        );
+
+        let target_dir = prewarm_evidence_target_dir();
+        let git_revision = prewarm_evidence_git_revision();
+        let scenarios = [
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_empty_pool",
+                strategy: "warm_pool",
+                pool_state: "empty",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("empty_pool"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_warm_hit",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("production_warm_pool_disabled"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_stale_entry",
+                strategy: "warm_pool",
+                pool_state: "stale",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("warm_entry_stale"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_crash_before_checkout",
+                strategy: "warm_pool",
+                pool_state: "crash_before_checkout",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("crash_before_checkout"),
+                unsafe_rejection_reason: None,
+                restart_reason: Some("crash_before_checkout"),
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_shutdown_cleanup",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("production_warm_pool_disabled"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_concurrent_swarm_startup",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("production_warm_pool_disabled"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 64,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_exhausted_under_burst",
+                strategy: "warm_pool",
+                pool_state: "empty",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("pool_exhausted"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 64,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_sandbox_limits_unavailable",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "limits_unavailable",
+                fallback_reason: Some("sandbox_limits_unavailable"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_checkout_cancelled_before_admit",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("checkout_cancelled"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_zygote_rejected_without_security_proof",
+                strategy: "zygote",
+                pool_state: "rejected",
+                admission_decision: "reject_unsafe",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: None,
+                unsafe_rejection_reason: Some("zygote_without_security_proof"),
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+        ];
+        let records = scenarios
+            .into_iter()
+            .map(|scenario| {
+                production_prewarm_evidence_record(
+                    scenario,
+                    connector_id,
+                    &target_dir,
+                    &git_revision,
+                    &latency,
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_swarm_prewarm_cold_start_evidence_bundle(&records, true)
+            .expect("production prewarm soak bundle validates");
+
+        for record in records {
+            let line = serde_json::to_string(
+                &record
+                    .to_jsonl_value()
+                    .expect("production prewarm record serializes"),
+            )
+            .expect("production prewarm JSONL serializes");
+            println!("FCP_PREWARM_COLD_START_JSONL {line}");
+        }
     }
 
     #[test]
@@ -21637,6 +26247,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -21674,6 +26285,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -21716,6 +26328,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -21758,6 +26371,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -21817,6 +26431,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -21863,6 +26478,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -21974,6 +26590,7 @@ done"#;
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -22026,6 +26643,7 @@ done"#;
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
@@ -22144,6 +26762,7 @@ done"#;
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let dbg = format!("{config:?}");
@@ -22422,6 +27041,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
@@ -22514,6 +27134,80 @@ done"#;
             ));
         axum::Router::new()
             .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
+    fn connector_state_explain_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/connectors/{connector_id}/state/explain",
+                get(connector_state_explain_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
+    fn connector_lease_status_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/connectors/{connector_id}/lease/status",
+                get(connector_lease_status_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
+    fn connector_lease_flush_before_yield_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/connectors/{connector_id}/lease/flush-before-yield",
+                post(connector_lease_flush_before_yield_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
+    fn host_telemetry_test_state(telemetry_config: TelemetryConfig) -> Arc<AppState> {
+        let base = cancel_route_test_state();
+        Arc::new(AppState {
+            telemetry_config,
+            ..(*base).clone()
+        })
+    }
+
+    fn host_telemetry_otlp_readiness_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/telemetry/otlp/readiness",
+                get(host_telemetry_otlp_readiness_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
+    fn mesh_cutover_gates_test_app(state: Arc<AppState>) -> axum::Router {
+        axum::Router::new()
+            .route("/rpc/mesh/cutover-gates", get(mesh_cutover_gates_handler))
             .with_state(Arc::clone(&state))
     }
 
@@ -22828,6 +27522,298 @@ done"#;
         .status()
     }
 
+    fn connector_state_write_authorization_for_test_with_key(
+        connector_id: &ConnectorId,
+        zone_id: &ZoneId,
+    ) -> (
+        fcp_core::ConnectorStateWriteAuthorization,
+        fcp_crypto::ed25519::Ed25519SigningKey,
+    ) {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let instance_id = InstanceId::new();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec![fcp_core::connector_state_resource_uri(connector_id)],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor)
+            .expect("test connector-state constraints should serialize");
+        let now = Utc::now();
+        let token = fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(fcp_core::CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+                .zone_id(zone_id.as_str())
+                .target_instance(instance_id.as_str())
+                .principal("principal:test")
+                .operations(&[fcp_core::CONNECTOR_STATE_APPEND_OPERATION_ID])
+                .issuer("node:test")
+                .validity(now, now + chrono::Duration::hours(1))
+                .try_constraints_cbor(&constraints_cbor)
+                .expect("test connector-state constraints should be accepted")
+                .sign(&signing_key)
+                .expect("test connector-state token should sign"),
+        );
+        let verifier = CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            zone_id.clone(),
+            instance_id,
+        );
+
+        let authorization = fcp_core::ConnectorStateWriteAuthorization::verify_append_token(
+            &verifier,
+            token,
+            connector_id,
+            zone_id,
+        )
+        .expect("test connector-state write token should authorize append");
+        (authorization, signing_key)
+    }
+
+    fn durable_connector_state_object_for_test(
+        connector_id: &ConnectorId,
+        zone_id: &ZoneId,
+        seq: u64,
+        prev: Option<ObjectId>,
+        lease_object_id: ObjectId,
+    ) -> fcp_core::ConnectorStateObject {
+        let seq_byte = u8::try_from(seq).expect("test sequence should fit in CBOR byte");
+        fcp_core::ConnectorStateObject {
+            header: ObjectHeader {
+                schema: fcp_store::FcpStoreConnectorStateStore::state_object_schema_id(),
+                zone_id: zone_id.clone(),
+                created_at: 1_800_200_000 + seq,
+                provenance: Provenance::new(zone_id.clone()),
+                refs: vec![lease_object_id],
+                foreign_refs: Vec::new(),
+                ttl_secs: None,
+                placement: None,
+            },
+            connector_id: connector_id.clone(),
+            instance_id: None,
+            zone_id: zone_id.clone(),
+            prev,
+            seq,
+            state_cbor: vec![0xa1, 0x61, b'n', seq_byte],
+            updated_at: 1_800_200_000 + seq,
+            lease_seq: seq + 10,
+            lease_object_id,
+            writer_public_key: [0u8; 32],
+            signature: fcp_core::Signature::zero(),
+        }
+    }
+
+    fn sign_durable_connector_state_object_for_test(
+        mut state: fcp_core::ConnectorStateObject,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    ) -> fcp_core::ConnectorStateObject {
+        state
+            .sign_with(signing_key)
+            .expect("test connector state should sign");
+        state
+    }
+
+    fn test_signature_set(signers: &[&str]) -> fcp_core::SignatureSet {
+        let mut signatures = fcp_core::SignatureSet::new();
+        for (idx, signer) in signers.iter().enumerate() {
+            let signature_byte = u8::try_from(idx).unwrap_or(u8::MAX);
+            signatures.add(fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new(*signer),
+                [signature_byte; 64],
+                1_800_200_000 + u64::try_from(idx).unwrap_or(u64::MAX),
+            ));
+        }
+        signatures
+    }
+
+    fn durable_core_lease_for_test(
+        zone_id: &ZoneId,
+        subject_object_id: ObjectId,
+        holder: TailscaleNodeId,
+        lease_seq: u64,
+        exp: u64,
+        quorum_signatures: fcp_core::SignatureSet,
+    ) -> CoreLease {
+        CoreLease {
+            header: ObjectHeader {
+                schema: fcp_cbor::SchemaId::new(
+                    "fcp.lease",
+                    "lease",
+                    semver::Version::new(1, 0, 0),
+                ),
+                zone_id: zone_id.clone(),
+                created_at: exp.saturating_sub(300),
+                provenance: Provenance::new(zone_id.clone()),
+                refs: vec![subject_object_id],
+                foreign_refs: Vec::new(),
+                ttl_secs: Some(300),
+                placement: None,
+            },
+            holder,
+            lease_seq,
+            exp,
+            subject_object_id,
+            purpose: CoreLeasePurpose::ConnectorStateWrite,
+            quorum_signatures,
+        }
+    }
+
+    fn stored_core_lease_for_test(lease: &CoreLease, object_id_key: &ObjectIdKey) -> StoredObject {
+        let body = fcp_cbor::CanonicalSerializer::serialize(lease, &lease.header.schema)
+            .expect("test core lease should serialize");
+        let object_id = StoredObject::derive_id(&lease.header, &body, object_id_key)
+            .expect("test core lease id should derive");
+        StoredObject {
+            object_id,
+            header: lease.header.clone(),
+            body,
+            storage: fcp_prelude::StorageMeta {
+                retention: fcp_prelude::RetentionClass::Lease {
+                    expires_at: lease.exp,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn connector_lease_status_payload_reports_routing_durable_sequence_mismatch() {
+        let connector_id =
+            ConnectorId::from_static("fcp.test.lease-sequence-mismatch:utility:1.0.0");
+        let zone_id = ZoneId::work();
+        let routing = HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![
+                TailscaleNodeId::new("node-a"),
+                TailscaleNodeId::new("node-b"),
+                TailscaleNodeId::new("node-c"),
+            ],
+            current_lease_seq: Some(9),
+        };
+        let durable = ConnectorLeaseDurableEvidence {
+            lease_object_id: Some(ObjectId::from_bytes([0x44; 32])),
+            lease_seq: Some(10),
+            expiry_unix_secs: Some(1_800_200_300),
+            quorum_signers_count: Some(2),
+            validation_status: Some("valid"),
+            validation_error: None,
+            validated_at_unix_secs: Some(1_800_200_000),
+            source: Some("canonical-fcp-store-lease-object"),
+            warnings: Vec::new(),
+        };
+
+        let payload =
+            connector_lease_status_payload(&connector_id, &zone_id, Some(&routing), &durable);
+
+        assert_eq!(payload["fencing_token"], 9);
+        assert_eq!(payload["durable_lease_seq"], 10);
+        assert_eq!(payload["quorum_signers_count"], 2);
+        assert_eq!(payload["required_quorum_signers_count"], 2);
+        assert_eq!(payload["quorum_satisfied"], true);
+        assert_eq!(payload["durable_validation"]["status"], "valid");
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert!(
+            warnings.iter().any(|warning| warning.as_str().is_some_and(
+                |warning| warning.contains("differs from durable fcp-store lease_seq 10")
+            )),
+            "sequence mismatch should be explicit in operator status: {payload}"
+        );
+    }
+
+    #[test]
+    fn connector_lease_status_payload_warns_on_below_quorum_durable_lease() {
+        let connector_id = ConnectorId::from_static("fcp.test.lease-below-quorum:utility:1.0.0");
+        let zone_id = ZoneId::work();
+        let routing = HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![
+                TailscaleNodeId::new("node-a"),
+                TailscaleNodeId::new("node-b"),
+                TailscaleNodeId::new("node-c"),
+            ],
+            current_lease_seq: Some(10),
+        };
+        let durable = ConnectorLeaseDurableEvidence {
+            lease_object_id: Some(ObjectId::from_bytes([0x45; 32])),
+            lease_seq: Some(10),
+            expiry_unix_secs: Some(1_800_200_300),
+            quorum_signers_count: Some(1),
+            validation_status: Some("invalid"),
+            validation_error: Some("insufficient quorum: required 2 signatures, got 1".to_string()),
+            validated_at_unix_secs: Some(1_800_200_000),
+            source: Some("canonical-fcp-store-lease-object"),
+            warnings: Vec::new(),
+        };
+
+        let payload =
+            connector_lease_status_payload(&connector_id, &zone_id, Some(&routing), &durable);
+
+        assert_eq!(payload["quorum_signers_count"], 1);
+        assert_eq!(payload["required_quorum_signers_count"], 2);
+        assert_eq!(payload["quorum_satisfied"], false);
+        assert_eq!(payload["durable_validation"]["status"], "invalid");
+        assert!(
+            payload["durable_validation"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("insufficient quorum"))
+        );
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("below the required 2"))),
+            "below-quorum durable lease should be explicit in operator status: {payload}"
+        );
+    }
+
+    #[test]
+    fn connector_lease_status_core_lease_validation_rejects_expired_durable_lease() {
+        let zone_id = ZoneId::work();
+        let subject_id = ObjectId::from_bytes([0x46; 32]);
+        let lease = durable_core_lease_for_test(
+            &zone_id,
+            subject_id,
+            TailscaleNodeId::new("node-a"),
+            10,
+            1_000,
+            test_signature_set(&["node-a", "node-b"]),
+        );
+
+        let error = validate_connector_state_core_lease_for_status(
+            &lease,
+            &subject_id,
+            &zone_id,
+            10,
+            1_001,
+        )
+        .expect_err("expired durable lease evidence must be invalid");
+
+        assert!(
+            error.to_string().contains("lease expired"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn connector_lease_status_zone_requires_explicit_query_for_multi_zone_singleton_writer() {
+        let connector_id = ConnectorId::from_static("fcp.test.lease-status-zone:utility:1.0.0");
+        let mut config = dispatcher_test_config("fcp.test.lease-status-zone:utility:1.0.0");
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        config.allowed_zones = vec!["z:work".to_owned(), "z:community".to_owned()];
+
+        let error = connector_lease_status_zone_id(&connector_id, &config, None)
+            .expect_err("multi-zone singleton_writer status should require explicit zone");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires an explicit zone query"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[fcp_async_core::runtime::test]
     async fn rpc_budget_report_rejects_unauthenticated_request() {
         let state = cancel_route_test_state();
@@ -22857,6 +27843,816 @@ done"#;
         .await;
 
         assert_eq!(status, axum::http::StatusCode::OK);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_state_explain_admin_route_rejects_unauthenticated_requests()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = connector_state_explain_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test/state/explain",
+            serde_json::json!({}),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_state_explain_admin_route_reports_missing_connector()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = connector_state_explain_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test/state/explain?zone=z%3Aowner",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_state_explain_admin_route_uses_managed_connector_state_root()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.state:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        prepare_connector_zone_state_dir(&state_root, &connector_key, &zone_id)
+            .expect("managed connector state root should be prepared");
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_state_explain_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.state:utility:1.0.0/state/explain?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["source"], "host-cache-markers");
+        assert_eq!(
+            payload["state_root"]["path"],
+            state_root.display().to_string()
+        );
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["local_cache_marker_present"], true);
+        assert_eq!(payload["zone"]["local_cache_marker_present"], true);
+        let state_root_text = state_root.display().to_string();
+        assert!(
+            payload["local_cache_path"]
+                .as_str()
+                .is_some_and(|path| path.starts_with(state_root_text.as_str())),
+            "local_cache_path should use managed state root: {payload}"
+        );
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_state_explain_admin_route_reads_durable_fcp_store_status()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.state:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xC7; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x71; 32]),
+                ),
+                &signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_state_explain_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.state:utility:1.0.0/state/explain?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["source"], "host-canonical-state");
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["last_canonical_seq"], 0);
+        assert_eq!(payload["mesh_replica_count"], Value::Null);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            connector_key.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], zone_id.as_str());
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("mesh replica count is not proven")))),
+            "payload should explain missing symbol-distribution evidence: {payload}"
+        );
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_lease_status_admin_route_defaults_to_singleton_allowed_zone()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let connector_id = "fcp.test.lease-status-default-zone:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id: ZoneId = "z:community".parse().expect("test zone should parse");
+        let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-alpha"),
+            TailscaleNodeId::new("node-beta"),
+            TailscaleNodeId::new("node-gamma"),
+        ];
+        let holder = fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
+            .expect("HRW holder should be selected");
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: holder,
+            eligible_nodes,
+            current_lease_seq: Some(17),
+        }));
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        config.allowed_zones = vec![zone_id.as_str().to_owned()];
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_lease_status_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.lease-status-default-zone:utility:1.0.0/lease/status",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["zone_id"], zone_id.as_str());
+        assert_eq!(payload["subject_id"], subject_id.to_string());
+        assert_eq!(payload["source"], "host-hrw-routing");
+        assert_eq!(payload["fencing_token"], 17);
+        assert_eq!(payload["local_is_holder"], true);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_lease_status_admin_route_reports_hrw_holder_and_fencing()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.lease-status:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xD1; 32]);
+        let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-alpha"),
+            TailscaleNodeId::new("node-beta"),
+            TailscaleNodeId::new("node-gamma"),
+        ];
+        let holder = fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
+            .expect("HRW holder should be selected");
+        let lease = durable_core_lease_for_test(
+            &zone_id,
+            subject_id,
+            holder.clone(),
+            10,
+            1_800_200_300,
+            test_signature_set(&["node-alpha", "node-beta"]),
+        );
+        let lease_object = stored_core_lease_for_test(&lease, &object_id_key);
+        let lease_object_id = lease_object.object_id;
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        object_store
+            .put(lease_object)
+            .await
+            .expect("durable lease object should be stored");
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    lease_object_id,
+                ),
+                &signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                seq,
+                snapshot_object_id,
+                ..
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        }
+        drop(state_store);
+        drop(object_store);
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: holder.clone(),
+            eligible_nodes: eligible_nodes.clone(),
+            current_lease_seq: Some(10),
+        }));
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_lease_status_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.lease-status:utility:1.0.0/lease/status?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["source"], "host-hrw-routing");
+        assert_eq!(
+            payload["subject_id"],
+            singleton_writer_connector_lease_subject_id(&connector_key, &zone_id).to_string()
+        );
+        assert_eq!(payload["fencing_token"], 10);
+        assert_eq!(payload["expiry_unix_secs"], lease.exp);
+        assert!(
+            payload["expiry"]
+                .as_str()
+                .is_some_and(|expiry| expiry.ends_with('Z')),
+            "lease expiry should be exposed as RFC3339 UTC: {payload}"
+        );
+        assert_eq!(payload["quorum_signers_count"], 2);
+        assert_eq!(payload["lease_object_id"], lease_object_id.to_string());
+        assert_eq!(
+            payload["lease_evidence_source"],
+            "canonical-fcp-store-lease-object"
+        );
+        assert_eq!(payload["durable_validation"]["status"], "valid");
+        assert!(
+            payload["durable_validation"]["validated_at_unix_secs"]
+                .as_u64()
+                .is_some()
+        );
+        assert_eq!(payload["local_is_holder"], true);
+        assert!(
+            payload["holder_node_id_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
+        assert_eq!(
+            payload["ranked_holders"].as_array().map(std::vec::Vec::len),
+            Some(eligible_nodes.len())
+        );
+        assert_eq!(payload["telemetry"]["event_names"][3], "fcp.lease.fenced");
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_lease_flush_before_yield_admin_route_reports_durable_state_barrier()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.lease-flush:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xCF; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x91; 32]),
+                ),
+                &signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_lease_flush_before_yield_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::POST,
+            "/rpc/admin/connectors/fcp.test.lease-flush:utility:1.0.0/lease/flush-before-yield?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["source"], "host-canonical-state-flush");
+        assert_eq!(payload["connector_id"], connector_key.to_string());
+        assert_eq!(payload["zone_id"], zone_id.as_str());
+        assert_eq!(payload["flush"]["root_present"], true);
+        assert_eq!(
+            payload["flush"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["flush"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(payload["flush"]["last_canonical_seq"], 0);
+        assert_eq!(payload["flush"]["lease_seq"], 10);
+        assert_eq!(
+            payload["flush"]["lease_object_id"],
+            ObjectId::from_bytes([0x91; 32]).to_string()
+        );
+        assert_eq!(
+            payload["telemetry"]["event_name"],
+            "fcp.lease.flushed_on_yield"
+        );
+        assert_eq!(payload["telemetry"]["outcome_label"], "success");
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_lease_flush_before_yield_admin_route_defaults_to_singleton_allowed_zone()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.lease-flush-default-zone:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id: ZoneId = "z:community".parse().expect("test zone should parse");
+        let object_id_key = ObjectIdKey::from_bytes([0xCE; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x92; 32]),
+                ),
+                &signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.allowed_zones = vec![zone_id.as_str().to_owned()];
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_lease_flush_before_yield_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::POST,
+            "/rpc/admin/connectors/fcp.test.lease-flush-default-zone:utility:1.0.0/lease/flush-before-yield",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["zone_id"], zone_id.as_str());
+        assert_eq!(payload["flush"]["zone_id"], zone_id.as_str());
+        assert_eq!(payload["flush"]["root_present"], true);
+        assert_eq!(
+            payload["flush"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["flush"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(
+            payload["flush"]["lease_object_id"],
+            ObjectId::from_bytes([0x92; 32]).to_string()
+        );
+        assert_eq!(payload["telemetry"]["outcome_label"], "success");
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn host_telemetry_otlp_readiness_admin_route_rejects_unauthenticated_requests()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = host_telemetry_test_state(default_host_telemetry_config());
+        let app = host_telemetry_otlp_readiness_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/telemetry/otlp/readiness",
+            serde_json::json!({}),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn host_telemetry_otlp_readiness_reports_redaction_safe_config()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let telemetry_config = default_host_telemetry_config()
+            .with_otlp("https://api-key@collector.example.com:4317")
+            .try_with_otlp_headers("authorization=Bearer%20redaction-sentinel-otlp-secret")?
+            .try_with_otlp_resource_attributes("cloud.account.id=redaction-sentinel-account")?;
+        let state = host_telemetry_test_state(telemetry_config);
+        let app = host_telemetry_otlp_readiness_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/telemetry/otlp/readiness",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["status"], "fail");
+        assert_eq!(payload["readiness"]["boundary"], "fcp-telemetry-crate");
+        assert_eq!(payload["readiness"]["endpoint_class"], "invalid");
+        assert_eq!(payload["readiness"]["collector_header_count"], 1);
+        assert_eq!(payload["readiness"]["resource_attribute_count"], 1);
+
+        let rendered = payload.to_string();
+        assert!(!rendered.contains("redaction-sentinel-otlp-secret"));
+        assert!(!rendered.contains("redaction-sentinel-account"));
+        assert!(!rendered.contains("api-key@collector"));
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mesh_cutover_gates_route_reports_fail_closed_skip_snapshot()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = mesh_cutover_gates_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/mesh/cutover-gates",
+            serde_json::json!({}),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(
+            payload["schema_version"],
+            HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION
+        );
+        assert_eq!(payload["source"], "fcp-host-direct-skip");
+        assert_eq!(payload["overall_status"], "skip");
+        assert_eq!(payload["node_count"], 1);
+        assert_eq!(payload["catalog_connector_count"], 0);
+
+        let gates = payload["gates"].as_array().ok_or_else(|| {
+            std::io::Error::other("cutover-gates payload should include gate records")
+        })?;
+        assert_eq!(gates.len(), 4);
+        for expected_id in [
+            "mesh-inventory-placement",
+            "mesh-lifecycle-state-replication",
+            "mesh-audit-chain-quorum",
+            "mesh-policy-object-distribution",
+        ] {
+            let gate = gates
+                .iter()
+                .find(|gate| gate["gate_id"] == expected_id)
+                .ok_or_else(|| {
+                    std::io::Error::other(format!("missing cutover gate {expected_id}"))
+                })?;
+            assert_eq!(gate["status"], "skip");
+            assert_eq!(
+                gate["measured_value"]["reason_code"],
+                "host-direct-telemetry-skip"
+            );
+            assert_eq!(gate["target"]["node_count_gte"], 3);
+        }
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]

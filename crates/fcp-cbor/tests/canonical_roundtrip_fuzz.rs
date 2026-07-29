@@ -37,7 +37,7 @@
 //!      format exposed to untrusted input.
 //!
 //!   6. **Depth-limit guard**. A nested array of depth >
-//!      MAX_CANONICALIZATION_DEPTH MUST surface DepthExceeded, never
+//!      `MAX_CANONICALIZATION_DEPTH` MUST surface `DepthExceeded`, never
 //!      panic the canonicalizer's recursion. Builds the worst-case
 //!      input directly (proptest can't naturally generate 130 levels
 //!      of nesting) and asserts the documented error.
@@ -86,13 +86,13 @@ struct FuzzPayload {
     /// ordering (which the encoder MUST preserve insertion order
     /// for arrays, since arrays are sequences not unordered sets).
     items: Vec<FuzzScalar>,
-    /// String → scalar map. BTreeMap so insertion order doesn't
+    /// String → scalar map. `BTreeMap` so insertion order doesn't
     /// affect the in-memory representation (we test insertion-order
     /// independence in property 3 by constructing a HashMap-equiv).
     metadata: BTreeMap<String, FuzzScalar>,
     /// Nested payload, max 1 level of recursion. Two levels keeps
     /// proptest case sizes manageable while still exercising the
-    /// recursive canonicalize_value_in_place path.
+    /// recursive `canonicalize_value_in_place` path.
     nested: Option<Box<FuzzNested>>,
 }
 
@@ -333,8 +333,8 @@ proptest! {
         let mut shuffled = entries.clone();
         let mut rng = seed;
         for i in (1..shuffled.len()).rev() {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let j = (rng as usize) % (i + 1);
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let j = usize::try_from(rng).unwrap_or(0) % (i + 1);
             shuffled.swap(i, j);
         }
         let mut order_b: BTreeMap<String, FuzzScalar> = BTreeMap::new();
@@ -364,7 +364,7 @@ proptest! {
 /// Property 6: depth-limit guard against adversarial nesting.
 ///
 /// Build a nested array of depth `MAX_CANONICALIZATION_DEPTH + 16`
-/// using ciborium::Value directly (proptest can't naturally produce
+/// using `ciborium::Value` directly (proptest can't naturally produce
 /// the exact depth required) and confirm the canonicalizer surfaces
 /// `DepthExceeded` rather than recursing past its stack budget.
 /// Pre-fix the canonicalizer had no depth guard and would stack-
@@ -385,6 +385,7 @@ fn canonicalizer_rejects_input_past_depth_limit() {
         to_canonical_cbor(&deeply_nested)
     }));
 
+    #[allow(clippy::match_wild_err_arm)]
     match result {
         Ok(Err(SerializationError::DepthExceeded { .. })) => {
             // ✓ Expected.
@@ -397,7 +398,7 @@ fn canonicalizer_rejects_input_past_depth_limit() {
             "canonicalizer rejected over-depth input but with the wrong error: \
              got {other}, expected DepthExceeded"
         ),
-        Err(_) => panic!(
+        Err(_payload) => panic!(
             "canonicalizer PANICKED on input deeper than MAX_CANONICALIZATION_DEPTH \
              — unbounded recursion regression"
         ),

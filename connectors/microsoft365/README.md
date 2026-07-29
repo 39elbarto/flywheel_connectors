@@ -3,6 +3,7 @@
 > **Status**: planning contract
 > **Bead**: `flywheel_connectors-j05nu.7.1`
 > **Unblocks**: `flywheel_connectors-j05nu.7.2`
+> **Verification script**: `scripts/e2e/microsoft365_connector_verification.sh`
 > **Primary upstream**: Microsoft Graph v1.0 at `https://graph.microsoft.com/v1.0`
 
 ## Purpose
@@ -67,6 +68,24 @@ The first slice is mailbox-oriented rather than admin-oriented. It is not a gene
 - Any other `user_id` maps to `/users/{user_id}/...` after path-safety validation.
 - Cross-mailbox access is therefore only possible when the caller's delegated or application permissions already authorize it inside the same tenant boundary.
 - `required_permissions` is a narrowing contract, not an expansion mechanism. If configured, the connector must reject tokens that do not advertise those claims.
+
+## Tier B Live Sandbox Verification
+
+The connector's gated sandbox proof is `rch exec -- cargo test -p fcp-microsoft365 --test live_verification -- --nocapture`. It is skipped unless `FCP_LIVE_SANDBOX=1` and the Microsoft 365 sandbox environment is complete.
+
+Required live inputs:
+
+- `MICROSOFT365_SANDBOX_TENANT_ID`
+- `MICROSOFT365_SANDBOX_CLIENT_ID`
+- `MICROSOFT365_SANDBOX_CLIENT_SECRET`
+- `MICROSOFT365_SANDBOX_USER_ID`
+- `FCP_SANDBOX_RUN_NAMESPACE`
+
+Optional endpoint overrides default to `https://graph.microsoft.com/v1.0` and `https://login.microsoftonline.com` through `MICROSOFT365_SANDBOX_API_URL` and `MICROSOFT365_SANDBOX_AUTH_URL`.
+
+Use a dedicated Microsoft 365 developer/test tenant, a sandbox app registration with `Files.ReadWrite.All` application permission and admin consent, and a disposable OneDrive-enabled user. The proof intentionally uses the broader connector's file operations, not mail/calendar delivery, so it can perform a reversible `upload_file` -> `list_items` -> `delete_item` -> post-delete `get_item` lifecycle without sending mail or calendar invitations. It also performs an invalid client-secret configure attempt as the auth-denial path.
+
+The live test emits `MICROSOFT365_LIVE_SANDBOX_JSONL` evidence with the command, git revision when provided through `FCP_LIVE_GIT_REVISION`, sandbox class, call ceiling, cleanup result, hashed user/file/item identifiers, and skip/failure reason. It never logs tenant id, client id, client secret, user id, file path, item id, provider resource ids, or raw provider error bodies.
 
 ## Network And Runtime Invariants
 
@@ -150,3 +169,25 @@ This contract is grounded in the current connector implementation and manifest, 
 - `connectors/microsoft365/src/client.rs` defines the actual Graph paths for messages, attachments, replies, forwards, `calendarView`, events, and `getSchedule`.
 - `connectors/microsoft365/src/connector.rs` defines the auth modes, readiness behavior, and the exposed `OperationInfo` safety/risk/idempotency metadata.
 - `connectors/microsoft365/manifest.toml` already declares the same mail/calendar capability families and network constraints used by the runtime.
+
+## Operator Guidance
+
+**Prerequisites**:
+
+- Use a dedicated Microsoft 365 developer or test tenant for live verification.
+- Use an app registration or delegated token whose consent scope matches the operation family being verified.
+- Keep `credential_id` deployments behind the host credential injection layer; direct connector logs must never contain access tokens, tenant IDs, client secrets, user IDs, message IDs, file paths, or provider error bodies.
+- Use the local non-mock test for loopback request-shape acceptance before running the live sandbox verifier.
+
+**Verification surface**:
+
+- `connectors/microsoft365/tests/local_non_mock.rs` drives real loopback HTTP through the connector for mailbox read and send request construction.
+- `connectors/microsoft365/tests/live_verification.rs` is the gated Tier B sandbox proof and is skipped unless `FCP_LIVE_SANDBOX=1` plus the Microsoft 365 sandbox environment is complete.
+- `scripts/e2e/microsoft365_connector_verification.sh` is the operator closeout script. It writes redaction-safe evidence under `artifacts/e2e/microsoft365_connector/<run-id>` and requires `rch` proof for Cargo lanes.
+
+**Rerun commands**:
+
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-microsoft365-readme cargo test -p fcp-microsoft365 --test local_non_mock -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-microsoft365-readme cargo test -p fcp-microsoft365 --test integration -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-microsoft365-readme cargo clippy -p fcp-microsoft365 --all-targets -- -D warnings`
+- `scripts/e2e/microsoft365_connector_verification.sh --run-id <redacted-run-id>`

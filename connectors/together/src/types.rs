@@ -284,3 +284,103 @@ fn invalid<T>(message: &str) -> FcpResult<T> {
         message: message.into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chat_request_uses_default_model_and_provider_extensions() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": "medium",
+                "safety_model": "meta-llama/Llama-Guard-3-8B"
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect("valid chat input should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+        assert_eq!(
+            request.provider_extensions["reasoning_effort"],
+            json!("medium")
+        );
+        assert_eq!(
+            request.provider_extensions["safety_model"],
+            json!("meta-llama/Llama-Guard-3-8B")
+        );
+    }
+
+    #[test]
+    fn invalid_reasoning_effort_is_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": "max"
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("unsupported reasoning effort should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn model_ids_require_namespace_separator() {
+        let error = validate_together_model_id("model", "llama-3")
+            .expect_err("Together model ids require namespace/model");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn embeddings_reject_empty_batch_and_zero_dimensions() {
+        let batch_error = embeddings_request_from_value(
+            json!({
+                "input": [],
+                "model": DEFAULT_EMBEDDING_MODEL
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("empty embedding batch should fail");
+        let dimensions_error = embeddings_request_from_value(
+            json!({
+                "input": "hello",
+                "dimensions": 0
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("zero dimensions should fail");
+
+        assert!(matches!(batch_error, FcpError::InvalidRequest { .. }));
+        assert!(matches!(dimensions_error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn legacy_completion_carries_safety_model() {
+        let request = legacy_request_from_value(
+            json!({
+                "prompt": "complete this",
+                "safety_model": "meta-llama/Llama-Guard-3-8B"
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect("valid legacy completion input should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+        assert_eq!(
+            request.provider_extensions["safety_model"],
+            json!("meta-llama/Llama-Guard-3-8B")
+        );
+    }
+
+    #[test]
+    fn legacy_completion_rejects_blank_prompt() {
+        let error = legacy_request_from_value(json!({"prompt": " "}), DEFAULT_MODEL)
+            .expect_err("blank prompt should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+}

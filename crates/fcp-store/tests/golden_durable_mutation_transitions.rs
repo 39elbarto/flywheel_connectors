@@ -1,10 +1,10 @@
-//! Golden vector for DurableSymbolStore mutation state transitions
+//! Golden vector for `DurableSymbolStore` mutation state transitions
 //! (br-38cd93962, follow-up to commit 38cd93962 read-validate /
 //! write-publish split).
 //!
 //! Records the FULL state-transition diff for a canonical mutation
-//! script. Each step in the script (open / put_object_meta /
-//! put_symbol / idempotent duplicate / delete_symbol / delete_object)
+//! script. Each step in the script (open / `put_object_meta` /
+//! `put_symbol` / idempotent duplicate / `delete_symbol` / `delete_object`)
 //! emits a one-line probe of the observable state — `storage_used`,
 //! per-object `symbol_count`, `list_zone` size — so a single golden
 //! file captures every observable side-effect of every WAL operation
@@ -14,13 +14,13 @@
 //! unit tests scattered across `durable.rs`. This golden gives an
 //! operator one diffable artifact that pins:
 //!
-//! - the EXACT storage_used delta after each mutation
-//! - that idempotent put_symbol with byte-equal data produces zero
+//! - the EXACT `storage_used` delta after each mutation
+//! - that idempotent `put_symbol` with byte-equal data produces zero
 //!   delta (the load-bearing invariant the metamorphic test pinned;
 //!   here it shows as a `storage_used` line that doesn't change
 //!   between two consecutive put rows)
-//! - that delete_symbol releases the right number of bytes
-//! - that delete_object releases the sum of its remaining symbols
+//! - that `delete_symbol` releases the right number of bytes
+//! - that `delete_object` releases the sum of its remaining symbols
 //!
 //! Any future refactor that double-counts a duplicate, leaks bytes
 //! on a failed put, or shifts the WAL apply order would surface as
@@ -28,7 +28,7 @@
 //! evidence trail.
 //!
 //! Update flow:
-//!   UPDATE_GOLDENS=1 cargo test -p fcp-store --test golden_durable_mutation_transitions
+//!   `UPDATE_GOLDENS=1` cargo test -p fcp-store --test `golden_durable_mutation_transitions`
 //!   cargo insta review
 //!   git diff crates/fcp-store/tests/snapshots/
 

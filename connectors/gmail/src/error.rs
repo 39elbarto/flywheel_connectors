@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Gmail-specific errors.
@@ -52,6 +52,25 @@ impl GmailError {
             Self::Api { code, .. } => {
                 matches!(code, 429 | 500 | 502 | 503)
             }
+            _ => false,
+        }
+    }
+
+    /// Whether replaying the request that produced this error cannot duplicate
+    /// a side effect (br-kxd3e).
+    ///
+    /// Deliberately NOT the same question as [`Self::is_retryable`]. Gmail
+    /// refuses a rate-limited request WITHOUT sending anything, so replaying
+    /// it is safe; a 5xx means Gmail received the request and may already have
+    /// delivered the mail. Collapsing the two would disable rate-limit backoff
+    /// on every send.
+    #[must_use]
+    pub fn replay_is_safe(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } => true,
+            Self::Api { code, .. } => *code == 429,
+            // Only a connect-phase failure proves the request never left us.
+            Self::Http(e) => !fcp_sdk::migration::transport_error_reached_service(e),
             _ => false,
         }
     }

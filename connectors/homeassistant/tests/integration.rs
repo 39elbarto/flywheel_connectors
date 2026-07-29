@@ -11,7 +11,6 @@
     clippy::unused_async
 )]
 
-use asupersync::Cx;
 use asupersync::io::{AsyncRead, ReadBuf};
 use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
@@ -82,19 +81,22 @@ async fn accept_test_websocket(mut stream: TcpStream) -> TestServerWebSocket {
         .await
         .expect("read websocket handshake");
     WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket")
 }
 
 async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        ServerWsMessage::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Option<String> {
-    match ws.recv(&Cx::for_testing()).await {
+    match ws.recv(&fcp_async_core::compatibility_cx()).await {
         Ok(Some(ServerWsMessage::Text(text))) => Some(text),
         Ok(Some(other)) => panic!("expected text frame for {context}, got {other:?}"),
         Ok(None) => None,
@@ -103,7 +105,9 @@ async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Option<
 }
 
 async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
 }
 
 // -- Lifecycle --
@@ -973,6 +977,26 @@ async fn error_503() {
         }))
         .await
         .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_200_empty_body_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/states"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "homeassistant.list_states",
+            "input": {}
+        }))
+        .await
+        .is_ok()
     );
 }
 

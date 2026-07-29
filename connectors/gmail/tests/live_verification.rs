@@ -14,6 +14,8 @@ use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use chrono::{Duration, Utc};
 use serde_json::json;
 
+const LIVE_GATE_ENV: &str = "FCP_LIVE_READ";
+
 // ============================================================================
 // Skip guard
 // ============================================================================
@@ -30,8 +32,27 @@ fn gmail_secretless_base_url() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn skip_without_live_gate() -> bool {
+    if live_gate_enabled() {
+        return false;
+    }
+
+    eprintln!(
+        "SKIP: {LIVE_GATE_ENV} is not enabled; set {LIVE_GATE_ENV}=1 before running live Gmail connector verification."
+    );
+    true
+}
+
 macro_rules! skip_without_secretless_config {
     ($var:ident) => {
+        if skip_without_live_gate() {
+            return;
+        }
         let Some($var) = gmail_credential_id() else {
             eprintln!(
                 "SKIP: GMAIL_CREDENTIAL_ID not set — skipping live Gmail connector verification. \

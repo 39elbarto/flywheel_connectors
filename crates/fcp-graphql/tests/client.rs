@@ -7,7 +7,6 @@ use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 
-use fcp_async_core::Cx;
 use fcp_async_core::io::{AsyncRead, ReadBuf};
 // ServerWebSocket and WebSocketAcceptor are test-server types not re-exported by
 // fcp-async-core; direct import from asupersync is acceptable for test infrastructure.
@@ -364,7 +363,7 @@ async fn accept_test_websocket(mut stream: TcpStream) -> TestServerWebSocket {
         .await
         .expect("read websocket handshake");
     WebSocketAcceptor::new()
-        .accept(&Cx::for_testing(), &request, stream)
+        .accept(&fcp_async_core::compatibility_cx(), &request, stream)
         .await
         .expect("accept websocket")
 }
@@ -378,7 +377,7 @@ fn expect_text_message(message: Message, context: &str) -> String {
 
 async fn recv_text(ws: &mut TestServerWebSocket, context: &str) -> String {
     let message = ws
-        .recv(&Cx::for_testing())
+        .recv(&fcp_async_core::compatibility_cx())
         .await
         .expect(context)
         .unwrap_or_else(|| panic!("{context} missing"));
@@ -386,13 +385,18 @@ async fn recv_text(ws: &mut TestServerWebSocket, context: &str) -> String {
 }
 
 async fn send_json(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
-    ws.send(&Cx::for_testing(), Message::text(value.to_string()))
-        .await
-        .expect(context);
+    ws.send(
+        &fcp_async_core::compatibility_cx(),
+        Message::text(value.to_string()),
+    )
+    .await
+    .expect(context);
 }
 
 async fn close_test_websocket(ws: &mut TestServerWebSocket) {
-    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+    let _ = ws
+        .close(&fcp_async_core::compatibility_cx(), CloseReason::normal())
+        .await;
 }
 
 async fn subscription_wrong_id_error(frame: serde_json::Value) -> GraphqlClientError {

@@ -12,7 +12,8 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::json;
@@ -223,6 +224,12 @@ impl DockerHubConnector {
             started_at: Instant::now(),
             verifier: None,
         }
+    }
+
+    /// Stable connector instance identity used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_prelude::InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {
@@ -917,6 +924,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &str,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -932,6 +940,7 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .target_instance(instance_id)
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
             .sign(signing_key)
@@ -1226,8 +1235,12 @@ mod tests {
         let mut c = DockerHubConnector::new();
         let signing_key =
             configure_and_handshake(&mut c, vec![CapabilityId::from_static(CAP_REPOS_READ)]);
-        let capability: TestCapability =
-            capability_token(&signing_key, CAP_REPOS_READ, OP_REPOS_LIST);
+        let capability: TestCapability = capability_token(
+            &signing_key,
+            CAP_REPOS_READ,
+            OP_REPOS_LIST,
+            c.base.instance_id.as_str(),
+        );
         let req = SimulateRequest::new(
             ConnectorId::from_static("fcp.dockerhub"),
             OperationId::from_static(OP_REPOS_LIST),
@@ -1248,8 +1261,12 @@ mod tests {
         let mut c = DockerHubConnector::new();
         let signing_key =
             configure_and_handshake(&mut c, vec![CapabilityId::from_static(CAP_REPOS_READ)]);
-        let capability: TestCapability =
-            capability_token(&signing_key, CAP_REPOS_READ, OP_TAGS_LIST);
+        let capability: TestCapability = capability_token(
+            &signing_key,
+            CAP_REPOS_READ,
+            OP_TAGS_LIST,
+            c.base.instance_id.as_str(),
+        );
         let req = SimulateRequest::new(
             ConnectorId::from_static("fcp.dockerhub"),
             OperationId::from_static(OP_REPOS_LIST),

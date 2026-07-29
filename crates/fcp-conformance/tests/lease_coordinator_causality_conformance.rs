@@ -48,7 +48,7 @@ fn obj() -> ObjectId {
     ObjectId::from_unscoped_bytes(b"subject-under-lease")
 }
 
-fn purpose() -> LeasePurpose {
+const fn purpose() -> LeasePurpose {
     LeasePurpose::OperationExecution
 }
 

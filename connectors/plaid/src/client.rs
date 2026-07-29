@@ -5,9 +5,8 @@
 
 use std::time::Duration;
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, Url};
 
 use crate::{
@@ -337,8 +336,8 @@ impl PlaidClient {
                                 .headers()
                                 .get("retry-after")
                                 .and_then(|v| v.to_str().ok())
-                                .and_then(|v| v.parse::<u64>().ok())
-                                .map_or(60_000, |s| s * 1000);
+                                .and_then(parse_retry_after_ms)
+                                .unwrap_or(60_000);
 
                             let err = PlaidError::RateLimit {
                                 retry_after_ms: retry_after,
@@ -436,13 +435,241 @@ fn normalize_base_url(base_url: &str) -> PlaidResult<String> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
+/// Parse an RFC 7231 `Retry-After` header value into milliseconds.
+///
+/// Accepts both the delta-seconds form (`"120"`) and the HTTP-date form
+/// (`"Wed, 21 Oct 2026 07:28:00 GMT"`); a date in the past yields 0.
+fn parse_retry_after_ms(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.saturating_mul(1000));
+    }
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&chrono::Utc)
+        .signed_duration_since(chrono::Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(0)
+    } else {
+        Some(u64::try_from(wait.num_milliseconds()).unwrap_or(u64::MAX))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    #[test]
+    fn parse_retry_after_ms_seconds() {
+        assert_eq!(parse_retry_after_ms("120"), Some(120_000));
+        assert_eq!(parse_retry_after_ms(" 1 "), Some(1_000));
+        assert_eq!(
+            parse_retry_after_ms(&u64::MAX.to_string()),
+            Some(u64::MAX.saturating_mul(1000))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_ms_http_date_in_past_is_zero() {
+        assert_eq!(
+            parse_retry_after_ms("Wed, 21 Oct 2015 07:28:00 GMT"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_ms_http_date_in_future_is_positive() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(90);
+        let value = future.to_rfc2822();
+        let ms = parse_retry_after_ms(&value).unwrap();
+        assert!(ms > 80_000 && ms <= 91_000, "got {ms}");
+    }
+
+    #[test]
+    fn parse_retry_after_ms_garbage_is_none() {
+        assert_eq!(parse_retry_after_ms("soon"), None);
+        assert_eq!(parse_retry_after_ms(""), None);
+    }
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    enum TestHttpBody {
+        Json(serde_json::Value),
+        Text(&'static str),
+        Empty,
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: TestHttpBody,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        #[must_use]
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Json(body),
+            }
+        }
+
+        #[must_use]
+        fn text(method: &'static str, path: &'static str, status: u16, body: &'static str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Text(body),
+            }
+        }
+
+        #[must_use]
+        const fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Empty,
+            }
+        }
+    }
+
+    impl TestHttpServer {
+        #[must_use]
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        #[must_use]
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let (body, is_json_body) = match response.body {
+            TestHttpBody::Json(body) => (body.to_string(), true),
+            TestHttpBody::Text(body) => (body.to_string(), false),
+            TestHttpBody::Empty => (String::new(), false),
+        };
+        let reason = match response.status {
+            200 => "OK",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        if is_json_body {
+            write!(stream, "content-type: application/json\r\n").unwrap();
+        }
+        write!(stream, "\r\n{body}").unwrap();
+        stream.flush().unwrap();
+    }
 
     fn client_with_credentials(client_id: &str, secret: &str, base_url: &str) -> PlaidClient {
         PlaidClient::new(client_id, secret, base_url).unwrap()
@@ -454,19 +681,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_link_token_create() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/link/token/create"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/link/token/create",
+            200,
+            serde_json::json!({
                 "link_token": "link-sandbox-abc123",
                 "expiration": "2026-03-02T00:00:00Z",
                 "request_id": "req-1"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = test_client(&mock_server.uri());
+        let client = test_client(server.uri());
 
         let result = client
             .link_token_create(
@@ -483,19 +709,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_token_exchange() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/item/public_token/exchange"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/item/public_token/exchange",
+            200,
+            serde_json::json!({
                 "access_token": "access-sandbox-abc123",
                 "item_id": "item-123",
                 "request_id": "req-2"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = test_client(&mock_server.uri());
+        let client = test_client(server.uri());
 
         let result = client
             .token_exchange("public-sandbox-abc123")
@@ -507,11 +732,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_accounts_get() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/accounts/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/accounts/get",
+            200,
+            serde_json::json!({
                 "accounts": [{
                     "account_id": "acc-1",
                     "balances": {
@@ -533,11 +758,10 @@ mod tests {
                     "available_products": ["balance"],
                     "billed_products": ["transactions"]
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = test_client(&mock_server.uri());
+        let client = test_client(server.uri());
 
         let (accounts, item) = client
             .accounts_get("access-sandbox-xxx", None)
@@ -551,11 +775,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_accounts_balance_get() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/accounts/balance/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/accounts/balance/get",
+            200,
+            serde_json::json!({
                 "accounts": [{
                     "account_id": "acc-1",
                     "balances": {
@@ -571,11 +795,10 @@ mod tests {
                     "subtype": "checking",
                     "type": "depository"
                 }]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = test_client(&mock_server.uri());
+        let client = test_client(server.uri());
 
         let accounts = client
             .accounts_balance_get("access-sandbox-xxx", None)
@@ -587,11 +810,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_transactions_sync() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/transactions/sync"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/transactions/sync",
+            200,
+            serde_json::json!({
                 "added": [{
                     "transaction_id": "tx-1",
                     "account_id": "acc-1",
@@ -608,11 +831,10 @@ mod tests {
                 "removed": [],
                 "next_cursor": "cursor-abc",
                 "has_more": false
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = test_client(&mock_server.uri());
+        let client = test_client(server.uri());
 
         let result = client
             .transactions_sync("access-sandbox-xxx", None, Some(100))
@@ -626,11 +848,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_auth_get() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/auth/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/auth/get",
+            200,
+            serde_json::json!({
                 "accounts": [{
                     "account_id": "acc-1",
                     "balances": {
@@ -652,11 +874,10 @@ mod tests {
                     "international": [],
                     "bacs": []
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = test_client(&mock_server.uri());
+        let client = test_client(server.uri());
 
         let (accounts, numbers) = client.auth_get("access-sandbox-xxx").await.unwrap();
         assert_eq!(accounts.len(), 1);
@@ -666,15 +887,10 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
+        let server =
+            TestHttpServer::respond(vec![TestHttpResponse::empty("POST", "/accounts/get", 429)]);
 
-        Mock::given(method("POST"))
-            .and(path("/accounts/get"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
-
-        let client = test_client(&mock_server.uri()).with_retry_config(0);
+        let client = test_client(server.uri()).with_retry_config(0);
 
         let result = client.accounts_get("access-sandbox-xxx", None).await;
         assert!(result.is_err());
@@ -683,20 +899,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/accounts/get"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/accounts/get",
+            401,
+            serde_json::json!({
                 "error_type": "INVALID_INPUT",
                 "error_code": "INVALID_API_KEYS",
                 "error_message": "invalid client_id or secret provided"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("bad_id", "bad_secret", &mock_server.uri())
-            .with_retry_config(0);
+        let client =
+            client_with_credentials("bad_id", "bad_secret", server.uri()).with_retry_config(0);
 
         let result = client.accounts_get("access-sandbox-xxx", None).await;
         assert!(result.is_err());
@@ -708,16 +923,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_server_error_retries() {
-        let mock_server = MockServer::start().await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::text("POST", "/accounts/get", 500, "Internal Server Error"),
+            TestHttpResponse::text("POST", "/accounts/get", 500, "Internal Server Error"),
+        ]);
 
-        Mock::given(method("POST"))
-            .and(path("/accounts/get"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
-            .expect(2)
-            .mount(&mock_server)
-            .await;
-
-        let client = test_client(&mock_server.uri()).with_retry_config(1);
+        let client = test_client(server.uri()).with_retry_config(1);
 
         let result = client.accounts_get("access-sandbox-xxx", None).await;
         assert!(result.is_err());
@@ -827,23 +1038,22 @@ mod tests {
         );
     }
 
-    // ── Additional wiremock API edge case tests ─────────────────────────
+    // ── Additional HTTP API edge case tests ─────────────────────────────
 
     #[fcp_async_core::runtime::test]
     async fn test_link_token_create_with_user() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/link/token/create"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/link/token/create",
+            200,
+            serde_json::json!({
                 "link_token": "link-sandbox-user",
                 "expiration": "2026-03-02T00:00:00Z",
                 "request_id": "req-u"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let user = serde_json::json!({"client_user_id": "custom-user-123"});
         let result = client
@@ -861,21 +1071,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_transactions_get() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/transactions/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/transactions/get",
+            200,
+            serde_json::json!({
                 "accounts": [],
                 "transactions": [
                     {"transaction_id": "tx1", "amount": 10.0}
                 ],
                 "total_transactions": 1
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let result = client
             .transactions_get("access-tok", "2026-01-01", "2026-03-01", None)
@@ -886,19 +1095,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_transactions_get_with_options() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/transactions/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/transactions/get",
+            200,
+            serde_json::json!({
                 "accounts": [],
                 "transactions": [],
                 "total_transactions": 0
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let opts = serde_json::json!({"count": 100, "offset": 0});
         let result = client
@@ -910,21 +1118,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_transactions_sync_with_cursor() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/transactions/sync"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/transactions/sync",
+            200,
+            serde_json::json!({
                 "added": [],
                 "modified": [],
                 "removed": [],
                 "next_cursor": "cursor-next",
                 "has_more": true
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let result = client
             .transactions_sync("access-tok", Some("cursor-prev"), Some(50))
@@ -936,19 +1143,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_identity_get() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/identity/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/identity/get",
+            200,
+            serde_json::json!({
                 "accounts": [
                     {"account_id": "acc1", "owners": [{"names": ["John Doe"]}]}
                 ]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let result = client.identity_get("access-tok").await.unwrap();
         assert_eq!(result.len(), 1);
@@ -956,19 +1162,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_investments_holdings_get() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/investments/holdings/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/investments/holdings/get",
+            200,
+            serde_json::json!({
                 "accounts": [],
                 "holdings": [],
                 "securities": []
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let result = client.investments_holdings_get("access-tok").await.unwrap();
         assert!(result.get("holdings").is_some());
@@ -976,11 +1181,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_liabilities_get() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/liabilities/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/liabilities/get",
+            200,
+            serde_json::json!({
                 "accounts": [
                     {
                         "account_id": "acc1",
@@ -1001,11 +1206,10 @@ mod tests {
                     "mortgage": null,
                     "student": null
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let (accounts, liabilities) = client.liabilities_get("access-tok").await.unwrap();
         assert_eq!(accounts.len(), 1);
@@ -1015,21 +1219,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_accounts_get_with_options() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/accounts/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/accounts/get",
+            200,
+            serde_json::json!({
                 "accounts": [],
                 "item": {
                     "item_id": "item-opt",
                     "institution_id": "ins_1"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let opts = serde_json::json!({"account_ids": ["acc1"]});
         let (accounts, item) = client
@@ -1042,17 +1245,16 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_accounts_balance_get_with_options() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/accounts/balance/get"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/accounts/balance/get",
+            200,
+            serde_json::json!({
                 "accounts": []
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri());
+        let client = client_with_credentials("id", "sec", server.uri());
 
         let opts = serde_json::json!({"account_ids": ["acc1"]});
         let accounts = client
@@ -1064,19 +1266,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_forbidden_returns_api_error() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/accounts/get"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/accounts/get",
+            403,
+            serde_json::json!({
                 "error_type": "INVALID_INPUT",
                 "error_code": "ACCESS_NOT_GRANTED",
                 "error_message": "Not authorized for this product"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri()).with_retry_config(0);
+        let client = client_with_credentials("id", "sec", server.uri()).with_retry_config(0);
 
         let result = client.accounts_get("access-tok", None).await;
         assert!(result.is_err());
@@ -1098,19 +1299,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_client_error_with_plaid_body() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/auth/get"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/auth/get",
+            400,
+            serde_json::json!({
                 "error_type": "INVALID_REQUEST",
                 "error_code": "INVALID_FIELD",
                 "error_message": "Invalid access_token"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
-        let client = client_with_credentials("id", "sec", &mock_server.uri()).with_retry_config(0);
+        let client = client_with_credentials("id", "sec", server.uri()).with_retry_config(0);
 
         let result = client.auth_get("bad-token").await;
         assert!(result.is_err());
@@ -1131,15 +1331,10 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized_without_error_body() {
-        let mock_server = MockServer::start().await;
+        let server =
+            TestHttpServer::respond(vec![TestHttpResponse::empty("POST", "/accounts/get", 401)]);
 
-        Mock::given(method("POST"))
-            .and(path("/accounts/get"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client = client_with_credentials("id", "sec", &mock_server.uri()).with_retry_config(0);
+        let client = client_with_credentials("id", "sec", server.uri()).with_retry_config(0);
 
         let result = client.accounts_get("access-tok", None).await;
         assert!(result.is_err());

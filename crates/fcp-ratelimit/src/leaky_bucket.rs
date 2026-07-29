@@ -94,9 +94,16 @@ impl LeakyBucket {
         let leaked = elapsed.as_secs_f64() * self.leak_rate;
 
         if leaked > 0.0 {
-            *level = (*level - leaked).max(0.0);
-            drop(level);
-            *last_leak = now;
+            let new_level = (*level - leaked).max(0.0);
+
+            // Only update the anchor if the level actually changed, or if the bucket
+            // is fully empty. This prevents tiny time increments from being absorbed
+            // by f64 truncation without actually leaking any capacity.
+            if (new_level - *level).abs() > f64::EPSILON || *level < f64::EPSILON {
+                *level = new_level;
+                drop(level);
+                *last_leak = now;
+            }
         }
     }
 
@@ -242,7 +249,11 @@ impl SmoothPacer {
         } else if requests_per_second.is_infinite() {
             Self::new(Duration::ZERO)
         } else {
-            Self::new(Duration::from_secs_f64(1.0 / requests_per_second))
+            // `ceil_positive_duration` avoids the panic `Duration::from_secs_f64`
+            // raises when `1.0 / rps` overflows the `Duration` range (extremely
+            // small positive rates, e.g. 1e-20 req/s): it maps the overflow to
+            // `Duration::MAX`, matching the `rps <= 0` "effectively never" arm.
+            Self::new(ceil_positive_duration(1.0 / requests_per_second))
         }
     }
 }
@@ -774,6 +785,15 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn smooth_pacer_from_rate_negative() {
         let pacer = SmoothPacer::from_rate(-5.0);
+        assert_eq!(pacer.min_interval, Duration::MAX);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn smooth_pacer_from_rate_tiny_positive_does_not_panic() {
+        // Regression: 1.0 / 1e-20 ≈ 1e20 s overflows the Duration range, which
+        // `Duration::from_secs_f64` panics on. `from_rate` must instead clamp to
+        // Duration::MAX (an effectively-never pace), matching the rps<=0 arm.
+        let pacer = SmoothPacer::from_rate(1e-20);
         assert_eq!(pacer.min_interval, Duration::MAX);
     }
 

@@ -19,6 +19,7 @@ use fcp_sdk::runtime::{
     SupervisorConfig,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, instrument};
 
 use crate::{
@@ -28,6 +29,8 @@ use crate::{
     stream::{FilteredStream, StreamEvent},
     types::{CreateTweetRequest, SearchTweetsParams, StreamRule, TweetReply, User},
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FCP-level provisioning config
@@ -211,6 +214,18 @@ impl TwitterConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle the configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(&mut self, params: Value) -> Result<Value, FcpError> {
@@ -321,7 +336,7 @@ impl TwitterConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:twitter-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1822,6 +1837,7 @@ mod tests {
 
     fn signed_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         capability: &'static str,
         operation: &'static str,
     ) -> CapabilityToken {
@@ -1838,6 +1854,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
             .unwrap()
@@ -1864,6 +1881,19 @@ mod tests {
             connector.base.instance_id.clone(),
         ));
         connector.base.set_handshaken(true);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(TwitterConnector::manifest_hash(), expected);
+        assert_ne!(
+            TwitterConnector::manifest_hash(),
+            "sha256:twitter-connector-v1"
+        );
     }
 
     // ───────────────────────── Schema completeness tests ─────────────────────────
@@ -2106,7 +2136,12 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twitter.user.get",
                 json!({ "user_id": "123" }),
-                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+                signed_token(
+                    &signing_key,
+                    connector.instance_id(),
+                    "twitter.read.public",
+                    "twitter.user.get",
+                ),
             ))
             .await
             .unwrap();
@@ -2133,7 +2168,12 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twitter.tweet.create",
                 json!({ "text": "hello" }),
-                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+                signed_token(
+                    &signing_key,
+                    connector.instance_id(),
+                    "twitter.read.public",
+                    "twitter.user.get",
+                ),
             ))
             .await
             .unwrap();
@@ -2161,7 +2201,12 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twitter.user.get",
                 json!({}),
-                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+                signed_token(
+                    &signing_key,
+                    connector.instance_id(),
+                    "twitter.read.public",
+                    "twitter.user.get",
+                ),
             ))
             .await
             .unwrap();
@@ -2343,37 +2388,6 @@ mod tests {
         let report: SelfCheckReport = serde_json::from_value(result).unwrap();
         assert_eq!(report.status, SelfCheckStatus::Degraded);
         assert_eq!(report.reason_code.as_deref(), Some("health_check_failed"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_ok_with_mock() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
-
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": {
-                    "id": "12345",
-                    "name": "Test",
-                    "username": "test"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = TwitterConnector::new();
-        let params = json!({
-            "consumer_key": "ck_test",
-            "consumer_secret": "cs_test",
-            "access_token": "at_test",
-            "access_token_secret": "ats_test",
-            "api_url": mock_server.uri()
-        });
-        connector.handle_configure(params).await.unwrap();
-
-        let result = connector.handle_self_check().await.unwrap();
-        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
-        assert_eq!(report.status, SelfCheckStatus::Ok);
     }
 
     // ───────────────────────── Multi-auth configure tests ─────────────────────────

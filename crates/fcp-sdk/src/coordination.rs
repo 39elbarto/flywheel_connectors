@@ -1886,6 +1886,10 @@ mod tests {
         AgentId::new(id)
     }
 
+    fn current_test_cx() -> fcp_async_core::Cx {
+        fcp_async_core::Cx::current().expect("test runtime provides a current Cx")
+    }
+
     struct ScriptedAgentMailReservationClient {
         outcomes: Mutex<VecDeque<AgentMailThreadReservationOutcome>>,
         requests: Mutex<Vec<AgentMailThreadReservationRequest>>,
@@ -1936,9 +1940,11 @@ mod tests {
     where
         C: AgentMailThreadReservationClient,
     {
-        let cx = fcp_async_core::Cx::for_testing();
-        fcp_async_core::runtime::block_on_sync(checker.claim(&cx, key, agent_id))
-            .expect("test runtime starts")
+        fcp_async_core::runtime::block_on_sync(async {
+            let cx = current_test_cx();
+            checker.claim(&cx, key, agent_id).await
+        })
+        .expect("test runtime starts")
     }
 
     fn run_claim_before_send<C>(
@@ -1951,18 +1957,22 @@ mod tests {
     where
         C: ThreadOwnershipChecker + ?Sized,
     {
-        let cx = fcp_async_core::Cx::for_testing();
-        fcp_async_core::runtime::block_on_sync(config.claim_before_send(
-            &cx,
-            checker,
-            ChatCoordinationSendRequest::new(
-                ZoneId::work(),
-                connector("slack:chat:1.0.0"),
-                ChannelId::new(channel_id),
-                thread_id.map(ThreadId::new),
-                agent(agent_id),
-            ),
-        ))
+        fcp_async_core::runtime::block_on_sync(async {
+            let cx = current_test_cx();
+            config
+                .claim_before_send(
+                    &cx,
+                    checker,
+                    ChatCoordinationSendRequest::new(
+                        ZoneId::work(),
+                        connector("slack:chat:1.0.0"),
+                        ChannelId::new(channel_id),
+                        thread_id.map(ThreadId::new),
+                        agent(agent_id),
+                    ),
+                )
+                .await
+        })
         .expect("test runtime starts")
     }
 
@@ -2381,10 +2391,10 @@ mod tests {
             AgentMailThreadOwnershipChecker::new(ScriptedAgentMailReservationClient::new([
                 AgentMailThreadReservationOutcome::Granted,
             ]));
-        let cx = fcp_async_core::Cx::for_testing();
-        cx.cancel_fast(asupersync::types::CancelKind::User);
 
-        let decision = fcp_async_core::runtime::block_on_sync(
+        let decision = fcp_async_core::runtime::block_on_sync(async {
+            let cx = current_test_cx();
+            cx.cancel_fast(asupersync::types::CancelKind::User);
             ChatCoordinationConfig::new()
                 .with_fail_open(true)
                 .claim_before_send(
@@ -2397,8 +2407,9 @@ mod tests {
                         Some(ThreadId::new("1700000000.000100")),
                         agent("alice"),
                     ),
-                ),
-        )
+                )
+                .await
+        })
         .expect("test runtime starts");
 
         assert_eq!(checker.client().requests().len(), 0);

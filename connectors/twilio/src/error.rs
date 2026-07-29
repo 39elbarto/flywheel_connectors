@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 
 /// Twilio API error.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +30,9 @@ pub enum TwilioError {
 
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 pub type TwilioResult<T> = Result<T, TwilioError>;
@@ -41,7 +44,9 @@ impl TwilioError {
         match self {
             Self::Http(_) | Self::RateLimited { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, Some(500..=599 | 429)),
-            Self::Json(_) | Self::Unauthorized | Self::NotFound { .. } => false,
+            Self::Json(_) | Self::Unauthorized | Self::NotFound { .. } | Self::InvalidInput(_) => {
+                false
+            }
         }
     }
 
@@ -103,6 +108,10 @@ impl TwilioError {
             },
             Self::NotFound { resource } => FcpError::ResourceNotFound {
                 resource: resource.clone(),
+            },
+            Self::InvalidInput(message) => FcpError::InvalidRequest {
+                code: 1003,
+                message: message.clone(),
             },
         }
     }

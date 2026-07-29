@@ -9,7 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 ///
 /// Datadog routes that hit the connector via `configured_connector` MUST
 /// emit both `DD-API-KEY: test-api-key` and `DD-APPLICATION-KEY: test-app-key`.
-/// Without these matchers on every Mock::given chain, a regression that
+/// Without these matchers on every `Mock::given` chain, a regression that
 /// dropped the headers in `connectors/datadog/src/client.rs` would still
 /// pass every integration test.
 const DD_API_KEY: &str = "test-api-key";
@@ -555,6 +555,27 @@ async fn invoke_rate_limited_error() {
         }))
         .await;
     assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_200_empty_body_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/api/v1/monitor.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&format!("{}/api/v1", server.uri())).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "datadog.monitors.list",
+            "input": {}
+        }))
+        .await;
+    assert!(result.is_ok());
 }
 
 #[fcp_async_core::runtime::test]

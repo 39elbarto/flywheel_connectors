@@ -1,9 +1,8 @@
 use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
-};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, RequestBuilder};
@@ -34,6 +33,7 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'|')
     .add(b'}');
+const USER_AGENT: &str = concat!("fcp-package-registry/", env!("CARGO_PKG_VERSION"));
 
 pub struct PackageRegistryClient {
     client: Client,
@@ -63,6 +63,7 @@ impl PackageRegistryClient {
         request_timeout_ms: u64,
     ) -> Result<Self> {
         let client = Client::builder()
+            .user_agent(USER_AGENT)
             .timeout(Duration::from_millis(request_timeout_ms))
             .build()
             .map_err(Error::Http)?;
@@ -539,8 +540,8 @@ impl PackageRegistryClient {
 
                 let path = format!(
                     "/api/v1/crates/{}/{}{}",
-                    encode_segment(name),
-                    encode_segment(&version),
+                    encode_segment(name)?,
+                    encode_segment(&version)?,
                     "/dependencies"
                 );
                 let payload = self.get_json(runtime, &path, &[]).await?;
@@ -706,7 +707,7 @@ impl PackageRegistryClient {
         match self.provider {
             RegistryProvider::CratesIo => {
                 let details = self.crates_details(runtime, name).await?;
-                let path = format!("/api/v1/crates/{}/downloads", encode_segment(name));
+                let path = format!("/api/v1/crates/{}/downloads", encode_segment(name)?);
                 let payload = self.get_json(runtime, &path, &[]).await?;
                 let points = payload
                     .get("version_downloads")
@@ -738,13 +739,13 @@ impl PackageRegistryClient {
     }
 
     async fn npm_packument(&self, runtime: &ConnectorRuntime, name: &str) -> Result<Value> {
-        let path = format!("/{}", encode_segment(name));
+        let path = format!("/{}", encode_segment(name)?);
         self.get_json(runtime, &path, &[]).await
     }
 
     async fn pypi_project(&self, runtime: &ConnectorRuntime, name: &str) -> Result<Value> {
         let normalized = normalize_pypi_name(name);
-        let path = format!("/pypi/{}/json", encode_segment(&normalized));
+        let path = format!("/pypi/{}/json", encode_segment(&normalized)?);
         self.get_json(runtime, &path, &[]).await
     }
 
@@ -757,19 +758,19 @@ impl PackageRegistryClient {
         let normalized = normalize_pypi_name(name);
         let path = format!(
             "/pypi/{}/{}/json",
-            encode_segment(&normalized),
-            encode_segment(version)
+            encode_segment(&normalized)?,
+            encode_segment(version)?
         );
         self.get_json(runtime, &path, &[]).await
     }
 
     async fn crates_details(&self, runtime: &ConnectorRuntime, name: &str) -> Result<Value> {
-        let path = format!("/api/v1/crates/{}", encode_segment(name));
+        let path = format!("/api/v1/crates/{}", encode_segment(name)?);
         self.get_json(runtime, &path, &[]).await
     }
 
     async fn crates_owners(&self, runtime: &ConnectorRuntime, name: &str) -> Result<Vec<String>> {
-        let path = format!("/api/v1/crates/{}/owners", encode_segment(name));
+        let path = format!("/api/v1/crates/{}/owners", encode_segment(name)?);
         let payload = self.get_json(runtime, &path, &[]).await?;
         Ok(payload
             .get("users")
@@ -809,7 +810,10 @@ impl PackageRegistryClient {
             async move {
                 debug!(attempt, provider = provider.as_str(), url = %redact_url(&url), "package registry GET");
 
-                let mut request = client.get(&url);
+                let mut request =
+                    client
+                        .get(&url)
+                        .header(reqwest::header::USER_AGENT, "fcp-package-registry/0.1");
                 request = with_auth(request, token.as_deref());
                 if !query.is_empty() {
                     request = request.query(&query);
@@ -905,11 +909,34 @@ fn validate_name(name: &str) -> Result<&str> {
     if trimmed.is_empty() {
         return Err(Error::InvalidInput("name must not be empty".into()));
     }
+    // A bare `.`/`..` package name would normalize to a sibling endpoint
+    // (`/{name}` → `/..` → registry root). Package names never legitimately
+    // contain consecutive dots.
+    if trimmed == "." || trimmed.contains("..") {
+        return Err(Error::InvalidInput(
+            "name must not contain path-traversal segments".into(),
+        ));
+    }
     Ok(trimmed)
 }
 
-fn encode_segment(input: &str) -> String {
-    utf8_percent_encode(input, PATH_SEGMENT).to_string()
+/// Percent-encode a value as a single URL path segment.
+///
+/// `PATH_SEGMENT` encodes slashes and other separators but not `.`, so a bare
+/// `.`/`..` segment (a package name or version) would survive to the server and
+/// normalize to a sibling endpoint (e.g. `/api/v1/crates/{name}/../dependencies`
+/// → `/api/v1/crates/dependencies`, dropping the name). Names and versions never
+/// legitimately contain consecutive dots, so such values are rejected.
+fn encode_segment(input: &str) -> Result<String> {
+    if input.is_empty() {
+        return Err(Error::InvalidInput("path segment must not be empty".into()));
+    }
+    if input == "." || input.contains("..") {
+        return Err(Error::InvalidInput(
+            "path segment must not contain traversal sequences".into(),
+        ));
+    }
+    Ok(utf8_percent_encode(input, PATH_SEGMENT).to_string())
 }
 
 fn latest_npm_version(payload: &Value) -> Option<String> {
@@ -1093,40 +1120,24 @@ fn split_keywords(value: Option<&str>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use fcp_sdk::migration::{ConnectorRuntimeConfig, HttpRetryConfig};
     use serde_json::json;
-    use wiremock::matchers::{header, method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
-    fn runtime_with_timeout(timeout_ms: u64) -> ConnectorRuntime {
-        ConnectorRuntime::new(
-            ConnectorRuntimeConfig::default()
-                .with_request_timeout(Duration::from_millis(timeout_ms)),
-        )
-    }
-
-    fn client(
-        provider: RegistryProvider,
-        base_url: &str,
-        token: Option<&str>,
-        retry_config: HttpRetryConfig,
-        request_timeout_ms: u64,
-    ) -> PackageRegistryClient {
-        PackageRegistryClient::new(
-            provider,
-            base_url.to_string(),
-            token.map(ToOwned::to_owned),
-            retry_config,
-            request_timeout_ms,
-        )
-        .unwrap()
+    #[test]
+    fn encode_segment_escapes_scoped_npm_name() {
+        assert_eq!(encode_segment("@scope/name").unwrap(), "@scope%2Fname");
     }
 
     #[test]
-    fn encode_segment_escapes_scoped_npm_name() {
-        assert_eq!(encode_segment("@scope/name"), "@scope%2Fname");
+    fn encode_segment_rejects_traversal() {
+        // A bare `.`/`..` name or version would normalize to a sibling endpoint.
+        for evil in ["..", ".", "../..", "a..b", ""] {
+            assert!(
+                matches!(encode_segment(evil), Err(Error::InvalidInput(_))),
+                "path segment {evil:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1159,175 +1170,5 @@ mod tests {
         assert_eq!(deps[0].name, "serde");
         assert_eq!(deps[0].kind.as_deref(), Some("dependency"));
         assert_eq!(deps[0].optional, Some(false));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn search_uses_page_offset_for_npm() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/-/v1/search"))
-            .and(query_param("text", "serde"))
-            .and(query_param("size", "2"))
-            .and(query_param("from", "2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "total": 1,
-                "objects": [
-                    {
-                        "package": {
-                            "name": "serde-json",
-                            "description": "fixture",
-                            "version": "1.0.0",
-                            "links": { "homepage": "https://example.test/serde-json" }
-                        }
-                    }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let runtime = runtime_with_timeout(1_000);
-        let client = client(
-            RegistryProvider::Npm,
-            &server.uri(),
-            None,
-            HttpRetryConfig {
-                max_retries: 0,
-                ..HttpRetryConfig::default()
-            },
-            1_000,
-        );
-
-        let response = client.search(&runtime, "serde", 2, 2).await.unwrap();
-        assert_eq!(response.page, 2);
-        assert_eq!(response.limit, 2);
-        assert_eq!(response.results[0].name, "serde-json");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_includes_auth_header_when_token_supplied() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/crates"))
-            .and(query_param("q", "serde"))
-            .and(query_param("per_page", "1"))
-            .and(header("authorization", "Bearer crates-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "crates": [{ "name": "serde", "max_version": "1.0.228" }],
-                "meta": { "total": 1 }
-            })))
-            .mount(&server)
-            .await;
-
-        let runtime = runtime_with_timeout(1_000);
-        let client = client(
-            RegistryProvider::CratesIo,
-            &server.uri(),
-            Some("crates-token"),
-            HttpRetryConfig {
-                max_retries: 0,
-                ..HttpRetryConfig::default()
-            },
-            1_000,
-        );
-
-        let probe = client.health_check(&runtime).await.unwrap();
-        assert_eq!(probe["provider"], "crates_io");
-        assert_eq!(probe["anonymous"], false);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_maps_401_to_unauthorized() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/crates"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-                "errors": [{ "detail": "bad token" }]
-            })))
-            .mount(&server)
-            .await;
-
-        let runtime = runtime_with_timeout(1_000);
-        let client = client(
-            RegistryProvider::CratesIo,
-            &server.uri(),
-            Some("bad-token"),
-            HttpRetryConfig {
-                max_retries: 0,
-                ..HttpRetryConfig::default()
-            },
-            1_000,
-        );
-
-        let error = client.health_check(&runtime).await.unwrap_err();
-        match error {
-            Error::Unauthorized(message) => assert!(message.contains("crates_io")),
-            other => panic!("expected unauthorized error, got {other:?}"),
-        }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn search_retries_retryable_503_once() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/-/v1/search"))
-            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
-                "message": "temporary outage"
-            })))
-            .mount(&server)
-            .await;
-
-        let runtime = runtime_with_timeout(1_000);
-        let client = client(
-            RegistryProvider::Npm,
-            &server.uri(),
-            None,
-            HttpRetryConfig {
-                max_retries: 1,
-                initial_delay_ms: 1,
-                max_delay_ms: 1,
-                jitter_enabled: false,
-            },
-            1_000,
-        );
-
-        let error = client.search(&runtime, "serde", 1, 1).await.unwrap_err();
-        assert!(matches!(error, Error::Api { status: 503, .. }));
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_timeout_surfaces_retryable_http_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/crates"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(Duration::from_millis(100))
-                    .set_body_json(json!({
-                        "crates": [{ "name": "serde", "max_version": "1.0.228" }],
-                        "meta": { "total": 1 }
-                    })),
-            )
-            .mount(&server)
-            .await;
-
-        let runtime = runtime_with_timeout(20);
-        let client = client(
-            RegistryProvider::CratesIo,
-            &server.uri(),
-            None,
-            HttpRetryConfig {
-                max_retries: 0,
-                ..HttpRetryConfig::default()
-            },
-            20,
-        );
-
-        let error = client.health_check(&runtime).await.unwrap_err();
-        match error {
-            Error::Http(inner) => assert!(inner.is_timeout()),
-            other => panic!("expected timeout http error, got {other:?}"),
-        }
     }
 }

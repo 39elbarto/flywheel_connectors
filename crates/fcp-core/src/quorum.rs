@@ -408,6 +408,19 @@ impl SignatureSet {
         self.signatures.is_empty()
     }
 
+    /// Return the first duplicate signer node ID, if the serialized signature
+    /// vector contains duplicates.
+    #[must_use]
+    pub fn duplicate_node_id(&self) -> Option<&str> {
+        let mut seen = BTreeSet::new();
+        for sig in &self.signatures {
+            if !seen.insert(sig.node_id.as_str()) {
+                return Some(sig.node_id.as_str());
+            }
+        }
+        None
+    }
+
     /// Get an iterator over the signatures.
     pub fn iter(&self) -> impl Iterator<Item = &NodeSignature> {
         self.signatures.iter()
@@ -1025,6 +1038,28 @@ mod tests {
         ));
         assert!(new_added, "New node-gamma should be accepted");
         assert_eq!(deserialized.len(), 3);
+    }
+
+    #[test]
+    fn test_signature_set_reports_malformed_deserialized_duplicate_node() {
+        let json = serde_json::json!({
+            "signatures": [
+                {
+                    "node_id": "node-alpha",
+                    "signature": "aa".repeat(64),
+                    "signed_at": 1000
+                },
+                {
+                    "node_id": "node-alpha",
+                    "signature": "bb".repeat(64),
+                    "signed_at": 2000
+                }
+            ]
+        });
+        let set: SignatureSet = serde_json::from_value(json).unwrap();
+
+        assert_eq!(set.len(), 2);
+        assert_eq!(set.duplicate_node_id(), Some("node-alpha"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

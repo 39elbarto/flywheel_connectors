@@ -21,6 +21,8 @@
 //! consumer of the normative `fcp-manifest` contract; this test is the
 //! provider-side verification that every published manifest satisfies it.
 
+#![allow(clippy::absurd_extreme_comparisons)]
+
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -200,7 +202,7 @@ fn connector_ids_are_unique_across_parsing_set() {
     let report = parse_all();
     let mut seen: HashSet<String> = HashSet::new();
     let mut dupes: Vec<String> = Vec::new();
-    for (_dir, manifest) in &report.passes {
+    for manifest in report.passes.values() {
         let id = manifest.connector.id.as_str().to_owned();
         if !seen.insert(id.clone()) {
             dupes.push(id);
@@ -213,7 +215,7 @@ fn connector_ids_are_unique_across_parsing_set() {
 }
 
 /// Every parsing manifest's `zones.home` is non-empty and never appears in
-/// `zones.forbidden` (also enforced by ConnectorManifest::validate, but this
+/// `zones.forbidden` (also enforced by `ConnectorManifest::validate`, but this
 /// verifies the differential holds across the full connector corpus).
 #[test]
 fn zones_home_never_forbidden_across_parsing_set() {

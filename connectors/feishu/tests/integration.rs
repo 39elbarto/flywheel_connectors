@@ -9,14 +9,17 @@
     clippy::unused_async
 )]
 
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_feishu::connector::{FeishuConnector, operations_info};
 use fcp_prelude::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
+    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, FcpError,
     HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus, OperationId,
     RequestId, SafetyTier, ZoneId,
 };
+use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker, ThreadOwnershipChecker};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
@@ -30,6 +33,7 @@ const OP_COMMENTS_CONTEXT_GET: &str = "feishu.comments.context.get";
 const OP_COMMENTS_PAIRINGS_MANAGE: &str = "feishu.comments.pairings.manage";
 const OP_COMMENTS_REACTION: &str = "feishu.comments.reaction";
 const OP_COMMENTS_REPLY: &str = "feishu.comments.reply";
+const OP_MESSAGES_REPLY: &str = "feishu.messages.reply";
 const OP_MESSAGES_SEND: &str = "feishu.messages.send";
 const OP_WEBHOOK_INGEST_REQUEST: &str = "feishu.webhook.ingest_request";
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/feishu_connector_verification.sh";
@@ -69,7 +73,7 @@ fn generate_valid_token(
 ) -> CapabilityToken {
     let capability = match op {
         OP_CHATS_LIST => "feishu.chats.read",
-        OP_MESSAGES_SEND => "feishu.messages.write",
+        OP_MESSAGES_SEND | OP_MESSAGES_REPLY => "feishu.messages.write",
         OP_WEBHOOK_INGEST_REQUEST => "feishu.webhook.ingest",
         OP_COMMENTS_CONTEXT_GET => "feishu.comments.read",
         OP_COMMENTS_PAIRINGS_MANAGE | OP_COMMENTS_REPLY | OP_COMMENTS_REACTION => {
@@ -373,7 +377,11 @@ fn invoke_req(
     }
 }
 
-async fn mock_auth_endpoint(server: &MockServer, status: u16) {
+async fn mock_auth_endpoint_with_expect(
+    server: &MockServer,
+    status: u16,
+    expected_calls: Option<u64>,
+) {
     let response = match status {
         200 => ResponseTemplate::new(200).set_body_json(json!({
             "code": 0,
@@ -386,11 +394,19 @@ async fn mock_auth_endpoint(server: &MockServer, status: u16) {
         _ => ResponseTemplate::new(status).set_body_string("upstream failure"),
     };
 
-    Mock::given(method("POST"))
+    let mock = Mock::given(method("POST"))
         .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-        .respond_with(response)
-        .mount(server)
-        .await;
+        .respond_with(response);
+    let mock = if let Some(expected_calls) = expected_calls {
+        mock.expect(expected_calls)
+    } else {
+        mock
+    };
+    mock.mount(server).await;
+}
+
+async fn mock_auth_endpoint(server: &MockServer, status: u16) {
+    mock_auth_endpoint_with_expect(server, status, None).await;
 }
 
 async fn setup_connector_with_extra_config(
@@ -428,6 +444,32 @@ async fn setup_connector_with_extra_config(
 
 async fn setup_connector(server: &MockServer) -> (FeishuConnector, Ed25519SigningKey) {
     setup_connector_with_extra_config(server, json!({})).await
+}
+
+async fn configure_connector_without_auth_mock(
+    connector: &mut FeishuConnector,
+    server: &MockServer,
+    signing_key: &Ed25519SigningKey,
+) {
+    connector
+        .configure(json!({
+            "base_url": server.uri(),
+            "app_id": APP_ID,
+            "app_secret": APP_SECRET,
+            "retry": {
+                "max_retries": 0,
+                "initial_delay_ms": 1,
+                "max_delay_ms": 1,
+                "jitter_enabled": false
+            },
+            "request_timeout_ms": 1_000
+        }))
+        .await
+        .unwrap();
+    connector
+        .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+        .await
+        .unwrap();
 }
 
 async fn invoke_ok_result(
@@ -632,9 +674,154 @@ async fn invoke_messages_send_emits_mutation_evidence() {
     let result = response.result.expect("send result");
     assert_eq!(result["message_id"], "om_dc13264520392913993dd051dba21dcf");
     assert_eq!(result["msg_type"], "text");
+    assert_eq!(result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(result["coordination"][1]["outcome"], "granted");
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
+    let coordination_text =
+        serde_json::to_string(&result["coordination"]).expect("serialize coordination");
+    assert!(
+        !coordination_text.contains("ou_123456"),
+        "coordination audit must not leak raw Feishu receiver IDs"
+    );
+    assert!(
+        !coordination_text.contains("hello from integration"),
+        "coordination audit must not leak message bodies"
+    );
     println!(
         "feishu_message_send_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_messages_send_claims_recipient_and_denies_duplicate_before_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages"))
+        .and(query_param("receive_id_type", "open_id"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "message_id": "om_claimed_once",
+                "msg_type": "text"
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let checker: Arc<dyn ThreadOwnershipChecker> = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut first = FeishuConnector::new()
+        .with_thread_ownership_checker(Arc::clone(&checker), ChatCoordinationBackend::InMemory);
+    let mut second = FeishuConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    let first_key = Ed25519SigningKey::generate();
+    let second_key = Ed25519SigningKey::generate();
+    configure_connector_without_auth_mock(&mut first, &server, &first_key).await;
+    configure_connector_without_auth_mock(&mut second, &server, &second_key).await;
+    let first_id = first.instance_id().clone();
+    let second_id = second.instance_id().clone();
+    mock_auth_endpoint_with_expect(&server, 200, Some(1)).await;
+
+    let first_response = first
+        .invoke(invoke_req(
+            OP_MESSAGES_SEND,
+            json!({
+                "receive_id": "ou_secret_claim_target",
+                "receive_id_type": "open_id",
+                "msg_type": "text",
+                "content": "{\"text\":\"secret Feishu body\"}"
+            }),
+            generate_valid_token(&first_key, OP_MESSAGES_SEND, &first_id),
+        ))
+        .await
+        .expect("first send should claim and reach provider");
+    assert_eq!(first_response.status, InvokeStatus::Ok);
+    let first_result = first_response.result.expect("first send result");
+    assert_eq!(first_result["message_id"], "om_claimed_once");
+    assert_eq!(first_result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(first_result["coordination"][1]["outcome"], "granted");
+    assert_eq!(first_result["coordination"][2]["event"], "send_executed");
+    let coordination_text =
+        serde_json::to_string(&first_result["coordination"]).expect("serialize coordination");
+    assert!(
+        !coordination_text.contains("ou_secret_claim_target"),
+        "coordination audit must not leak raw Feishu receiver IDs"
+    );
+    assert!(
+        !coordination_text.contains("secret Feishu body"),
+        "coordination audit must not leak message bodies"
+    );
+
+    let duplicate = second
+        .invoke(invoke_req(
+            OP_MESSAGES_SEND,
+            json!({
+                "receive_id": "ou_secret_claim_target",
+                "receive_id_type": "open_id",
+                "msg_type": "text",
+                "content": "{\"text\":\"secret Feishu body\"}"
+            }),
+            generate_valid_token(&second_key, OP_MESSAGES_SEND, &second_id),
+        ))
+        .await
+        .expect_err("duplicate active owner should be denied before Feishu HTTP");
+    assert!(matches!(
+        duplicate,
+        FcpError::Unauthorized { code: 4090, ref message }
+            if message.starts_with("thread_owned_by_peer:") && message.contains(first_id.as_str())
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_messages_reply_claims_message_and_includes_coordination() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages/om_parent/reply"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "message_id": "om_reply_created",
+                "root_id": "om_parent",
+                "msg_type": "text"
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_MESSAGES_REPLY,
+            json!({
+                "message_id": "om_parent",
+                "msg_type": "text",
+                "content": "{\"text\":\"thread reply body\"}"
+            }),
+            generate_valid_token(&signing_key, OP_MESSAGES_REPLY, connector.instance_id()),
+        ))
+        .await
+        .expect("reply should invoke");
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let result = response.result.expect("reply result");
+    assert_eq!(result["message_id"], "om_reply_created");
+    assert_eq!(result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(result["coordination"][1]["outcome"], "granted");
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
+    let coordination_text =
+        serde_json::to_string(&result["coordination"]).expect("serialize coordination");
+    assert!(
+        !coordination_text.contains("om_parent"),
+        "coordination audit must not leak raw Feishu message IDs"
+    );
+    assert!(
+        !coordination_text.contains("thread reply body"),
+        "coordination audit must not leak reply bodies"
     );
 }
 
@@ -1501,6 +1688,18 @@ fn introspection_emits_v3_compliance_evidence() {
         .find(|operation| operation.id.as_str() == OP_MESSAGES_SEND)
         .expect("messages.send operation");
     assert_eq!(send.safety_tier, SafetyTier::Risky);
+    assert_eq!(
+        send.output_schema["required"],
+        json!(["message_id", "coordination"])
+    );
+    let reply = operations
+        .iter()
+        .find(|operation| operation["id"] == OP_MESSAGES_REPLY)
+        .expect("messages.reply operation");
+    assert_eq!(
+        reply["output_schema"]["required"],
+        json!(["message_id", "coordination"])
+    );
 
     let chats_list = operations
         .iter()
@@ -1543,5 +1742,122 @@ fn introspection_emits_v3_compliance_evidence() {
     println!(
         "feishu_introspection_evidence={}",
         serde_json::to_string_pretty(&value).unwrap()
+    );
+}
+
+// ── Replay safety on retry (br-kxd3e) ────────────────────────────────
+//
+// A 5xx or a timeout can both be reported after Feishu already delivered the
+// message, so a bare retry sends it twice. Feishu deduplicates messaging
+// requests on a `uuid` BODY field (not a header, unlike Stripe/Mastodon),
+// which makes the retry genuinely safe rather than merely refused.
+//
+// These pin the DISTINCTION: a per-attempt uuid would still "succeed" here,
+// so what is asserted is that both attempts carry the SAME value.
+
+fn test_runtime() -> fcp_sdk::ConnectorRuntime {
+    fcp_sdk::ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default())
+}
+
+fn replay_test_client(server: &MockServer) -> fcp_feishu::client::FeishuClient {
+    fcp_feishu::client::FeishuClient::new(
+        &server.uri(),
+        APP_ID,
+        APP_SECRET,
+        fcp_sdk::migration::HttpRetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            max_delay_ms: 5,
+            jitter_enabled: false,
+        },
+        std::time::Duration::from_secs(5),
+    )
+    .expect("wiremock URI should build a Feishu client")
+}
+
+/// Request bodies for the message endpoints, in arrival order.
+async fn message_request_bodies(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .iter()
+        .filter(|r| r.url.path().contains("/im/v1/messages"))
+        .map(|r| serde_json::from_slice(&r.body).expect("request body should be JSON"))
+        .collect()
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_presents_one_stable_dedup_uuid_across_attempts() {
+    let server = MockServer::start().await;
+    mock_auth_endpoint(&server, 200).await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/im/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "ok",
+            "data": { "message_id": "om_1" }
+        })))
+        .mount(&server)
+        .await;
+
+    let request = fcp_feishu::types::SendMessageRequest {
+        receive_id: "ou_1".into(),
+        msg_type: "text".into(),
+        content: "{\"text\":\"hi\"}".into(),
+    };
+    replay_test_client(&server)
+        .send_message(&test_runtime(), "open_id", &request)
+        .await
+        .expect("the retry should succeed");
+
+    let bodies = message_request_bodies(&server).await;
+    assert_eq!(bodies.len(), 2, "the 503 should have been retried");
+
+    let first = bodies[0]["uuid"].as_str().unwrap_or_default();
+    assert!(
+        !first.is_empty(),
+        "send_message must carry a `uuid` so Feishu can deduplicate the retry"
+    );
+    assert_eq!(
+        first,
+        bodies[1]["uuid"].as_str().unwrap_or_default(),
+        "both attempts must present the SAME uuid — a per-attempt value would \
+         let Feishu treat the retry as a new message and deliver it twice"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn add_whole_comment_is_not_retried_after_a_5xx() {
+    let server = MockServer::start().await;
+    mock_auth_endpoint(&server, 200).await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/drive/v1/files/doc-1/new_comments"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let result = replay_test_client(&server)
+        .add_whole_comment(&test_runtime(), "doc-1", "docx", "hello")
+        .await;
+    assert!(result.is_err());
+
+    let comment_requests = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .iter()
+        .filter(|r| r.url.path().ends_with("/new_comments"))
+        .count();
+    assert_eq!(
+        comment_requests, 1,
+        "Drive comments take no dedup key, and a 503 means Feishu received the \
+         request — a retry posts a SECOND comment"
     );
 }

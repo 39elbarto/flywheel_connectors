@@ -9,17 +9,21 @@
     clippy::unused_async
 )]
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_line::client::LineClient;
 use fcp_line::connector::{LineConnector, operations_info};
+use fcp_line::error::LineError;
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     FcpError, HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus,
     OperationId, RequestId, SafetyTier, ZoneId,
 };
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
@@ -179,6 +183,89 @@ async fn mock_bot_info(server: &MockServer, status: u16) {
         .respond_with(response)
         .mount(server)
         .await;
+}
+
+fn line_client(server: &MockServer, token: &str) -> LineClient {
+    LineClient::new(
+        &server.uri(),
+        token,
+        HttpRetryConfig::default(),
+        StdDuration::from_secs(30),
+    )
+    .expect("wiremock URI should build LINE client")
+}
+
+fn client_runtime() -> ConnectorRuntime {
+    ConnectorRuntime::new(ConnectorRuntimeConfig::default())
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_statuses_and_secretless_auth_contracts() {
+    let success_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/bot/info"))
+        .and(header("authorization", &format!("Bearer {TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&success_server)
+        .await;
+    assert!(
+        line_client(&success_server, TOKEN)
+            .health_check()
+            .await
+            .is_ok()
+    );
+
+    let unauthorized_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/bot/info"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&unauthorized_server)
+        .await;
+    let unauthorized = line_client(&unauthorized_server, "bad_tok")
+        .health_check()
+        .await;
+    assert!(matches!(unauthorized, Err(LineError::Unauthorized(_))));
+
+    let secretless_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/bot/info"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&secretless_server)
+        .await;
+    assert!(
+        line_client(&secretless_server, "")
+            .health_check()
+            .await
+            .is_ok()
+    );
+    let requests = secretless_server
+        .received_requests()
+        .await
+        .unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].headers.get("authorization").is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_group_members_start_query_is_percent_encoded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/bot/group/C123/members/ids"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "memberIds": [],
+            "next": null
+        })))
+        .mount(&server)
+        .await;
+
+    line_client(&server, TOKEN)
+        .get_group_members(&client_runtime(), "C123", Some("tok&other=value"))
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.query(), Some("start=tok%26other%3Dvalue"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -613,5 +700,210 @@ fn introspection_emits_v3_compliance_evidence() {
     println!(
         "line_introspection_evidence={}",
         serde_json::to_string_pretty(&value).unwrap()
+    );
+}
+
+// ── Replay safety on retry (br-kxd3e) ────────────────────────────────
+//
+// Retrying a send after a 5xx or a timeout duplicates the message unless
+// something deduplicates it, because both failures can be reported after LINE
+// already delivered. LINE offers `X-Line-Retry-Key` on push/multicast, so the
+// fix makes the retry SAFE rather than merely refusing it.
+//
+// What these pin is the DISTINCTION. Asserting only "the call still succeeds"
+// would pass with a per-attempt key, which looks like protection and provides
+// exactly zero.
+
+/// A fast retry budget so the 5xx-then-200 tests do not sleep.
+fn fast_retry_client(server: &MockServer) -> LineClient {
+    LineClient::new(
+        &server.uri(),
+        TOKEN,
+        HttpRetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            max_delay_ms: 5,
+            jitter_enabled: false,
+        },
+        StdDuration::from_secs(30),
+    )
+    .expect("wiremock URI should build LINE client")
+}
+
+fn sample_rich_menu() -> fcp_line::types::RichMenu {
+    fcp_line::types::RichMenu {
+        rich_menu_id: None,
+        size: fcp_line::types::RichMenuSize {
+            width: 2500,
+            height: 1686,
+        },
+        selected: false,
+        name: "kxd3e menu".into(),
+        chat_bar_text: "Menu".into(),
+        areas: Vec::new(),
+    }
+}
+
+fn retry_keys_of(requests: &[wiremock::Request]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|r| {
+            r.headers
+                .get("x-line-retry-key")
+                .map(|v| v.to_str().expect("header is ASCII").to_string())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+#[fcp_async_core::runtime::test]
+async fn push_message_presents_one_stable_retry_key_across_attempts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/message/push"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/message/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "sentMessages": [] })))
+        .mount(&server)
+        .await;
+
+    fast_retry_client(&server)
+        .push_message(
+            &client_runtime(),
+            "U1",
+            vec![fcp_line::types::Message::Text { text: "hi".into() }],
+        )
+        .await
+        .expect("the retry should succeed");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 2, "the 500 should have been retried");
+
+    let keys = retry_keys_of(&requests);
+    assert!(
+        !keys[0].is_empty(),
+        "push must carry {} so LINE can deduplicate the retry",
+        "X-Line-Retry-Key"
+    );
+    assert_eq!(
+        keys[0], keys[1],
+        "both attempts must present the SAME key — a per-attempt key would \
+         let LINE treat the retry as a new message and deliver it twice"
+    );
+    assert!(
+        uuid::Uuid::parse_str(&keys[0]).is_ok(),
+        "LINE rejects a retry key that is not a UUID, got {:?}",
+        keys[0]
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn reply_message_sends_no_retry_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/message/reply"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "sentMessages": [] })))
+        .mount(&server)
+        .await;
+
+    fast_retry_client(&server)
+        .reply_message(
+            &client_runtime(),
+            "reply-token",
+            vec![fcp_line::types::Message::Text { text: "hi".into() }],
+        )
+        .await
+        .expect("reply should succeed");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        retry_keys_of(&requests)[0],
+        "",
+        "the reply endpoint takes no retry key — its safety comes from the \
+         reply token being single-use"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn push_message_treats_409_as_the_original_send_succeeding() {
+    let server = MockServer::start().await;
+    // LINE answers a repeat of a key it has already seen with 409 and does NOT
+    // send the message again.
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/message/push"))
+        .respond_with(ResponseTemplate::new(409))
+        .mount(&server)
+        .await;
+
+    let result = fast_retry_client(&server)
+        .push_message(
+            &client_runtime(),
+            "U1",
+            vec![fcp_line::types::Message::Text { text: "hi".into() }],
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "409 against our own retry key means LINE already accepted the \
+         message; reporting an error would invite an invoke-level retry that \
+         mints a fresh key and genuinely duplicates it — got {result:?}"
+    );
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1, "a 409 is final, not retried");
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_rich_menu_is_not_retried_after_a_5xx() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/richmenu"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let result = fast_retry_client(&server)
+        .create_rich_menu(&client_runtime(), &sample_rich_menu())
+        .await;
+    assert!(result.is_err());
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "LINE has no dedup key for rich-menu creation, and a 503 means LINE \
+         received the request — a retry would create a SECOND menu"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_rich_menu_still_retries_a_429() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/richmenu"))
+        .respond_with(ResponseTemplate::new(429))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/richmenu"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "richMenuId": "rm-1" })))
+        .mount(&server)
+        .await;
+
+    fast_retry_client(&server)
+        .create_rich_menu(&client_runtime(), &sample_rich_menu())
+        .await
+        .expect("a rate-limited request was refused without creating anything");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "429 means LINE did NOT create the menu, so backoff must be preserved"
     );
 }

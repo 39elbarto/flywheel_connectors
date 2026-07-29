@@ -27,9 +27,9 @@
 //!    `AllowedConnector::Any`.
 //! 6. **`add_zone_operation`** rejects malformed zone OR operation;
 //!    accepts `*` as `AllowedOperation::Any`.
-//! 7. **`AllowedConnector::Any` matches every ConnectorId**;
+//! 7. **`AllowedConnector::Any` matches every `ConnectorId`**;
 //!    `AllowedConnector::Connector(x)` matches only `x`.
-//! 8. **`AllowedOperation::Any` matches every OperationId**;
+//! 8. **`AllowedOperation::Any` matches every `OperationId`**;
 //!    `AllowedOperation::Operation(x)` matches only `x`.
 //! 9. **`EnforcementConfigError` Display** — operator log greps
 //!    depend on "invalid zone id" / "invalid connector id" /

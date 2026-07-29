@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:c21df258ce24502e59023ecb09be4bff6b4990bf5f9c4dbfc35fae44d14da908"
+interface_hash = "blake3-256:fcp.interface.v2:e34f724375daec048e0a9e6a714129dd4268504b5ed37af69417406a9bb82b07"
 
 [connector]
 id = "fcp.package-registry"
@@ -14,6 +14,7 @@ version = "0.1.0"
 description = "Provider-bound package registry metadata connector for npm, PyPI, and crates.io"
 archetypes = ["operational"]
 format = "native"
+status = "proven"
 
 [connector.state]
 model = "stateless"
@@ -37,6 +38,12 @@ required = [
     "network.dns",
     "network.egress",
     "network.tls.sni",
+    "registry.artifacts.read",
+    "registry.dependencies.read",
+    "registry.downloads.read",
+    "registry.packages.read",
+    "registry.search",
+    "registry.versions.read",
 ]
 optional = []
 forbidden = [
@@ -416,7 +423,10 @@ max_response_bytes = 1048576
 [provides.operations."registry.search".ai_hints]
 when_to_use = "Use when you need npm or crates.io package discovery for a text query."
 common_mistakes = ["PyPI search is intentionally unsupported in the first slice."]
-examples = ['{"query":"serde","limit":5,"page":1}']
+examples = [
+    '{"query":"serde","limit":5,"page":1}',
+    '{"query":"react","limit":10,"page":2}',
+]
 related = ["registry.packages.get"]
 
 [provides.operations."registry.versions.list"]

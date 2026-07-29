@@ -3,9 +3,15 @@
 //! Diagnoses common connector issues (auth failure, rate limiting, high latency,
 //! config errors) and suggests specific fix-it commands or automatic repairs.
 
+pub mod self_test;
+
 use serde::Serialize;
 use serde_json::Value;
 use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::SystemTime;
 
 // ── Diagnosis types ────────────────────────────────────────────────
 
@@ -25,6 +31,7 @@ pub enum Severity {
 
 impl Severity {
     /// Human-readable label.
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Info => "info",
@@ -67,6 +74,7 @@ pub enum DiagnosisCategory {
 
 impl DiagnosisCategory {
     /// Human-readable display name.
+    #[must_use]
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Auth => "Authentication",
@@ -168,6 +176,7 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Healthy => "healthy",
@@ -205,11 +214,13 @@ impl DiagnosticReport {
     }
 
     /// Whether this report has any issues.
+    #[must_use]
     pub fn has_issues(&self) -> bool {
         !self.diagnoses.is_empty()
     }
 
     /// Count of auto-safe fixes available.
+    #[must_use]
     pub fn auto_fixable_count(&self) -> usize {
         self.diagnoses
             .iter()
@@ -219,6 +230,7 @@ impl DiagnosticReport {
     }
 
     /// All fix commands across all diagnoses.
+    #[must_use]
     pub fn all_fix_commands(&self) -> Vec<&str> {
         self.diagnoses
             .iter()
@@ -228,6 +240,7 @@ impl DiagnosticReport {
     }
 
     /// Render as TOON-style summary.
+    #[must_use]
     pub fn summary_line(&self) -> String {
         if self.diagnoses.is_empty() {
             format!("{}  {}", self.connector_id, self.status)
@@ -249,6 +262,7 @@ impl DiagnosticReport {
     }
 
     /// Render as structured JSON value.
+    #[must_use]
     pub fn to_json(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
@@ -288,6 +302,7 @@ pub struct Symptoms {
 }
 
 /// Diagnose symptoms for a connector.
+#[must_use]
 pub fn diagnose(connector_id: &str, symptoms: &Symptoms) -> DiagnosticReport {
     let mut diagnoses = Vec::new();
 
@@ -544,6 +559,7 @@ fn diagnose_rate_limit(connector_id: &str, percent: u8) -> Option<Diagnosis> {
 // ── TOON formatting ───────────────────────────────────────────────
 
 /// Format a single diagnostic report as TOON text.
+#[must_use]
 pub fn format_report_toon(report: &DiagnosticReport) -> String {
     let mut out = String::new();
     let indicator = match report.status {
@@ -620,6 +636,7 @@ pub fn format_fleet_toon(reports: &[DiagnosticReport]) -> String {
 }
 
 /// Collect all auto-safe fix commands from a set of reports.
+#[must_use]
 pub fn collect_auto_fixes(reports: &[DiagnosticReport]) -> Vec<AutoFix> {
     reports
         .iter()
@@ -646,11 +663,575 @@ pub struct AutoFix {
     pub command: String,
 }
 
+// ── Lean formal-proof doctor ──────────────────────────────────────
+
+const LEAN_DOCTOR_SCHEMA_VERSION: &str = "fcp.fwc.doctor.lean.v1";
+
+const LEAN_PROOF_OBLIGATIONS: [(&str, &str, &str); 5] = [
+    (
+        "lean/Fcp/Zone/Lattice.lean",
+        "Fcp.Zone.Lattice",
+        "zone_flow_soundness",
+    ),
+    (
+        "lean/Fcp/Capability/Typestate.lean",
+        "Fcp.Capability.Typestate",
+        "typestate_progression_no_skip",
+    ),
+    (
+        "lean/Fcp/Audit/HashChain.lean",
+        "Fcp.Audit.HashChain",
+        "chain_tamper_evident",
+    ),
+    (
+        "lean/Fcp/Crypto/HybridSignature.lean",
+        "Fcp.Crypto.HybridSignature",
+        "hybrid_unforgeable_under_one_break",
+    ),
+    (
+        "lean/Fcp/Mesh/CrdtMerge.lean",
+        "Fcp.Mesh.CrdtMerge",
+        "crdt_merge_lattice_laws",
+    ),
+];
+
+/// Machine-readable status for a Lean doctor check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeanDoctorStatus {
+    /// The check passed.
+    Pass,
+    /// The check could not run or found a non-blocking advisory.
+    Warn,
+    /// The check failed and the formal gate is not healthy.
+    Fail,
+}
+
+impl LeanDoctorStatus {
+    const fn penalty(self) -> u16 {
+        match self {
+            Self::Pass => 0,
+            Self::Warn => 50,
+            Self::Fail => 250,
+        }
+    }
+}
+
+/// A single read-only Lean doctor check result.
+#[derive(Clone, Debug, Serialize)]
+pub struct LeanDoctorCheck {
+    /// Stable check identifier.
+    pub id: String,
+    /// Result status.
+    pub status: LeanDoctorStatus,
+    /// Human-readable check summary.
+    pub message: String,
+    /// Evidence paths, commands, or diagnostic snippets.
+    pub evidence: Vec<String>,
+}
+
+/// Operator-facing report for `fwc doctor lean`.
+#[derive(Clone, Debug, Serialize)]
+pub struct LeanDoctorReport {
+    /// Stable JSON schema identifier.
+    pub schema_version: &'static str,
+    /// True only when all required checks pass.
+    pub healthy: bool,
+    /// 0-1000 readiness score.
+    pub score: u16,
+    /// Proof obligations that the doctor expects.
+    pub proof_obligations: Vec<LeanProofObligation>,
+    /// Individual check results.
+    pub checks: Vec<LeanDoctorCheck>,
+    /// Redaction-safe remediation or verification commands.
+    pub commands: Vec<String>,
+}
+
+/// A Lean proof file/module/theorem tuple covered by the formal gate.
+#[derive(Clone, Debug, Serialize)]
+pub struct LeanProofObligation {
+    /// Repository-relative Lean file path.
+    pub path: &'static str,
+    /// Lake module name.
+    pub module: &'static str,
+    /// Representative theorem required in the coverage matrix.
+    pub theorem: &'static str,
+}
+
+/// Build the read-only Lean formal-proof doctor report.
+#[must_use]
+pub fn lean_doctor_report(
+    workspace_root: &Path,
+    run_compile: bool,
+    check_binaries: bool,
+) -> LeanDoctorReport {
+    let mut checks = Vec::new();
+
+    push_file_check(&mut checks, workspace_root, "lean-toolchain");
+    push_file_check(&mut checks, workspace_root, "lakefile.lean");
+    push_file_check(&mut checks, workspace_root, "lake-manifest.json");
+    push_file_check(
+        &mut checks,
+        workspace_root,
+        "docs/formal/coverage-matrix.md",
+    );
+    push_file_check(
+        &mut checks,
+        workspace_root,
+        ".github/workflows/lean-verify.yml",
+    );
+
+    push_binary_check(&mut checks, "elan", check_binaries);
+    push_binary_check(&mut checks, "lake", check_binaries);
+    push_toolchain_pin_check(&mut checks, workspace_root);
+    push_proof_file_checks(&mut checks, workspace_root);
+    push_coverage_matrix_check(&mut checks, workspace_root);
+    push_workflow_artifact_contract_check(&mut checks, workspace_root);
+    push_latest_ci_artifact_check(&mut checks, workspace_root);
+    push_compile_check(&mut checks, workspace_root, run_compile);
+
+    let penalty = checks
+        .iter()
+        .map(|check| check.status.penalty())
+        .sum::<u16>()
+        .min(1000);
+    let score = 1000 - penalty;
+    let healthy = checks
+        .iter()
+        .all(|check| check.status != LeanDoctorStatus::Fail);
+
+    LeanDoctorReport {
+        schema_version: LEAN_DOCTOR_SCHEMA_VERSION,
+        healthy,
+        score,
+        proof_obligations: LEAN_PROOF_OBLIGATIONS
+            .iter()
+            .map(|&(path, module, theorem)| LeanProofObligation {
+                path,
+                module,
+                theorem,
+            })
+            .collect(),
+        checks,
+        commands: vec![
+            "make lean-verify".to_owned(),
+            "lake build Fcp".to_owned(),
+            "fwc doctor lean --json".to_owned(),
+        ],
+    }
+}
+
+fn push_check(
+    checks: &mut Vec<LeanDoctorCheck>,
+    id: impl Into<String>,
+    status: LeanDoctorStatus,
+    message: impl Into<String>,
+    evidence: Vec<String>,
+) {
+    checks.push(LeanDoctorCheck {
+        id: id.into(),
+        status,
+        message: message.into(),
+        evidence,
+    });
+}
+
+fn push_file_check(checks: &mut Vec<LeanDoctorCheck>, root: &Path, relative: &str) {
+    let path = root.join(relative);
+    if path.is_file() {
+        push_check(
+            checks,
+            format!("file.{relative}"),
+            LeanDoctorStatus::Pass,
+            format!("{relative} is present"),
+            vec![relative.to_owned()],
+        );
+    } else {
+        push_check(
+            checks,
+            format!("file.{relative}"),
+            LeanDoctorStatus::Fail,
+            format!("{relative} is missing"),
+            vec![path.display().to_string()],
+        );
+    }
+}
+
+fn push_binary_check(checks: &mut Vec<LeanDoctorCheck>, binary: &str, check_binaries: bool) {
+    if !check_binaries {
+        push_check(
+            checks,
+            format!("binary.{binary}"),
+            LeanDoctorStatus::Warn,
+            format!("{binary} availability check skipped"),
+            vec![format!("{binary} --version")],
+        );
+        return;
+    }
+
+    match Command::new(binary).arg("--version").output() {
+        Ok(output) if output.status.success() => push_check(
+            checks,
+            format!("binary.{binary}"),
+            LeanDoctorStatus::Pass,
+            format!("{binary} is reachable"),
+            vec![first_output_line(&output.stdout, &output.stderr)],
+        ),
+        Ok(output) => push_check(
+            checks,
+            format!("binary.{binary}"),
+            LeanDoctorStatus::Fail,
+            format!("{binary} --version exited unsuccessfully"),
+            vec![first_output_line(&output.stdout, &output.stderr)],
+        ),
+        Err(error) => push_check(
+            checks,
+            format!("binary.{binary}"),
+            LeanDoctorStatus::Fail,
+            format!("{binary} is not reachable: {error}"),
+            vec![format!("{binary} --version")],
+        ),
+    }
+}
+
+fn push_toolchain_pin_check(checks: &mut Vec<LeanDoctorCheck>, root: &Path) {
+    let toolchain = read_optional(root, "lean-toolchain");
+    let lakefile = read_optional(root, "lakefile.lean");
+    let manifest = read_optional(root, "lake-manifest.json");
+    let Some(toolchain) = toolchain else {
+        push_check(
+            checks,
+            "toolchain.pin",
+            LeanDoctorStatus::Fail,
+            "lean-toolchain is missing",
+            vec!["lean-toolchain".to_owned()],
+        );
+        return;
+    };
+    let expected = toolchain.trim();
+    let lake_mentions_version = lakefile
+        .as_deref()
+        .is_some_and(|source| source.contains("5e932f97dd25535344f80f9dd8da3aab83df0fe6"));
+    let manifest_mentions_version = manifest
+        .as_deref()
+        .is_some_and(manifest_has_expected_mathlib_rev);
+
+    if expected == "leanprover/lean4:v4.29.1" && lake_mentions_version && manifest_mentions_version
+    {
+        push_check(
+            checks,
+            "toolchain.pin",
+            LeanDoctorStatus::Pass,
+            "Lean compiler and mathlib pins match the formal gate contract",
+            vec![
+                "lean-toolchain=leanprover/lean4:v4.29.1".to_owned(),
+                "mathlib=5e932f97dd25535344f80f9dd8da3aab83df0fe6".to_owned(),
+            ],
+        );
+    } else {
+        push_check(
+            checks,
+            "toolchain.pin",
+            LeanDoctorStatus::Fail,
+            "Lean compiler or mathlib pin drifted from the formal gate contract",
+            vec![
+                format!("lean-toolchain={expected}"),
+                "expected mathlib=5e932f97dd25535344f80f9dd8da3aab83df0fe6".to_owned(),
+            ],
+        );
+    }
+}
+
+fn push_proof_file_checks(checks: &mut Vec<LeanDoctorCheck>, root: &Path) {
+    let missing = LEAN_PROOF_OBLIGATIONS
+        .iter()
+        .filter_map(|(path, _, _)| (!root.join(path).is_file()).then_some((*path).to_owned()))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        push_check(
+            checks,
+            "proof.files",
+            LeanDoctorStatus::Pass,
+            "all five Lean proof files are present",
+            LEAN_PROOF_OBLIGATIONS
+                .iter()
+                .map(|(path, _, _)| (*path).to_owned())
+                .collect(),
+        );
+    } else {
+        push_check(
+            checks,
+            "proof.files",
+            LeanDoctorStatus::Fail,
+            "one or more Lean proof files are missing",
+            missing,
+        );
+    }
+}
+
+fn push_coverage_matrix_check(checks: &mut Vec<LeanDoctorCheck>, root: &Path) {
+    let Some(matrix) = read_optional(root, "docs/formal/coverage-matrix.md") else {
+        push_check(
+            checks,
+            "coverage.matrix",
+            LeanDoctorStatus::Fail,
+            "coverage matrix is missing",
+            vec!["docs/formal/coverage-matrix.md".to_owned()],
+        );
+        return;
+    };
+
+    let missing = LEAN_PROOF_OBLIGATIONS
+        .iter()
+        .filter_map(|(path, _, theorem)| {
+            let reference = format!("{path}:{theorem}");
+            (!matrix.contains(&reference)).then_some(reference)
+        })
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        push_check(
+            checks,
+            "coverage.matrix",
+            LeanDoctorStatus::Pass,
+            "coverage matrix lists all five representative Lean proof obligations",
+            LEAN_PROOF_OBLIGATIONS
+                .iter()
+                .map(|(path, _, theorem)| format!("{path}:{theorem}"))
+                .collect(),
+        );
+    } else {
+        push_check(
+            checks,
+            "coverage.matrix",
+            LeanDoctorStatus::Fail,
+            "coverage matrix is missing Lean proof references",
+            missing,
+        );
+    }
+}
+
+fn push_workflow_artifact_contract_check(checks: &mut Vec<LeanDoctorCheck>, root: &Path) {
+    let Some(workflow) = read_optional(root, ".github/workflows/lean-verify.yml") else {
+        push_check(
+            checks,
+            "workflow.artifact_contract",
+            LeanDoctorStatus::Fail,
+            "Lean verify workflow is missing",
+            vec![".github/workflows/lean-verify.yml".to_owned()],
+        );
+        return;
+    };
+
+    let expected = [
+        "make lean-verify",
+        "artifacts/lean/${GITHUB_SHA}.txt",
+        "name: lean-verify-${{ github.sha }}",
+        "retention-days: 14",
+    ];
+    let missing = expected
+        .iter()
+        .filter_map(|needle| (!workflow.contains(needle)).then_some((*needle).to_owned()))
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        push_check(
+            checks,
+            "workflow.artifact_contract",
+            LeanDoctorStatus::Pass,
+            "Lean verify workflow publishes the expected proof artifact",
+            expected.iter().map(|needle| (*needle).to_owned()).collect(),
+        );
+    } else {
+        push_check(
+            checks,
+            "workflow.artifact_contract",
+            LeanDoctorStatus::Fail,
+            "Lean verify workflow no longer matches the proof artifact contract",
+            missing,
+        );
+    }
+}
+
+fn push_latest_ci_artifact_check(checks: &mut Vec<LeanDoctorCheck>, root: &Path) {
+    let artifact_dir = root.join("artifacts/lean");
+    let Ok(entries) = fs::read_dir(&artifact_dir) else {
+        push_check(
+            checks,
+            "ci_artifact.latest",
+            LeanDoctorStatus::Fail,
+            "no local Lean CI artifact was found under artifacts/lean",
+            vec![artifact_dir.display().to_string()],
+        );
+        return;
+    };
+
+    let mut latest: Option<(PathBuf, Option<SystemTime>)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("txt") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        let replace_latest = match latest.as_ref() {
+            None => true,
+            Some((_, latest_modified)) => match (modified.as_ref(), latest_modified.as_ref()) {
+                (Some(candidate), Some(current)) => candidate > current,
+                (Some(_), None) => true,
+                (None, Some(_) | None) => false,
+            },
+        };
+        if replace_latest {
+            latest = Some((path, modified));
+        }
+    }
+
+    let Some((path, _)) = latest else {
+        push_check(
+            checks,
+            "ci_artifact.latest",
+            LeanDoctorStatus::Fail,
+            "artifacts/lean exists but contains no Lean proof artifact",
+            vec![artifact_dir.display().to_string()],
+        );
+        return;
+    };
+
+    match fs::read_to_string(&path) {
+        Ok(source) if source.contains("\"green\":5") && source.contains("\"red\":0") => {
+            push_check(
+                checks,
+                "ci_artifact.latest",
+                LeanDoctorStatus::Pass,
+                "latest Lean proof artifact reports 5/5 green and 0 red",
+                vec![path.display().to_string()],
+            );
+        }
+        Ok(_) => push_check(
+            checks,
+            "ci_artifact.latest",
+            LeanDoctorStatus::Fail,
+            "latest Lean proof artifact does not report 5/5 green and 0 red",
+            vec![path.display().to_string()],
+        ),
+        Err(error) => push_check(
+            checks,
+            "ci_artifact.latest",
+            LeanDoctorStatus::Fail,
+            format!("latest Lean proof artifact could not be read: {error}"),
+            vec![path.display().to_string()],
+        ),
+    }
+}
+
+fn push_compile_check(checks: &mut Vec<LeanDoctorCheck>, root: &Path, run_compile: bool) {
+    if !run_compile {
+        push_check(
+            checks,
+            "proof.compile",
+            LeanDoctorStatus::Warn,
+            "local Lean proof compilation skipped",
+            vec!["make lean-verify".to_owned()],
+        );
+        return;
+    }
+
+    match Command::new("make")
+        .arg("lean-verify")
+        .current_dir(root)
+        .output()
+    {
+        Ok(output)
+            if output.status.success()
+                && first_output_blob(&output.stdout, &output.stderr).contains("\"green\":5")
+                && first_output_blob(&output.stdout, &output.stderr).contains("\"red\":0") =>
+        {
+            push_check(
+                checks,
+                "proof.compile",
+                LeanDoctorStatus::Pass,
+                "make lean-verify compiled all five proofs green",
+                vec!["make lean-verify".to_owned()],
+            );
+        }
+        Ok(output) => push_check(
+            checks,
+            "proof.compile",
+            LeanDoctorStatus::Fail,
+            "make lean-verify did not complete with 5/5 green",
+            vec![first_output_blob(&output.stdout, &output.stderr)],
+        ),
+        Err(error) => push_check(
+            checks,
+            "proof.compile",
+            LeanDoctorStatus::Fail,
+            format!("make lean-verify could not be started: {error}"),
+            vec!["make lean-verify".to_owned()],
+        ),
+    }
+}
+
+fn read_optional(root: &Path, relative: &str) -> Option<String> {
+    fs::read_to_string(root.join(relative)).ok()
+}
+
+fn manifest_has_expected_mathlib_rev(source: &str) -> bool {
+    serde_json::from_str::<Value>(source)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("packages")?
+                .as_array()?
+                .iter()
+                .any(|package| {
+                    package.get("name").and_then(Value::as_str) == Some("mathlib")
+                        && package.get("rev").and_then(Value::as_str)
+                            == Some("5e932f97dd25535344f80f9dd8da3aab83df0fe6")
+                })
+                .then_some(())
+        })
+        .is_some()
+}
+
+fn first_output_line(stdout: &[u8], stderr: &[u8]) -> String {
+    first_output_blob(stdout, stderr)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn first_output_blob(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let joined = if stdout.trim().is_empty() {
+        stderr.to_string()
+    } else if stderr.trim().is_empty() {
+        stdout.to_string()
+    } else {
+        format!("{stdout}\n{stderr}")
+    };
+    joined.chars().take(4000).collect()
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn write_fixture(root: &Path, relative: &str, body: &str) {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fixture parent directory must be created");
+        }
+        fs::write(path, body).expect("fixture file must be written");
+    }
 
     fn default_symptoms() -> Symptoms {
         Symptoms {
@@ -667,6 +1248,83 @@ mod tests {
         assert!(Severity::Critical > Severity::Error);
         assert!(Severity::Error > Severity::Warning);
         assert!(Severity::Warning > Severity::Info);
+    }
+
+    #[test]
+    fn lean_doctor_report_accepts_complete_fixture_without_running_toolchain() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write_fixture(root, "lean-toolchain", "leanprover/lean4:v4.29.1\n");
+        write_fixture(
+            root,
+            "lakefile.lean",
+            "require mathlib from git\n  \"https://github.com/leanprover-community/mathlib4.git\" @\n    \"5e932f97dd25535344f80f9dd8da3aab83df0fe6\"\n",
+        );
+        write_fixture(
+            root,
+            "lake-manifest.json",
+            r#"{"packages":[{"name":"mathlib","rev":"5e932f97dd25535344f80f9dd8da3aab83df0fe6"}]}"#,
+        );
+        write_fixture(
+            root,
+            ".github/workflows/lean-verify.yml",
+            "run: make lean-verify | tee \"artifacts/lean/${GITHUB_SHA}.txt\"\nname: lean-verify-${{ github.sha }}\nretention-days: 14\n",
+        );
+        let matrix = LEAN_PROOF_OBLIGATIONS
+            .iter()
+            .map(|(path, _, theorem)| format!("{path}:{theorem}"))
+            .collect::<Vec<_>>()
+            .join("<br>");
+        write_fixture(root, "docs/formal/coverage-matrix.md", &matrix);
+        for (path, _, theorem) in LEAN_PROOF_OBLIGATIONS {
+            write_fixture(
+                root,
+                path,
+                &format!("theorem {theorem} : True := by\n  trivial\n"),
+            );
+        }
+        write_fixture(
+            root,
+            "artifacts/lean/fixture.txt",
+            r#"INFO {"target":"lean-verify","total_proofs":5,"green":5,"red":0}"#,
+        );
+
+        let report = lean_doctor_report(root, false, false);
+        assert_eq!(report.schema_version, "fcp.fwc.doctor.lean.v1");
+        assert_eq!(report.proof_obligations.len(), 5);
+        assert!(report.healthy, "expected no failing checks: {report:?}");
+        assert!(report.score >= 850, "unexpected score: {}", report.score);
+        assert!(
+            report.checks.iter().any(
+                |check| check.id == "coverage.matrix" && check.status == LeanDoctorStatus::Pass
+            )
+        );
+    }
+
+    #[test]
+    fn lean_doctor_report_flags_missing_coverage_reference() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write_fixture(root, "lean-toolchain", "leanprover/lean4:v4.29.1\n");
+        write_fixture(
+            root,
+            "lakefile.lean",
+            "\"5e932f97dd25535344f80f9dd8da3aab83df0fe6\"",
+        );
+        write_fixture(
+            root,
+            "lake-manifest.json",
+            r#"{"packages":[{"name":"mathlib","rev":"5e932f97dd25535344f80f9dd8da3aab83df0fe6"}]}"#,
+        );
+        write_fixture(root, "docs/formal/coverage-matrix.md", "missing refs");
+
+        let report = lean_doctor_report(root, false, false);
+        assert!(!report.healthy);
+        assert!(
+            report.checks.iter().any(
+                |check| check.id == "coverage.matrix" && check.status == LeanDoctorStatus::Fail
+            )
+        );
     }
 
     #[test]

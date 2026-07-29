@@ -24,6 +24,8 @@ use serde_json::json;
 use wiremock::matchers::{header_exists, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const OP_S3_LIST_OBJECTS: &str = "aws.s3.list_objects";
+const OP_S3_PUT_OBJECT: &str = "aws.s3.put_object";
 const OP_S3_DELETE_OBJECT: &str = "aws.s3.delete_object";
 const OP_EC2_TERMINATE: &str = "aws.ec2.terminate_instance";
 const OP_LAMBDA_LIST: &str = "aws.lambda.list_functions";
@@ -39,6 +41,7 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
         host_public_key,
         nonce: [5u8; 32],
         capabilities_requested: vec![
+            CapabilityId::from_static("aws.s3.read"),
             CapabilityId::from_static("aws.s3.write"),
             CapabilityId::from_static("aws.ec2.write"),
             CapabilityId::from_static("aws.lambda.read"),
@@ -50,9 +53,14 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    connector: &AwsConnector,
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+) -> CapabilityToken {
     let capability = match op {
-        OP_S3_DELETE_OBJECT => "aws.s3.write",
+        OP_S3_LIST_OBJECTS => "aws.s3.read",
+        OP_S3_PUT_OBJECT | OP_S3_DELETE_OBJECT => "aws.s3.write",
         OP_EC2_TERMINATE => "aws.ec2.write",
         OP_LAMBDA_LIST => "aws.lambda.read",
         OP_STS_IDENTITY => "aws.iam.read",
@@ -61,7 +69,12 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
     assert!(
         matches!(
             op,
-            OP_S3_DELETE_OBJECT | OP_EC2_TERMINATE | OP_LAMBDA_LIST | OP_STS_IDENTITY
+            OP_S3_LIST_OBJECTS
+                | OP_S3_PUT_OBJECT
+                | OP_S3_DELETE_OBJECT
+                | OP_EC2_TERMINATE
+                | OP_LAMBDA_LIST
+                | OP_STS_IDENTITY
         ),
         "unsupported test operation: {op}"
     );
@@ -80,6 +93,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .target_instance(connector.instance_id())
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
         .sign(signing_key)
@@ -287,6 +301,90 @@ async fn self_check_auth_failure_reports_auth_failure() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_s3_list_objects_parses_native_xml() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/test-bucket"))
+        .and(query_param("list-type", "2"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>test-bucket</Name>
+  <Contents>
+    <Key>fcp-live/object.txt</Key>
+    <LastModified>2026-05-15T11:00:00.000Z</LastModified>
+    <ETag>&quot;abc123&quot;</ETag>
+    <Size>42</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+</ListBucketResult>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_S3_LIST_OBJECTS,
+            json!({ "bucket": "test-bucket" }),
+            generate_valid_token(&connector, &signing_key, OP_S3_LIST_OBJECTS),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("s3 list objects result");
+    let objects = result.as_array().expect("objects array");
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0]["key"], "fcp-live/object.txt");
+    assert_eq!(objects[0]["size"], 42);
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_s3_put_accepts_native_empty_response_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/test-bucket/fcp-live/object.txt"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", "\"abc123\"")
+                .insert_header("x-amz-version-id", "version-1"),
+        )
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_S3_PUT_OBJECT,
+            json!({
+                "bucket": "test-bucket",
+                "key": "fcp-live/object.txt",
+                "body": "hello from native s3",
+                "content_type": "text/plain"
+            }),
+            generate_valid_token(&connector, &signing_key, OP_S3_PUT_OBJECT),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("s3 put result");
+    assert_eq!(result["etag"], "\"abc123\"");
+    assert_eq!(result["version_id"], "version-1");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_dangerous_s3_delete_preserves_artifact_evidence() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
@@ -309,7 +407,7 @@ async fn invoke_dangerous_s3_delete_preserves_artifact_evidence() {
                 "bucket": "test-bucket",
                 "key": "object.txt"
             }),
-            generate_valid_token(&signing_key, OP_S3_DELETE_OBJECT),
+            generate_valid_token(&connector, &signing_key, OP_S3_DELETE_OBJECT),
         ))
         .await
         .unwrap();
@@ -323,6 +421,43 @@ async fn invoke_dangerous_s3_delete_preserves_artifact_evidence() {
         "aws_risky_mutation_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_s3_delete_accepts_native_empty_response_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/test-bucket/fcp-live/object.txt"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Amz-Date"))
+        .and(header_exists("X-Amz-Content-Sha256"))
+        .respond_with(
+            ResponseTemplate::new(204)
+                .insert_header("x-amz-delete-marker", "true")
+                .insert_header("x-amz-version-id", "version-2"),
+        )
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_S3_DELETE_OBJECT,
+            json!({
+                "bucket": "test-bucket",
+                "key": "fcp-live/object.txt"
+            }),
+            generate_valid_token(&connector, &signing_key, OP_S3_DELETE_OBJECT),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("s3 delete result");
+    assert_eq!(result["delete_marker"], true);
+    assert_eq!(result["version_id"], "version-2");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_sigv4_headers(&requests[0]);
 }
 
 #[fcp_async_core::runtime::test]
@@ -351,7 +486,7 @@ async fn invoke_ec2_terminate_preserves_state_transition_evidence() {
             json!({
                 "instance_id": "i-0123456789abcdef0"
             }),
-            generate_valid_token(&signing_key, OP_EC2_TERMINATE),
+            generate_valid_token(&connector, &signing_key, OP_EC2_TERMINATE),
         ))
         .await
         .unwrap();
@@ -395,7 +530,7 @@ async fn invoke_lambda_list_functions_preserves_artifact_evidence() {
         .invoke(invoke_req(
             OP_LAMBDA_LIST,
             json!({}),
-            generate_valid_token(&signing_key, OP_LAMBDA_LIST),
+            generate_valid_token(&connector, &signing_key, OP_LAMBDA_LIST),
         ))
         .await
         .unwrap();
@@ -435,7 +570,7 @@ async fn invoke_sts_identity_preserves_artifact_evidence() {
         .invoke(invoke_req(
             OP_STS_IDENTITY,
             json!({}),
-            generate_valid_token(&signing_key, OP_STS_IDENTITY),
+            generate_valid_token(&connector, &signing_key, OP_STS_IDENTITY),
         ))
         .await
         .unwrap();

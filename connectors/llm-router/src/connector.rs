@@ -10,6 +10,7 @@ use fcp_prelude::{
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 use url::{Host, Url};
 
@@ -21,6 +22,8 @@ use crate::types::{
     ProviderReadiness, ProviderStatus, ProviderUsage, RoutingDecision, RoutingStrategy,
     built_in_gateway_provider_descriptors, gateway_provider_descriptor, llm_router_host_is_allowed,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Router configuration parsed from `configure` params.
 #[derive(Debug, Clone)]
@@ -58,6 +61,12 @@ impl LlmRouterConnector {
 
     fn total_cost(&self) -> f64 {
         self.total_cost.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     fn track_cost(&self, cost: f64) {
@@ -341,7 +350,7 @@ impl LlmRouterConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "blake3-256:fcp.interface.v2:pending".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: None,
             auth_caps: None,
@@ -602,8 +611,8 @@ impl LlmRouterConnector {
         }))
     }
 
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let operations = vec![
+    fn operations_info() -> Vec<OperationInfo> {
+        vec![
             OperationInfo {
                 id: OperationId::from_static("llm-router.route"),
                 summary: "Select a provider/model and return a routing decision".to_string(),
@@ -683,10 +692,12 @@ impl LlmRouterConnector {
                 rate_limit: None,
                 requires_approval: None,
             },
-        ];
+        ]
+    }
 
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations,
+            operations: Self::operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -2005,6 +2016,17 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::{CapabilityConstraints, InstanceId};
 
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = LlmRouterConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "blake3-256:fcp.interface.v2:pending");
+    }
+
     fn test_config_params() -> serde_json::Value {
         json!({
             "providers": [
@@ -2116,6 +2138,22 @@ mod tests {
         assert!(op_ids.contains(&"llm-router.list_providers"));
         assert!(op_ids.contains(&"llm-router.get_usage"));
         assert!(op_ids.contains(&"llm-router.get_budget"));
+    }
+
+    #[test]
+    fn operations_info_source_covers_runtime_catalog() {
+        let operations = LlmRouterConnector::operations_info();
+        let op_ids: Vec<&str> = operations.iter().map(|op| op.id.as_ref()).collect();
+        assert_eq!(
+            op_ids,
+            vec![
+                "llm-router.route",
+                "llm-router.estimate_cost",
+                "llm-router.list_providers",
+                "llm-router.get_usage",
+                "llm-router.get_budget",
+            ]
+        );
     }
 
     #[fcp_async_core::runtime::test]

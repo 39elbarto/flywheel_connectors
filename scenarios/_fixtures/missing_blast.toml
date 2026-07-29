@@ -1,0 +1,6 @@
+name = "missing_blast"
+recovery_objective_secs = 30
+
+[[rollback_steps]]
+name = "restore"
+action = "noop"

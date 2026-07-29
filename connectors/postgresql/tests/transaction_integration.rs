@@ -1,4 +1,4 @@
-//! Real-Postgres testcontainer integration tests for the PostgresClient
+//! Real-Postgres testcontainer integration tests for the `PostgresClient`
 //! transaction state machine.
 //!
 //! Closes flywheel_connectors-x6qrn. The existing wiremock-backed tests
@@ -9,14 +9,14 @@
 //!
 //! # Architecture
 //!
-//! The connector speaks PostgREST HTTP — specifically a bespoke
+//! The connector speaks `PostgREST` HTTP — specifically a bespoke
 //! `POST /rest/v1/rpc/transaction` RPC with `{"action": "begin" | "commit" | "rollback", ...}`.
-//! Booting a full PostgREST container plus the associated custom RPC
+//! Booting a full `PostgREST` container plus the associated custom RPC
 //! function is out of scope for the testcontainers-only budget, so this
 //! test boots a real Postgres 15 container and stands up a minimal
 //! axum-based HTTP shim that implements the three RPC actions by
 //! executing real `BEGIN` / `COMMIT` / `ROLLBACK` against pinned
-//! `tokio-postgres` connections, one per txn_id.
+//! `tokio-postgres` connections, one per `txn_id`.
 //!
 //! The shim is intentionally small — it mirrors the exact contract
 //! that `PostgresClient::transaction_*` expects, nothing more. That's
@@ -34,7 +34,7 @@
 //! # Running
 //!
 //!   cargo test -p fcp-postgresql --features integration-testcontainer \
-//!       --test transaction_integration
+//!       --test `transaction_integration`
 //!
 //! Requires a running Docker daemon. The Postgres container boot takes
 //! ~5-10s on first run (image pull) and ~1-2s on subsequent runs.
@@ -59,12 +59,12 @@ use tokio_postgres::{Client as PgClient, NoTls};
 struct ShimState {
     /// Connection string to the testcontainer.
     conn_str: String,
-    /// Active transactions: txn_id → dedicated pinned PG client.
-    /// A real PostgREST implementation binds each open txn to a
+    /// Active transactions: `txn_id` → dedicated pinned PG client.
+    /// A real `PostgREST` implementation binds each open txn to a
     /// specific backend connection; we mirror that so commit/rollback
     /// lands on the same session that ran BEGIN.
     active: Mutex<HashMap<String, PgClient>>,
-    /// Monotonic counter for txn_id generation.
+    /// Monotonic counter for `txn_id` generation.
     next_id: Mutex<u64>,
 }
 
@@ -90,10 +90,12 @@ async fn handle_transaction(
     State(state): State<Arc<ShimState>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let action = body.get("action").and_then(|v| v.as_str()).ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(json!({"error": "missing action"})),
-    ))?;
+    let action = body.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "missing action"})),
+        )
+    })?;
 
     match action {
         "begin" => {
@@ -107,7 +109,7 @@ async fn handle_transaction(
             client
                 .batch_execute(&begin_sql)
                 .await
-                .map_err(|err| internal(format!("BEGIN failed: {err}")))?;
+                .map_err(|err| internal(&format!("BEGIN failed: {err}")))?;
 
             let mut next = state.next_id.lock().await;
             *next += 1;
@@ -119,28 +121,32 @@ async fn handle_transaction(
         }
         "commit" => {
             let txn_id = require_str(&body, "txn_id")?;
-            let client = state.active.lock().await.remove(&txn_id).ok_or((
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("unknown txn_id {txn_id}")})),
-            ))?;
+            let client = state.active.lock().await.remove(&txn_id).ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": format!("unknown txn_id {txn_id}")})),
+                )
+            })?;
             client
                 .batch_execute("COMMIT")
                 .await
-                .map_err(|err| internal(format!("COMMIT failed: {err}")))?;
+                .map_err(|err| internal(&format!("COMMIT failed: {err}")))?;
             // Dropping `client` here releases the pinned server connection.
             drop(client);
             Ok(Json(json!({"status": "committed", "txn_id": txn_id})))
         }
         "rollback" => {
             let txn_id = require_str(&body, "txn_id")?;
-            let client = state.active.lock().await.remove(&txn_id).ok_or((
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("unknown txn_id {txn_id}")})),
-            ))?;
+            let client = state.active.lock().await.remove(&txn_id).ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": format!("unknown txn_id {txn_id}")})),
+                )
+            })?;
             client
                 .batch_execute("ROLLBACK")
                 .await
-                .map_err(|err| internal(format!("ROLLBACK failed: {err}")))?;
+                .map_err(|err| internal(&format!("ROLLBACK failed: {err}")))?;
             drop(client);
             Ok(Json(json!({"status": "rolled_back", "txn_id": txn_id})))
         }
@@ -155,13 +161,15 @@ fn require_str(body: &Value, field: &str) -> Result<String, (StatusCode, Json<Va
     body.get(field)
         .and_then(|v| v.as_str())
         .map(ToString::to_string)
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("missing {field}")})),
-        ))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("missing {field}")})),
+            )
+        })
 }
 
-fn internal(msg: String) -> (StatusCode, Json<Value>) {
+fn internal(msg: &str) -> (StatusCode, Json<Value>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({"error": msg})),

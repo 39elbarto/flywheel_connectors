@@ -49,6 +49,18 @@ impl JiraConnectorAdapter {
             id: ConnectorId::from_static("jira"),
         }
     }
+
+    /// The Jira connector verifies tokens with `verify_bound` against its own
+    /// (fixed) instance_id; expose it so test tokens can bind to it
+    /// (instance-binding pattern, commit 16171621d).
+    async fn connector_instance_id(&self) -> String {
+        self.connector
+            .lock()
+            .await
+            .instance_id()
+            .as_str()
+            .to_string()
+    }
 }
 
 fcp_core::impl_fcp_sealed!(JiraConnectorAdapter);
@@ -243,6 +255,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
 
 fn build_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -263,9 +276,14 @@ fn build_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        // dja9u typestate ratchet: the Jira connector verifies with
+        // verify_bound, which requires an INSTANCE_ID claim; bind to the
+        // connector instance (instance-binding pattern, commit 16171621d).
+        .target_instance(instance_id)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -366,8 +384,14 @@ async fn jira_default_deny_compliance_suite_passes() {
 
     let mut connector = JiraConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = connector.connector_instance_id().await;
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["jira.get_issue"]);
-    let token = build_token(&signing_key, "jira.get_issue", &["jira.get_issue"]);
+    let token = build_token(
+        &signing_key,
+        &instance_id,
+        "jira.get_issue",
+        &["jira.get_issue"],
+    );
     let invoke = invoke_request(
         "jira.create_issue",
         json!({
@@ -416,8 +440,14 @@ async fn jira_allow_valid_token_connector_suite_passes() {
 
     let mut connector = JiraConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = connector.connector_instance_id().await;
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["jira.get_issue"]);
-    let token = build_token(&signing_key, "jira.get_issue", &["jira.get_issue"]);
+    let token = build_token(
+        &signing_key,
+        &instance_id,
+        "jira.get_issue",
+        &["jira.get_issue"],
+    );
     let invoke = invoke_request("jira.get_issue", json!({ "issue_key": "PROJ-123" }), token);
     let suite = ConnectorSuite {
         test_name: "jira_allow_valid_token".to_string(),
@@ -539,7 +569,12 @@ async fn jira_dangerous_delete_requires_delete_capability() {
         .await
         .expect("handshake");
 
-    let token = build_token(&signing_key, "jira.get_issue", &["jira.get_issue"]);
+    let token = build_token(
+        &signing_key,
+        &adapter.connector_instance_id().await,
+        "jira.get_issue",
+        &["jira.get_issue"],
+    );
     let req = invoke_request(
         "jira.delete_issue",
         json!({ "issue_key": "PROJ-123" }),
@@ -586,7 +621,12 @@ async fn jira_dangerous_delete_allows_with_delete_capability() {
         .await
         .expect("handshake");
 
-    let token = build_token(&signing_key, "jira.delete_issue", &["jira.delete_issue"]);
+    let token = build_token(
+        &signing_key,
+        &adapter.connector_instance_id().await,
+        "jira.delete_issue",
+        &["jira.delete_issue"],
+    );
     let req = invoke_request(
         "jira.delete_issue",
         json!({ "issue_key": "PROJ-123" }),

@@ -19,7 +19,8 @@ use fcp_prelude::{
     ApprovalMode, FcpConnector, FcpError, IdempotencyClass, RequestId, RiskLevel, SafetyTier,
     SubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

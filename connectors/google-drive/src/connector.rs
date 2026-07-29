@@ -1,16 +1,19 @@
 //! FCP Google Drive Connector implementation.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, Introspection, OperationId, OperationInfo, SelfCheckReport, SessionId,
+    SimulateRequest, SimulateResponse,
 };
 use reqwest::Url;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 fn is_local_test_host(host: &str) -> bool {
@@ -161,6 +164,17 @@ use crate::{
     types::{DoctorCheck, DoctorReport},
 };
 
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: &[&str] = &[
+    "drive.list_files",
+    "drive.get_file",
+    "drive.download_file",
+    "drive.create_folder",
+    "drive.upload_file",
+    "drive.trash_file",
+    "drive.share_file",
+];
+
 /// FCP Google Drive Connector.
 pub struct DriveConnector {
     base: Arc<BaseConnector>,
@@ -178,6 +192,19 @@ impl DriveConnector {
             verifier: None,
             session_id: None,
         }
+    }
+
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     #[instrument(skip(self, params))]
@@ -242,10 +269,15 @@ impl DriveConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        let verifier_instance_id = req
+            .requested_instance_id
+            .clone()
+            .unwrap_or_else(|| self.base.instance_id.clone());
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            self.base.instance_id.clone(),
+            verifier_instance_id,
         ));
 
         let session_id = SessionId::new();
@@ -265,7 +297,7 @@ impl DriveConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-drive-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -408,222 +440,7 @@ impl DriveConnector {
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations: vec![
-                op_info(
-                    "drive.list_files",
-                    "List files and folders in Google Drive",
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "query": { "type": "string", "description": "Drive search query (q parameter)" },
-                            "max_results": { "type": "integer", "minimum": 1, "maximum": 1000 },
-                            "page_token": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "files": { "type": "array" },
-                            "next_page_token": { "type": "string" }
-                        }
-                    }),
-                    "drive.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "List files in Google Drive. Use query parameter for search.".into(),
-                        common_mistakes: vec![
-                            "Drive query syntax uses specific operators like 'name contains' and 'mimeType ='".into(),
-                        ],
-                        examples: vec![
-                            r#"{"query": "name contains 'report' and mimeType = 'application/pdf'"}"#.into(),
-                        ],
-                        related: vec![CapabilityId::from_static("drive.get_file")],
-                    },
-                ),
-                op_info(
-                    "drive.get_file",
-                    "Get file metadata by ID",
-                    json!({
-                        "type": "object",
-                        "required": ["file_id"],
-                        "properties": {
-                            "file_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "file": { "type": "object" }
-                        }
-                    }),
-                    "drive.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Get metadata for a specific file or folder.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}"#.into()],
-                        related: vec![CapabilityId::from_static("drive.list_files")],
-                    },
-                ),
-                op_info(
-                    "drive.download_file",
-                    "Download file content (returned as base64)",
-                    json!({
-                        "type": "object",
-                        "required": ["file_id"],
-                        "properties": {
-                            "file_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "content_base64": { "type": "string" },
-                            "file_id": { "type": "string" }
-                        }
-                    }),
-                    "drive.read",
-                    RiskLevel::Low,
-                    SafetyTier::Safe,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Download the binary content of a file.".into(),
-                        common_mistakes: vec![
-                            "Google Docs/Sheets/Slides cannot be downloaded directly - export them first".into(),
-                        ],
-                        examples: vec![r#"{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}"#.into()],
-                        related: vec![CapabilityId::from_static("drive.get_file")],
-                    },
-                ),
-                op_info(
-                    "drive.create_folder",
-                    "Create a new folder in Google Drive",
-                    json!({
-                        "type": "object",
-                        "required": ["name"],
-                        "properties": {
-                            "name": { "type": "string" },
-                            "parent_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "folder": { "type": "object" }
-                        }
-                    }),
-                    "drive.write",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
-                    IdempotencyClass::None,
-                    AgentHint {
-                        when_to_use: "Create a folder to organize files.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"name": "Project Files", "parent_id": "root"}"#.into()],
-                        related: vec![CapabilityId::from_static("drive.upload_file")],
-                    },
-                ),
-                op_info(
-                    "drive.upload_file",
-                    "Upload a file to Google Drive",
-                    json!({
-                        "type": "object",
-                        "required": ["name", "mime_type", "content_base64"],
-                        "properties": {
-                            "name": { "type": "string" },
-                            "mime_type": { "type": "string" },
-                            "content_base64": { "type": "string" },
-                            "parent_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "file": { "type": "object" }
-                        }
-                    }),
-                    "drive.write",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::None,
-                    AgentHint {
-                        when_to_use: "Upload a file to Google Drive.".into(),
-                        common_mistakes: vec![
-                            "Large files should use resumable upload (not yet supported)".into(),
-                        ],
-                        examples: vec![
-                            r#"{"name":"report.txt","mime_type":"text/plain","content_base64":"SGVsbG8="}"#.into(),
-                        ],
-                        related: vec![CapabilityId::from_static("drive.create_folder")],
-                    },
-                ),
-                op_info(
-                    "drive.trash_file",
-                    "Move a file to trash",
-                    json!({
-                        "type": "object",
-                        "required": ["file_id"],
-                        "properties": {
-                            "file_id": { "type": "string" }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "file": { "type": "object" }
-                        }
-                    }),
-                    "drive.write",
-                    RiskLevel::High,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::Strict,
-                    AgentHint {
-                        when_to_use: "Move a file to the trash (can be recovered within 30 days).".into(),
-                        common_mistakes: vec![
-                            "This does NOT permanently delete - use empty trash for permanent deletion".into(),
-                        ],
-                        examples: vec![r#"{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}"#.into()],
-                        related: vec![CapabilityId::from_static("drive.get_file")],
-                    },
-                ),
-                op_info(
-                    "drive.share_file",
-                    "Share a file with a user",
-                    json!({
-                        "type": "object",
-                        "required": ["file_id", "email", "role"],
-                        "properties": {
-                            "file_id": { "type": "string" },
-                            "email": { "type": "string" },
-                            "role": { "type": "string", "enum": ["reader", "commenter", "writer", "organizer"] }
-                        }
-                    }),
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "permission": { "type": "object" }
-                        }
-                    }),
-                    "drive.write",
-                    RiskLevel::Critical,
-                    SafetyTier::Dangerous,
-                    IdempotencyClass::None,
-                    AgentHint {
-                        when_to_use: "Share a file or folder with another user.".into(),
-                        common_mistakes: vec![
-                            "Sharing is a sensitive operation - always confirm with the user first".into(),
-                        ],
-                        examples: vec![
-                            r#"{"file_id":"1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs","email":"user@example.com","role":"reader"}"#.into(),
-                        ],
-                        related: vec![CapabilityId::from_static("drive.get_file")],
-                    },
-                ),
-            ],
+            operations: operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -885,30 +702,62 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
+fn operations_info() -> Vec<OperationInfo> {
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest =
+        ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded Drive manifest should parse");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
     OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
     }
 }
 
@@ -938,6 +787,7 @@ mod tests {
 
     fn build_capability(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         operation: &'static str,
     ) -> CapabilityToken {
         let capability = match operation {
@@ -962,6 +812,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id)
             .audience("*")
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
@@ -973,10 +824,11 @@ mod tests {
 
     fn simulate_request(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         operation: &'static str,
         input: serde_json::Value,
     ) -> serde_json::Value {
-        let capability = build_capability(signing_key, operation);
+        let capability = build_capability(signing_key, instance_id, operation);
         serde_json::to_value(SimulateRequest::new(
             ConnectorId::from_static("google-drive"),
             OperationId::from_static(operation),
@@ -1010,6 +862,19 @@ mod tests {
             }))
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(DriveConnector::manifest_hash(), expected);
+        assert_ne!(
+            DriveConnector::manifest_hash(),
+            "sha256:google-drive-connector-v1"
+        );
     }
 
     #[test]
@@ -1080,14 +945,49 @@ mod tests {
         let ops = result["operations"].as_array().unwrap();
         let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
 
-        assert!(op_ids.contains(&"drive.list_files"));
-        assert!(op_ids.contains(&"drive.get_file"));
-        assert!(op_ids.contains(&"drive.download_file"));
-        assert!(op_ids.contains(&"drive.create_folder"));
-        assert!(op_ids.contains(&"drive.upload_file"));
-        assert!(op_ids.contains(&"drive.trash_file"));
-        assert!(op_ids.contains(&"drive.share_file"));
-        assert_eq!(ops.len(), 7);
+        assert_eq!(op_ids, OPERATION_ORDER);
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("Drive manifest should parse");
+        let operations = operations_info();
+
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_str())
+                .expect("runtime operation should be declared in manifest");
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).expect("operation hints serialize"),
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .expect("manifest operation hints serialize")
+            );
+            assert_eq!(
+                serde_json::to_value(operation.rate_limit.as_ref())
+                    .expect("operation rate limit serializes"),
+                serde_json::to_value(manifest_operation.rate_limit.as_ref())
+                    .expect("manifest operation rate limit serializes")
+            );
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1178,6 +1078,7 @@ mod tests {
         let result = connector
             .handle_simulate(simulate_request(
                 &signing_key,
+                connector.instance_id(),
                 "drive.get_file",
                 json!({ "file_id": "file_123" }),
             ))
@@ -1197,7 +1098,12 @@ mod tests {
         let mut connector = DriveConnector::new();
         configure_and_handshake(&mut connector, &signing_key).await;
         let result = connector
-            .handle_simulate(simulate_request(&signing_key, "drive.get_file", json!({})))
+            .handle_simulate(simulate_request(
+                &signing_key,
+                connector.instance_id(),
+                "drive.get_file",
+                json!({}),
+            ))
             .await
             .unwrap();
         let response = parse_simulate_response(result);
@@ -1228,6 +1134,7 @@ mod tests {
         let result = connector
             .handle_simulate(simulate_request(
                 &signing_key,
+                connector.instance_id(),
                 "drive.get_file",
                 json!({ "file_id": "file_123" }),
             ))
@@ -1243,7 +1150,12 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         let connector = DriveConnector::new();
         let result = connector
-            .handle_simulate(simulate_request(&signing_key, "drive.nope", json!({})))
+            .handle_simulate(simulate_request(
+                &signing_key,
+                connector.instance_id(),
+                "drive.nope",
+                json!({}),
+            ))
             .await
             .unwrap();
         let response = parse_simulate_response(result);

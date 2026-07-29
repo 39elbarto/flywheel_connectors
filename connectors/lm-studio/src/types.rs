@@ -191,3 +191,76 @@ fn invalid<T>(message: &str) -> FcpResult<T> {
         message: message.into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chat_request_uses_default_model() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            "",
+        )
+        .expect("valid chat input should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+        assert!(!request.stream);
+    }
+
+    #[test]
+    fn chat_rejects_empty_messages() {
+        let error = chat_request_from_value(json!({"messages": []}), DEFAULT_MODEL)
+            .expect_err("empty messages should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn chat_rejects_invalid_candidate_count() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "n": 0
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("n=0 should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn model_ids_reject_whitespace() {
+        let error = validate_lm_studio_model_id("model", "local model")
+            .expect_err("model ids with whitespace should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn embeddings_reject_blank_input_and_zero_dimensions() {
+        let blank_error = embeddings_request_from_value(
+            json!({
+                "input": " ",
+                "model": DEFAULT_EMBEDDING_MODEL
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("blank embedding input should fail");
+        let dimensions_error = embeddings_request_from_value(
+            json!({
+                "input": "hello",
+                "dimensions": 0
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("zero dimensions should fail");
+
+        assert!(matches!(blank_error, FcpError::InvalidRequest { .. }));
+        assert!(matches!(dimensions_error, FcpError::InvalidRequest { .. }));
+    }
+}

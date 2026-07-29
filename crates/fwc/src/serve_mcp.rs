@@ -214,6 +214,9 @@ pub struct McpServerConfig {
     /// Optional connector filter — only expose this specific connector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connector_filter: Option<String>,
+    /// Optional risk ceiling — only expose tools at or below this risk level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_max: Option<String>,
     /// Whether to expose resources.
     #[serde(default = "default_true")]
     pub include_resources: bool,
@@ -232,6 +235,7 @@ impl Default for McpServerConfig {
             transport: TransportMode::default(),
             zone_filter: None,
             connector_filter: None,
+            risk_max: None,
             include_resources: true,
             include_prompts: true,
         }
@@ -259,6 +263,12 @@ impl McpServerConfig {
     /// Builder: set connector filter.
     pub fn with_connector_filter(mut self, connector: impl Into<String>) -> Self {
         self.connector_filter = Some(connector.into());
+        self
+    }
+
+    /// Builder: set the maximum risk level to expose (inclusive).
+    pub fn with_risk_max(mut self, risk_max: impl Into<String>) -> Self {
+        self.risk_max = Some(risk_max.into());
         self
     }
 
@@ -755,7 +765,23 @@ fn tool_matches_server_filters(tool: &McpToolDefinition, config: &McpServerConfi
         .zone_filter
         .as_deref()
         .is_none_or(|zone| tool.supports_zone(zone));
-    connector_ok && zone_ok
+    let risk_ok = tool_passes_risk_filter(tool, config.risk_max.as_deref());
+    connector_ok && zone_ok && risk_ok
+}
+
+/// Same inclusive ceiling semantics as `export_tools::passes_risk_filter`. A
+/// tool without declared risk metadata ranks above `critical`, so any
+/// recognized ceiling excludes it (default deny).
+fn tool_passes_risk_filter(tool: &McpToolDefinition, risk_max: Option<&str>) -> bool {
+    let Some(max) = risk_max else {
+        return true;
+    };
+    let level = tool
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.risk_level.as_deref())
+        .unwrap_or("undeclared");
+    export_tools::risk_filter_rank(level) <= export_tools::risk_filter_rank(max)
 }
 
 fn filtered_tools(state: &McpServerState) -> impl Iterator<Item = &McpToolDefinition> + '_ {
@@ -903,6 +929,22 @@ fn validate_tool_access(
             "tool": tool.name(),
             "connector_id": tool.connector_id(),
             "required_connector": connector_filter,
+        })));
+    }
+
+    if !tool_passes_risk_filter(tool, state.config.risk_max.as_deref()) {
+        return Err(JsonRpcError::invalid_params(format!(
+            "Tool `{}` is hidden by the active risk ceiling.",
+            tool.name()
+        ))
+        .with_data(json!({
+            "type": "risk-ceiling-exceeded",
+            "tool": tool.name(),
+            "risk_level": tool
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.risk_level.as_deref()),
+            "risk_max": state.config.risk_max,
         })));
     }
 
@@ -1270,13 +1312,113 @@ fn handle_initialized_notification(id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, json!({}))
 }
 
+/// Top-level JSON-Schema keywords that OpenAI's / Codex's function-tool validator
+/// rejects in a tool's `parameters` schema (HTTP 400 `invalid_function_parameters`).
+/// A single offending tool fails the *entire* `tools` array, so one connector with a
+/// top-level `anyOf` (e.g. `gmail.send_message`) makes every tool unusable from Codex.
+const OPENAI_INCOMPATIBLE_TOP_LEVEL_KEYS: [&str; 5] = ["anyOf", "oneOf", "allOf", "enum", "not"];
+
+/// Rewrite a tool input schema so it imports cleanly as an OpenAI/Codex function tool
+/// while staying faithful to the connector's parameter surface.
+///
+/// Connector manifests legitimately use top-level `anyOf`/`oneOf`/`allOf` to express
+/// XOR-style required-field constraints (`gmail.send_message` needs `raw` *or*
+/// `to`+`subject`+`body`; `stripe.update_customer` needs `email` *or* `name`). These
+/// are valid JSON Schema and remain enforced at invoke time against the connector's
+/// stored schema — but OpenAI's stricter validator rejects them at the *top level*.
+///
+/// This flattens only the top level: it drops the offending keywords, guarantees
+/// `type: "object"` with a `properties` map, and folds any `properties` declared
+/// inside the combinator branches back up (top-level definitions win) so no parameter
+/// is lost even if a manifest declares fields only inside branches. Nested combinators
+/// inside individual properties are valid for OpenAI and are deliberately left intact.
+///
+/// The stored schema is never mutated — only the value emitted in `tools/list` is
+/// rewritten — so the full constraint is preserved for runtime validation and for the
+/// richer `resource://` inventory views.
+fn sanitize_schema_for_openai_tool_import(schema: &Value) -> Value {
+    let Some(obj) = schema.as_object() else {
+        return schema.clone();
+    };
+    // Fast path: nothing OpenAI dislikes at the top level — emit verbatim and untouched.
+    if !OPENAI_INCOMPATIBLE_TOP_LEVEL_KEYS
+        .iter()
+        .any(|key| obj.contains_key(*key))
+    {
+        return schema.clone();
+    }
+
+    let mut sanitized = obj.clone();
+
+    // Salvage `properties` from combinator branches so schemas that declare fields only
+    // inside branches don't lose them. `allOf` branches must all hold, so their
+    // `required` is cumulative; `anyOf`/`oneOf` branches are alternatives, so folding
+    // their `required` up would over-constrain the tool — we drop it (the real XOR is
+    // still enforced at invoke time against the unmodified stored schema).
+    let mut merged_properties = serde_json::Map::new();
+    let mut required: Vec<Value> = match obj.get("required") {
+        Some(Value::Array(reqs)) => reqs.clone(),
+        _ => Vec::new(),
+    };
+    for key in ["allOf", "anyOf", "oneOf"] {
+        let Some(Value::Array(branches)) = obj.get(key) else {
+            continue;
+        };
+        for branch in branches {
+            let Some(branch_obj) = branch.as_object() else {
+                continue;
+            };
+            if let Some(Value::Object(props)) = branch_obj.get("properties") {
+                for (name, value) in props {
+                    merged_properties
+                        .entry(name.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+            if key == "allOf" {
+                if let Some(Value::Array(reqs)) = branch_obj.get("required") {
+                    required.extend(reqs.iter().cloned());
+                }
+            }
+        }
+    }
+
+    for key in OPENAI_INCOMPATIBLE_TOP_LEVEL_KEYS {
+        sanitized.remove(key);
+    }
+
+    // Top-level `properties` win over branch-salvaged ones.
+    if let Some(Value::Object(top_properties)) = sanitized.remove("properties") {
+        for (name, value) in top_properties {
+            merged_properties.insert(name, value);
+        }
+    }
+
+    sanitized.insert("type".to_owned(), Value::String("object".to_owned()));
+    sanitized.insert("properties".to_owned(), Value::Object(merged_properties));
+
+    // De-duplicate `required` (preserving order); omit entirely if empty.
+    if required.is_empty() {
+        sanitized.remove("required");
+    } else {
+        let mut seen = std::collections::HashSet::new();
+        required.retain(|value| match value.as_str() {
+            Some(name) => seen.insert(name.to_owned()),
+            None => true,
+        });
+        sanitized.insert("required".to_owned(), Value::Array(required));
+    }
+
+    Value::Object(sanitized)
+}
+
 fn handle_tools_list(state: &McpServerState, id: Value) -> JsonRpcResponse {
     let tools: Vec<Value> = filtered_tools(state)
         .map(|t| {
             let mut payload = json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": t.input_schema,
+                "inputSchema": sanitize_schema_for_openai_tool_import(&t.input_schema),
             });
             if let Some(object) = payload.as_object_mut() {
                 if let Some(annotations) = &t.annotations {
@@ -2054,6 +2196,24 @@ mod tests {
             ))
     }
 
+    fn risk_annotated_tool(name: &str, risk_level: &str) -> McpToolDefinition {
+        McpToolDefinition::new(
+            name,
+            "Risk-annotated fixture tool",
+            json!({"type": "object"}),
+            "github",
+            name.rsplit('.').next().unwrap_or(name),
+        )
+        .with_annotations(Some(export_tools::McpToolAnnotations {
+            risk_level: Some(risk_level.to_owned()),
+            safety_tier: None,
+            idempotency: None,
+            capability: None,
+            read_only: None,
+            destructive: None,
+        }))
+    }
+
     fn sample_token(zone: &str) -> Value {
         serde_json::to_value(
             ToolCapabilityToken::new(ZoneId::new(zone.to_owned()), "agent:test")
@@ -2378,6 +2538,7 @@ mod tests {
         assert_eq!(c.transport, TransportMode::Stdio);
         assert!(c.zone_filter.is_none());
         assert!(c.connector_filter.is_none());
+        assert!(c.risk_max.is_none());
         assert!(c.include_resources);
         assert!(c.include_prompts);
     }
@@ -2409,6 +2570,12 @@ mod tests {
     }
 
     #[test]
+    fn config_builder_risk_max() {
+        let c = McpServerConfig::new().with_risk_max("medium");
+        assert_eq!(c.risk_max.as_deref(), Some("medium"));
+    }
+
+    #[test]
     fn config_builder_without_resources() {
         let c = McpServerConfig::new().without_resources();
         assert!(!c.include_resources);
@@ -2424,10 +2591,12 @@ mod tests {
     fn config_serde_roundtrip() {
         let c = McpServerConfig::new()
             .with_transport(TransportMode::Sse { port: 4000 })
-            .with_zone_filter("staging");
+            .with_zone_filter("staging")
+            .with_risk_max("high");
         let json = serde_json::to_string(&c).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.zone_filter.as_deref(), Some("staging"));
+        assert_eq!(back.risk_max.as_deref(), Some("high"));
     }
 
     // ── Server Info ─────────────────────────────────────────────────
@@ -2903,6 +3072,123 @@ mod tests {
     }
 
     #[test]
+    fn handle_tools_list_strips_top_level_combinators_for_openai_import() {
+        // gmail.send_message-style schema: a top-level `anyOf` expressing a required
+        // XOR (raw OR to+subject+body). OpenAI/Codex rejects top-level combinators.
+        let schema = json!({
+            "type": "object",
+            "anyOf": [
+                { "required": ["raw"] },
+                { "required": ["to", "subject", "body"] }
+            ],
+            "properties": {
+                "raw": { "type": "string" },
+                "to": { "type": "string" },
+                "subject": { "type": "string" },
+                "body": { "type": "string" }
+            },
+            "additionalProperties": false
+        });
+        let state = McpServerState::builder()
+            .with_tool(McpToolDefinition::new(
+                "gmail.send_message",
+                "Send a message",
+                schema,
+                "gmail",
+                "gmail.send_message",
+            ))
+            .build();
+
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let emitted = &resp.result().unwrap()["tools"][0]["inputSchema"];
+
+        // Emitted schema is OpenAI/Codex-importable: a flat object, no top-level combinators.
+        assert_eq!(emitted["type"], "object");
+        assert!(emitted.get("anyOf").is_none());
+        assert!(emitted.get("oneOf").is_none());
+        assert!(emitted.get("allOf").is_none());
+        // Every parameter is preserved, along with sibling keywords.
+        assert!(emitted["properties"]["raw"].is_object());
+        assert!(emitted["properties"]["to"].is_object());
+        assert!(emitted["properties"]["subject"].is_object());
+        assert!(emitted["properties"]["body"].is_object());
+        assert_eq!(emitted["additionalProperties"], false);
+
+        // The stored schema is untouched — the full XOR constraint is kept for runtime
+        // validation and the resource:// inventory views.
+        assert!(state.tools[0].input_schema.get("anyOf").is_some());
+    }
+
+    #[test]
+    fn handle_tools_list_salvages_branch_properties_and_top_level_required() {
+        // bluebubbles.send_media-style: top-level `required` + a `oneOf` whose branches
+        // carry their own `required`/`properties`. Branch properties must survive.
+        let schema = json!({
+            "type": "object",
+            "required": ["local_path"],
+            "oneOf": [
+                { "required": ["chat_guid"], "properties": { "chat_guid": { "type": "string" } } },
+                { "required": ["chat_id"], "properties": { "chat_id": { "type": "integer" } } }
+            ],
+            "properties": {
+                "local_path": { "type": "string" }
+            }
+        });
+        let state = McpServerState::builder()
+            .with_tool(McpToolDefinition::new(
+                "bluebubbles.send_media",
+                "Send media",
+                schema,
+                "bluebubbles",
+                "bluebubbles.send_media",
+            ))
+            .build();
+
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let emitted = &resp.result().unwrap()["tools"][0]["inputSchema"];
+
+        assert_eq!(emitted["type"], "object");
+        assert!(emitted.get("oneOf").is_none());
+        // Top-level required is retained; alternative-branch required is dropped (the
+        // XOR is enforced at invoke time, not advertised as universally required).
+        assert_eq!(emitted["required"], json!(["local_path"]));
+        // Properties from both the top level and the oneOf branches are present.
+        assert!(emitted["properties"]["local_path"].is_object());
+        assert!(emitted["properties"]["chat_guid"].is_object());
+        assert!(emitted["properties"]["chat_id"].is_object());
+    }
+
+    #[test]
+    fn handle_tools_list_preserves_nested_combinators() {
+        // A combinator nested inside a property is valid for OpenAI and must NOT be
+        // stripped; such a schema must pass through byte-for-byte (fast path).
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "thread": { "anyOf": [ { "type": "object" }, { "type": "null" } ] }
+            }
+        });
+        let state = McpServerState::builder()
+            .with_tool(McpToolDefinition::new(
+                "demo.op",
+                "demo",
+                schema.clone(),
+                "demo",
+                "demo.op",
+            ))
+            .build();
+
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let emitted = &resp.result().unwrap()["tools"][0]["inputSchema"];
+
+        assert!(emitted["properties"]["thread"].get("anyOf").is_some());
+        assert_eq!(emitted, &schema);
+    }
+
+    #[test]
     fn handle_tools_list_includes_annotations_provenance_and_supported_zones() {
         let state = McpServerState::builder()
             .with_tool(sample_live_tool())
@@ -2947,6 +3233,60 @@ mod tests {
         assert_eq!(tools[0]["name"], "github.project_issue");
     }
 
+    #[test]
+    fn handle_tools_list_risk_max_is_inclusive_boundary() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_risk_max("medium"))
+            .with_tool(risk_annotated_tool("github.read_issue", "low"))
+            .with_tool(risk_annotated_tool("github.create_issue", "medium"))
+            .with_tool(risk_annotated_tool("github.delete_repo", "high"))
+            .with_tool(risk_annotated_tool("github.transfer_org", "critical"))
+            .build();
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let tools = resp.result().unwrap()["tools"].as_array().unwrap().clone();
+        let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["github.read_issue", "github.create_issue"]);
+    }
+
+    #[test]
+    fn handle_tools_list_risk_max_critical_includes_critical() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_risk_max("critical"))
+            .with_tool(risk_annotated_tool("github.transfer_org", "critical"))
+            .build();
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let tools = resp.result().unwrap()["tools"].as_array().unwrap().clone();
+        assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn handle_tools_list_risk_max_excludes_tools_without_risk_metadata() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_risk_max("critical"))
+            .with_tool(sample_tool())
+            .with_tool(risk_annotated_tool("github.read_issue", "low"))
+            .build();
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let tools = resp.result().unwrap()["tools"].as_array().unwrap().clone();
+        let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["github.read_issue"]);
+    }
+
+    #[test]
+    fn handle_tools_list_without_risk_max_includes_unannotated_tools() {
+        let state = McpServerState::builder()
+            .with_tool(sample_tool())
+            .with_tool(risk_annotated_tool("github.delete_repo", "high"))
+            .build();
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let tools = resp.result().unwrap()["tools"].as_array().unwrap().clone();
+        assert_eq!(tools.len(), 2);
+    }
+
     // ── handle_request: tools/call ──────────────────────────────────
 
     #[test]
@@ -2960,6 +3300,51 @@ mod tests {
             })),
         );
         let resp = handle_request(&state, &req);
+        assert!(resp.is_error());
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code, INTERNAL_ERROR);
+        assert!(error.message.contains("transport-bound tool handler"));
+    }
+
+    #[test]
+    fn handle_tools_call_refuses_tool_above_risk_ceiling() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_risk_max("medium"))
+            .with_tool(risk_annotated_tool("github.delete_repo", "high"))
+            .build();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "github.delete_repo",
+                "arguments": {}
+            })),
+        );
+        let resp = handle_request(&state, &req);
+        assert!(resp.is_error());
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code, INVALID_PARAMS);
+        assert!(error.message.contains("risk ceiling"));
+        let data = error.data.as_ref().unwrap();
+        assert_eq!(data["type"], "risk-ceiling-exceeded");
+        assert_eq!(data["risk_level"], "high");
+        assert_eq!(data["risk_max"], "medium");
+    }
+
+    #[test]
+    fn handle_tools_call_allows_tool_at_risk_ceiling() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_risk_max("medium"))
+            .with_tool(risk_annotated_tool("github.create_issue", "medium"))
+            .build();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "github.create_issue",
+                "arguments": {}
+            })),
+        );
+        let resp = handle_request(&state, &req);
+        // Passes the risk gate; fails only at the transport-handler boundary.
         assert!(resp.is_error());
         let error = resp.error.as_ref().unwrap();
         assert_eq!(error.code, INTERNAL_ERROR);

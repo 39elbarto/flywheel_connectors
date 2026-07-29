@@ -1,9 +1,9 @@
 # Pulumi Connector V3 Contract
 
-> **Status**: runtime contract documented; Pulumi Cloud REST drift documented
+> **Status**: runtime contract documented; Pulumi Cloud REST auth aligned; gated sandbox proof tracked
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: none tracked; use the commands below plus `cargo test -p fcp-pulumi --test live_verification -- --nocapture`
 > **Pulumi Cloud REST API upstream**: https://www.pulumi.com/docs/reference/cloud-rest-api/
 > **Pulumi API basics upstream**: https://www.pulumi.com/docs/reference/cloud-rest-api/api-basics/
 > **Pulumi stacks upstream**: https://www.pulumi.com/docs/reference/cloud-rest-api/stacks/
@@ -36,7 +36,7 @@ Important runtime truths the contract preserves:
 - Configuration requires exactly one auth source:
   - `access_token`
   - `credential_id`
-- Direct token mode trims whitespace and sends `Authorization: Bearer <token>`.
+- Direct token mode trims whitespace and sends `Authorization: token <token>`.
 - `credential_id` mode sends `X-FCP-Credential-Id` and expects host egress policy to inject real secret material.
 - `credential_id` must be a valid UUID.
 - Default runtime API URL is `https://api.pulumi.com/api`.
@@ -81,7 +81,6 @@ Identifier handling is deliberately restrictive for path segments:
 
 This README documents runtime truth and keeps current drift visible:
 
-- Current Pulumi REST API documentation describes API-key requests with `Authorization: token <api-token>`. Runtime sends `Authorization: Bearer <token>`.
 - Current Pulumi REST API documentation scopes stack list to the user stacks endpoint. Runtime calls `/api/stacks` through the default base URL, not `/api/user/stacks`.
 - Manifest network constraints allow only `api.pulumi.com` on port `443`, deny localhost, deny private ranges, require TLS/SNI, and cap redirects at three. Runtime configure accepts any string as `base_url` that `reqwest` can build against; URL policy is only surfaced later through self-check.
 - Runtime URL self-check accepts `api.pulumi.com`, `pulumi.com`, any `*.pulumi.com`, and loopback test hosts. The manifest allows only `api.pulumi.com`.
@@ -98,7 +97,7 @@ This README documents runtime truth and keeps current drift visible:
 - Provider 401, 403, 404, and 429 are mapped as `FcpError::External` with status codes, not specialized unauthorized/resource/rate-limit FCP variants.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align the Pulumi auth header with the provider contract, confirm the intended stack-list endpoint, enforce production URL policy at configure or before invoke, add capability-token verification, expose approval and rate-limit metadata, decide whether `self_check()` should perform a live read-only probe, and reconcile the manifest state model with in-memory runtime behavior.
+A follow-up parity bead should confirm the intended stack-list endpoint, enforce production URL policy at configure or before invoke, add capability-token verification, expose approval and rate-limit metadata, decide whether `self_check()` should perform a live read-only probe, and reconcile the manifest state model with in-memory runtime behavior.
 
 ## First-Slice Scope
 
@@ -112,6 +111,7 @@ The current Pulumi README slice documents the existing runtime surface:
 - provider error mapping, retry classification, timeout behavior, and path-segment validation
 - runtime/manifest/provider-doc drift around authentication, endpoint paths, approvals, rate limits, network policy, state persistence, and capability-token verification
 - deterministic WireMock integration tests
+- gated sandbox live proof for invalid-token denial, stack metadata read, update-history read, and production Pulumi CLI preview
 
 ## Auth And Zone Boundary
 
@@ -132,8 +132,8 @@ The current Pulumi README slice documents the existing runtime surface:
 ## Network And Runtime Invariants
 
 - Default runtime API URL: `https://api.pulumi.com/api`.
-- Direct runtime request headers include `Accept: application/json`.
-- Direct token requests use `Authorization: Bearer <token>`.
+- Direct runtime request headers include `Accept: application/vnd.pulumi+8` and `Content-Type: application/json`.
+- Direct token requests use `Authorization: token <token>`.
 - `credential_id` requests use `X-FCP-Credential-Id: <uuid>`.
 - Runtime client timeout is 30 seconds.
 - Runtime request-context timeout is 30 seconds.
@@ -194,7 +194,7 @@ The current implementation does not include:
 - Stack config secret editing
 - Provider-specific resource graph normalization
 - Cross-account or cross-zone stack aggregation
-- Real Pulumi Cloud integration tests
+- Always-on real Pulumi Cloud integration tests; live proof is gated by `FCP_LIVE_SANDBOX=1`
 
 ## Test And Verification Contract
 
@@ -211,6 +211,8 @@ The tracked tests use deterministic WireMock servers. They cover:
 - Authorization header behavior for direct-token requests
 - provider 401, 403, 404, 429, and 500 responses
 - request and error counter updates
+
+The gated live suite requires `PULUMI_SANDBOX_ACCESS_TOKEN`, `PULUMI_SANDBOX_ORG`, `PULUMI_SANDBOX_PROJECT`, `PULUMI_SANDBOX_STACK`, and `FCP_SANDBOX_RUN_NAMESPACE`. It uses `pulumi` from `PATH` by default; set `PULUMI_SANDBOX_CLI` to an explicit binary path when needed. A fully configured run performs invalid-token denial, stack metadata read, update-history read, and `pulumi preview --refresh=false --expect-no-changes --suppress-outputs` against the sandbox stack. If the CLI prerequisite is absent, the suite emits an exact structured skip instead of passing. `PULUMI_LIVE_SANDBOX_JSONL` hashes organization/project/stack/namespace/CLI identifiers, records provider-resource redaction flags, and never logs stack state payloads.
 
 Before committing README-only changes for this connector, run:
 

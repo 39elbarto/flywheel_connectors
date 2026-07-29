@@ -1,37 +1,42 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:e0343b5c6b580d53a01f1470fd941c488e1f78f45c1d6803cd99daa1e421e8ab"
 
 [connector]
 id = "fcp.qq"
 name = "QQ Bot"
 version = "0.1.0"
 description = "Tencent QQ bot connector for channel, group, and C2C sends plus gateway discovery, stateful gateway event projection, and health verification"
-archetype = "operational"
-homepage = "https://bot.q.qq.com/wiki/"
+archetypes = ["operational"]
+format = "native"
 
 [zones]
 home = "z:community"
 allowed_sources = ["z:owner", "z:private", "z:work", "z:community", "z:project:*"]
 allowed_targets = ["z:community", "z:project:*"]
-tailscale_tag = "tag:fcp-community"
 
 [capabilities]
-required = ["network.dns", "network.outbound", "network.tls.sni"]
+required = ["network.dns", "network.outbound", "network.tls.sni", "qq.messages.write", "qq.gateway.read", "qq.events.read", "qq.health.read"]
 optional = []
 forbidden = ["system.exec", "system.privileged", "network.listen"]
 
-[provides.operations.messages_send_channel]
-summary = "Send a QQ channel message"
+[provides.operations."qq.messages.send_channel"]
+description = "Send a QQ channel message"
 capability = "qq.messages.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "none"
 input_schema = { type = "object", required = ["channel_id", "content"], additionalProperties = false, properties = { channel_id = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" }, coordination = { type = "array", description = "Redacted chat coordination audit records" } } }
 network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.messages_send_channel.ai_hints]
+[provides.operations."qq.messages.send_channel".ai_hints]
 when_to_use = "Use when an agent needs to send a bot-authored message into a known QQ channel by channel_id."
 common_mistakes = [
   "Using group_openid or openid here sends to the wrong QQ endpoint; channel sends require channel_id.",
@@ -40,17 +45,18 @@ common_mistakes = [
 ]
 examples = ['{"input":{"channel_id":"channel-alpha","content":"Deploy finished for project atlas.","msg_id":"qq-msg-root"},"output":{"id":"send-001","timestamp":"2026-05-09T18:50:00Z"}}']
 
-[provides.operations.messages_send_group]
-summary = "Send a QQ group message"
+[provides.operations."qq.messages.send_group"]
+description = "Send a QQ group message"
 capability = "qq.messages.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "none"
 input_schema = { type = "object", required = ["group_openid", "content"], additionalProperties = false, properties = { group_openid = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" }, coordination = { type = "array", description = "Redacted chat coordination audit records" } } }
 network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.messages_send_group.ai_hints]
+[provides.operations."qq.messages.send_group".ai_hints]
 when_to_use = "Use when an agent needs to send a QQ group message to a known group_openid."
 common_mistakes = [
   "Confusing group_openid with channel_id or user openid sends the request to the wrong QQ route.",
@@ -59,17 +65,18 @@ common_mistakes = [
 ]
 examples = ['{"input":{"group_openid":"group-alpha","content":"Build 472 is ready for review.","msg_id":"group-thread-1"},"output":{"id":"group-send-001","timestamp":"2026-05-09T18:51:00Z"}}']
 
-[provides.operations.messages_send_c2c]
-summary = "Send a QQ direct C2C message"
+[provides.operations."qq.messages.send_c2c"]
+description = "Send a QQ direct C2C message"
 capability = "qq.messages.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
 idempotency = "none"
 input_schema = { type = "object", required = ["openid", "content"], additionalProperties = false, properties = { openid = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" }, coordination = { type = "array", description = "Redacted chat coordination audit records" } } }
 network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.messages_send_c2c.ai_hints]
+[provides.operations."qq.messages.send_c2c".ai_hints]
 when_to_use = "Use when an agent needs to send a direct QQ C2C message to a known user openid."
 common_mistakes = [
   "Passing a group_openid or channel_id here targets the wrong QQ message endpoint.",
@@ -78,17 +85,18 @@ common_mistakes = [
 ]
 examples = ['{"input":{"openid":"user-alpha","content":"Your requested export is ready.","msg_id":"direct-thread-1"},"output":{"id":"c2c-send-001","timestamp":"2026-05-09T18:52:00Z"}}']
 
-[provides.operations.gateway_get]
-summary = "Get the QQ gateway websocket URL"
+[provides.operations."qq.gateway.get"]
+description = "Get the QQ gateway websocket URL"
 capability = "qq.gateway.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["url"], additionalProperties = true, properties = { url = { type = "string", format = "uri" } } }
 network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.gateway_get.ai_hints]
+[provides.operations."qq.gateway.get".ai_hints]
 when_to_use = "Use when a QQ gateway runtime needs to discover the official websocket URL before event intake."
 common_mistakes = [
   "Using this operation for outbound messages is wrong; it only discovers the gateway URL.",
@@ -97,17 +105,18 @@ common_mistakes = [
 ]
 examples = ['{"input":{},"output":{"url":"wss://api.sgroup.qq.com/websocket"}}']
 
-[provides.operations.events_normalize]
-summary = "Normalize a QQ gateway message event"
+[provides.operations."qq.events.normalize"]
+description = "Normalize a QQ gateway message event"
 capability = "qq.events.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object", required = ["event"], additionalProperties = false, properties = { event = { type = "object", required = ["op"], additionalProperties = false, properties = { op = { type = "integer", minimum = 0, maximum = 255 }, s = { type = ["integer", "null"], minimum = 0 }, t = { type = ["string", "null"], maxLength = 64, pattern = "^[A-Z0-9_]+$" }, d = { type = ["object", "null"], additionalProperties = true }, id = { type = ["string", "null"], maxLength = 256 } } } } }
-output_schema = { type = "object", required = ["event_type", "message_id", "channel_id", "guild_id", "group_id", "sender_id", "sender_name", "text", "timestamp", "is_reply", "reply_to", "has_attachments", "routing", "raw"], additionalProperties = false, properties = { event_type = { type = "string" }, message_id = { type = ["string", "null"] }, channel_id = { type = ["string", "null"] }, guild_id = { type = ["string", "null"] }, group_id = { type = ["string", "null"] }, sender_id = { type = ["string", "null"] }, sender_name = { type = ["string", "null"] }, text = { type = ["string", "null"] }, timestamp = { type = ["string", "null"] }, is_reply = { type = "boolean" }, reply_to = { type = ["string", "null"] }, has_attachments = { type = "boolean" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, raw = { type = ["object", "null"], additionalProperties = true } } }
+output_schema = { type = "object", required = ["event_type", "message_id", "channel_id", "guild_id", "group_id", "sender_id", "sender_name", "text", "timestamp", "is_reply", "reply_to", "has_attachments", "routing", "interaction_kind", "command_name", "approval_action", "raw"], additionalProperties = false, properties = { event_type = { type = "string" }, message_id = { type = ["string", "null"] }, channel_id = { type = ["string", "null"] }, guild_id = { type = ["string", "null"] }, group_id = { type = ["string", "null"] }, sender_id = { type = ["string", "null"] }, sender_name = { type = ["string", "null"] }, text = { type = ["string", "null"] }, timestamp = { type = ["string", "null"] }, is_reply = { type = "boolean" }, reply_to = { type = ["string", "null"] }, has_attachments = { type = "boolean" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, interaction_kind = { type = "string", enum = ["plain", "slash_command", "approval"] }, command_name = { type = ["string", "null"], maxLength = 64 }, approval_action = { anyOf = [{ type = "string", enum = ["approve", "reject", "deny"] }, { type = "null" }] }, raw = { type = ["object", "null"], additionalProperties = true } } }
 network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.events_normalize.ai_hints]
+[provides.operations."qq.events.normalize".ai_hints]
 when_to_use = "Use when an agent needs to convert one raw QQ gateway event into a structured routing-safe event without mutating runtime state."
 common_mistakes = [
   "Treating normalization as authorization is unsafe; sender policy is applied by gateway_project_event.",
@@ -116,36 +125,58 @@ common_mistakes = [
 ]
 examples = ['{"input":{"event":{"op":0,"s":7,"t":"GROUP_AT_MESSAGE_CREATE","d":{"id":"evt-alpha","group_openid":"group-alpha","author":{"id":"sender-alpha"},"content":"bot status?"}}},"output":{"event_type":"GROUP_AT_MESSAGE_CREATE","message_id":"evt-alpha","channel_id":null,"guild_id":null,"group_id":"group-alpha","sender_id":"sender-alpha","sender_name":null,"text":"bot status?","timestamp":null,"is_reply":false,"reply_to":null,"has_attachments":false,"routing":"group","raw":{"id":"evt-alpha"}}}']
 
-[provides.operations.gateway_project_event]
-summary = "Project a QQ gateway event through sequence, replay, and inbound policy state"
+[provides.operations."qq.gateway.project_event"]
+description = "Project a QQ gateway event through sequence, replay, and inbound policy state"
 capability = "qq.events.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object", required = ["event"], additionalProperties = false, properties = { event = { type = "object", required = ["op"], additionalProperties = false, properties = { op = { type = "integer", minimum = 0, maximum = 255 }, s = { type = ["integer", "null"], minimum = 0 }, t = { type = ["string", "null"], maxLength = 64, pattern = "^[A-Z0-9_]+$" }, d = { type = ["object", "null"], additionalProperties = true }, id = { type = ["string", "null"], maxLength = 256 } } } } }
-output_schema = { type = "object", required = ["accepted", "topic", "reason_code", "sequence", "event_id", "normalized", "policy", "runtime"], additionalProperties = false, properties = { accepted = { type = "boolean" }, topic = { type = "string", enum = ["qq.message.authorized", "qq.event.dropped"] }, reason_code = { type = "string" }, sequence = { type = ["integer", "null"], minimum = 0 }, event_id = { type = ["string", "null"] }, normalized = { anyOf = [{ type = "object", required = ["event_type", "message_id", "channel_id", "guild_id", "group_id", "sender_id", "sender_name", "text", "timestamp", "is_reply", "reply_to", "has_attachments", "routing", "raw"], additionalProperties = false, properties = { event_type = { type = "string" }, message_id = { type = ["string", "null"] }, channel_id = { type = ["string", "null"] }, guild_id = { type = ["string", "null"] }, group_id = { type = ["string", "null"] }, sender_id = { type = ["string", "null"] }, sender_name = { type = ["string", "null"] }, text = { type = ["string", "null"] }, timestamp = { type = ["string", "null"] }, is_reply = { type = "boolean" }, reply_to = { type = ["string", "null"] }, has_attachments = { type = "boolean" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, raw = { type = ["object", "null"], additionalProperties = true } } }, { type = "null" }] }, policy = { anyOf = [{ type = "object", required = ["allowed", "reason_code", "routing", "sender_id", "target_id", "mentioned_bot"], additionalProperties = false, properties = { allowed = { type = "boolean" }, reason_code = { type = "string" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, sender_id = { type = ["string", "null"] }, target_id = { type = ["string", "null"] }, mentioned_bot = { type = "boolean" } } }, { type = "null" }] }, runtime = { type = "object", required = ["enabled", "session_id", "last_sequence", "heartbeat_interval_ms", "heartbeat_sent_count", "heartbeat_ack_count", "reconnect_attempts", "max_reconnect_attempts", "reconnect_backoff_ms", "queue_depth", "max_queue_depth", "dedupe_size", "dedupe_window_size", "accepted_events", "dropped_events", "duplicate_events", "stale_sequence_events"], additionalProperties = false, properties = { enabled = { type = "boolean" }, session_id = { type = ["string", "null"] }, last_sequence = { type = "integer", minimum = 0 }, heartbeat_interval_ms = { type = "integer", minimum = 0 }, heartbeat_sent_count = { type = "integer", minimum = 0 }, heartbeat_ack_count = { type = "integer", minimum = 0 }, reconnect_attempts = { type = "integer", minimum = 0 }, max_reconnect_attempts = { type = "integer", minimum = 0 }, reconnect_backoff_ms = { type = "integer", minimum = 0 }, queue_depth = { type = "integer", minimum = 0 }, max_queue_depth = { type = "integer", minimum = 0 }, dedupe_size = { type = "integer", minimum = 0 }, dedupe_window_size = { type = "integer", minimum = 0 }, accepted_events = { type = "integer", minimum = 0 }, dropped_events = { type = "integer", minimum = 0 }, duplicate_events = { type = "integer", minimum = 0 }, stale_sequence_events = { type = "integer", minimum = 0 } } } } }
+output_schema = { type = "object", required = ["accepted", "topic", "reason_code", "sequence", "event_id", "normalized", "policy", "runtime", "lifecycle"], additionalProperties = false, properties = { accepted = { type = "boolean" }, topic = { type = "string", enum = ["qq.message.authorized", "qq.event.dropped"] }, reason_code = { type = "string" }, sequence = { type = ["integer", "null"], minimum = 0 }, event_id = { type = ["string", "null"] }, normalized = { anyOf = [{ type = "object", required = ["event_type", "message_id", "channel_id", "guild_id", "group_id", "sender_id", "sender_name", "text", "timestamp", "is_reply", "reply_to", "has_attachments", "routing", "interaction_kind", "command_name", "approval_action", "raw"], additionalProperties = false, properties = { event_type = { type = "string" }, message_id = { type = ["string", "null"] }, channel_id = { type = ["string", "null"] }, guild_id = { type = ["string", "null"] }, group_id = { type = ["string", "null"] }, sender_id = { type = ["string", "null"] }, sender_name = { type = ["string", "null"] }, text = { type = ["string", "null"] }, timestamp = { type = ["string", "null"] }, is_reply = { type = "boolean" }, reply_to = { type = ["string", "null"] }, has_attachments = { type = "boolean" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, interaction_kind = { type = "string", enum = ["plain", "slash_command", "approval"] }, command_name = { type = ["string", "null"], maxLength = 64 }, approval_action = { anyOf = [{ type = "string", enum = ["approve", "reject", "deny"] }, { type = "null" }] }, raw = { type = ["object", "null"], additionalProperties = true } } }, { type = "null" }] }, policy = { anyOf = [{ type = "object", required = ["allowed", "reason_code", "routing", "sender_id", "target_id", "mentioned_bot"], additionalProperties = false, properties = { allowed = { type = "boolean" }, reason_code = { type = "string" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, sender_id = { type = ["string", "null"] }, target_id = { type = ["string", "null"] }, mentioned_bot = { type = "boolean" } } }, { type = "null" }] }, runtime = { type = "object", required = ["enabled", "session_id", "last_sequence", "heartbeat_interval_ms", "heartbeat_sent_count", "heartbeat_ack_count", "reconnect_attempts", "max_reconnect_attempts", "terminal_reconnect_failures", "reconnect_backoff_ms", "max_reconnect_backoff_ms", "queue_depth", "max_queue_depth", "peer_queue_count", "largest_peer_queue_depth", "max_peer_queue_depth", "dedupe_size", "dedupe_window_size", "reply_reference_count", "max_reply_references", "known_reply_references", "unknown_reply_references", "accepted_events", "dropped_events", "duplicate_events", "stale_sequence_events"], additionalProperties = false, properties = { enabled = { type = "boolean" }, session_id = { type = ["string", "null"] }, last_sequence = { type = "integer", minimum = 0 }, heartbeat_interval_ms = { type = "integer", minimum = 0 }, heartbeat_sent_count = { type = "integer", minimum = 0 }, heartbeat_ack_count = { type = "integer", minimum = 0 }, reconnect_attempts = { type = "integer", minimum = 0 }, max_reconnect_attempts = { type = "integer", minimum = 0 }, terminal_reconnect_failures = { type = "integer", minimum = 0 }, reconnect_backoff_ms = { type = "integer", minimum = 0 }, max_reconnect_backoff_ms = { type = "integer", minimum = 0 }, queue_depth = { type = "integer", minimum = 0 }, max_queue_depth = { type = "integer", minimum = 0 }, peer_queue_count = { type = "integer", minimum = 0 }, largest_peer_queue_depth = { type = "integer", minimum = 0 }, max_peer_queue_depth = { type = "integer", minimum = 0 }, dedupe_size = { type = "integer", minimum = 0 }, dedupe_window_size = { type = "integer", minimum = 0 }, reply_reference_count = { type = "integer", minimum = 0 }, max_reply_references = { type = "integer", minimum = 0 }, known_reply_references = { type = "integer", minimum = 0 }, unknown_reply_references = { type = "integer", minimum = 0 }, accepted_events = { type = "integer", minimum = 0 }, dropped_events = { type = "integer", minimum = 0 }, duplicate_events = { type = "integer", minimum = 0 }, stale_sequence_events = { type = "integer", minimum = 0 } } }, lifecycle = { type = "object", required = ["action", "reason_code", "resume_session_id", "resume_sequence", "heartbeat_interval_ms", "reconnect_after_ms"], additionalProperties = false, properties = { action = { type = "string", enum = ["none", "drain_events", "send_heartbeat", "identify", "resume", "reconnect_identify", "reconnect_resume", "stop_reconnect"] }, reason_code = { type = "string" }, resume_session_id = { type = ["string", "null"] }, resume_sequence = { type = "integer", minimum = 0 }, heartbeat_interval_ms = { type = "integer", minimum = 0 }, reconnect_after_ms = { type = ["integer", "null"], minimum = 0 } } } } }
 network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.gateway_project_event.ai_hints]
+[provides.operations."qq.gateway.project_event".ai_hints]
 when_to_use = "Use when an agent needs QQ gateway intake to apply sequence tracking, replay suppression, and inbound sender policy before emitting an event."
 common_mistakes = [
   "Bypassing projection and emitting normalized events directly skips allowlist, mention, duplicate, and stale-sequence decisions.",
   "Ignoring accepted=false results can surface denied or duplicate QQ events to downstream agents.",
   "Persisting raw event identifiers instead of redacted hashes can leak community or sender metadata in evidence logs.",
 ]
-examples = ['{"input":{"event":{"op":0,"s":8,"t":"GROUP_AT_MESSAGE_CREATE","id":"event-alpha","d":{"id":"event-alpha","group_openid":"group-alpha","author":{"id":"sender-alpha"},"content":"bot deploy status?"}}},"output":{"accepted":true,"topic":"qq.message.authorized","reason_code":"group_allowed","sequence":8,"event_id":"event-alpha","normalized":{"event_type":"GROUP_AT_MESSAGE_CREATE","message_id":"event-alpha","channel_id":null,"guild_id":null,"group_id":"group-alpha","sender_id":"sender-alpha","sender_name":null,"text":"bot deploy status?","timestamp":null,"is_reply":false,"reply_to":null,"has_attachments":false,"routing":"group","raw":{"id":"event-alpha"}},"policy":{"allowed":true,"reason_code":"group_allowed","routing":"group","sender_id":"sender-alpha","target_id":"group-alpha","mentioned_bot":true},"runtime":{"enabled":true,"session_id":null,"last_sequence":8,"heartbeat_interval_ms":0,"heartbeat_sent_count":0,"heartbeat_ack_count":0,"reconnect_attempts":0,"max_reconnect_attempts":0,"reconnect_backoff_ms":0,"queue_depth":0,"max_queue_depth":64,"dedupe_size":1,"dedupe_window_size":128,"accepted_events":1,"dropped_events":0,"duplicate_events":0,"stale_sequence_events":0}}}']
+examples = ['{"input":{"event":{"op":0,"s":8,"t":"GROUP_AT_MESSAGE_CREATE","id":"event-alpha","d":{"id":"event-alpha","group_openid":"group-alpha","author":{"id":"sender-alpha"},"content":"bot deploy status?"}}},"output":{"accepted":true,"topic":"qq.message.authorized","reason_code":"group_allowed","sequence":8,"event_id":"event-alpha","normalized":{"event_type":"GROUP_AT_MESSAGE_CREATE","message_id":"event-alpha","channel_id":null,"guild_id":null,"group_id":"group-alpha","sender_id":"sender-alpha","sender_name":null,"text":"bot deploy status?","timestamp":null,"is_reply":false,"reply_to":null,"has_attachments":false,"routing":"group","raw":{"id":"event-alpha"}},"policy":{"allowed":true,"reason_code":"group_allowed","routing":"group","sender_id":"sender-alpha","target_id":"group-alpha","mentioned_bot":true},"runtime":{"enabled":true,"session_id":null,"last_sequence":8,"heartbeat_interval_ms":45000,"heartbeat_sent_count":0,"heartbeat_ack_count":0,"reconnect_attempts":0,"max_reconnect_attempts":5,"terminal_reconnect_failures":0,"reconnect_backoff_ms":1000,"max_reconnect_backoff_ms":30000,"queue_depth":1,"max_queue_depth":64,"peer_queue_count":1,"largest_peer_queue_depth":1,"max_peer_queue_depth":32,"dedupe_size":1,"dedupe_window_size":128,"reply_reference_count":1,"max_reply_references":64,"known_reply_references":0,"unknown_reply_references":0,"accepted_events":1,"dropped_events":0,"duplicate_events":0,"stale_sequence_events":0},"lifecycle":{"action":"drain_events","reason_code":"accepted","resume_session_id":null,"resume_sequence":8,"heartbeat_interval_ms":45000,"reconnect_after_ms":null}}}']
 
-[provides.operations.health]
-summary = "Verify QQ credentials and gateway discovery"
-capability = "qq.health.read"
-risk = "low"
+[provides.operations."qq.gateway.drain_events"]
+description = "Drain accepted QQ gateway events from the bounded runtime queue"
+capability = "qq.events.read"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 10000 } } }
+output_schema = { type = "object", required = ["drained_count", "remaining_count", "events", "runtime"], additionalProperties = false, properties = { drained_count = { type = "integer", minimum = 0 }, remaining_count = { type = "integer", minimum = 0 }, events = { type = "array", items = { type = "object", required = ["topic", "sequence", "event_id", "normalized", "policy"], additionalProperties = false, properties = { topic = { const = "qq.message.authorized" }, sequence = { type = ["integer", "null"], minimum = 0 }, event_id = { type = ["string", "null"] }, normalized = { type = "object", additionalProperties = true }, policy = { type = "object", additionalProperties = true } } } }, runtime = { type = "object", required = ["enabled", "session_id", "last_sequence", "heartbeat_interval_ms", "heartbeat_sent_count", "heartbeat_ack_count", "reconnect_attempts", "max_reconnect_attempts", "terminal_reconnect_failures", "reconnect_backoff_ms", "max_reconnect_backoff_ms", "queue_depth", "max_queue_depth", "peer_queue_count", "largest_peer_queue_depth", "max_peer_queue_depth", "dedupe_size", "dedupe_window_size", "reply_reference_count", "max_reply_references", "known_reply_references", "unknown_reply_references", "accepted_events", "dropped_events", "duplicate_events", "stale_sequence_events"], additionalProperties = false, properties = { enabled = { type = "boolean" }, session_id = { type = ["string", "null"] }, last_sequence = { type = "integer", minimum = 0 }, heartbeat_interval_ms = { type = "integer", minimum = 0 }, heartbeat_sent_count = { type = "integer", minimum = 0 }, heartbeat_ack_count = { type = "integer", minimum = 0 }, reconnect_attempts = { type = "integer", minimum = 0 }, max_reconnect_attempts = { type = "integer", minimum = 0 }, terminal_reconnect_failures = { type = "integer", minimum = 0 }, reconnect_backoff_ms = { type = "integer", minimum = 0 }, max_reconnect_backoff_ms = { type = "integer", minimum = 0 }, queue_depth = { type = "integer", minimum = 0 }, max_queue_depth = { type = "integer", minimum = 0 }, peer_queue_count = { type = "integer", minimum = 0 }, largest_peer_queue_depth = { type = "integer", minimum = 0 }, max_peer_queue_depth = { type = "integer", minimum = 0 }, dedupe_size = { type = "integer", minimum = 0 }, dedupe_window_size = { type = "integer", minimum = 0 }, reply_reference_count = { type = "integer", minimum = 0 }, max_reply_references = { type = "integer", minimum = 0 }, known_reply_references = { type = "integer", minimum = 0 }, unknown_reply_references = { type = "integer", minimum = 0 }, accepted_events = { type = "integer", minimum = 0 }, dropped_events = { type = "integer", minimum = 0 }, duplicate_events = { type = "integer", minimum = 0 }, stale_sequence_events = { type = "integer", minimum = 0 } } } } }
+network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."qq.gateway.drain_events".ai_hints]
+when_to_use = "Use after qq.gateway.project_event has accepted host-fed gateway frames and the host needs to dequeue authorized events for downstream fanout."
+common_mistakes = [
+  "Calling drain before projection returns an empty event list; use it after the host has fed gateway frames through qq.gateway.project_event.",
+  "Ignoring remaining_count can hide a backlog behind a small drain limit.",
+  "Logging drained normalized events without redaction can leak QQ conversation, sender, or attachment metadata.",
+]
+examples = ['{"input":{"limit":10},"output":{"drained_count":1,"remaining_count":0,"events":[{"topic":"qq.message.authorized","sequence":8,"event_id":"event-alpha","normalized":{"event_type":"GROUP_AT_MESSAGE_CREATE"},"policy":{"allowed":true,"reason_code":"group_allowed"}}],"runtime":{"enabled":true,"session_id":null,"last_sequence":8,"heartbeat_interval_ms":45000,"heartbeat_sent_count":0,"heartbeat_ack_count":0,"reconnect_attempts":0,"max_reconnect_attempts":5,"terminal_reconnect_failures":0,"reconnect_backoff_ms":1000,"max_reconnect_backoff_ms":30000,"queue_depth":0,"max_queue_depth":64,"peer_queue_count":0,"largest_peer_queue_depth":0,"max_peer_queue_depth":32,"dedupe_size":1,"dedupe_window_size":128,"reply_reference_count":1,"max_reply_references":64,"known_reply_references":0,"unknown_reply_references":0,"accepted_events":1,"dropped_events":0,"duplicate_events":0,"stale_sequence_events":0}}}']
+
+[provides.operations."qq.health"]
+description = "Verify QQ credentials and gateway discovery"
+capability = "qq.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "base_url", "gateway", "manifest_hash"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, base_url = { type = "string", format = "uri" }, gateway = { type = ["string", "null"], format = "uri" }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" } } }
 network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
-[provides.operations.health.ai_hints]
+[provides.operations."qq.health".ai_hints]
 when_to_use = "Use when an operator or agent needs to verify QQ credentials, base URL wiring, gateway discovery, and manifest hash before other QQ operations."
 common_mistakes = [
   "Treating health as a send or event operation is wrong; it only verifies connector readiness.",

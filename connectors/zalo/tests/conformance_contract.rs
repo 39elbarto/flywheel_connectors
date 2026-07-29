@@ -9,13 +9,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fcp_manifest::{ConnectorManifest, ConnectorStatus, OperationSection};
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_zalo::{ZaloConnector, ZaloError};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const EXPECTED_OPERATION_COUNT: usize = 9;
+const EXPECTED_OPERATION_IDS: [&str; EXPECTED_OPERATION_COUNT] = [
+    "zalo.self.get_me",
+    "zalo.messages.send",
+    "zalo.messages.send_photo",
+    "zalo.updates.poll",
+    "zalo.webhook.set",
+    "zalo.webhook.delete",
+    "zalo.webhook.info",
+    "zalo.webhook.ingest",
+    "zalo.webhook.verify",
+];
 
 fn manifest() -> ConnectorManifest {
     ConnectorManifest::parse_str(MANIFEST_TOML).expect("Zalo manifest should validate")
@@ -39,6 +50,10 @@ fn serialized_str(value: &impl Serialize) -> String {
         .as_str()
         .expect("manifest enum should serialize as a string")
         .to_string()
+}
+
+fn serialized_value(value: &impl Serialize) -> Value {
+    serde_json::to_value(value).expect("manifest value should serialize")
 }
 
 fn assert_object_schema(schema: &Value, operation_id: &str, label: &str) {
@@ -141,39 +156,6 @@ fn assert_no_connector_egress_network_constraints(id: &str, op: &OperationSectio
     assert_eq!(constraints.max_redirects, 0, "{id}");
 }
 
-fn assert_runtime_schema_covers_manifest(
-    operation_id: &str,
-    runtime_schema: &Value,
-    manifest_schema: &Value,
-    label: &str,
-) {
-    assert_object_schema(runtime_schema, operation_id, label);
-    assert_eq!(
-        runtime_schema.get("required"),
-        manifest_schema.get("required"),
-        "{operation_id} runtime {label}_schema required fields should match manifest"
-    );
-
-    let Some(manifest_properties) = manifest_schema.get("properties").and_then(Value::as_object)
-    else {
-        return;
-    };
-    let runtime_properties = runtime_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .expect("runtime schema should declare manifest properties");
-    for (field, manifest_property) in manifest_properties {
-        let runtime_property = runtime_properties
-            .get(field)
-            .expect("runtime schema should include manifest property");
-        assert_eq!(
-            runtime_property.get("type"),
-            manifest_property.get("type"),
-            "{operation_id} runtime {label}_schema property `{field}` type should match manifest"
-        );
-    }
-}
-
 fn assert_schema_accepts(schema: &Value, payload: &Value) {
     let validator = jsonschema::validator_for(schema).expect("schema should compile");
     let errors = validator
@@ -188,14 +170,8 @@ fn assert_schema_accepts(schema: &Value, payload: &Value) {
 
 fn assert_schema_rejects(schema: &Value, payload: &Value) {
     let validator = jsonschema::validator_for(schema).expect("schema should compile");
-    let errors = validator
-        .iter_errors(payload)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
-    assert!(
-        !errors.is_empty(),
-        "schema should reject payload {payload:#}"
-    );
+    let has_error = validator.iter_errors(payload).next().is_some();
+    assert!(has_error, "schema should reject payload {payload:#}");
 }
 
 fn input_schema<'a>(manifest: &'a ConnectorManifest, operation_id: &str) -> &'a Value {
@@ -214,6 +190,11 @@ async fn runtime_catalog_matches_manifest_operation_contracts() {
 
     assert_eq!(manifest.provides.operations.len(), EXPECTED_OPERATION_COUNT);
     assert_eq!(runtime_ops.len(), EXPECTED_OPERATION_COUNT);
+    let runtime_ids_in_order = runtime_ops
+        .iter()
+        .map(|op| op["id"].as_str().expect("runtime operation id"))
+        .collect::<Vec<_>>();
+    assert_eq!(runtime_ids_in_order, EXPECTED_OPERATION_IDS.to_vec());
 
     let runtime_by_id: BTreeMap<&str, &Value> = runtime_ops
         .iter()
@@ -234,6 +215,8 @@ async fn runtime_catalog_matches_manifest_operation_contracts() {
             .get(id.as_str())
             .expect("manifest operation should be present in runtime introspection");
 
+        assert_eq!(runtime_op["summary"], manifest_op.description, "{id}");
+        assert_eq!(runtime_op["description"], manifest_op.description, "{id}");
         assert_eq!(
             runtime_op["capability"],
             manifest_op.capability.as_str(),
@@ -254,21 +237,46 @@ async fn runtime_catalog_matches_manifest_operation_contracts() {
             serialized_str(&manifest_op.idempotency),
             "{id}"
         );
-        assert_runtime_schema_covers_manifest(
-            id,
-            &runtime_op["input_schema"],
-            &manifest_op.input_schema,
-            "input",
-        );
-        assert_runtime_schema_covers_manifest(
-            id,
-            &runtime_op["output_schema"],
-            &manifest_op.output_schema,
-            "output",
+        assert_eq!(
+            runtime_op["requires_approval"],
+            serialized_str(&manifest_op.requires_approval),
+            "{id}"
         );
         assert_eq!(
-            runtime_op["ai_hints"]["when_to_use"], manifest_op.ai_hints.when_to_use,
+            runtime_op["revocation_freshness"],
+            serialized_str(&manifest_op.revocation_freshness),
+            "{id}"
+        );
+        assert_eq!(
+            runtime_op["input_schema"], manifest_op.input_schema,
+            "{id} runtime input_schema should mirror manifest"
+        );
+        assert_eq!(
+            runtime_op["output_schema"], manifest_op.output_schema,
+            "{id} runtime output_schema should mirror manifest"
+        );
+        assert_eq!(
+            runtime_op["ai_hints"],
+            serialized_value(&manifest_op.ai_hints),
             "{id} runtime ai_hints should mirror manifest"
+        );
+        let expected_network_constraints = manifest_op
+            .network_constraints
+            .as_ref()
+            .map(serialized_value);
+        assert_eq!(
+            runtime_op.get("network_constraints"),
+            expected_network_constraints.as_ref(),
+            "{id} runtime network_constraints should mirror manifest"
+        );
+        let expected_rate_limit = manifest_op
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| serialized_value(&rate_limit.0));
+        assert_eq!(
+            runtime_op.get("rate_limit"),
+            expected_rate_limit.as_ref(),
+            "{id} runtime rate_limit should mirror manifest"
         );
         assert!(
             runtime_op["implemented"].as_bool() == Some(true),

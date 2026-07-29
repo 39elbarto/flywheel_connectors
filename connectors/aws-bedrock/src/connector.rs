@@ -12,7 +12,8 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -261,7 +262,7 @@ fn operator_guidance() -> OperatorGuidance {
         prerequisites: vec![
             "Provision Bedrock Runtime credentials scoped to bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, and bedrock:ListFoundationModels for the intended region.",
             "For Bedrock Mantle, provide a bearer token from AWS_BEARER_TOKEN_BEDROCK or an IAM bearer-token generator as mantle_bearer_token; this connector does not mint IAM bearer tokens internally.",
-            "Use runtime_base_url and control_base_url overrides for deterministic wiremock or signing-proxy verification.",
+            "Use runtime_base_url and control_base_url overrides for deterministic local HTTP fixture or signing-proxy verification.",
             "Set AWS_BEDROCK_E2E=1 only in a disposable verification account with cheapest-model smoke settings.",
         ],
         redaction_rules: vec![
@@ -1038,7 +1039,7 @@ impl FcpConnector for BedrockConnector {
             return Ok(self.attach_self_check_details(
                 SelfCheckReport::degraded(
                     "self_check_unsupported_on_default_bedrock",
-                    "self_check abstains against the default Bedrock control-plane endpoint to avoid hitting production with operator credentials; set control_base_url to a staging endpoint or wiremock verifier",
+                    "self_check abstains against the default Bedrock control-plane endpoint to avoid hitting production with operator credentials; set control_base_url to a staging endpoint or local HTTP verifier",
                 ),
                 Some(provisioning),
             ));

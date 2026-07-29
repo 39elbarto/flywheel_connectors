@@ -3,13 +3,14 @@
 #![allow(clippy::doc_markdown)]
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
-    ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
-    StepId,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, Introspection,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, SelfCheckReport, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,20 @@ use crate::{
     client::{MailchimpAuth, MailchimpClient, base_url_for_dc, extract_dc},
     error::MailchimpError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OP_LISTS_LIST: &str = "mailchimp.lists.list";
+const OP_MEMBERS_LIST: &str = "mailchimp.members.list";
+const OP_MEMBERS_DELETE: &str = "mailchimp.members.delete";
+const OP_CAMPAIGNS_LIST: &str = "mailchimp.campaigns.list";
+const OP_CAMPAIGNS_SEND: &str = "mailchimp.campaigns.send";
+const OPERATION_ORDER: &[&str] = &[
+    OP_LISTS_LIST,
+    OP_MEMBERS_LIST,
+    OP_MEMBERS_DELETE,
+    OP_CAMPAIGNS_LIST,
+    OP_CAMPAIGNS_SEND,
+];
 
 /// Parsed and validated Mailchimp connector configuration.
 #[derive(Debug, Clone)]
@@ -358,148 +373,7 @@ impl MailchimpConnector {
     /// Handle the `introspect` method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations: vec![
-                OperationInfo {
-                    id: OperationId::from_static("mailchimp.lists.list"),
-                    summary: "List audiences".into(),
-                    input_schema: json!({"type": "object", "required": []}),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["lists"],
-                        "properties": {"lists": {"type": "array"}}
-                    }),
-                    capability: CapabilityId::from_static("mailchimp.lists.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List Mailchimp audiences.".into(),
-                        common_mistakes: vec![],
-                        examples: vec!["{}".into()],
-                        related: vec![
-                            CapabilityId::from_static("mailchimp.members.list"),
-                            CapabilityId::from_static("mailchimp.campaigns.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("mailchimp.members.list"),
-                    summary: "List members of an audience".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["list_id"],
-                        "properties": {"list_id": {"type": "string"}}
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["members"],
-                        "properties": {"members": {"type": "array"}}
-                    }),
-                    capability: CapabilityId::from_static("mailchimp.members.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List members of an audience.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"list_id": "abc123"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("mailchimp.lists.list"),
-                            CapabilityId::from_static("mailchimp.members.delete"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("mailchimp.members.delete"),
-                    summary: "Delete a member from an audience".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["list_id", "subscriber_hash"],
-                        "properties": {
-                            "list_id": {"type": "string"},
-                            "subscriber_hash": {"type": "string", "description": "MD5 hash of lowercase email address"}
-                        }
-                    }),
-                    output_schema: json!({"type": "object"}),
-                    capability: CapabilityId::from_static("mailchimp.members.delete"),
-                    risk_level: RiskLevel::High,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Dangerous,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "Permanently delete a member. Cannot be undone.".into(),
-                        common_mistakes: vec![
-                            "Using email directly instead of MD5 hash.".into(),
-                        ],
-                        examples: vec![
-                            r#"{"list_id": "abc123", "subscriber_hash": "d41d8cd98f00b204e9800998ecf8427e"}"#.into(),
-                        ],
-                        related: vec![
-                            CapabilityId::from_static("mailchimp.members.list"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("mailchimp.campaigns.list"),
-                    summary: "List campaigns".into(),
-                    input_schema: json!({"type": "object", "required": []}),
-                    output_schema: json!({
-                        "type": "object",
-                        "required": ["campaigns"],
-                        "properties": {"campaigns": {"type": "array"}}
-                    }),
-                    capability: CapabilityId::from_static("mailchimp.campaigns.read"),
-                    risk_level: RiskLevel::Low,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: IdempotencyClass::Strict,
-                    ai_hints: AgentHint {
-                        when_to_use: "List email campaigns.".into(),
-                        common_mistakes: vec![],
-                        examples: vec!["{}".into()],
-                        related: vec![
-                            CapabilityId::from_static("mailchimp.campaigns.send"),
-                        ],
-                    },
-                },
-                OperationInfo {
-                    id: OperationId::from_static("mailchimp.campaigns.send"),
-                    summary: "Send a campaign".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "required": ["campaign_id"],
-                        "properties": {"campaign_id": {"type": "string"}}
-                    }),
-                    output_schema: json!({"type": "object"}),
-                    capability: CapabilityId::from_static("mailchimp.campaigns.write"),
-                    risk_level: RiskLevel::High,
-                    description: None,
-                    rate_limit: None,
-                    requires_approval: None,
-                    safety_tier: SafetyTier::Dangerous,
-                    idempotency: IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "Send a campaign to all recipients.".into(),
-                        common_mistakes: vec![
-                            "Sending a campaign that is not in ready state.".into(),
-                        ],
-                        examples: vec![r#"{"campaign_id": "abc123"}"#.into()],
-                        related: vec![
-                            CapabilityId::from_static("mailchimp.campaigns.list"),
-                        ],
-                    },
-                },
-            ],
+            operations: typed_operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -559,10 +433,9 @@ impl MailchimpConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = typed_operations_info()
+            .iter()
+            .any(|op| op.id.as_ref() == operation);
 
         Ok(json!({
             "allowed": allowed,
@@ -678,48 +551,64 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
 
 /// Build the operations info for introspection.
 fn operations_info() -> serde_json::Value {
-    json!([
-        {
-            "id": "mailchimp.lists.list",
-            "summary": "List audiences",
-            "capability": "mailchimp.lists.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mailchimp.members.list",
-            "summary": "List members of an audience",
-            "capability": "mailchimp.members.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mailchimp.members.delete",
-            "summary": "Delete a member from an audience",
-            "capability": "mailchimp.members.delete",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mailchimp.campaigns.list",
-            "summary": "List campaigns",
-            "capability": "mailchimp.campaigns.read",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-        },
-        {
-            "id": "mailchimp.campaigns.send",
-            "summary": "Send a campaign",
-            "capability": "mailchimp.campaigns.write",
-            "risk_level": "high",
-            "safety_tier": "dangerous",
-            "idempotency": "none",
-        },
-    ])
+    static OPERATIONS: OnceLock<serde_json::Value> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| serde_json::to_value(typed_operations_info()).unwrap_or_else(|_| json!([])))
+        .clone()
+}
+
+fn typed_operations_info() -> Vec<OperationInfo> {
+    ordered_manifest_operations()
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+        .collect()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Mailchimp manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 /// Build the provisioning recipe for the Mailchimp connector.
@@ -828,6 +717,12 @@ mod tests {
             .find(|op| op["id"] == id)?
             .get("capability")?
             .as_str()
+    }
+
+    fn operation_json<'a>(ops: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
+        ops.as_array()?
+            .iter()
+            .find(|op| op.get("id").and_then(serde_json::Value::as_str) == Some(id))
     }
 
     #[test]
@@ -968,7 +863,7 @@ mod tests {
 
     #[test]
     fn operations_risk_levels_valid() {
-        let valid = ["low", "medium", "high"];
+        let valid = ["low", "medium", "high", "critical"];
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let rl = op["risk_level"].as_str().unwrap();
@@ -978,7 +873,7 @@ mod tests {
 
     #[test]
     fn operations_safety_tiers_valid() {
-        let valid = ["safe", "risky", "dangerous"];
+        let valid = ["safe", "risky", "dangerous", "critical", "forbidden"];
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let st = op["safety_tier"].as_str().unwrap();
@@ -1041,6 +936,26 @@ mod tests {
             .find(|op| op["id"] == "mailchimp.members.delete")
             .unwrap();
         assert_eq!(typed_delete["capability"], "mailchimp.members.delete");
+        assert_eq!(typed_delete["requires_approval"], "interactive");
+    }
+
+    #[test]
+    fn operation_approval_modes_match_manifest() {
+        let ops = operations_info();
+        assert_eq!(
+            operation_json(&ops, OP_MEMBERS_DELETE).unwrap()["requires_approval"],
+            "interactive"
+        );
+        assert_eq!(
+            operation_json(&ops, OP_CAMPAIGNS_SEND).unwrap()["requires_approval"],
+            "policy"
+        );
+        assert!(
+            operation_json(&ops, OP_LISTS_LIST)
+                .unwrap()
+                .get("requires_approval")
+                .is_none()
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1330,15 +1245,15 @@ mod tests {
     }
 
     #[test]
-    fn operations_send_is_dangerous() {
+    fn operations_send_is_risky() {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             if id.contains("send") {
                 assert_eq!(
                     op["safety_tier"].as_str().unwrap(),
-                    "dangerous",
-                    "send op {id} should be dangerous"
+                    "risky",
+                    "send op {id} should be risky"
                 );
             }
         }
@@ -1426,7 +1341,7 @@ mod tests {
 
     #[test]
     fn operations_idempotency_values_valid() {
-        let valid = ["strict", "none", "idempotent"];
+        let valid = ["strict", "none", "best_effort"];
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let idem = op["idempotency"].as_str().unwrap();
@@ -1488,6 +1403,87 @@ mod tests {
         for op in ops.as_array().unwrap() {
             let summary = op["summary"].as_str().unwrap();
             assert!(!summary.is_empty());
+        }
+    }
+
+    #[test]
+    fn strict_mailchimp_manifest() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        assert_eq!(manifest.connector.id.as_ref(), "fcp.mailchimp");
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+        assert_eq!(
+            manifest.manifest.interface_hash,
+            manifest.compute_interface_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            assert_eq!(operation.id.as_ref(), OPERATION_ORDER[index]);
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should come from manifest");
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_ref(),
+                Some(&manifest_operation.description)
+            );
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                operation.ai_hints.when_to_use.as_str(),
+                manifest_operation.ai_hints.when_to_use.as_str()
+            );
+            assert_eq!(
+                &operation.ai_hints.common_mistakes,
+                &manifest_operation.ai_hints.common_mistakes
+            );
+            assert_eq!(
+                &operation.ai_hints.examples,
+                &manifest_operation.ai_hints.examples
+            );
+            let actual_related = operation
+                .ai_hints
+                .related
+                .iter()
+                .map(std::convert::AsRef::as_ref)
+                .collect::<Vec<_>>();
+            let expected_related = manifest_operation
+                .ai_hints
+                .related
+                .iter()
+                .map(std::convert::AsRef::as_ref)
+                .collect::<Vec<_>>();
+            assert_eq!(actual_related, expected_related);
+        }
+    }
+
+    #[test]
+    fn manifest_schema_is_the_runtime_introspection_schema() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = typed_operations_info();
+
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should come from manifest");
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
         }
     }
 
@@ -1620,7 +1616,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "mailchimp.api_key");
-        assert!(v["steps"].as_array().unwrap().len() == 2);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
     }
 
     #[test]

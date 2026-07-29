@@ -20,15 +20,19 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use fcp_crypto::{AeadKey, Ed25519SigningKey, Ed25519VerifyingKey};
+use fcp_crypto::{
+    AeadKey, CryptoError, Ed25519SigningKey, Ed25519VerifyingKey, MlDsa65SigningKey,
+    MlDsa65VerifyingKey, PqSigningPolicy,
+};
 use fcp_prelude::{
     ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKey,
     ZoneKeyAlgorithm as CoreZoneKeyAlgorithm, ZoneKeyId,
 };
 use fcp_protocol::{
-    FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameError, FrameFlags, SignedFcpsFrame,
-    SymbolContext, SymbolEnvelopeError, SymbolRecord, ZoneKeyAlgorithm as SymbolZoneKeyAlgorithm,
-    decrypt_symbol, encrypt_symbol,
+    FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameError, FrameFlags, HybridSignedFcpsFrame,
+    SignedFcpsFrame, SymbolContext, SymbolEnvelopeError, SymbolRecord,
+    ZoneKeyAlgorithm as SymbolZoneKeyAlgorithm, decrypt_symbol, encrypt_symbol,
+    verify_hybrid_signed_fcps_frame,
 };
 use fcp_raptorq::{DecodeError, EncodeError, RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
 use thiserror::Error;
@@ -54,6 +58,13 @@ pub enum DegradedTransportError {
     Incomplete { received: u32, needed: u32 },
 
     /// Schema hash mismatch after reconstruction.
+    ///
+    /// Part of the stable degraded-transport error contract for consumers
+    /// that know the expected schema of a reconstructed payload. The decoder
+    /// itself cannot raise this: the reconstructed wire payload carries the
+    /// claimed schema hash but nothing to compare it against (see
+    /// [`DegradedModeDecoder::finish_reconstruction`] for the verification
+    /// deferral; bead degraded-reconstruct-objectid-verify-qtmop).
     #[error("schema hash mismatch: expected {expected:?}, got {actual:?}")]
     SchemaHashMismatch {
         expected: [u8; 32],
@@ -61,6 +72,13 @@ pub enum DegradedTransportError {
     },
 
     /// Object ID mismatch after reconstruction.
+    ///
+    /// Part of the stable degraded-transport error contract for promotion
+    /// boundaries that re-derive the content address. The decoder itself
+    /// cannot raise this: `derive_id` needs the object's `ObjectHeader` and
+    /// the zone `ObjectIdKey`, neither of which exists at the degraded
+    /// transport layer (see [`DegradedModeDecoder::finish_reconstruction`];
+    /// bead degraded-reconstruct-objectid-verify-qtmop).
     #[error("object ID mismatch")]
     ObjectIdMismatch,
 
@@ -86,6 +104,10 @@ pub enum DegradedTransportError {
     /// Signature verification failed.
     #[error("signature verification failed")]
     SignatureVerificationFailed,
+
+    /// Hybrid signing operation failed.
+    #[error("crypto error: {0}")]
+    Crypto(#[from] CryptoError),
 
     /// Symbol encryption failed before a CONTROL_PLANE frame could be emitted.
     #[error("symbol encryption failed for esi {esi}: {source}")]
@@ -123,6 +145,20 @@ pub enum RetentionClass {
     Required,
     /// Object MAY be discarded after processing.
     Ephemeral,
+}
+
+/// Authenticated degraded-frame verification inputs.
+pub struct SignedDegradedFrameAuth<'a> {
+    /// Classical Ed25519 verifying key for the signed FCPS frame.
+    pub verifying_key: &'a Ed25519VerifyingKey,
+    /// Post-quantum ML-DSA verifying key for the signed FCPS frame.
+    pub pq_verifying_key: &'a MlDsa65VerifyingKey,
+    /// Required signature policy for the hybrid envelope.
+    pub signing_policy: PqSigningPolicy,
+    /// Zone key used for symbol decryption.
+    pub zone_key: &'a ZoneKey,
+    /// Zone-key algorithm used for symbol decryption.
+    pub algorithm: CoreZoneKeyAlgorithm,
 }
 
 /// Control-plane object wrapped for degraded-mode transport.
@@ -352,15 +388,25 @@ impl DegradedModeEncoder {
         source_id: &TailscaleNodeId,
         timestamp: u64,
         signing_key: &Ed25519SigningKey,
-    ) -> Result<Vec<SignedFcpsFrame>, DegradedTransportError> {
+        pq_signing_key: &MlDsa65SigningKey,
+    ) -> Result<Vec<HybridSignedFcpsFrame>, DegradedTransportError> {
         let frames =
             self.encode_authenticated(envelope, epoch_id, zone_key, algorithm, source_id)?;
 
         let signed: Result<Vec<_>, _> = frames
             .into_iter()
-            .map(|frame| SignedFcpsFrame::new(frame, source_id.clone(), timestamp, signing_key))
+            .map(|frame| {
+                SignedFcpsFrame::new_hybrid(
+                    &frame,
+                    source_id.clone(),
+                    timestamp,
+                    signing_key,
+                    pq_signing_key,
+                )
+                .map_err(DegradedTransportError::from)
+            })
             .collect();
-        Ok(signed?)
+        signed
     }
 
     /// Encode and sign a control-plane object with the test-only static zone key.
@@ -376,7 +422,8 @@ impl DegradedModeEncoder {
         source_id: &TailscaleNodeId,
         timestamp: u64,
         signing_key: &Ed25519SigningKey,
-    ) -> Result<Vec<SignedFcpsFrame>, DegradedTransportError> {
+        pq_signing_key: &MlDsa65SigningKey,
+    ) -> Result<Vec<HybridSignedFcpsFrame>, DegradedTransportError> {
         self.encode_signed_authenticated(
             envelope,
             epoch_id,
@@ -385,6 +432,7 @@ impl DegradedModeEncoder {
             source_id,
             timestamp,
             signing_key,
+            pq_signing_key,
         )
     }
 
@@ -403,7 +451,8 @@ impl DegradedModeEncoder {
         _source_id: &TailscaleNodeId,
         _timestamp: u64,
         _signing_key: &Ed25519SigningKey,
-    ) -> Result<Vec<SignedFcpsFrame>, DegradedTransportError> {
+        _pq_signing_key: &MlDsa65SigningKey,
+    ) -> Result<Vec<HybridSignedFcpsFrame>, DegradedTransportError> {
         Err(DegradedTransportError::SymbolCryptoUnavailable)
     }
 }
@@ -609,37 +658,54 @@ impl DegradedModeDecoder {
     /// Returns error if signature verification fails or frame processing fails.
     pub fn process_signed_frame_authenticated(
         &mut self,
-        signed_frame: &SignedFcpsFrame,
-        verifying_key: &Ed25519VerifyingKey,
+        signed_frame: &HybridSignedFcpsFrame,
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
-        zone_key: &ZoneKey,
-        algorithm: CoreZoneKeyAlgorithm,
+        auth: &SignedDegradedFrameAuth<'_>,
     ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
-        // Verify signature
-        if signed_frame.verify(verifying_key).is_err() {
+        let frame = match verify_hybrid_signed_fcps_frame(
+            signed_frame,
+            auth.verifying_key,
+            auth.pq_verifying_key,
+            auth.signing_policy,
+            usize::MAX,
+        ) {
+            Ok(frame) => frame,
+            Err(err) => {
+                warn!(
+                    source_id = ?signed_frame.payload.source_id,
+                    error = %err,
+                    "degraded_mode: hybrid signature verification failed for signed FCPS frame"
+                );
+                return Err(DegradedTransportError::SignatureVerificationFailed);
+            }
+        };
+
+        if signed_frame.object_type.as_str()
+            != fcp_crypto::HybridSignedObjectKind::GossipFrame.as_str()
+        {
             warn!(
-                object_id = %signed_frame.frame.header.object_id,
-                source_id = ?signed_frame.source_id,
-                "degraded_mode: signature verification failed for signed FCPS frame"
+                source_id = ?signed_frame.payload.source_id,
+                "degraded_mode: hybrid envelope carried non-gossip object type"
             );
             return Err(DegradedTransportError::SignatureVerificationFailed);
         }
 
         debug!(
-            object_id = %signed_frame.frame.header.object_id,
-            source_id = ?signed_frame.source_id,
-            timestamp = signed_frame.timestamp,
-            "degraded_mode: signature verified for signed FCPS frame"
+            object_id = %frame.header.object_id,
+            source_id = ?signed_frame.payload.source_id,
+            timestamp = signed_frame.payload.timestamp,
+            policy = ?auth.signing_policy,
+            "degraded_mode: hybrid signature verified for signed FCPS frame"
         );
 
         self.process_frame_authenticated(
-            &signed_frame.frame,
+            &frame,
             expected_zone_id,
             retention,
-            zone_key,
-            algorithm,
-            &signed_frame.source_id,
+            auth.zone_key,
+            auth.algorithm,
+            &signed_frame.payload.source_id,
         )
     }
 
@@ -652,18 +718,24 @@ impl DegradedModeDecoder {
     #[cfg(test)]
     pub fn process_signed_frame(
         &mut self,
-        signed_frame: &SignedFcpsFrame,
+        signed_frame: &HybridSignedFcpsFrame,
         verifying_key: &Ed25519VerifyingKey,
+        pq_verifying_key: &MlDsa65VerifyingKey,
+        signing_policy: PqSigningPolicy,
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
     ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
         self.process_signed_frame_authenticated(
             signed_frame,
-            verifying_key,
             expected_zone_id,
             retention,
-            &ZoneKey::from_bytes([0x44; 32]),
-            CoreZoneKeyAlgorithm::ChaCha20Poly1305,
+            &SignedDegradedFrameAuth {
+                verifying_key,
+                pq_verifying_key,
+                signing_policy,
+                zone_key: &ZoneKey::from_bytes([0x44; 32]),
+                algorithm: CoreZoneKeyAlgorithm::ChaCha20Poly1305,
+            },
         )
     }
 
@@ -677,8 +749,10 @@ impl DegradedModeDecoder {
     #[cfg(not(test))]
     pub fn process_signed_frame(
         &mut self,
-        _signed_frame: &SignedFcpsFrame,
+        _signed_frame: &HybridSignedFcpsFrame,
         _verifying_key: &Ed25519VerifyingKey,
+        _pq_verifying_key: &MlDsa65VerifyingKey,
+        _signing_policy: PqSigningPolicy,
         _expected_zone_id: &ZoneId,
         _retention: RetentionClass,
     ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
@@ -841,6 +915,21 @@ impl DegradedModeDecoder {
         Ok(None)
     }
 
+    /// Finalize a completed RaptorQ reconstruction into an envelope.
+    ///
+    /// Content-address verification is deliberately deferred here
+    /// (investigated under bead degraded-reconstruct-objectid-verify-qtmop):
+    /// the reconstructed wire payload is `len ‖ schema_hash ‖ payload` with
+    /// no `ObjectHeader`, and the decoder holds the zone AEAD key but never
+    /// the zone `ObjectIdKey`, so `object_id == derive_id(...)` cannot be
+    /// recomputed at this layer. The envelope's `object_id`/`schema_hash`
+    /// are transport metadata: per-symbol AEAD context binding (object id,
+    /// zone, epoch, sender) stops non-zone-members from forging them, and a
+    /// zone-key holder gains nothing here because every trust decision
+    /// happens downstream — gossip payloads are independently
+    /// signature-verified at dispatch, and promotion into any object store
+    /// must pass that store's injected `ObjectIdVerifier` (see
+    /// `MeshNode::apply_gossip_fetch_payload`).
     fn finish_reconstruction(
         &mut self,
         pending_key: &PendingReconstructionKey,
@@ -975,6 +1064,13 @@ pub trait ControlPlaneHandler: Send + Sync {
 }
 
 /// Simple in-memory handler that stores Required objects.
+///
+/// Test/replay fixture only: it indexes envelopes by their *claimed*
+/// `object_id` without content-address verification (which is impossible at
+/// this layer — see [`DegradedModeDecoder::finish_reconstruction`]). A
+/// production handler that promotes reconstructed payloads into an object
+/// store must route the write through a store with an injected
+/// `ObjectIdVerifier` instead of trusting the envelope's id.
 #[derive(Default)]
 pub struct InMemoryControlPlaneHandler {
     state: std::sync::Mutex<InMemoryReplayState>,
@@ -1135,6 +1231,10 @@ mod tests {
 
     fn test_zone_key() -> ZoneKey {
         ZoneKey::from_bytes([0x44; 32])
+    }
+
+    fn test_pq_signing_key() -> MlDsa65SigningKey {
+        MlDsa65SigningKey::generate().expect("ML-DSA signing key")
     }
 
     const fn test_zone_algorithm() -> CoreZoneKeyAlgorithm {
@@ -1364,20 +1464,28 @@ mod tests {
     }
 
     #[test]
-    fn signed_frame_roundtrip() {
+    fn hybrid_signed_frame_roundtrip() {
         let config = test_config();
         let mut encoder = DegradedModeEncoder::new(config.clone(), 0xCAFE);
         let mut decoder = DegradedModeDecoder::new(config);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
+        let pq_signing_key = test_pq_signing_key();
 
         let envelope = test_envelope();
         let zone_id = envelope.zone_id.clone();
         let source_id = TailscaleNodeId::new("node-test");
 
         let signed_frames = encoder
-            .encode_signed(&envelope, 3000, &source_id, 1_704_067_200, &signing_key)
+            .encode_signed(
+                &envelope,
+                3000,
+                &source_id,
+                1_704_067_200,
+                &signing_key,
+                &pq_signing_key,
+            )
             .expect("encode signed");
 
         let mut result = None;
@@ -1386,6 +1494,8 @@ mod tests {
                 .process_signed_frame(
                     signed_frame,
                     &verifying_key,
+                    pq_signing_key.verifying_key(),
+                    PqSigningPolicy::BothRequired,
                     &zone_id,
                     RetentionClass::Required,
                 )
@@ -1401,25 +1511,35 @@ mod tests {
     }
 
     #[test]
-    fn signed_frame_rejects_wrong_key() {
+    fn hybrid_signed_frame_rejects_wrong_key() {
         let config = test_config();
         let mut encoder = DegradedModeEncoder::new(config.clone(), 0x1234);
         let mut decoder = DegradedModeDecoder::new(config);
 
         let signing_key = Ed25519SigningKey::generate();
         let wrong_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
 
         let envelope = test_envelope();
         let zone_id = envelope.zone_id.clone();
         let source_id = TailscaleNodeId::new("node-wrong");
 
         let signed_frames = encoder
-            .encode_signed(&envelope, 4000, &source_id, 1_704_067_200, &signing_key)
+            .encode_signed(
+                &envelope,
+                4000,
+                &source_id,
+                1_704_067_200,
+                &signing_key,
+                &pq_signing_key,
+            )
             .expect("encode");
 
         let result = decoder.process_signed_frame(
             &signed_frames[0],
             &wrong_key.verifying_key(),
+            pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
             &zone_id,
             RetentionClass::Required,
         );
@@ -2883,48 +3003,62 @@ mod tests {
     // ── Signed frame edge cases ─────────────────────────────────
 
     #[test]
-    fn signed_frame_timestamp_preserved() {
+    fn hybrid_signed_frame_timestamp_preserved() {
         let config = test_config();
         let mut encoder = DegradedModeEncoder::new(config, 1);
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let env = test_envelope();
         let source_id = TailscaleNodeId::new("node-ts");
 
         let signed_frames = encoder
-            .encode_signed(&env, 1, &source_id, 9_999_999, &signing_key)
+            .encode_signed(
+                &env,
+                1,
+                &source_id,
+                9_999_999,
+                &signing_key,
+                &pq_signing_key,
+            )
             .unwrap();
 
-        assert_eq!(signed_frames[0].timestamp, 9_999_999);
+        assert_eq!(signed_frames[0].payload.timestamp, 9_999_999);
     }
 
     #[test]
-    fn signed_frame_source_id_preserved() {
+    fn hybrid_signed_frame_source_id_preserved() {
         let config = test_config();
         let mut encoder = DegradedModeEncoder::new(config, 1);
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let env = test_envelope();
         let source_id = TailscaleNodeId::new("node-src-check");
 
         let signed_frames = encoder
-            .encode_signed(&env, 1, &source_id, 1000, &signing_key)
+            .encode_signed(&env, 1, &source_id, 1000, &signing_key, &pq_signing_key)
             .unwrap();
 
-        assert_eq!(signed_frames[0].source_id, source_id);
+        assert_eq!(signed_frames[0].payload.source_id, source_id);
     }
 
     #[test]
-    fn signed_frame_uses_requested_epoch_even_if_envelope_differs() {
+    fn hybrid_signed_frame_uses_requested_epoch_even_if_envelope_differs() {
         let config = test_config();
         let mut encoder = DegradedModeEncoder::new(config, 1);
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let mut env = test_envelope();
         env.epoch_id = 3;
         let source_id = TailscaleNodeId::new("node-epoch-mismatch");
 
         let signed_frames = encoder
-            .encode_signed(&env, 4, &source_id, 1000, &signing_key)
+            .encode_signed(&env, 4, &source_id, 1000, &signing_key, &pq_signing_key)
             .expect("transport epoch should be authoritative");
-        assert_eq!(signed_frames[0].frame.header.epoch_id, 4);
+        let frame = signed_frames[0]
+            .payload
+            .decode_frame(usize::MAX)
+            .expect("hybrid signed frame decodes");
+        assert_eq!(frame.header.epoch_id, 4);
     }
 
     #[test]
@@ -2934,18 +3068,26 @@ mod tests {
         let mut decoder = DegradedModeDecoder::new(config);
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
+        let pq_signing_key = test_pq_signing_key();
         let env = test_envelope();
         let zone_id = env.zone_id.clone();
         let source_id = TailscaleNodeId::new("node-epoch");
 
         let signed_frames = encoder
-            .encode_signed(&env, 12345, &source_id, 1000, &signing_key)
+            .encode_signed(&env, 12345, &source_id, 1000, &signing_key, &pq_signing_key)
             .unwrap();
 
         let mut result = None;
         for sf in &signed_frames {
             if let Some(d) = decoder
-                .process_signed_frame(sf, &verifying_key, &zone_id, RetentionClass::Required)
+                .process_signed_frame(
+                    sf,
+                    &verifying_key,
+                    pq_signing_key.verifying_key(),
+                    PqSigningPolicy::BothRequired,
+                    &zone_id,
+                    RetentionClass::Required,
+                )
                 .unwrap()
             {
                 result = Some(d);

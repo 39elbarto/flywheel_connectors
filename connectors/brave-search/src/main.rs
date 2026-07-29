@@ -88,19 +88,16 @@ async fn handle_message(connector: &mut BraveSearchConnector, message: &str) -> 
     };
 
     match result {
-        Ok(value) => {
-            let mut response = serde_json::json!({"jsonrpc": "2.0", "result": value});
-            if let Some(id) = id {
-                response["id"] = id;
-            }
-            response
-        }
+        Ok(value) => id.map_or_else(
+            || serde_json::json!({"jsonrpc": "2.0", "result": value}),
+            |id| serde_json::json!({"jsonrpc": "2.0", "id": id, "result": value}),
+        ),
         Err(error) => {
-            let mut response = serde_json::json!({"jsonrpc": "2.0", "error": error.to_response()});
-            if let Some(id) = id {
-                response["id"] = id;
-            }
-            response
+            let error = error.to_response();
+            id.map_or_else(
+                || serde_json::json!({"jsonrpc": "2.0", "error": error}),
+                |id| serde_json::json!({"jsonrpc": "2.0", "id": id, "error": error}),
+            )
         }
     }
 }

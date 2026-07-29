@@ -5,9 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
@@ -132,10 +131,7 @@ impl SentryClient {
 
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -172,17 +168,25 @@ impl SentryClient {
         }
     }
 
+    /// Issue a request with retry.
+    ///
+    /// br-kxd3e: replay safety is derived from the verb, which is sound here
+    /// because this client uses each one for its standard meaning — GET reads,
+    /// PUT/PATCH set named fields to named values, DELETE converges, and only
+    /// POST creates. A replay of a POST after a 5xx creates a second object or
+    /// double-counts an ingested event.
     async fn request_with_retry(
         &self,
         http_method: &'static str,
         url: &str,
         body: Option<&serde_json::Value>,
     ) -> SentryResult<serde_json::Value> {
+        let replay_safe = http_method != "POST";
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, method = http_method, url = %redact_url(&url), "sentry request");
+            debug!(attempt, method = http_method, url = %redact_url(url), "sentry request");
 
             let req = match http_method {
                 "GET" => self.client.get(url),
@@ -197,22 +201,18 @@ impl SentryClient {
             match req.send().await {
                 Ok(resp) => match self.handle_response(resp).await {
                     Ok(val) => AttemptOutcome::Success(val),
-                    Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
-                        retry_after: err.retry_after(),
-                        error: err,
-                    },
+                    Err(err) if err.is_retryable() => {
+                        let replayable = replay_safe || err.replay_is_safe();
+                        let retry_after = err.retry_after();
+                        AttemptOutcome::retryable_if_replayable(err, retry_after, replayable)
+                    }
                     Err(err) => AttemptOutcome::Terminal(err),
                 },
                 Err(err) => {
                     let err = SentryError::Http(err);
-                    if err.is_retryable() {
-                        AttemptOutcome::Retryable {
-                            retry_after: err.retry_after(),
-                            error: err,
-                        }
-                    } else {
-                        AttemptOutcome::Terminal(err)
-                    }
+                    let replayable = replay_safe || err.replay_is_safe();
+                    let retry_after = err.retry_after();
+                    AttemptOutcome::retryable_if_replayable(err, retry_after, replayable)
                 }
             }
         })
@@ -452,6 +452,18 @@ impl SentryClient {
         let org = sanitize_path_segment(org);
         let encoded_version = urlencoded(version);
         self.get(&format!("/organizations/{org}/releases/{encoded_version}/"))
+            .await
+    }
+
+    /// Delete a release.
+    pub async fn delete_release(
+        &self,
+        org: &str,
+        version: &str,
+    ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let encoded_version = urlencoded(version);
+        self.delete(&format!("/organizations/{org}/releases/{encoded_version}/"))
             .await
     }
 
@@ -770,12 +782,39 @@ fn sanitize_path_segment(s: &str) -> String {
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
 
-/// Minimal URL encoding for version strings.
+/// Minimal, readability-preserving URL encoding for release version strings.
+///
+/// Sentry release versions are embedded as a path segment (e.g.
+/// `/organizations/{org}/releases/{version}/`). Beyond the display-oriented
+/// escapes (`%`, `+`, space, `@`), this also neutralizes the characters that
+/// would otherwise let a caller-supplied `version` escape that segment:
+/// `/`/`\` (segment splitting → `Url::parse` normalization), `..` (dot-segment
+/// traversal, e.g. `delete_release` with `../../organizations/<victim>/...`),
+/// and `?`/`#` (query/fragment injection against the API host). `%` is replaced
+/// first so the encodings emitted here are not double-encoded.
 fn urlencoded(s: &str) -> String {
     s.replace('%', "%25")
+        .replace("..", "%2E%2E")
+        .replace('/', "%2F")
+        .replace('\\', "%5C")
+        .replace('?', "%3F")
+        .replace('#', "%23")
         .replace('+', "%2B")
         .replace(' ', "%20")
         .replace('@', "%40")
+}
+
+fn decode_success_body(status: StatusCode, body: &str) -> SentryResult<serde_json::Value> {
+    if matches!(status, StatusCode::NO_CONTENT | StatusCode::ACCEPTED) {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(SentryError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
 }
 
 #[cfg(test)]
@@ -793,6 +832,46 @@ mod tests {
     #[test]
     fn encode_query_value_empty() {
         assert_eq!(encode_query_value(""), "");
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            SentryError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            SentryError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_accepted() {
+        assert_eq!(
+            decode_success_body(StatusCode::ACCEPTED, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]
@@ -984,5 +1063,24 @@ mod tests {
     fn url_encode_multiple_specials() {
         let result = urlencoded("a@b+c d%e");
         assert_eq!(result, "a%40b%2Bc%20d%25e");
+    }
+
+    #[test]
+    fn urlencoded_neutralizes_path_traversal_and_injection() {
+        // A release version must not be able to escape its path segment. Each of
+        // these would otherwise redirect delete/get_release to another endpoint
+        // or inject a query/fragment.
+        let attack = "../../../organizations/victim/projects/proj";
+        let encoded = urlencoded(attack);
+        assert!(!encoded.contains('/'), "slash survived: {encoded}");
+        assert!(!encoded.contains(".."), "dot-segment survived: {encoded}");
+
+        assert_eq!(urlencoded("a/b"), "a%2Fb");
+        assert_eq!(urlencoded("a\\b"), "a%5Cb");
+        assert_eq!(urlencoded("v1?x=y"), "v1%3Fx=y");
+        assert_eq!(urlencoded("v1#frag"), "v1%23frag");
+        assert_eq!(urlencoded(".."), "%2E%2E");
+        // A normal semver-style release is left readable.
+        assert_eq!(urlencoded("v1.2.3"), "v1.2.3");
     }
 }

@@ -17,8 +17,11 @@ fcp-async-core = { path = "../fcp-async-core" }
 fcp-conformance = { path = "../fcp-conformance" }
 fcp-core = { path = "../fcp-core" }
 fcp-crypto = { path = "../fcp-crypto" }
+fcp-mesh = { path = "../fcp-mesh" }
 fcp-prelude = { path = "../fcp-prelude" }
 fcp-sdk = { path = "../fcp-sdk" }
+fcp-store = { path = "../fcp-store" }
+fcp-tailscale = { path = "../fcp-tailscale" }
 
 # Async runtime
 async-trait.workspace = true
@@ -46,6 +49,8 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 uuid.workspace = true
 chrono.workspace = true
 blake3.workspace = true
+rand.workspace = true
+rand_chacha = "0.3"
 
 # HTTP client for test assertions
 reqwest.workspace = true

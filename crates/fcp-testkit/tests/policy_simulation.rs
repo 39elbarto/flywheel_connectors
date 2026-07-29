@@ -162,6 +162,7 @@ fn execution_approval(invoke: &InvokeRequest) -> ApprovalToken {
         }),
         zone_id: invoke.zone_id.clone(),
         signature: None,
+        _state: std::marker::PhantomData,
     }
 }
 

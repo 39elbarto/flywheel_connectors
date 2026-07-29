@@ -1,5 +1,5 @@
 //! Pin `select_checkpoint_coordinator` + `rank_checkpoint_coordinators` HRW
-//! ordering invariants — the closest analogue to "ConnectorSelector ordering"
+//! ordering invariants — the closest analogue to "`ConnectorSelector` ordering"
 //! (flywheel_connectors-u0771).
 //!
 //! Bead asks for `ConnectorSelector` ordering pinning. No type literally named
@@ -10,7 +10,7 @@
 //! ordering surface the rest of the system depends on for selecting which
 //! node serves an operation.
 //!
-//! The existing checkpoint_golden_vectors.rs tests cover deterministic
+//! The existing `checkpoint_golden_vectors.rs` tests cover deterministic
 //! selection, basic descending-hash ranking, and epoch sensitivity. This
 //! test pins orthogonal ordering invariants:
 //!   * Empty + single-node boundaries,

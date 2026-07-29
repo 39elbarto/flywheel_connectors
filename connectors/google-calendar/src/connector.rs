@@ -17,6 +17,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 fn is_local_test_host(host: &str) -> bool {
@@ -97,6 +98,8 @@ use crate::{
     error::GoogleCalendarError,
     types::{Attendee, Event, EventDateTime, FreeBusyRequest, FreeBusyRequestItem},
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Validated configuration for the Google Calendar connector.
 struct GoogleCalendarConfig {
@@ -315,6 +318,19 @@ impl GoogleCalendarConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     ///
     /// # Errors
@@ -368,6 +384,13 @@ impl GoogleCalendarConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Google Calendar base connector was shared before handshake".into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -391,7 +414,7 @@ impl GoogleCalendarConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-calendar-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -1519,7 +1542,11 @@ mod tests {
         assert!(!host_is_calendar_googleapis("evil-googleapis.com"));
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &str,
+        op: &str,
+    ) -> CapabilityToken {
         let cap = match op {
             "gcal.list_calendars" | "gcal.get_event" | "gcal.list_events" => "gcal.read",
             "gcal.create_event" | "gcal.update_event" | "gcal.quick_add" => "gcal.write",
@@ -1540,8 +1567,10 @@ mod tests {
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .unwrap()
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -1562,6 +1591,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(GoogleCalendarConnector::manifest_hash(), expected);
+        assert_ne!(
+            GoogleCalendarConnector::manifest_hash(),
+            "sha256:google-calendar-connector-v1"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1589,7 +1631,8 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "gcal.list_calendars");
+        let token =
+            generate_valid_token(&signing_key, connector.instance_id(), "gcal.list_calendars");
 
         let result = connector
             .handle_invoke(json!({
@@ -1628,7 +1671,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "gcal.get_event");
+        let token = generate_valid_token(&signing_key, connector.instance_id(), "gcal.get_event");
 
         let result = connector
             .handle_invoke(json!({

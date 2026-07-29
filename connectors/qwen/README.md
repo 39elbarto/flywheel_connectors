@@ -1,10 +1,11 @@
 # Qwen Connector V3 Contract
 
-> **Status**: manifest/runtime contract documented
+> **Status**: manifest-derived runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/qwen_connector_verification.sh`
 > **Primary upstream**: https://www.alibabacloud.com/help/en/model-studio/
+> **Interface hash**: `blake3-256:fcp.interface.v2:a28c10ebb1f1d4600b5b9d9777de485f86686f32fd89691f3cd854b13ab08387`
 
 ## Purpose
 
@@ -34,6 +35,8 @@ Important runtime truths the contract preserves:
 - Multimodal `image_url` chat defaults to `qwen-vl-plus` when no model is supplied.
 - Embeddings default to `text-embedding-v4`.
 - SSE chat streaming returns redaction-safe chunk metadata and assembled text from a bounded invoke call; FCP subscribe is not implemented.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+- Runtime introspection derives operation descriptions, schemas, capabilities, safety, risk, idempotency, approval, rate-limit metadata, and AI hints from the embedded strict manifest while preserving the five-operation order listed below.
 
 ## First-Slice Scope
 
@@ -145,6 +148,7 @@ The deterministic integration evidence is anchored on WireMock loopback runs cov
 - `connectors/qwen/src/types.rs` defines chat, image URL, embedding, model ID, and request validation.
 - `connectors/qwen/manifest.toml` defines the five-operation catalog, network constraints, sandbox boundary, and no-listener/no-exec posture.
 - `connectors/qwen/tests/conformance.rs` checks manifest and runtime operation surface alignment.
+- Connector unit tests assert that runtime operation metadata and schemas are derived from the embedded strict manifest.
 - `connectors/qwen/tests/integration.rs` covers loopback chat, streaming, embeddings, model listing, health, redaction, rate limits, cancellation, and JSONL evidence.
 - `connectors/qwen/tests/live_verification.rs` emits structured skip records unless `DASHSCOPE_API_KEY` is present.
 

@@ -8,16 +8,16 @@
 //! Properties pinned (NORMATIVE):
 //!
 //! 1. **`LeaseCoordinatorConfig::default`** — 6 documented values:
-//!    default_ttl_secs=300, min_ttl_secs=10, max_ttl_secs=3600,
-//!    renew_threshold_bps=2000 (renew at 20% remaining),
-//!    max_leases_per_node=64, escalate_dangerous_conflicts=true.
+//!    `default_ttl_secs=300`, `min_ttl_secs=10`, `max_ttl_secs=3600`,
+//!    `renew_threshold_bps=2000` (renew at 20% remaining),
+//!    `max_leases_per_node=64`, `escalate_dangerous_conflicts=true`.
 //! 2. **`AcquireOutcome` 4 internally-tagged variants** with
 //!    `outcome` tag values `granted` / `rejected` / `denied` /
 //!    `conflict`; payload fields per variant.
 //! 3. **`RenewOutcome` 2 variants** with tag `renewed` / `denied`.
 //! 4. **`ReleaseOutcome` 2 variants** with tag `released` /
 //!    `not_held`.
-//! 5. **`ConflictSeverity`** 3 snake_case variants:
+//! 5. **`ConflictSeverity`** 3 `snake_case` variants:
 //!    `info` / `warning` / `critical`.
 //! 6. **`LeaseConflict` 7-field roundtrip identity**.
 //! 7. **`ConflictingHolder` 3-field roundtrip identity**.

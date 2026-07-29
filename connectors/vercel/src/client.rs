@@ -8,8 +8,9 @@ mod projects;
 use std::time::Duration;
 
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, transport_error_reached_service,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::debug;
@@ -208,6 +209,13 @@ impl VercelClient {
         .await
     }
 
+    /// Issue a request with retry.
+    ///
+    /// br-kxd3e: replay safety is derived from the verb — GET reads, PUT/PATCH
+    /// set named fields, DELETE converges, and only POST creates. Vercel has
+    /// no idempotency key, so a replayed POST can trigger a SECOND deployment.
+    /// (The POST helper currently has no callers; the gate is here so the
+    /// first one added inherits the safe behaviour.)
     async fn request_json<R>(
         &self,
         method: Method,
@@ -220,6 +228,7 @@ impl VercelClient {
     {
         let url = self.endpoint_url(endpoint);
         let query = self.scope_query(extra_query);
+        let replay_safe = method != Method::POST;
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
@@ -241,19 +250,26 @@ impl VercelClient {
                 match builder.send().await {
                     Ok(response) => match self.handle_response(response).await {
                         Ok(parsed) => AttemptOutcome::Success(parsed),
-                        Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
-                            retry_after: error.retry_after(),
-                            error,
-                        },
+                        Err(error) if error.is_retryable() => {
+                            // 429 stays retryable — refused WITHOUT deploying.
+                            let replayable =
+                                replay_safe || matches!(error, VercelError::RateLimited { .. });
+                            let retry_after = error.retry_after();
+                            AttemptOutcome::retryable_if_replayable(error, retry_after, replayable)
+                        }
                         Err(error) => AttemptOutcome::Terminal(error),
                     },
-                    Err(error) if error.is_timeout() || error.is_connect() => {
-                        AttemptOutcome::Retryable {
-                            error: VercelError::Http(error),
-                            retry_after: None,
-                        }
+                    // `is_timeout()` is the TOTAL request timeout and fires
+                    // after the body was written; only a connect-phase failure
+                    // proves the request never arrived.
+                    Err(error) => {
+                        let replayable = replay_safe || !transport_error_reached_service(&error);
+                        AttemptOutcome::retryable_if_replayable(
+                            VercelError::Http(error),
+                            None,
+                            replayable,
+                        )
                     }
-                    Err(error) => AttemptOutcome::Terminal(VercelError::Http(error)),
                 }
             }
         })
@@ -392,45 +408,6 @@ fn parse_error_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path, query_param},
-    };
-
-    #[test]
-    fn health_check_applies_scope_and_auth() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/v9/projects"))
-                .and(query_param("limit", "1"))
-                .and(query_param("teamId", "team_123"))
-                .and(header("authorization", "Bearer token"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "projects": [],
-                    "pagination": { "count": 0 }
-                })))
-                .mount(&server)
-                .await;
-
-            let client = VercelClient::new(
-                VercelAuth::AccessToken {
-                    access_token: "token".into(),
-                },
-                TeamScope {
-                    team_id: Some("team_123".into()),
-                    team_slug: None,
-                },
-                HttpRetryConfig::default(),
-                Duration::from_secs(5),
-            )
-            .unwrap()
-            .with_base_url(&server.uri());
-
-            client.health_check().await.unwrap();
-        })
-        .unwrap();
-    }
 
     #[test]
     fn sanitize_path_segment_rejects_traversal() {

@@ -5,9 +5,14 @@
 //! benchmarks and integration tests without restructuring the CLI.
 
 pub mod access_cmd;
+pub mod agent_bootstrap;
+pub mod capability_replay;
 pub mod connector_state;
+pub mod doctor;
 pub mod mesh_cmd;
 pub mod pipe;
+pub mod proof_readiness;
+pub mod proof_request;
 pub mod readiness;
 pub mod recovery;
 pub mod schema_nav;

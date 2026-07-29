@@ -18,7 +18,7 @@ use fcp_prelude::{
     SimulateRequest, SimulateResponse, SubscribeRequest, ThreadInfo, ThreadKind, TrustLevel,
     ZoneId,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::runtime::{
     InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSession,
     StreamingSupervisor, SupervisorConfig,
@@ -28,6 +28,7 @@ use fcp_sdk::{
     ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
     InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};

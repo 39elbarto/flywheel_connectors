@@ -1,9 +1,9 @@
 # Telegram Connector V3 Contract
 
-> **Status**: runtime contract documented; Bot API polling/webhook drift documented
-> **Bead**: `flywheel_connectors-4kw5f.12`
-> **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Status**: runtime contract documented; no-live-credential Bot API/webhook loopback proof tracked
+> **Bead**: `flywheel_connectors-6n7.2`
+> **Parent**: `flywheel_connectors-6n7`
+> **Verification script**: `scripts/e2e/telegram_connector_verification.sh`
 > **Telegram Bot API upstream**: https://core.telegram.org/bots/api
 
 ## Purpose
@@ -81,6 +81,7 @@ The runtime uses these request shapes under `{base_url}`:
 Input and event handling:
 
 - `telegram.send_message` splits long text into bounded 4096 UTF-16-code-unit Telegram chunks, preserving `message_thread_id` on every chunk and applying `reply_to_message_id` only to the first chunk.
+- `telegram.send_message` and `telegram.send_media` claim chat ownership before Bot API sends. Duplicate active owners return `FcpError::Unauthorized` code `4090` before provider HTTP, and successful sends include redaction-safe `coordination` audit records.
 - `telegram.send_media` validates the 1024 character caption limit.
 - `telegram.send_media` accepts media types `photo`, `document`, `audio`, `video`, and `voice`.
 - `telegram.send_chat_action` accepts Telegram Bot API chat-action enum values such as `typing`, `upload_photo`, and `upload_document`.
@@ -91,6 +92,7 @@ Input and event handling:
 - `chat_id` can be a numeric ID, `@username`, some `t.me` links, or a bare username that can be normalized.
 - Invite links are rejected as chat IDs.
 - `message_thread_id` is accepted for message and media sends and is included in resource URI binding.
+- Optional `chat_coordination` config supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`; the connector defaults to the in-memory backend for deterministic local proof.
 - `get_file` percent-encodes `file_path` and rejects empty, absolute, empty-segment, dot, and dot-dot path forms before constructing a download URL.
 - Long polling uses `getUpdates` with offset, limit `100`, configured poll timeout, and normalized allowed updates.
 - Polling persists `telegram_poll_cursor.json` and `telegram_poll_lease.json` under `zone_dir`.
@@ -115,7 +117,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime setWebhook support does not upload custom TLS certificates or multipart files.
 - Runtime `subscribe` confirms topics but does not filter them against the advertised Telegram event catalog.
 - Event replay is not supported.
-- There is no dedicated tracked verification shell script for this connector.
+- The tracked no-live-credential verifier exercises a local Bot API loopback plus host-forwarded webhook ingest, but the connector still does not open an inbound webhook listener itself; inbound HTTP remains a host responsibility.
 
 A follow-up parity bead should reconcile Telegram's current update taxonomy, decide whether polling and host-forwarded webhook modes should be mutually exclusive at runtime, add custom-certificate handling if needed, filter handshake grants, expose approval metadata, enforce rate-limit pools, and replace the placeholder interface hash.
 
@@ -130,7 +132,7 @@ The current Telegram README slice documents the existing runtime surface:
 - lifecycle, doctor, health, self-check, simulate, introspect, invoke, subscribe, and shutdown behavior
 - provider error handling, retry behavior, local path safety, and message/caption limits
 - runtime/manifest/provider-doc drift around update taxonomy, approval tokens, grant filtering, rate limits, and interface hashes
-- deterministic WireMock and connector-suite tests
+- deterministic WireMock, connector-suite tests, connector-local `local_non_mock` coverage, and the no-live-credential loopback JSONL verifier
 
 ## Auth And Zone Boundary
 
@@ -223,11 +225,48 @@ The current implementation does not include:
 
 ## Verification
 
-README-only changes do not require Cargo or `rch` compilation. For this connector contract, use:
+The connector proof lane is tracked at `scripts/e2e/telegram_connector_verification.sh`.
+It offloads Cargo work through fail-closed `fwc proof run` / `rch` evidence,
+runs format, the no-live-credential loopback JSONL matrix, the connector-local
+`local_non_mock` acceptance test, the Telegram conformance contract, optional
+live-smoke structured skip handling, clippy, and a diff whitespace check on the
+owned Telegram proof files.
 
 ```bash
-git diff --check -- connectors/telegram/README.md
-LC_ALL=C rg -n '[^ -~]' connectors/telegram/README.md
-rg -n '\bmaster\b' connectors/telegram/README.md
-ubs connectors/telegram/README.md
+bash scripts/e2e/telegram_connector_verification.sh
 ```
+
+By default the script writes artifacts under `/tmp/fcp-telegram-e2e/<run-id>/`.
+The primary evidence file is `evidence/loopback_matrix.jsonl`; the live lane
+emits `evidence/live_optional_skip.jsonl` unless `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_LIVE_WRITE_APPROVAL=yes` are both present. Cargo-backed steps also
+write proof-governor artifacts under `${OUT_ROOT}/proof`.
+
+Only `accepted_remote_proof` rows in `*.rch_remote_proof.jsonl` are green
+closeout evidence for Cargo-backed steps. `refused_local_fallback`,
+`infra_blocked`, `remote_command_failed`, `failed_closed`, `not_proof`, or a
+missing proof row keep the verifier non-green. `format_check` is a source-state
+check, not accepted remote Cargo proof. Set `PROOF_GOVERNOR=0` only for legacy
+diagnostics; the default `PROOF_GOVERNOR=1` is the tracked proof lane.
+
+The loopback evidence records are redaction-safe and include command line, git
+revision, fixture ID, operation, update/chat/user hashes, sender-policy
+decision, capability decision, retry/backoff outcome, HTTP status, FCP error
+mapping, event topic, payload byte counts, artifact paths, cleanup state, and
+skip reason.
+
+## Operator Guidance
+
+Rerun commands:
+
+```bash
+bash scripts/e2e/telegram_connector_verification.sh
+PROOF_GOVERNOR=1 bash scripts/e2e/telegram_connector_verification.sh
+FWC_BIN=/path/to/current/target/debug/fwc PROOF_GOVERNOR=1 bash scripts/e2e/telegram_connector_verification.sh
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telegram-local-non-mock CARGO_INCREMENTAL=0 cargo test -p fcp-telegram --test local_non_mock -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telegram-conformance CARGO_INCREMENTAL=0 cargo test -p fcp-telegram --test conformance_contract -- --nocapture
+```
+
+Treat live Telegram checks as opt-in only. Provide `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_LIVE_WRITE_APPROVAL=yes` only in a controlled sandbox; the default
+verification lane is the redaction-safe local loopback suite.

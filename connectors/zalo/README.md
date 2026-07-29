@@ -39,6 +39,7 @@ Important runtime truths the contract preserves:
 - Live base URLs must be the default host with no extra path.
 - Runtime builds provider paths as `/bot{token}/{method}` and sends POST requests.
 - Runtime request timeout defaults to `30000 ms` and is capped at `120000 ms`.
+- Optional chat coordination is configured through `chat_coordination`; it defaults to the in-memory backend for this connector crate and runs before outbound text/photo provider calls.
 - Long-poll timeout defaults to `30 seconds` and is capped at `55 seconds`.
 - Message and caption-like text are truncated to `2000` Unicode scalar values.
 - Default webhook path is `/zalo/webhook`.
@@ -49,6 +50,7 @@ Important runtime truths the contract preserves:
 - `health()` is local readiness state; it reports `ready` only when configured with a token.
 - `self_check()` does not perform a live identity probe. It returns `ok` after configure, handshake, and token presence.
 - `invoke` accepts either `operation_id` or `operation`.
+- `zalo.messages.send` and `zalo.messages.send_photo` claim the Zalo recipient conversation before provider HTTP and append redaction-safe `coordination` audit records to successful responses.
 - `zalo.webhook.verify` compares the supplied token against `webhook_verify_challenge` or `webhook_token` using a constant-time byte comparison.
 - `zalo.webhook.ingest` validates a host-forwarded request; the connector does not open its own listener.
 - Inbound events default-deny until `allowed_sender_ids`, `allowed_chat_ids`, `allowed_group_ids`, or `paired_sender_ids` is configured.
@@ -60,6 +62,7 @@ This README documents runtime truth and keeps current drift visible:
 - The manifest declares capability gates, but connector-local `handle_invoke()` currently dispatches after readiness checks and does not verify a bound capability token before upstream calls.
 - `handle_simulate()` checks `zone_id` and `target_instance`, but live `invoke` does not enforce those scope checks locally.
 - `zalo.media` is advertised as a live capability, but there is no standalone `zalo.media.*` operation. Photo send is gated by `zalo.messages` in the manifest.
+- Chat coordination defaults to in-memory ownership claims in this connector crate. The optional `chat_coordination` object accepts `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`; recognized backends are `agent_mail`, `mesh_gossip`, and `in_memory`, and recognized DM modes are `skip` and `treat_as_thread`.
 - `self_check()` proves configuration state, not upstream token validity.
 - Provider paths are Bot API-shaped and tested against loopback fixtures; live Zalo behavior needs dedicated operator proof before production claims.
 - There is no tracked connector verification shell script yet.
@@ -128,8 +131,8 @@ The current Zalo README slice documents the existing runtime surface:
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Required input |
 |-----------|----------------|------------|------------|-----------|-------------|----------------|
-| `zalo.messages.send` | `POST /bot{token}/sendMessage` | `zalo.messages` | `safe` | `medium` | `best_effort` | `recipient_id`, `message`; runtime also accepts `chat_id`. |
-| `zalo.messages.send_photo` | `POST /bot{token}/sendPhoto` | `zalo.messages` | `safe` | `medium` | `best_effort` | `recipient_id`, `photo_url`; runtime also accepts `chat_id`, `photo`, optional `caption`. |
+| `zalo.messages.send` | `POST /bot{token}/sendMessage` after chat coordination claim | `zalo.messages` | `safe` | `medium` | `best_effort` | `recipient_id`, `message`; runtime also accepts `chat_id`. |
+| `zalo.messages.send_photo` | `POST /bot{token}/sendPhoto` after chat coordination claim | `zalo.messages` | `safe` | `medium` | `best_effort` | `recipient_id`, `photo_url`; runtime also accepts `chat_id`, `photo`, optional `caption`. |
 | `zalo.self.get_me` | `POST /bot{token}/getMe` | `zalo.messages` | `safe` | `low` | `strict` | None. |
 | `zalo.updates.poll` | `POST /bot{token}/getUpdates` | `zalo.updates` | `safe` | `low` | `none` | Optional `timeout_seconds`/`timeout`, optional `offset`. |
 | `zalo.webhook.delete` | `POST /bot{token}/deleteWebhook` | `zalo.webhook` | `safe` | `medium` | `best_effort` | None. |
@@ -177,6 +180,7 @@ These are excluded on purpose:
 - degraded self-check reasons for not configured, not handshaken, and missing token
 - local simulate decisions for webhook verification, webhook ingest, token presence, zone mismatch, target-instance mismatch, and unknown operations
 - URL policy, replay/rate policy, provider error mapping, and redaction-safe evidence fields in tests
+- outbound chat coordination denial/audit behavior for text and photo sends
 
 The deterministic integration evidence is anchored on loopback mock-server tests covering:
 

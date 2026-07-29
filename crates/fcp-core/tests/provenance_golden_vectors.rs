@@ -15,9 +15,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use fcp_core::{
-    AdjustmentKind, ApprovalScope, ApprovalToken, ConfidentialityLevel, DeclassificationScope,
-    ElevationScope, FlowCheckResult, IntegrityLevel, ObjectId, ProvenanceRecord, SafetyTier,
-    SanitizerReceipt, TaintFlag, TaintFlags, TaintReduction, ZoneId,
+    AdjustmentKind, ApprovalScope, ApprovalToken, Approved, ConfidentialityLevel,
+    DeclassificationScope, ElevationScope, FlowCheckResult, IntegrityLevel, ObjectId,
+    ProvenanceRecord, SafetyTier, SanitizerReceipt, TaintFlag, TaintFlags, TaintReduction, ZoneId,
 };
 
 /// Test logging structure per FCP2 requirements.
@@ -306,6 +306,7 @@ fn test_approval_token_elevation_vector_roundtrip() {
         }),
         zone_id: ZoneId::work(),
         signature: None,
+        _state: std::marker::PhantomData::<Approved>,
     };
 
     // Extract scope for vector
@@ -442,6 +443,7 @@ fn test_approval_token_declassification_vector_roundtrip() {
         }),
         zone_id: ZoneId::private(),
         signature: None,
+        _state: std::marker::PhantomData::<Approved>,
     };
 
     let (from_zone, to_zone, obj_ids, target_conf) = match &token.scope {
@@ -1043,6 +1045,7 @@ fn test_approval_token_scope_elevation_validates_integrity_transition() {
         }),
         zone_id: ZoneId::work(),
         signature: None,
+        _state: std::marker::PhantomData::<Approved>,
     };
 
     // Verify token is valid
@@ -1085,6 +1088,7 @@ fn test_approval_token_scope_declassification_validates_confidentiality_transiti
         }),
         zone_id: ZoneId::private(),
         signature: None,
+        _state: std::marker::PhantomData::<Approved>,
     };
 
     // Verify scope is declassification
@@ -1125,6 +1129,7 @@ fn test_approval_token_time_validity_enforced() {
         }),
         zone_id: ZoneId::work(),
         signature: None,
+        _state: std::marker::PhantomData::<Approved>,
     };
 
     // Before issuance - not yet valid
@@ -1310,6 +1315,7 @@ fn test_stale_approval_token_rejected() {
         }),
         zone_id: ZoneId::work(),
         signature: None,
+        _state: std::marker::PhantomData::<Approved>,
     };
 
     // Check at time well after expiration

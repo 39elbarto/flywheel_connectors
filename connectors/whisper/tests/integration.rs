@@ -817,6 +817,13 @@ async fn loopback_errors_cover_audio_auth_rate_provider_network_timeout_and_malf
         .expect(1)
         .mount(&provider_server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .and(body_partial_json(json!({ "model": "whisper-empty" })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .expect(1)
+        .mount(&provider_server)
+        .await;
     let provider_connector =
         configured_connector(&format!("{}/v1", provider_server.uri()), None).await;
     let missing_model = provider_connector
@@ -866,6 +873,25 @@ async fn loopback_errors_cover_audio_auth_rate_provider_network_timeout_and_malf
         .await
         .expect_err("malformed provider JSON should fail");
     assert!(matches!(malformed, FcpError::Internal { .. }));
+
+    // An empty 2xx body is coerced to the canonical empty success shape
+    // (`Ok({})`) per the workspace-wide policy set in commit 506b45904
+    // ("align empty-success-body handling on coercion to {} instead of
+    // failing"), which intentionally stopped ~27 connector clients —
+    // whisper included — from raising a spurious "empty response body"
+    // error on a successful status. The transcription mapper then surfaces
+    // the absent fields as JSON null rather than failing closed.
+    let empty_body = provider_connector
+        .handle_invoke(json!({
+            "operation_id": TRANSCRIBE_OP,
+            "input": {
+                "audio_base64": FIXTURE_AUDIO_BASE64,
+                "model": "whisper-empty"
+            }
+        }))
+        .await
+        .expect("empty provider success body is coerced to an empty success shape");
+    assert!(empty_body["text"].is_null());
 
     let network_connector = configured_connector(&unused_loopback_base_url(), None).await;
     let network = network_connector

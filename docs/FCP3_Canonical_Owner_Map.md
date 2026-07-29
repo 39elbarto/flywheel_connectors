@@ -154,7 +154,7 @@ These overlaps MUST NOT be reintroduced by future work:
 - **Migration**: Move `RolloutDecision`, `RolloutEvidence`, `RolloutObservation` to fcp-core.
 
 ### F3. Enforcement Pipeline Ordering
-- **Current**: The 11-check enforcement sequence and short-circuit logic is fcp-host-only knowledge.
+- **Current**: The 14-check enforcement sequence and short-circuit logic is fcp-host-only knowledge.
 - **Rule**: The canonical check ordering must be declared in fcp-core so SDKs and sidecars can replicate it.
 - **Migration**: Define `EnforcementCheckOrder` enum in fcp-core. fcp-host implements the pipeline.
 

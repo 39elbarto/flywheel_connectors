@@ -12,6 +12,7 @@ use fcp_prelude::{
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::{
@@ -22,6 +23,7 @@ use crate::types::{CancelInput, PromptIdInput, SubmitWorkflowInput, WaitInput};
 
 pub const CONNECTOR_ID: &str = "fcp.comfyui";
 pub const CONNECTOR_VERSION: &str = "0.1.0";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const OP_SUBMIT: &str = "comfyui.workflow.submit";
 const OP_STATUS: &str = "comfyui.workflow.status";
@@ -177,6 +179,12 @@ impl ComfyUiConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let config = ComfyUiConfig::from_params(&params)?;
         let client = config.build_client()?;
@@ -236,7 +244,7 @@ impl ComfyUiConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:comfyui-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: None,
             auth_caps: None,
@@ -892,5 +900,22 @@ pub fn test_handshake_request(
         host: None,
         transport_caps: None,
         requested_instance_id: Some(InstanceId::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = ComfyUiConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:comfyui-connector-v1");
     }
 }

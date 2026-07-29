@@ -1,19 +1,21 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_async_core::Cx;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_openai_compat::{ChatMessage, RateLimitPolicy};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError,
-    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection,
+    InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::{
@@ -29,6 +31,7 @@ use crate::types::{
 
 pub const CONNECTOR_ID: &str = "fcp.microsoft-foundry";
 pub const CONNECTOR_VERSION: &str = "0.1.0";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const OP_CHAT: &str = "microsoft_foundry.chat.completions";
 const OP_CHAT_STREAM: &str = "microsoft_foundry.chat.completions_stream";
@@ -38,6 +41,16 @@ const OP_RESPONSES_CREATE: &str = "microsoft_foundry.responses.create";
 const OP_RESPONSES_CANCEL: &str = "microsoft_foundry.responses.cancel";
 const OP_RESPONSES_INPUT_ITEMS: &str = "microsoft_foundry.responses.input_items.list";
 const OP_HEALTH: &str = "microsoft_foundry.health";
+const OPERATION_ORDER: &[&str] = &[
+    OP_RESPONSES_CREATE,
+    OP_RESPONSES_CANCEL,
+    OP_RESPONSES_INPUT_ITEMS,
+    OP_CHAT,
+    OP_CHAT_STREAM,
+    OP_EMBEDDINGS,
+    OP_MODELS,
+    OP_HEALTH,
+];
 
 const CAP_CHAT: &str = "microsoft_foundry.chat";
 const CAP_EMBEDDINGS: &str = "microsoft_foundry.embeddings";
@@ -185,6 +198,12 @@ impl MicrosoftFoundryConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let config = MicrosoftFoundryConfig::from_params(&params)?;
         let client = config.build_client();
@@ -238,7 +257,7 @@ impl MicrosoftFoundryConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:microsoft-foundry-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -375,7 +394,10 @@ impl MicrosoftFoundryConnector {
             message: "Microsoft Foundry client not initialized".into(),
         })?;
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
-        let cx = Cx::for_testing();
+        // asupersync 0.3.2 gates `Cx::for_testing` out of production builds
+        // (cap-mask bypass hardening); operations run under the connector
+        // runtime, so take the ambient context instead of fabricating one.
+        let cx = fcp_async_core::compatibility_cx();
         match operation {
             OP_CHAT => {
                 let request = chat_request_from_value(input, &config.default_model)?;
@@ -655,182 +677,62 @@ impl FcpConnector for MicrosoftFoundryConnector {
 }
 
 fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            OP_RESPONSES_CREATE,
-            "Create a Microsoft Foundry Responses API response",
-            "Uses POST /responses. The request model field is the Azure deployment name.",
-            responses_schema(),
-            CAP_RESPONSES,
-            RiskLevel::Medium,
-            IdempotencyClass::None,
-            "Use for Azure OpenAI deployments where Responses API features, background mode, or input item tracking are needed.",
-        ),
-        op_info(
-            OP_RESPONSES_CANCEL,
-            "Cancel a background Microsoft Foundry response",
-            "Uses POST /responses/{response_id}/cancel for background Responses API work.",
-            json!({ "type": "object", "required": ["response_id"], "properties": { "response_id": { "type": "string" } } }),
-            CAP_RESPONSES,
-            RiskLevel::Low,
-            IdempotencyClass::BestEffort,
-            "Use to stop a background Responses API job that is no longer needed.",
-        ),
-        op_info(
-            OP_RESPONSES_INPUT_ITEMS,
-            "List Microsoft Foundry response input items",
-            "Uses GET /responses/{response_id}/input_items for Responses API diagnostics.",
-            json!({ "type": "object", "required": ["response_id"], "properties": { "response_id": { "type": "string" } } }),
-            CAP_RESPONSES,
-            RiskLevel::Low,
-            IdempotencyClass::Strict,
-            "Use for redaction-aware diagnostics of a Responses API job without logging prompt bodies.",
-        ),
-        op_info(
-            OP_CHAT,
-            "Create a Microsoft Foundry chat completion",
-            "Uses OpenAI-compatible POST /chat/completions via fcp-openai-compat.",
-            chat_schema(false),
-            CAP_CHAT,
-            RiskLevel::Medium,
-            IdempotencyClass::None,
-            "Use for compatible Foundry deployments and third-party Foundry models that require chat completions.",
-        ),
-        op_info(
-            OP_CHAT_STREAM,
-            "Create a Microsoft Foundry streaming chat completion",
-            "Uses OpenAI-compatible SSE chat streaming via fcp-openai-compat.",
-            chat_schema(true),
-            CAP_CHAT,
-            RiskLevel::Medium,
-            IdempotencyClass::None,
-            "Use when the caller can consume incremental stream chunk metadata.",
-        ),
-        op_info(
-            OP_EMBEDDINGS,
-            "Create Microsoft Foundry embeddings",
-            "Uses OpenAI-compatible POST /embeddings through a Foundry embeddings deployment.",
-            embeddings_schema(),
-            CAP_EMBEDDINGS,
-            RiskLevel::Medium,
-            IdempotencyClass::None,
-            "Use only with a deployment that supports embeddings; do not route raw vectors into logs.",
-        ),
-        op_info(
-            OP_MODELS,
-            "List Microsoft Foundry deployments/models",
-            "Uses GET /models; callers should treat returned IDs as deployment names.",
-            json!({ "type": "object", "properties": { "refresh": { "type": "boolean" } } }),
-            CAP_MODELS,
-            RiskLevel::Low,
-            IdempotencyClass::Strict,
-            "Use to discover configured Foundry deployment IDs before invoking chat, responses, or embeddings.",
-        ),
-        op_info(
-            OP_HEALTH,
-            "Probe Microsoft Foundry health",
-            "Performs a bounded deployment/model listing probe.",
-            json!({ "type": "object", "properties": {} }),
-            CAP_HEALTH,
-            RiskLevel::Low,
-            IdempotencyClass::Strict,
-            "Use before dispatching user-visible Foundry work.",
-        ),
-    ]
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &'static str,
-    description: &'static str,
-    input_schema: Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    idempotency: IdempotencyClass,
-    when_to_use: &'static str,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        description: Some(description.into()),
-        input_schema,
-        output_schema: json!({ "type": "object" }),
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        safety_tier: SafetyTier::Safe,
-        idempotency,
-        ai_hints: AgentHint {
-            when_to_use: when_to_use.into(),
-            common_mistakes: vec![
-                "Do not log prompts, completions, embeddings, bearer tokens, API keys, tenant IDs, or full resource hostnames.".into(),
-                "Use the deployment name in model; do not pass an Azure resource path.".into(),
-            ],
-            examples: vec![r#"{"model":"prod-gpt4o","input":[{"role":"user","content":"Hello"}]}"#.into()],
-            related: vec![CapabilityId::from_static(capability)],
-        },
-        rate_limit: None,
-        requires_approval: Some(ApprovalMode::None),
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest = ConnectorManifest::parse_str(MANIFEST_TOML)
+        .expect("embedded Microsoft Foundry manifest should validate");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
 }
 
-fn chat_schema(streaming: bool) -> Value {
-    json!({
-        "type": "object",
-        "required": ["messages"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_MODEL, "description": "Foundry deployment name" },
-            "messages": { "type": "array", "minItems": 1 },
-            "max_tokens": { "type": "integer", "minimum": 1 },
-            "max_completion_tokens": { "type": "integer", "minimum": 1 },
-            "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-            "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
-            "stop": {},
-            "response_format": { "type": "object" },
-            "tools": { "type": "array" },
-            "tool_choice": {},
-            "reasoning_effort": { "type": "string" },
-            "streaming_response": { "const": streaming },
-            "provider_extensions": { "type": "object" }
-        }
-    })
-}
-
-fn responses_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["input"],
-        "properties": {
-            "model": { "type": "string", "default": DEFAULT_MODEL, "description": "Foundry deployment name" },
-            "input": {},
-            "instructions": { "type": "string" },
-            "include": { "type": "array", "items": { "type": "string" } },
-            "tools": { "type": "array" },
-            "tool_choice": {},
-            "max_output_tokens": { "type": "integer", "minimum": 1 },
-            "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
-            "top_p": { "type": "number", "minimum": 0, "maximum": 1 },
-            "store": { "type": "boolean" },
-            "background": { "type": "boolean" },
-            "previous_response_id": { "type": "string" },
-            "metadata": { "type": "object" },
-            "provider_extensions": { "type": "object" }
-        }
-    })
-}
-
-fn embeddings_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["input"],
-        "properties": {
-            "model": { "type": "string", "description": "Foundry embeddings deployment name" },
-            "input": {},
-            "encoding_format": { "type": "string" },
-            "dimensions": { "type": "integer", "minimum": 1 },
-            "provider_extensions": { "type": "object" }
-        }
-    })
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
@@ -1009,5 +911,104 @@ pub fn test_invoke_request(
         correlation_id: None,
         provenance: None,
         approval_tokens: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(MicrosoftFoundryConnector::manifest_hash(), expected);
+        assert_ne!(
+            MicrosoftFoundryConnector::manifest_hash(),
+            "sha256:microsoft-foundry-connector-v1"
+        );
+    }
+
+    #[test]
+    fn strict_microsoft_foundry_manifest() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        assert_eq!(manifest.connector.id.as_ref(), CONNECTOR_ID);
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+        assert_eq!(
+            manifest.manifest.interface_hash,
+            manifest.compute_interface_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = operations_info();
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            assert_eq!(operation.id.as_ref(), OPERATION_ORDER[index]);
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should come from manifest");
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_ref(),
+                Some(&manifest_operation.description)
+            );
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                operation.ai_hints.when_to_use.as_str(),
+                manifest_operation.ai_hints.when_to_use.as_str()
+            );
+            assert_eq!(
+                &operation.ai_hints.common_mistakes,
+                &manifest_operation.ai_hints.common_mistakes
+            );
+            assert_eq!(
+                &operation.ai_hints.examples,
+                &manifest_operation.ai_hints.examples
+            );
+            let actual_related = operation
+                .ai_hints
+                .related
+                .iter()
+                .map(std::convert::AsRef::as_ref)
+                .collect::<Vec<_>>();
+            let expected_related = manifest_operation
+                .ai_hints
+                .related
+                .iter()
+                .map(std::convert::AsRef::as_ref)
+                .collect::<Vec<_>>();
+            assert_eq!(actual_related, expected_related);
+        }
+    }
+
+    #[test]
+    fn manifest_schema_is_the_runtime_introspection_schema() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = operations_info();
+
+        for operation in operations {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation.id.as_ref())
+                .expect("runtime operation should come from manifest");
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+        }
     }
 }

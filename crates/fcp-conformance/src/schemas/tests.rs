@@ -1260,7 +1260,7 @@ fn reject_too_many_input_constraints() {
     let validator = load_schema();
     // Build an array with 65 constraints (max is 64)
     let constraints: Vec<String> = (0..65)
-        .map(|i| format!(r#"{{ "pointer": "/field{i}", "op": "eq", "value": {i} }}"#,))
+        .map(|i| format!(r#"{{ "pointer": "/field{i}", "op": "eq", "value": {i} }}"#))
         .collect();
 
     let doc: Value = serde_json::from_str(&format!(

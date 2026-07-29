@@ -1,0 +1,574 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+OUT_ROOT="${OUT_ROOT:-/tmp/fcp-postgresql-e2e/${RUN_ID}}"
+TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-postgresql-e2e-target}"
+STATUS_JSONL="${OUT_ROOT}/evidence/verification_steps.jsonl"
+POSTGRESQL_RUN_TESTCONTAINER="${POSTGRESQL_RUN_TESTCONTAINER:-1}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+PROOF_GOVERNOR="${PROOF_GOVERNOR:-1}"
+if [[ -z "${FWC_BIN:-}" ]]; then
+  if [[ -x "${REPO_ROOT}/target/debug/fwc" ]]; then
+    FWC_BIN="${REPO_ROOT}/target/debug/fwc"
+  else
+    FWC_BIN="fwc"
+  fi
+fi
+export RCH_FORCE_REMOTE=1
+
+mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence" "${OUT_ROOT}/proof"
+
+OVERALL_STATUS="passed"
+EXIT_CODE=0
+
+promote_status() {
+  local status="$1"
+  case "${status}" in
+    failed)
+      OVERALL_STATUS="failed"
+      EXIT_CODE=1
+      ;;
+    infra_blocked)
+      if [[ "${OVERALL_STATUS}" == "passed" ]]; then
+        OVERALL_STATUS="infra_blocked"
+        EXIT_CODE=2
+      fi
+      ;;
+  esac
+}
+
+classify_failure() {
+  local log_path="$1"
+
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+
+  if grep -Eqi 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|Cannot connect to the Docker daemon|docker daemon|testcontainers.*docker|missing worker system package|timeout: failed to execute process|not a valid fwc command|local_fallback_refused' "${log_path}"; then
+    echo "infra_blocked"
+  else
+    echo "failed"
+  fi
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    return 1
+  fi
+}
+
+json_array_from_args() {
+  if [[ $# -eq 0 ]]; then
+    printf '[]'
+    return
+  fi
+  printf '%s\n' "$@" | jq -R . | jq -s .
+}
+
+command_uses_rch_exec() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "rch" && "${arg}" == "exec" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
+rch_remote_summary_present() {
+  local log_path="$1"
+  grep -E '^\[RCH\][[:space:]]+remote[[:space:]]+' "${log_path}" \
+    | grep -Ev '^\[RCH\][[:space:]]+remote[[:space:]]+required([;[:space:]]|$)' >/dev/null
+}
+
+record_step() {
+  local name="$1"
+  local status="$2"
+  local duration_ms="$3"
+  local log_path="$4"
+  shift 4
+  local argv_json
+  argv_json="$(json_array_from_args "$@")"
+
+  jq -cn \
+    --arg schema_version "fcp-postgresql-verification/v1" \
+    --arg run_id "${RUN_ID}" \
+    --arg connector "fcp-postgresql" \
+    --arg fixture_id "postgresql-testcontainer-local-acceptance" \
+    --arg step "${name}" \
+    --arg status "${status}" \
+    --arg git_revision "${git_revision}" \
+    --arg target_dir "${TARGET_DIR}" \
+    --arg log_path "${log_path}" \
+    --argjson duration_ms "${duration_ms}" \
+    --argjson argv "${argv_json}" \
+    '{
+      schema_version: $schema_version,
+      run_id: $run_id,
+      connector: $connector,
+      fixture_id: $fixture_id,
+      step: $step,
+      status: $status,
+      duration_ms: $duration_ms,
+      git_revision: $git_revision,
+      target_dir: $target_dir,
+      log_path: $log_path,
+      argv: $argv
+    }' >>"${STATUS_JSONL}"
+}
+
+run_logged_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
+  local name="$1"
+  shift
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local start_seconds end_seconds duration_ms rc status
+
+  echo "[postgresql-verification] ${name}: $*" >&2
+  start_seconds="$(date -u +%s)"
+  (
+    cd "${REPO_ROOT}" || exit
+    "$@"
+  ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 && "${require_remote_proof}" == "1" ]] && command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
+    echo "[postgresql-verification] ${name}: rch command did not produce remote proof" >&2
+    echo "rch command did not produce remote proof" >>"${log_path}"
+    rc=1
+  fi
+  status="passed"
+  if [[ "${rc}" -ne 0 ]]; then
+    status="$(classify_failure "${log_path}")"
+    promote_status "${status}"
+  fi
+  end_seconds="$(date -u +%s)"
+  duration_ms="$(((end_seconds - start_seconds) * 1000))"
+  record_step "${name}" "${status}" "${duration_ms}" "${log_path}" "$@"
+}
+
+run_logged() {
+  run_logged_with_remote_policy 1 "$@"
+}
+
+graduation_gauntlet_pre_promotion_pending() {
+  local jsonl_path="$1"
+
+  if [[ ! -f "${jsonl_path}" ]]; then
+    return 1
+  fi
+
+  jq -s -e '
+    [.[] | select(.verdict == "fail")] as $failures
+    | ($failures | length) == 1
+      and $failures[0].check == "readme_status_match"
+  ' "${jsonl_path}" >/dev/null
+}
+
+run_graduation_gauntlet_step() {
+  local jsonl_path="${OUT_ROOT}/evidence/graduation_gauntlet.jsonl"
+  local log_path="${OUT_ROOT}/logs/graduation_gauntlet.log"
+  local start_seconds end_seconds duration_ms rc status
+
+  echo "[postgresql-verification] graduation_gauntlet: scripts/graduation/run_gauntlet.sh --jsonl ${jsonl_path} connectors/postgresql" >&2
+  start_seconds="$(date -u +%s)"
+  (
+    cd "${REPO_ROOT}" || exit
+    scripts/graduation/run_gauntlet.sh --jsonl "${jsonl_path}" connectors/postgresql
+  ) >"${log_path}" 2>&1
+  rc="$?"
+
+  if [[ "${rc}" -eq 0 ]]; then
+    status="passed"
+  elif graduation_gauntlet_pre_promotion_pending "${jsonl_path}"; then
+    status="pre_promotion_pending"
+    echo "pre-promotion gauntlet reached only readme_status_match; PROVEN status has not been claimed yet" >>"${log_path}"
+  else
+    status="$(classify_failure "${log_path}")"
+    promote_status "${status}"
+  fi
+
+  end_seconds="$(date -u +%s)"
+  duration_ms="$(((end_seconds - start_seconds) * 1000))"
+  record_step \
+    graduation_gauntlet \
+    "${status}" \
+    "${duration_ms}" \
+    "${log_path}" \
+    scripts/graduation/run_gauntlet.sh --jsonl "${jsonl_path}" connectors/postgresql
+}
+
+run_no_match() {
+  local name="$1"
+  local pattern="$2"
+  shift 2
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local start_seconds end_seconds duration_ms rc status
+
+  echo "[postgresql-verification] ${name}: rg ${pattern} $*" >&2
+  start_seconds="$(date -u +%s)"
+  (
+    cd "${REPO_ROOT}" || exit
+    rg -n "${pattern}" "$@"
+  ) >"${log_path}" 2>&1
+  rc="$?"
+  status="passed"
+  case "${rc}" in
+    0)
+      status="failed"
+      promote_status failed
+      ;;
+    1)
+      status="passed"
+      ;;
+    *)
+      status="$(classify_failure "${log_path}")"
+      promote_status "${status}"
+      ;;
+  esac
+  end_seconds="$(date -u +%s)"
+  duration_ms="$(((end_seconds - start_seconds) * 1000))"
+  record_step "${name}" "${status}" "${duration_ms}" "${log_path}" rg -n "${pattern}" "$@"
+}
+
+write_proof_corpus() {
+  local name="$1"
+  local corpus_path="$2"
+  shift 2
+  local claim_key="postgresql-connector-verifier-${name}"
+  local argv_json
+  argv_json="$(json_array_from_args "$@")"
+  jq -n \
+    --arg claim_key "${claim_key}" \
+    --arg purpose "Run PostgreSQL connector verifier step ${name} through the fail-closed rch proof governor." \
+    --argjson rerun_argv "${argv_json}" \
+    '{
+      schema: "fcp.proof-graph-indexer-corpus.v1",
+      verification_scripts: [
+        {
+          claim_key: $claim_key,
+          script_path: "scripts/e2e/postgresql_connector_verification.sh",
+          purpose: $purpose,
+          rerun_argv: $rerun_argv,
+          required_env_keys: [],
+          source: {
+            source_id: "postgresql.connector.verifier",
+            path: "scripts/e2e/postgresql_connector_verification.sh",
+            line: 1
+          }
+        }
+      ]
+    }' >"${corpus_path}"
+}
+
+governor_step_status() {
+  local classification="$1"
+  case "${classification}" in
+    accepted_remote_proof)
+      echo "passed"
+      ;;
+    infra_blocked|refused_local_fallback)
+      echo "infra_blocked"
+      ;;
+    remote_command_failed|not_proof|failed_closed|missing)
+      echo "failed"
+      ;;
+    *)
+      echo "failed"
+      ;;
+  esac
+}
+
+run_governed_rch_cargo_step() {
+  local name="$1"
+  shift
+  local corpus_path="${OUT_ROOT}/proof/${name}.corpus.json"
+  local proof_json="${OUT_ROOT}/proof/${name}.proof.json"
+  local proof_jsonl="${OUT_ROOT}/proof/${name}.rch_remote_proof.jsonl"
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local claim_key="postgresql-connector-verifier-${name}"
+  local classification status rch_summary_line
+  local start_seconds end_seconds duration_ms
+
+  echo "[postgresql-verification] ${name}: fwc proof run ${claim_key} --execute" >&2
+  start_seconds="$(date -u +%s)"
+  if ! require_cmd jq >"${log_path}" 2>&1; then
+    end_seconds="$(date -u +%s)"
+    duration_ms="$(((end_seconds - start_seconds) * 1000))"
+    promote_status infra_blocked
+    record_step "${name}" infra_blocked "${duration_ms}" "${log_path}" require_cmd jq
+    return
+  fi
+  if ! require_cmd "${FWC_BIN}" >>"${log_path}" 2>&1; then
+    end_seconds="$(date -u +%s)"
+    duration_ms="$(((end_seconds - start_seconds) * 1000))"
+    promote_status infra_blocked
+    record_step "${name}" infra_blocked "${duration_ms}" "${log_path}" require_cmd "${FWC_BIN}"
+    return
+  fi
+
+  # shellcheck disable=SC2129
+  write_proof_corpus "${name}" "${corpus_path}" "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" "$@" >>"${log_path}" 2>&1
+  (
+    cd "${REPO_ROOT}" || exit
+    "${FWC_BIN}" --json proof run "${claim_key}" --corpus "${corpus_path}" --execute
+  ) >"${proof_json}" 2>>"${log_path}"
+
+  cat "${proof_json}" >>"${log_path}"
+  classification="$(jq -r '
+    if .status == "error"
+      and (
+        .error.type == "unknown-command"
+        or ((.error.message // "") | test("not a valid fwc command"))
+      )
+    then
+      "infra_blocked"
+    else
+      .execution.rch_remote_proof.classification_label // "missing"
+    end
+  ' "${proof_json}" 2>>"${log_path}" || echo missing)"
+  rch_summary_line="$(jq -r '.execution.rch_remote_proof.evidence.rch_summary_line // ""' "${proof_json}" 2>>"${log_path}" || true)"
+  if [[ "${rch_summary_line}" == *"remote required; refusing local fallback"* ]]; then
+    classification="refused_local_fallback"
+    jq -c '
+      (.execution.rch_remote_proof.jsonl_record // empty) as $record
+      | if $record == "" then
+          empty
+        else
+          ($record | fromjson)
+          | .worker_id = null
+          | .selector_reason = "local_fallback_refused"
+          | .blocker_reason = "local_fallback_refused"
+          | .exit_kind = {state: "blocked"}
+        end
+    ' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  else
+    jq -r '.execution.rch_remote_proof.jsonl_record // empty' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  fi
+  status="$(governor_step_status "${classification}")"
+  if [[ "${status}" != "passed" ]]; then
+    promote_status "${status}"
+  fi
+  end_seconds="$(date -u +%s)"
+  duration_ms="$(((end_seconds - start_seconds) * 1000))"
+  record_step "${name}" "${status}" "${duration_ms}" "${log_path}" \
+    "${FWC_BIN}" --json proof run "${claim_key}" --corpus "${corpus_path}" --execute
+}
+
+run_legacy_rch_cargo_step_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
+  local name="$1"
+  shift
+
+  run_logged_with_remote_policy "${require_remote_proof}" "${name}" env \
+    RCH_VISIBILITY=verbose \
+    RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \
+    RCH_FORCE_REMOTE=1 \
+    rch exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
+    CARGO_TARGET_DIR="${TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    "$@"
+}
+
+run_rch_cargo_step_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
+  local name="$1"
+  shift
+
+  if [[ "${require_remote_proof}" == "1" && "${PROOF_GOVERNOR}" == "1" ]]; then
+    run_governed_rch_cargo_step "${name}" "$@"
+    return
+  fi
+
+  run_legacy_rch_cargo_step_with_remote_policy "${require_remote_proof}" "${name}" "$@"
+}
+
+run_rch_cargo_step() {
+  run_rch_cargo_step_with_remote_policy 1 "$@"
+}
+
+run_rch_format_step() {
+  local name="$1"
+  shift
+
+  # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
+  run_rch_cargo_step_with_remote_policy 0 "${name}" "$@"
+}
+
+for required in jq git rg rch; do
+  if ! command -v "${required}" >/dev/null 2>&1; then
+    echo "Missing required command: ${required}" >&2
+    exit 2
+  fi
+done
+
+git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+run_graduation_gauntlet_step
+
+run_logged \
+  diff_check \
+  git diff --check -- \
+    connectors/postgresql/README.md \
+    connectors/postgresql/manifest.toml \
+    connectors/postgresql/src/client.rs \
+    connectors/postgresql/src/connector.rs \
+    connectors/postgresql/src/types.rs \
+    connectors/postgresql/tests/local_non_mock.rs \
+    connectors/postgresql/tests/transaction_integration.rs \
+    scripts/e2e/postgresql_connector_verification.sh
+
+run_no_match \
+  readme_master_word_scan \
+  '\bmaster\b' \
+  connectors/postgresql/README.md \
+  scripts/e2e/postgresql_connector_verification.sh
+
+run_rch_cargo_step \
+  cargo_check \
+  cargo check -p fcp-postgresql --all-targets
+
+run_rch_cargo_step \
+  unit_suite \
+  cargo test -p fcp-postgresql -- --nocapture
+
+run_rch_format_step \
+  format_check \
+  cargo fmt -p fcp-postgresql -- --check
+
+run_rch_cargo_step \
+  clippy \
+  cargo clippy -p fcp-postgresql --all-targets -- -D warnings
+
+if [[ "${POSTGRESQL_RUN_TESTCONTAINER}" == "1" ]]; then
+  run_rch_cargo_step \
+    local_non_mock_acceptance \
+    cargo test -p fcp-postgresql --features integration-testcontainer --test local_non_mock -- --nocapture
+
+  run_rch_cargo_step \
+    transaction_integration \
+    cargo test -p fcp-postgresql --features integration-testcontainer --test transaction_integration -- --nocapture
+else
+  record_step \
+    local_non_mock_acceptance \
+    skipped \
+    0 \
+    "${OUT_ROOT}/logs/local_non_mock_acceptance.log" \
+    env POSTGRESQL_RUN_TESTCONTAINER=1 scripts/e2e/postgresql_connector_verification.sh
+  record_step \
+    transaction_integration \
+    skipped \
+    0 \
+    "${OUT_ROOT}/logs/transaction_integration.log" \
+    env POSTGRESQL_RUN_TESTCONTAINER=1 scripts/e2e/postgresql_connector_verification.sh
+fi
+
+if rg -n -e 'local-acceptance-token|test_pw|postgres://|password=|Authorization: Bearer|X-FCP-Credential-Id' "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence" >/dev/null 2>&1; then
+  echo "[postgresql-verification] redaction scan failed" >&2
+  promote_status failed
+  record_step redaction_scan failed 0 "${OUT_ROOT}/logs/redaction_scan.log" rg -n -e redaction-patterns "${OUT_ROOT}"
+else
+  record_step redaction_scan passed 0 "${OUT_ROOT}/logs/redaction_scan.log" rg -n -e redaction-patterns "${OUT_ROOT}"
+fi
+
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg connector "fcp-postgresql" \
+  --arg repo_root "${REPO_ROOT}" \
+  --arg verification_script "scripts/e2e/postgresql_connector_verification.sh" \
+  --arg artifact_root "${OUT_ROOT}" \
+  --arg git_revision "${git_revision}" \
+  --arg target_dir "${TARGET_DIR}" \
+  --arg rch_require_remote "${RCH_REQUIRE_REMOTE}" \
+  --arg testcontainer_required "${POSTGRESQL_RUN_TESTCONTAINER}" \
+  --arg runner "${REMOTE_RUNNER}" \
+  --arg toolchain "${REPO_TOOLCHAIN}" \
+  --arg proof_governor_enabled "${PROOF_GOVERNOR}" \
+  --arg proof_governor "Cargo-backed verifier steps run through fwc proof run; accepted_remote_proof is the only passing rch proof classification. refused_local_fallback and infra_blocked keep the verifier non-green. format_check is a source-state check, not accepted remote Cargo proof." \
+  --arg proof_artifacts "${OUT_ROOT}/proof" \
+  --arg fixture_mode "real Postgres 15 testcontainer plus local PostgREST-compatible HTTP shim" \
+  --arg redaction "logs and JSONL must not contain API keys, credential IDs, bearer headers, connection strings, database passwords, SQL result rows, or provider payload bodies" \
+  '{
+    run_id: $run_id,
+    connector: $connector,
+    repo_root: $repo_root,
+    verification_script: $verification_script,
+    artifact_root: $artifact_root,
+    git_revision: $git_revision,
+    target_dir: $target_dir,
+    rch_require_remote: $rch_require_remote,
+    testcontainer_required: $testcontainer_required,
+    runner: $runner,
+    toolchain: $toolchain,
+    proof_governor_enabled: $proof_governor_enabled,
+    proof_governor: $proof_governor,
+    proof_artifacts: $proof_artifacts,
+    fixture_mode: $fixture_mode,
+    redaction: $redaction
+  }' >"${OUT_ROOT}/environment.json"
+
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf '%s\n' ''
+  printf 'RUN_ID=%q \\\n' "${RUN_ID}"
+  printf 'OUT_ROOT=%q \\\n' "${OUT_ROOT}"
+  printf 'CARGO_TARGET_DIR=%q \\\n' "${TARGET_DIR}"
+  printf 'RCH_VISIBILITY=verbose \\\n'
+  printf 'RCH_REQUIRE_REMOTE=%q \\\n' "${RCH_REQUIRE_REMOTE}"
+  printf 'RCH_FORCE_REMOTE=1 \\\n'
+  printf 'REPO_TOOLCHAIN=%q \\\n' "${REPO_TOOLCHAIN}"
+  printf 'PROOF_GOVERNOR=%q \\\n' "${PROOF_GOVERNOR}"
+  printf 'FWC_BIN=%q \\\n' "${FWC_BIN}"
+  printf 'POSTGRESQL_RUN_TESTCONTAINER=%q \\\n' "${POSTGRESQL_RUN_TESTCONTAINER}"
+  printf '%s\n' 'scripts/e2e/postgresql_connector_verification.sh'
+} >"${OUT_ROOT}/replay.sh"
+chmod +x "${OUT_ROOT}/replay.sh"
+
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg connector "fcp-postgresql" \
+  --arg status "${OVERALL_STATUS}" \
+  --arg artifacts_root "${OUT_ROOT}" \
+  --arg runner "${REMOTE_RUNNER}" \
+  --arg toolchain "${REPO_TOOLCHAIN}" \
+  --arg status_jsonl "${STATUS_JSONL}" \
+  --arg graduation_gauntlet "${OUT_ROOT}/evidence/graduation_gauntlet.jsonl" \
+  --arg proof_governor_json "${OUT_ROOT}/proof/*.proof.json" \
+  --arg proof_governor_jsonl "${OUT_ROOT}/proof/*.rch_remote_proof.jsonl" \
+  --arg environment "${OUT_ROOT}/environment.json" \
+  --arg replay "${OUT_ROOT}/replay.sh" \
+  --arg logs "${OUT_ROOT}/logs" \
+  --argjson exit_code "${EXIT_CODE}" \
+  '{
+    run_id: $run_id,
+    connector: $connector,
+    status: $status,
+    exit_code: $exit_code,
+    artifacts_root: $artifacts_root,
+    runner: $runner,
+    toolchain: $toolchain,
+    artifacts: {
+      status_jsonl: $status_jsonl,
+      graduation_gauntlet: $graduation_gauntlet,
+      proof_governor_json: $proof_governor_json,
+      proof_governor_jsonl: $proof_governor_jsonl,
+      environment: $environment,
+      replay: $replay,
+      logs: $logs
+    }
+  }' >"${OUT_ROOT}/summary.json"
+
+echo "PostgreSQL verification artifacts written to ${OUT_ROOT} (status=${OVERALL_STATUS})" >&2
+exit "${EXIT_CODE}"

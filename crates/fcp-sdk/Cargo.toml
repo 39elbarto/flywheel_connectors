@@ -40,12 +40,14 @@ cursor-store-object-store = ["dep:fcp-store", "dep:fcp-cbor", "dep:semver"]
 connector-http = ["dep:reqwest"]
 
 [dev-dependencies]
-asupersync = { version = "0.3.1", default-features = false, features = ["tracing-integration", "tls", "tls-native-roots"] }
+asupersync = { version = "=0.3.4", default-features = false, features = ["tracing-integration", "tls", "tls-native-roots"] }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 fcp-cbor = { path = "../fcp-cbor" }
+fcp-crypto = { path = "../fcp-crypto" }
 semver = { workspace = true }
 reqwest = { workspace = true }
 wiremock = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+ciborium = { workspace = true }

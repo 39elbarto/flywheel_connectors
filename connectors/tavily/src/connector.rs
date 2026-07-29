@@ -1,9 +1,12 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_manifest::ConnectorManifest;
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::{
+    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
+};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
@@ -330,7 +333,7 @@ impl TavilyConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": operations_info()?,
+            "operations": introspect_operations()?,
             "events": [],
             "resource_types": []
         }))
@@ -464,7 +467,7 @@ impl Default for TavilyConnector {
     }
 }
 
-fn operations_info() -> FcpResult<Vec<Value>> {
+fn ordered_manifest_operations() -> FcpResult<Vec<(String, fcp_manifest::OperationSection)>> {
     let manifest =
         ConnectorManifest::parse_str(TAVILY_MANIFEST_TOML).map_err(|error| FcpError::Internal {
             message: format!("Embedded Tavily manifest is invalid: {error}"),
@@ -475,10 +478,43 @@ fn operations_info() -> FcpResult<Vec<Value>> {
         let right_index = operation_order(right);
         left_index.cmp(&right_index).then_with(|| left.cmp(right))
     });
-    Ok(operations
-        .into_iter()
-        .map(|(id, operation)| operation_info_from_manifest(id, operation))
-        .collect())
+    Ok(operations)
+}
+
+fn introspect_operations() -> FcpResult<Vec<Value>> {
+    static OPERATIONS: OnceLock<FcpResult<Vec<Value>>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            Ok(ordered_manifest_operations()?
+                .into_iter()
+                .map(|(id, operation)| {
+                    let operation_info = operation_info_from_manifest(id, &operation);
+                    introspect_operation_from_manifest(operation_info, &operation)
+                })
+                .collect())
+        })
+        .clone()
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn introspect_operation_from_manifest(
+    operation_info: OperationInfo,
+    operation: &fcp_manifest::OperationSection,
+) -> Value {
+    let mut metadata =
+        serde_json::to_value(operation_info).expect("Tavily operation metadata should serialize");
+    metadata["requires_approval"] = json!(operation.requires_approval);
+    metadata["revocation_freshness"] = json!(operation.revocation_freshness);
+    if let Some(network_constraints) = &operation.network_constraints {
+        metadata["network_constraints"] = json!(network_constraints);
+    }
+    metadata
 }
 
 fn operation_order(operation_id: &str) -> usize {
@@ -488,39 +524,28 @@ fn operation_order(operation_id: &str) -> usize {
         .unwrap_or(OPERATION_ORDER.len())
 }
 
-fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
-    let mut entry = serde_json::Map::new();
-    entry.insert("id".into(), Value::String(id));
-    entry.insert(
-        "summary".into(),
-        Value::String(operation.description.clone()),
-    );
-    entry.insert("description".into(), Value::String(operation.description));
-    entry.insert(
-        "capability".into(),
-        Value::String(operation.capability.as_str().to_string()),
-    );
-    entry.insert("risk_level".into(), json!(operation.risk_level));
-    entry.insert("safety_tier".into(), json!(operation.safety_tier));
-    entry.insert("idempotency".into(), json!(operation.idempotency));
-    entry.insert(
-        "requires_approval".into(),
-        json!(operation.requires_approval),
-    );
-    entry.insert(
-        "revocation_freshness".into(),
-        json!(operation.revocation_freshness),
-    );
-    entry.insert("input_schema".into(), operation.input_schema);
-    entry.insert("output_schema".into(), operation.output_schema);
-    entry.insert("ai_hints".into(), json!(operation.ai_hints));
-    if let Some(rate_limit) = operation.rate_limit {
-        entry.insert("rate_limit".into(), json!(rate_limit));
+fn operation_info_from_manifest(
+    id: String,
+    operation: &fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
     }
-    if let Some(network_constraints) = operation.network_constraints {
-        entry.insert("network_constraints".into(), json!(network_constraints));
-    }
-    Value::Object(entry)
 }
 
 const fn health_status(

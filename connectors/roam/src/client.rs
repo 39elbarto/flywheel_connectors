@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::json;
 use tracing::{debug, instrument};
@@ -127,7 +128,10 @@ impl RoamClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
+            // A 2xx with an empty body is a successful no-content response
+            // (e.g. POST/PUT/DELETE that returns no payload); coerce to `{}`
+            // rather than failing closed. See workspace commit 506b45904.
+            if body.trim().is_empty() {
                 return Ok(json!({}));
             }
             Ok(serde_json::from_str(&body)?)

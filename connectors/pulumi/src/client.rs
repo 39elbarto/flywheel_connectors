@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -13,6 +14,9 @@ use crate::{
     error::{PulumiError, PulumiResult},
     types::ApiErrorResponse,
 };
+
+const PULUMI_API_ACCEPT: &str = "application/vnd.pulumi+8";
+const PULUMI_API_CONTENT_TYPE: &str = "application/json";
 
 /// Validate a URL path segment to prevent path-traversal attacks.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PulumiResult<&'a str> {
@@ -122,7 +126,7 @@ impl PulumiClient {
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
-            PulumiAuth::BearerToken(token) => req.bearer_auth(token),
+            PulumiAuth::BearerToken(token) => req.header("Authorization", format!("token {token}")),
             PulumiAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
@@ -131,10 +135,7 @@ impl PulumiClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -181,7 +182,8 @@ impl PulumiClient {
         debug!(url = %redact_url(&url), "GET request");
         let mut req = self
             .add_auth(self.client.get(&url))
-            .header("Accept", "application/json");
+            .header("Accept", PULUMI_API_ACCEPT)
+            .header("Content-Type", PULUMI_API_CONTENT_TYPE);
         if let Some(q) = query {
             req = req.query(q);
         }
@@ -195,7 +197,8 @@ impl PulumiClient {
         debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
-            .header("Accept", "application/json")
+            .header("Accept", PULUMI_API_ACCEPT)
+            .header("Content-Type", PULUMI_API_CONTENT_TYPE)
             .json(body);
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -207,7 +210,8 @@ impl PulumiClient {
         debug!(url = %redact_url(&url), "DELETE request");
         let req = self
             .add_auth(self.client.delete(&url))
-            .header("Accept", "application/json");
+            .header("Accept", PULUMI_API_ACCEPT)
+            .header("Content-Type", PULUMI_API_CONTENT_TYPE);
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -302,6 +306,19 @@ impl PulumiClient {
     }
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> PulumiResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(PulumiError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +351,38 @@ mod tests {
         let cred = PulumiAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
         assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            PulumiError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            PulumiError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

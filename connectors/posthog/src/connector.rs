@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_BASE_URL, PostHogAuth, PostHogClient},
+    client::{DEFAULT_BASE_URL, PostHogAuth, PostHogClient, capture_url_from_host},
     error::PostHogError,
 };
 
@@ -41,8 +41,10 @@ const VERIFY_COMMANDS: [&str; 10] = [
 #[derive(Debug, Clone)]
 struct PostHogConfig {
     auth: PostHogAuth,
+    project_api_key: Option<String>,
     project_id: String,
     base_url: String,
+    capture_url: String,
 }
 
 impl PostHogConfig {
@@ -98,16 +100,31 @@ impl PostHogConfig {
             })?
             .to_string();
 
+        let project_api_key = params
+            .get("project_api_key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
         let base_url = params
             .get("base_url")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
+        let capture_url = params
+            .get("capture_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| capture_url_from_host(&base_url), str::to_string);
 
         Ok(Self {
             auth,
+            project_api_key,
             project_id,
             base_url,
+            capture_url,
         })
     }
 
@@ -122,15 +139,17 @@ impl PostHogConfig {
             token_configured: matches!(&self.auth, PostHogAuth::ApiKey(_)),
             credential_id_configured: self.auth.is_secretless(),
             requires_credential_injection: self.auth.is_secretless(),
+            project_token_configured: self.project_api_key.is_some(),
             network_ok,
             network_message,
             base_url: self.base_url.clone(),
+            capture_url: self.capture_url.clone(),
             project_id: self.project_id.clone(),
             query_surface: true,
             insights_surface: true,
             feature_flags_surface: true,
-            write_surface: false,
-            host_policy_guidance: "Production verification must target the PostHog SaaS API or an approved self-hosted PostHog deployment over HTTPS. Localhost overrides are allowed only for deterministic test fixtures.",
+            capture_surface: self.project_api_key.is_some(),
+            host_policy_guidance: "Production verification must target the PostHog SaaS API plus matching ingestion endpoint or an approved self-hosted PostHog deployment over HTTPS. Localhost overrides are allowed only for deterministic test fixtures.",
         }
     }
 }
@@ -142,14 +161,16 @@ struct ProvisioningReadiness {
     token_configured: bool,
     credential_id_configured: bool,
     requires_credential_injection: bool,
+    project_token_configured: bool,
     network_ok: bool,
     network_message: String,
     base_url: String,
+    capture_url: String,
     project_id: String,
     query_surface: bool,
     insights_surface: bool,
     feature_flags_surface: bool,
-    write_surface: bool,
+    capture_surface: bool,
     host_policy_guidance: &'static str,
 }
 
@@ -239,18 +260,19 @@ fn operator_guidance() -> OperatorGuidance {
     OperatorGuidance {
         prerequisites: vec![
             "Use a disposable PostHog project or sanitized self-hosted workspace before running verification.",
-            "Provide exactly one auth source: a PostHog API key for live probes or a credential_id when host-side injection is available.",
-            "Seed deterministic insights and feature flags if you need reproducible evidence beyond the default readiness probe.",
+            "Provide exactly one management auth source: a PostHog personal API key for read probes or a credential_id when host-side injection is available.",
+            "Provide a PostHog project API key only for sandbox event-capture proof.",
+            "Seed deterministic insights and feature flags if you need reproducible evidence beyond the default readiness and capture probes.",
         ],
-        dedicated_environment: "Run verification against disposable analytics data or a localhost/self-hosted PostHog fixture. HogQL queries can surface sensitive telemetry, so do not aim this harness at production without explicit redaction and approval.",
+        dedicated_environment: "Run verification against disposable analytics data or a localhost/self-hosted PostHog fixture. HogQL queries can surface sensitive telemetry and event capture creates immutable analytics artifacts, so do not aim this harness at production without explicit redaction and approval.",
         redaction_rules: vec![
-            "Never print raw PostHog API keys, Authorization headers, or injected credential material.",
-            "Treat project IDs, event names, insight definitions, feature flag keys, and HogQL query text as potentially sensitive metadata.",
-            "If a self-hosted base_url override is used, capture it in the evidence bundle but redact internal hostnames before sharing artifacts outside the owning team.",
+            "Never print raw PostHog personal API keys, project API keys, Authorization headers, or injected credential material.",
+            "Treat project IDs, distinct IDs, event names, insight definitions, feature flag keys, and HogQL query text as potentially sensitive metadata.",
+            "If a self-hosted host/base_url override is used, capture it in the evidence bundle but redact internal hostnames before sharing artifacts outside the owning team.",
         ],
         limitations: vec![
-            "This connector is read-only: HogQL event query, insight listing, and feature flag listing only.",
-            "It does not capture events, mutate insights, update feature flags, or manage persons/groups.",
+            "This connector exposes read-only HogQL, insight, and feature flag APIs plus sandbox-scoped event capture.",
+            "It does not mutate insights, update feature flags, or manage persons/groups.",
             "Credential-id mode can validate configuration shape but cannot prove live reachability until the host injects concrete secret material.",
         ],
         common_remediation: vec![
@@ -267,12 +289,17 @@ fn operator_guidance() -> OperatorGuidance {
             RemediationHint {
                 code: "auth_invalid",
                 symptom: "the PostHog API returns 401 or 403 during self_check",
-                action: "Verify the API key is active for the target PostHog project and has read access to insights and feature flags.",
+                action: "Verify the personal API key is active for the target PostHog project and has read access to insights and feature flags.",
             },
             RemediationHint {
                 code: "self_check_retryable",
                 symptom: "the live PostHog probe failed with rate limiting, timeout, or transient 5xx errors",
                 action: "Wait for the upstream to recover or relax retry and timeout settings before rerunning verification.",
+            },
+            RemediationHint {
+                code: "project_token_missing",
+                symptom: "event capture operation reports missing project_api_key",
+                action: "Provide a sandbox PostHog project API key in connector configuration or live-suite environment before running capture proof.",
             },
         ],
         rerun_commands: VERIFY_COMMANDS.to_vec(),
@@ -428,10 +455,11 @@ impl PostHogConnector {
             "Configuring PostHog connector"
         );
 
-        let client = PostHogClient::new(
+        let client = PostHogClient::new_with_capture_url(
             config.auth.clone(),
             &config.project_id,
             Some(&config.base_url),
+            Some(&config.capture_url),
         )
         .map_err(|e| e.to_fcp_error())?;
 
@@ -467,6 +495,7 @@ impl PostHogConnector {
             "connector_version": "0.1.0",
             "capabilities": [
                 "posthog.events.read",
+                "posthog.events.write",
                 "posthog.insights.read",
                 "posthog.feature_flags.read"
             ]
@@ -652,6 +681,7 @@ impl PostHogConnector {
 
         let result = match operation {
             "posthog.events.query" => self.invoke_events_query(client, &input).await,
+            "posthog.events.capture" => self.invoke_events_capture(client, &input).await,
             "posthog.insights.list" => self.invoke_insights_list(client).await,
             "posthog.feature_flags.list" => self.invoke_feature_flags_list(client).await,
             _ => {
@@ -713,6 +743,35 @@ impl PostHogConnector {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         Ok(json!({ "results": results }))
+    }
+
+    async fn invoke_events_capture(
+        &self,
+        client: &PostHogClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, PostHogError> {
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| PostHogError::InvalidInput("connector is not configured".into()))?;
+        let project_api_key = config.project_api_key.as_deref().ok_or_else(|| {
+            PostHogError::InvalidInput(
+                "Missing project_api_key in configuration for event capture".into(),
+            )
+        })?;
+        let event = require_str(input, "event")?;
+        let distinct_id = require_str(input, "distinct_id")?;
+        let properties = input
+            .get("properties")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let response = client
+            .capture_event(project_api_key, event, distinct_id, properties)
+            .await?;
+        Ok(json!({
+            "captured": true,
+            "response": response,
+        }))
     }
 
     async fn invoke_insights_list(
@@ -882,6 +941,44 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("posthog.insights.list"),
                     CapabilityId::from_static("posthog.feature_flags.list"),
+                ],
+            },
+        ),
+        op_info(
+            "posthog.events.capture",
+            "Capture a sandbox-scoped event",
+            json!({
+                "type": "object",
+                "required": ["event", "distinct_id"],
+                "properties": {
+                    "event": {"type": "string", "description": "Namespaced event name"},
+                    "distinct_id": {"type": "string", "description": "Sandbox distinct id"},
+                    "properties": {"type": "object", "description": "Redaction-safe event properties"}
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["captured"],
+                "properties": {
+                    "captured": {"type": "boolean"},
+                    "response": {"type": "object"}
+                }
+            }),
+            "posthog.events.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Capture a single namespaced PostHog sandbox event with the configured project API key.".into(),
+                common_mistakes: vec![
+                    "Do not use production project tokens or customer distinct IDs; this creates analytics artifacts.".into(),
+                ],
+                examples: vec![
+                    r#"{"event": "fcp_sandbox_verification", "distinct_id": "fcp-sandbox-run", "properties": {"$process_person_profile": false}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("posthog.events.query"),
+                    CapabilityId::from_static("posthog.insights.list"),
                 ],
             },
         ),
@@ -1083,10 +1180,10 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_3_operations() {
+    fn operations_info_has_4_operations() {
         let ops = ops_json();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 4);
     }
 
     #[test]
@@ -1169,6 +1266,7 @@ mod tests {
             .filter_map(|o| o["id"].as_str())
             .collect();
         assert!(ids.contains(&"posthog.events.query"));
+        assert!(ids.contains(&"posthog.events.capture"));
         assert!(ids.contains(&"posthog.insights.list"));
         assert!(ids.contains(&"posthog.feature_flags.list"));
     }

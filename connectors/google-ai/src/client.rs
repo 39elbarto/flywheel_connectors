@@ -10,9 +10,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use parking_lot::Mutex;
 use reqwest::{Client, StatusCode, Url};
 
@@ -250,6 +249,7 @@ impl GoogleAiClient {
         model: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<GenerateContentResponse> {
+        validate_model(model)?;
         let resource = normalize_generation_resource(model);
         let url = self.url(&format!("{resource}:generateContent"));
         let data = self.post_json(&url, body).await;
@@ -266,6 +266,7 @@ impl GoogleAiClient {
         model: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<Vec<GenerateContentResponse>> {
+        validate_model(model)?;
         let resource = normalize_generation_resource(model);
         let url = self.url(&format!("{resource}:streamGenerateContent"));
         // The streaming endpoint returns an array of response chunks when
@@ -298,7 +299,9 @@ impl GoogleAiClient {
         model: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<EmbedContentResponse> {
-        let url = self.url(&format!("models/{model}:embedContent"));
+        validate_model(model)?;
+        let resource = normalize_model_resource(model);
+        let url = self.url(&format!("{resource}:embedContent"));
         let data = self.post_json(&url, body).await;
         self.record_request(data.is_ok());
         let data = data?;
@@ -311,7 +314,9 @@ impl GoogleAiClient {
         model: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<BatchEmbedContentsResponse> {
-        let url = self.url(&format!("models/{model}:batchEmbedContents"));
+        validate_model(model)?;
+        let resource = normalize_model_resource(model);
+        let url = self.url(&format!("{resource}:batchEmbedContents"));
         let data = self.post_json(&url, body).await;
         self.record_request(data.is_ok());
         let data = data?;
@@ -326,6 +331,7 @@ impl GoogleAiClient {
         model: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<CountTokensResponse> {
+        validate_model(model)?;
         let resource = normalize_generation_resource(model);
         let url = self.url(&format!("{resource}:countTokens"));
         let data = self.post_json(&url, body).await;
@@ -358,6 +364,7 @@ impl GoogleAiClient {
 
     /// Get a specific model.
     pub async fn get_model(&self, model: &str) -> GoogleAiResult<ModelInfo> {
+        validate_model(model)?;
         let url = self.url(&normalize_model_resource(model));
         let data = self.get(&url).await;
         self.record_request(data.is_ok());
@@ -627,6 +634,46 @@ fn append_query_param(mut url: String, name: &str, value: &str) -> String {
     url
 }
 
+/// Validate a user-supplied model id before it is interpolated into a request URL.
+///
+/// Accepts a bare model id (`gemini-2.0-flash`) or one carrying a single
+/// recognized resource prefix (`models/…`, `tunedModels/…`). Rejects path
+/// traversal and any character that could alter the URL path, the `:method`
+/// selector, or the query string. `Url::parse` normalizes `..` segments, so
+/// without this guard a crafted `model` could reach a sibling endpoint under
+/// the same allowlisted host or smuggle query parameters.
+fn validate_model(model: &str) -> GoogleAiResult<()> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err(GoogleAiError::InvalidConfig(
+            "model must not be empty".into(),
+        ));
+    }
+    // Strip at most one recognized resource prefix; the remaining id must be a
+    // single path segment.
+    let segment = trimmed
+        .strip_prefix("models/")
+        .or_else(|| trimmed.strip_prefix("tunedModels/"))
+        .unwrap_or(trimmed);
+    let lower = segment.to_ascii_lowercase();
+    if segment.is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains("..")
+        || segment.contains(':')
+        || segment.contains('?')
+        || segment.contains('#')
+        || segment.chars().any(|c| c.is_whitespace() || c.is_control())
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(GoogleAiError::InvalidConfig(
+            "model contains characters that are not allowed in a model id".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_generation_resource(model: &str) -> String {
     let trimmed = model.trim().trim_start_matches('/');
     if trimmed.starts_with("models/") || trimmed.starts_with("tunedModels/") {
@@ -665,518 +712,42 @@ fn is_google_api_version_segment(segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_partial_json, method, path, query_param},
-    };
 
-    #[fcp_async_core::runtime::test]
-    async fn test_generate_content() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "candidates": [{
-                    "content": {
-                        "parts": [{"text": "Hello! How can I help?"}],
-                        "role": "model"
-                    },
-                    "finishReason": "STOP",
-                    "index": 0
-                }],
-                "usageMetadata": {
-                    "promptTokenCount": 5,
-                    "candidatesTokenCount": 10,
-                    "totalTokenCount": 15
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let body = serde_json::json!({
-            "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
-        });
-        let resp = client
-            .generate_content("gemini-2.0-flash", &body)
-            .await
-            .unwrap();
-        assert_eq!(resp.candidates.len(), 1);
-        assert_eq!(resp.usage_metadata.as_ref().unwrap().prompt_token_count, 5);
-
-        let usage = client.get_usage();
-        assert_eq!(usage.input_tokens, 5);
-        assert_eq!(usage.output_tokens, 10);
-        assert_eq!(usage.requests_total, 1);
-        assert_eq!(usage.requests_error, 0);
+    #[test]
+    fn validate_model_accepts_bare_and_prefixed_ids() {
+        assert!(validate_model("gemini-2.0-flash").is_ok());
+        assert!(validate_model("text-embedding-004").is_ok());
+        assert!(validate_model("gemini-1.5-pro").is_ok());
+        assert!(validate_model("models/gemini-2.0-flash").is_ok());
+        assert!(validate_model("tunedModels/my-tuned-model").is_ok());
+        assert!(validate_model("  gemini-2.0-flash  ").is_ok());
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_embed_content() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1beta/models/text-embedding-004:embedContent"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "embedding": {
-                    "values": [0.1, 0.2, 0.3, 0.4]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let body = serde_json::json!({
-            "content": {"parts": [{"text": "test text"}]}
-        });
-        let resp = client
-            .embed_content("text-embedding-004", &body)
-            .await
-            .unwrap();
-        assert_eq!(resp.embedding.values.len(), 4);
+    #[test]
+    fn validate_model_rejects_empty() {
+        assert!(validate_model("").is_err());
+        assert!(validate_model("   ").is_err());
+        assert!(validate_model("models/").is_err());
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_count_tokens() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1beta/models/gemini-2.0-flash:countTokens"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "totalTokens": 42
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let body = serde_json::json!({
-            "contents": [{"role": "user", "parts": [{"text": "Hello world"}]}]
-        });
-        let resp = client
-            .count_tokens("gemini-2.0-flash", &body)
-            .await
-            .unwrap();
-        assert_eq!(resp.total_tokens, 42);
+    #[test]
+    fn validate_model_rejects_path_traversal() {
+        assert!(validate_model("../../v1beta/models").is_err());
+        assert!(validate_model("models/../tunedModels/x").is_err());
+        assert!(validate_model("a/b").is_err());
+        assert!(validate_model("a\\b").is_err());
+        assert!(validate_model("foo%2fbar").is_err());
+        assert!(validate_model("foo%5Cbar").is_err());
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_list_models() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "models": [
-                    {
-                        "name": "models/gemini-2.0-flash",
-                        "displayName": "Gemini 2.0 Flash",
-                        "supportedGenerationMethods": ["generateContent", "countTokens"],
-                        "inputTokenLimit": 1048576,
-                        "outputTokenLimit": 8192
-                    },
-                    {
-                        "name": "models/text-embedding-004",
-                        "displayName": "Text Embedding 004",
-                        "supportedGenerationMethods": ["embedContent"],
-                        "inputTokenLimit": 2048,
-                        "outputTokenLimit": 768
-                    }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let resp = client.list_models(None, None).await.unwrap();
-        assert_eq!(resp.models.len(), 2);
-        assert_eq!(resp.models[0].name, "models/gemini-2.0-flash");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_models_credential_id_uses_proper_query_separator() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .and(query_param("pageSize", "5"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "models": []
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new_with_auth(GoogleAiAuth::CredentialId(CredentialId::new()))
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let resp = client.list_models(Some(5), None).await.unwrap();
-        assert!(resp.models.is_empty());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_model() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models/gemini-2.0-flash"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "name": "models/gemini-2.0-flash",
-                "displayName": "Gemini 2.0 Flash",
-                "supportedGenerationMethods": ["generateContent", "countTokens"],
-                "inputTokenLimit": 1048576,
-                "outputTokenLimit": 8192
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let model = client.get_model("gemini-2.0-flash").await.unwrap();
-        assert_eq!(model.name, "models/gemini-2.0-flash");
-        assert_eq!(model.input_token_limit, Some(1_048_576));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_generate_content_supports_tuned_model_resources() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1beta/tunedModels/support-bot:generateContent"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "candidates": [{
-                    "content": {"parts": [{"text": "hello"}], "role": "model"}
-                }]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let body = serde_json::json!({
-            "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
-        });
-        let response = client
-            .generate_content("tunedModels/support-bot", &body)
-            .await
-            .unwrap();
-        assert_eq!(response.candidates.len(), 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_tuned_model() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1beta/tunedModels"))
-            .and(query_param("tunedModelId", "support-bot"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "name": "tunedModels/support-bot/operations/op-123",
-                "done": false,
-                "metadata": {
-                    "state": "PENDING"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let request = CreateTunedModelRequest {
-            tuned_model_id: Some("support-bot".into()),
-            display_name: Some("Support Bot".into()),
-            description: None,
-            source_model: "models/gemini-1.5-flash-001".into(),
-            tuning_task: crate::types::TuningTaskConfig {
-                training_data: crate::types::TuningDataset {
-                    examples: vec![crate::types::TuningExample {
-                        text_input: "refund request".into(),
-                        output: "billing".into(),
-                    }],
-                },
-                hyperparameters: None,
-            },
-        };
-
-        let operation = client.create_tuned_model(&request).await.unwrap();
-        assert_eq!(operation.name, "tunedModels/support-bot/operations/op-123");
-        assert!(!operation.done);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_list_tuned_models() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/tunedModels"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "tunedModels": [
-                    {
-                        "name": "tunedModels/support-bot",
-                        "displayName": "Support Bot",
-                        "state": "ACTIVE"
-                    }
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let response = client
-            .list_tuned_models(&ListTunedModelsRequest::default())
-            .await
-            .unwrap();
-        assert_eq!(response.tuned_models.len(), 1);
-        assert_eq!(response.tuned_models[0].name, "tunedModels/support-bot");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_tuning_operation() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/tunedModels/support-bot/operations/op-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "name": "tunedModels/support-bot/operations/op-123",
-                "done": true,
-                "response": {
-                    "name": "tunedModels/support-bot"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let response = client
-            .get_tuning_operation(&GetTuningOperationRequest {
-                operation: "tunedModels/support-bot/operations/op-123".into(),
-            })
-            .await
-            .unwrap();
-        assert!(response.done);
-        assert_eq!(
-            response.response.unwrap()["name"],
-            "tunedModels/support-bot"
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_cancel_tuning_operation() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path(
-                "/v1beta/tunedModels/support-bot/operations/op-123:cancel",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        client
-            .cancel_tuning_operation(&CancelTuningOperationRequest {
-                operation: "tunedModels/support-bot/operations/op-123".into(),
-            })
-            .await
-            .unwrap();
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_live_browser_session_uses_v1alpha_auth_tokens_endpoint() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1alpha/auth_tokens"))
-            .and(query_param("key", "test-key"))
-            .and(body_partial_json(serde_json::json!({
-                "uses": 1,
-                "bidiGenerateContentSetup": {
-                    "model": "models/gemini-live-test",
-                    "generationConfig": {
-                        "responseModalities": ["AUDIO"],
-                        "temperature": 0.4,
-                    },
-                },
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "name": "auth_tokens/browser-session"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-        let session = client
-            .create_live_browser_session(&GoogleLiveBrowserSessionRequest {
-                model: Some("gemini-live-test".into()),
-                voice: Some("Puck".into()),
-                temperature: Some(0.4),
-                instructions: Some("Speak briefly.".into()),
-                expire_time: Some("2026-05-05T20:30:00Z".into()),
-                new_session_expire_time: Some("2026-05-05T20:01:00Z".into()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(session.client_secret, "auth_tokens/browser-session");
-        assert_eq!(session.model, "gemini-live-test");
-        assert_eq!(session.voice, "Puck");
-        assert_eq!(
-            session.initial_message["setup"]["model"],
-            "models/gemini-live-test"
-        );
-        assert_eq!(session.audio.input_sample_rate_hz, 16_000);
-        assert_eq!(session.audio.output_sample_rate_hz, 24_000);
-        assert_eq!(session.expires_at, 1_778_013_000);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_batch_embed_contents() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1beta/models/text-embedding-004:batchEmbedContents"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "embeddings": [
-                    {"values": [0.1, 0.2]},
-                    {"values": [0.3, 0.4]}
-                ]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        let body = serde_json::json!({
-            "requests": [
-                {"content": {"parts": [{"text": "doc 1"}]}},
-                {"content": {"parts": [{"text": "doc 2"}]}}
-            ]
-        });
-        let resp = client
-            .batch_embed_contents("text-embedding-004", &body)
-            .await
-            .unwrap();
-        assert_eq!(resp.embeddings.len(), 2);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.list_models(None, None).await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            GoogleAiError::RateLimit { .. }
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("bad-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()))
-            .with_retry_config(0);
-
-        let result = client.list_models(None, None).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            GoogleAiError::Api { status_code, .. } => assert_eq!(status_code, Some(401)),
-            e => panic!("Expected Api error with 401, got: {e:?}"),
-        }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_usage_tracking() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "candidates": [{
-                    "content": {"parts": [{"text": "response"}], "role": "model"},
-                    "finishReason": "STOP"
-                }],
-                "usageMetadata": {
-                    "promptTokenCount": 10,
-                    "candidatesTokenCount": 20,
-                    "totalTokenCount": 30
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = GoogleAiClient::new("test-key")
-            .unwrap()
-            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
-
-        // Two requests
-        let body = serde_json::json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
-        client
-            .generate_content("gemini-2.0-flash", &body)
-            .await
-            .unwrap();
-        client
-            .generate_content("gemini-2.0-flash", &body)
-            .await
-            .unwrap();
-
-        let usage = client.get_usage();
-        assert_eq!(usage.input_tokens, 20);
-        assert_eq!(usage.output_tokens, 40);
-        assert_eq!(usage.requests_total, 2);
-        assert_eq!(usage.requests_error, 0);
+    #[test]
+    fn validate_model_rejects_structure_breaking_chars() {
+        // A `:` would alter the `:method` selector; `?`/`#` would inject a
+        // query string or fragment.
+        assert!(validate_model("gemini:deleteModel").is_err());
+        assert!(validate_model("gemini?key=evil").is_err());
+        assert!(validate_model("gemini#frag").is_err());
+        assert!(validate_model("gemini flash").is_err());
     }
 
     #[test]

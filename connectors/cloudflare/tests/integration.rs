@@ -47,6 +47,7 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
 
 fn generate_valid_token(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     op: &'static str,
 ) -> Result<CapabilityToken, String> {
     let capability = match op {
@@ -70,6 +71,7 @@ fn generate_valid_token(
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .target_instance(instance_id)
         .try_constraints_cbor(&cbor)
         .map_err(|err| format!("constraints CBOR should validate: {err:?}"))?
         .sign(signing_key)
@@ -289,7 +291,12 @@ async fn invoke_safe_read_zones_list() {
         .invoke(invoke_req(
             OP_ZONES_LIST,
             json!({}),
-            generate_valid_token(&signing_key, OP_ZONES_LIST).expect("test token should build"),
+            generate_valid_token(
+                &signing_key,
+                connector.instance_id().as_str(),
+                OP_ZONES_LIST,
+            )
+            .expect("test token should build"),
         ))
         .await
         .unwrap();
@@ -320,7 +327,12 @@ async fn invoke_risky_dns_delete_preserves_artifact_evidence() {
                 "zone_id": "zone-123",
                 "record_id": "rec-456"
             }),
-            generate_valid_token(&signing_key, OP_DNS_DELETE).expect("test token should build"),
+            generate_valid_token(
+                &signing_key,
+                connector.instance_id().as_str(),
+                OP_DNS_DELETE,
+            )
+            .expect("test token should build"),
         ))
         .await
         .unwrap();

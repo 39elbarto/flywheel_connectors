@@ -38,7 +38,7 @@ fn manifest_matches_connector_id_and_declares_glm_surface() {
         manifest
             .connector
             .archetypes
-            .contains(&"request-response".to_string())
+            .contains(&"operational".to_string())
     );
     assert!(
         manifest

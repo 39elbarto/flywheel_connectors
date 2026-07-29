@@ -1,11 +1,11 @@
 //! Pin `ConnectorBinaryTransmissionInfo` serde shape — the closest
-//! analogue to "ConnectorBundleSize"
+//! analogue to "`ConnectorBundleSize`"
 //! (flywheel_connectors-mrnib).
 //!
 //! Bead asks for `ConnectorBundleSize serde JSON+CBOR roundtrip`.
 //! No type literally named `ConnectorBundleSize` exists in fcp-core.
 //! The closest "connector bundle size descriptor" is
-//! `ConnectorBinaryTransmissionInfo` (connector_artifacts.rs:112) —
+//! `ConnectorBinaryTransmissionInfo` (`connector_artifacts.rs:112`) —
 //! the portable transmission descriptor mirroring the symbol-layer
 //! `OTI` (Object Transmission Information) fields:
 //!
@@ -16,22 +16,22 @@
 //!  - `alignment: u8` — symbol alignment
 //!  - `payload_hash: Option<[u8; 32]>` — optional end-to-end hash
 //!
-//! Used in fixtures across signed_package_catalog_serde_roundtrip.rs
-//! and connector_bundle_serde_extended.rs but NOT yet pinned for its
+//! Used in fixtures across `signed_package_catalog_serde_roundtrip.rs`
+//! and `connector_bundle_serde_extended.rs` but NOT yet pinned for its
 //! own serde shape. This test pins:
 //!
-//!   1. **6-field JSON shape** when payload_hash is Some.
-//!   2. **payload_hash omitted via skip_serializing_if when None**.
-//!   3. **payload_hash defaults to None** when missing from wire form
+//!   1. **6-field JSON shape** when `payload_hash` is Some.
+//!   2. **`payload_hash` omitted via `skip_serializing_if` when None**.
+//!   3. **`payload_hash` defaults to None** when missing from wire form
 //!      via `#[serde(default)]`.
 //!   4. **JSON round-trip** preserves all fields.
 //!   5. **CBOR round-trip** preserves all fields.
 //!   6. **Boundary values** for each numeric field (0 + max for u64,
 //!      u16, u8) round-trip.
-//!   7. **payload_hash JSON form is array of 32 numbers** (no
-//!      hex_or_bytes serde adapter on this field — pinned vs the
+//!   7. **`payload_hash` JSON form is array of 32 numbers** (no
+//!      `hex_or_bytes` serde adapter on this field — pinned vs the
 //!      hex-string form used elsewhere on `[u8; 32]`).
-//!   8. **CBOR payload_hash form** — sequence of 32 bytes in CBOR.
+//!   8. **CBOR `payload_hash` form** — sequence of 32 bytes in CBOR.
 //!   9. **Cross-format consistency**: JSON and CBOR decode to the
 //!      same value.
 //!  10. **Nested usage in `ConnectorBinarySymbolSet`** preserves
@@ -41,14 +41,14 @@ use fcp_core::{
     ConnectorBinarySymbolSet, ConnectorBinaryTransmissionInfo, ConnectorTarget, ObjectId,
 };
 
-fn fixture_no_payload_hash() -> ConnectorBinaryTransmissionInfo {
+const fn fixture_no_payload_hash() -> ConnectorBinaryTransmissionInfo {
     ConnectorBinaryTransmissionInfo::new(1024, 256, 4, 1, 1)
 }
 
 fn fixture_with_payload_hash() -> ConnectorBinaryTransmissionInfo {
     let mut hash = [0u8; 32];
     for (i, byte) in hash.iter_mut().enumerate() {
-        *byte = i as u8;
+        *byte = u8::try_from(i).expect("hash index fits in u8");
     }
     fixture_no_payload_hash().with_payload_hash(hash)
 }
@@ -60,19 +60,32 @@ fn fixture_with_payload_hash() -> ConnectorBinaryTransmissionInfo {
 #[test]
 fn full_json_shape_pinned_with_payload_hash_present() {
     let info = fixture_with_payload_hash();
-    let value = serde_json::to_value(&info).expect("serialize");
+    let value = serde_json::to_value(info).expect("serialize");
     let obj = value
         .as_object()
         .expect("ConnectorBinaryTransmissionInfo is JSON object");
 
     assert_eq!(
-        obj.get("transfer_length").and_then(|v| v.as_u64()),
+        obj.get("transfer_length")
+            .and_then(serde_json::Value::as_u64),
         Some(1024)
     );
-    assert_eq!(obj.get("symbol_size").and_then(|v| v.as_u64()), Some(256));
-    assert_eq!(obj.get("source_blocks").and_then(|v| v.as_u64()), Some(4));
-    assert_eq!(obj.get("sub_blocks").and_then(|v| v.as_u64()), Some(1));
-    assert_eq!(obj.get("alignment").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(
+        obj.get("symbol_size").and_then(serde_json::Value::as_u64),
+        Some(256)
+    );
+    assert_eq!(
+        obj.get("source_blocks").and_then(serde_json::Value::as_u64),
+        Some(4)
+    );
+    assert_eq!(
+        obj.get("sub_blocks").and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        obj.get("alignment").and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
     assert!(
         obj.contains_key("payload_hash"),
         "payload_hash MUST be present when Some"
@@ -86,7 +99,7 @@ fn full_json_shape_pinned_with_payload_hash_present() {
 #[test]
 fn payload_hash_omitted_from_wire_form_when_none() {
     let info = fixture_no_payload_hash();
-    let value = serde_json::to_value(&info).expect("serialize");
+    let value = serde_json::to_value(info).expect("serialize");
     let obj = value.as_object().expect("object");
     assert!(
         !obj.contains_key("payload_hash"),
@@ -239,7 +252,7 @@ fn payload_hash_json_form_is_array_of_32_byte_values() {
     // the hex-string form used by ObjectId/Signature elsewhere in
     // the codebase.
     let info = fixture_with_payload_hash();
-    let value = serde_json::to_value(&info).expect("serialize");
+    let value = serde_json::to_value(info).expect("serialize");
     let hash_value = value.get("payload_hash").expect("payload_hash present");
     let arr = hash_value
         .as_array()
@@ -277,7 +290,7 @@ fn payload_hash_distinct_from_hex_string_form() {
 fn cbor_payload_hash_round_trips_byte_for_byte() {
     let mut hash = [0u8; 32];
     for (i, byte) in hash.iter_mut().enumerate() {
-        *byte = i as u8 ^ 0xAA;
+        *byte = u8::try_from(i).expect("hash index fits in u8") ^ 0xAA;
     }
     let info = fixture_no_payload_hash().with_payload_hash(hash);
     let mut buf = Vec::new();

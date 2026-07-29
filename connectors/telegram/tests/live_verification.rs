@@ -15,6 +15,8 @@ use fcp_telegram::connector::TelegramConnector;
 use chrono::{Duration, Utc};
 use serde_json::json;
 
+const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
+
 // ============================================================================
 // Skip guard
 // ============================================================================
@@ -25,8 +27,27 @@ fn telegram_token() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn skip_without_live_gate() -> bool {
+    if live_gate_enabled() {
+        return false;
+    }
+
+    eprintln!(
+        "SKIP: {LIVE_GATE_ENV} is not enabled; set {LIVE_GATE_ENV}=1 before running live Telegram bot verification."
+    );
+    true
+}
+
 macro_rules! skip_without_token {
     ($var:ident) => {
+        if skip_without_live_gate() {
+            return;
+        }
         let Some($var) = telegram_token() else {
             eprintln!(
                 "SKIP: TELEGRAM_BOT_TOKEN not set — skipping live Telegram connector verification. \
@@ -41,7 +62,11 @@ macro_rules! skip_without_token {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -56,6 +81,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .principal("user:live-test")
         .operations(&[op])
         .issuer("node:live-test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
@@ -135,6 +161,10 @@ async fn live_get_me() {
 
 #[fcp_async_core::test]
 async fn live_error_mapping_invalid_token() {
+    if skip_without_live_gate() {
+        return;
+    }
+
     // Test with a deliberately invalid token to verify error handling.
     // Telegram's handle_configure calls getMe, so an invalid token produces
     // a structured FCP error at configure time (not at invoke time).
@@ -173,7 +203,11 @@ async fn live_get_file_nonexistent() {
 
     let mut connector = TelegramConnector::new();
     let signing_key = setup_live_connector(&mut connector, &token).await;
-    let capability = generate_read_token(&signing_key, "telegram.get_file");
+    let capability = generate_read_token(
+        &signing_key,
+        connector.instance_id().as_str(),
+        "telegram.get_file",
+    );
 
     // Invoke get_file with a nonexistent file_id — should return a structured
     // Telegram API error (400 "Bad Request: invalid file_id"), not a panic.

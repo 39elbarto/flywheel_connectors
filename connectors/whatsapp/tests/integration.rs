@@ -8,6 +8,8 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -15,6 +17,10 @@ use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
     HealthState, InstanceId, InvokeRequest, OperationId, RequestId, SelfCheckStatus,
     ShutdownRequest, ZoneId,
+};
+use fcp_sdk::{
+    ChatCoordinationBackend, InMemoryThreadOwnershipChecker, ThreadOwnershipChecker,
+    migration::HttpRetryConfig,
 };
 use fcp_testkit::AsyncTestContext;
 use hmac::{Hmac, Mac};
@@ -25,7 +31,10 @@ use wiremock::{
     matchers::{body_json, header, method, path, query_param},
 };
 
-use fcp_whatsapp::connector::{WhatsAppConnector, operations_info};
+use fcp_whatsapp::{
+    client::WhatsAppClient,
+    connector::{WhatsAppConnector, operations_info},
+};
 
 const PHONE_NUMBER_ID: &str = "123456789";
 const ACCESS_TOKEN: &str = "test_access_token_xyz";
@@ -260,11 +269,16 @@ fn assert_input_schema_examples(manifest: &toml::Value) {
 }
 
 fn assert_output_schema_examples(manifest: &toml::Value) {
-    let send_output = json!({ "message_id": "wamid.1", "wa_id": "15559876543" });
+    let send_output =
+        json!({ "message_id": "wamid.1", "wa_id": "15559876543", "coordination": [] });
 
     let send_text = operation_schema(manifest, "send_text", "output_schema");
     assert_schema_accepts(&send_text, &send_output);
     assert_schema_rejects(&send_text, &json!({ "message_id": "wamid.1" }));
+    assert_schema_rejects(
+        &send_text,
+        &json!({ "message_id": "wamid.1", "wa_id": "15559876543" }),
+    );
 
     let send_template = operation_schema(manifest, "send_template", "output_schema");
     assert_schema_accepts(&send_template, &send_output);
@@ -732,6 +746,49 @@ async fn self_check_rate_limited_is_degraded() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn client_secretless_health_check_omits_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/{PHONE_NUMBER_ID}")))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+
+    let client = WhatsAppClient::new(
+        &server.uri(),
+        PHONE_NUMBER_ID,
+        "",
+        HttpRetryConfig::default(),
+    )
+    .expect("test client should initialize");
+    assert!(client.health_check().await.is_ok());
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].headers.get("authorization").is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_with_token_sends_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/{PHONE_NUMBER_ID}")))
+        .and(header("authorization", "Bearer real_token"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+
+    let client = WhatsAppClient::new(
+        &server.uri(),
+        PHONE_NUMBER_ID,
+        "real_token",
+        HttpRetryConfig::default(),
+    )
+    .expect("test client should initialize");
+    assert!(client.health_check().await.is_ok());
+}
+
+#[fcp_async_core::runtime::test]
 async fn send_text_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("whatsapp.send_text.happy_path");
     let server = MockServer::start().await;
@@ -777,6 +834,90 @@ async fn send_text_happy_path() {
 
     assert_eq!(result["message_id"], "wamid.MSG1");
     assert_eq!(result["wa_id"], "15551234567");
+    assert_eq!(result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(result["coordination"][1]["outcome"], "granted");
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
+    let coordination_text =
+        serde_json::to_string(&result["coordination"]).expect("serialize coordination");
+    assert!(
+        !coordination_text.contains("15551234567"),
+        "coordination audit must not leak raw WhatsApp recipients"
+    );
+    assert!(
+        !coordination_text.contains("Hello from FCP!"),
+        "coordination audit must not leak WhatsApp message bodies"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_text_claims_conversation_and_denies_duplicate_before_http() {
+    let _ctx = AsyncTestContext::for_scenario("whatsapp.send_text.chat_coordination");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/{PHONE_NUMBER_ID}/messages")))
+        .and(header("authorization", format!("Bearer {ACCESS_TOKEN}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(send_message_response("wamid.CLAIM1", "15551234567")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let checker: Arc<dyn ThreadOwnershipChecker> = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut first = WhatsAppConnector::new()
+        .with_thread_ownership_checker(Arc::clone(&checker), ChatCoordinationBackend::InMemory);
+    let mut second = WhatsAppConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    configure_connector(&mut first, &server.uri(), false).await;
+    configure_connector(&mut second, &server.uri(), false).await;
+    let first_key = setup_handshake(&mut first, &[CAP_SEND]).await;
+    let second_key = setup_handshake(&mut second, &[CAP_SEND]).await;
+    let first_id = first.instance_id().clone();
+    let second_id = second.instance_id().clone();
+
+    let first_result = invoke(
+        &first,
+        OP_SEND_TEXT,
+        json!({
+            "to": "15551234567",
+            "text": "secret WhatsApp body",
+        }),
+        generate_valid_token(&first_key, CAP_SEND, &[OP_SEND_TEXT], &first_id),
+    )
+    .await
+    .expect("first send should claim and reach provider");
+    assert_eq!(first_result["message_id"], "wamid.CLAIM1");
+    assert_eq!(first_result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(first_result["coordination"][1]["outcome"], "granted");
+    assert_eq!(first_result["coordination"][2]["event"], "send_executed");
+    let coordination_text =
+        serde_json::to_string(&first_result["coordination"]).expect("serialize coordination");
+    assert!(
+        !coordination_text.contains("15551234567"),
+        "coordination audit must not leak raw WhatsApp recipients"
+    );
+    assert!(
+        !coordination_text.contains("secret WhatsApp body"),
+        "coordination audit must not leak WhatsApp message bodies"
+    );
+
+    let duplicate = invoke(
+        &second,
+        OP_SEND_TEXT,
+        json!({
+            "to": "15551234567",
+            "text": "secret WhatsApp body",
+        }),
+        generate_valid_token(&second_key, CAP_SEND, &[OP_SEND_TEXT], &second_id),
+    )
+    .await
+    .expect_err("duplicate active owner should be denied before provider HTTP");
+    assert!(matches!(
+        duplicate,
+        FcpError::Unauthorized { code: 4090, ref message }
+            if message.starts_with("thread_owned_by_peer:") && message.contains(first_id.as_str())
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -928,6 +1069,9 @@ async fn send_template_happy_path() {
     .expect("send_template should succeed");
 
     assert_eq!(result["message_id"], "wamid.TEMPLATE1");
+    assert_eq!(result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(result["coordination"][1]["outcome"], "granted");
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
 }
 
 #[fcp_async_core::runtime::test]
@@ -1479,4 +1623,98 @@ async fn operation_mismatch_rejects_send_text() {
     .await;
 
     assert!(matches!(result, Err(FcpError::OperationNotGranted { .. })));
+}
+
+// ── Replay safety on retry (br-kxd3e) ────────────────────────────────
+//
+// The WhatsApp Cloud API has no idempotency key, so a 5xx retry delivers the
+// message a second time to a real person's phone. The assertion is the REQUEST
+// COUNT — "it still errors" would pass with the bug present.
+
+fn replay_test_client(server: &MockServer) -> WhatsAppClient {
+    WhatsAppClient::new(
+        &server.uri(),
+        PHONE_NUMBER_ID,
+        ACCESS_TOKEN,
+        HttpRetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            max_delay_ms: 5,
+            jitter_enabled: false,
+        },
+    )
+    .expect("test client should initialize")
+}
+
+fn replay_test_runtime() -> fcp_sdk::ConnectorRuntime {
+    fcp_sdk::ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default())
+}
+
+/// A Meta-shaped 5xx. Using the real error envelope matters: the client parses
+/// it into `WhatsAppError::Api`, which is a DIFFERENT branch from a bodyless
+/// 5xx, and it is the branch production actually takes.
+fn meta_server_error() -> ResponseTemplate {
+    ResponseTemplate::new(503).set_body_json(json!({
+        "error": {
+            "message": "(#131026) Message undeliverable",
+            "type": "OAuthException",
+            "code": 131_026,
+            "fbtrace_id": "Az8n"
+        }
+    }))
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_text_message_is_not_retried_after_a_5xx() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/{PHONE_NUMBER_ID}/messages")))
+        .respond_with(meta_server_error())
+        .mount(&server)
+        .await;
+
+    let result = replay_test_client(&server)
+        .send_text_message(&replay_test_runtime(), "15551234567", "hello", false)
+        .await;
+    assert!(result.is_err());
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests.len(),
+        1,
+        "a 503 means Meta received the send — retrying delivers the message a \
+         SECOND time, and WhatsApp offers no idempotency key to prevent it"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_text_message_still_retries_a_429() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/{PHONE_NUMBER_ID}/messages")))
+        .respond_with(ResponseTemplate::new(429))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/{PHONE_NUMBER_ID}/messages")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "messaging_product": "whatsapp",
+            "contacts": [{ "input": "15551234567", "wa_id": "15551234567" }],
+            "messages": [{ "id": "wamid.1" }]
+        })))
+        .mount(&server)
+        .await;
+
+    replay_test_client(&server)
+        .send_text_message(&replay_test_runtime(), "15551234567", "hello", false)
+        .await
+        .expect("a rate-limited send was refused without delivering anything");
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests.len(),
+        2,
+        "429 means the message was NOT sent, so backoff must be preserved"
+    );
 }

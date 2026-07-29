@@ -127,7 +127,7 @@ impl KubernetesError {
     }
 }
 
-impl fcp_sdk::migration::ConnectorErrorMapping for KubernetesError {
+impl fcp_sdk::ConnectorErrorMapping for KubernetesError {
     fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
         use fcp_async_core::AsyncError;
         match error {
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_timeout() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = KubernetesError::from_async_error(AsyncError::Timeout { timeout_ms: 4000 });
         assert!(matches!(
             err,
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_cancelled() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = KubernetesError::from_async_error(AsyncError::Cancelled);
         assert!(matches!(err, KubernetesError::Api { status_code: 0, .. }));
     }
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_join_error() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = KubernetesError::from_async_error(AsyncError::Join {
             message: "task panicked".into(),
         });
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_to_fcp_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = KubernetesError::Forbidden;
         let fcp = ConnectorErrorMapping::to_fcp_error(&err);
         assert!(matches!(
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_is_retryable_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = KubernetesError::RateLimited {
             retry_after_ms: 5000,
         };
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_retry_after_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = KubernetesError::RateLimited {
             retry_after_ms: 30_000,
         };

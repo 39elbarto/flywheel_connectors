@@ -203,7 +203,7 @@ fn hybrid_owner_manifest_signatures_reject_cross_payload_swaps() {
     let v4_signatures = fixture.sign(&v4_transcript);
 
     let v3_signature_on_v4_manifest = HybridOwnerObjectSignatures::new(
-        v3_signatures.signed_with_v3.clone(),
+        v3_signatures.signed_with_v3,
         v4_signatures.signed_with_v4.clone(),
     );
     let err = fixture

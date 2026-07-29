@@ -1,8 +1,8 @@
 //! Adversarial fuzz harness — fcp-policy capability matching
-//! (testing-fuzzing alpha-domain coverage; complements CrimsonWolf's
+//! (testing-fuzzing alpha-domain coverage; complements `CrimsonWolf`'s
 //! 6f46e6a13 PQ-crypto sweep).
 //!
-//! AmberLark, 2026-05-02.
+//! `AmberLark`, 2026-05-02.
 //!
 //! Drives the real `DefaultConstraintEnforcer` against random
 //! `CapabilityConstraints` × `RequestDescriptor` pairs and asserts:
@@ -109,7 +109,7 @@ fn arb_request_descriptor() -> impl Strategy<Value = RequestDescriptor> {
         )
 }
 
-fn outcome_is_well_formed(outcome: &ConstraintEvaluation) -> bool {
+const fn outcome_is_well_formed(outcome: &ConstraintEvaluation) -> bool {
     // ConstraintEvaluation is a closed enum with exactly two variants
     // (Allow / Deny). The pinned-baseline check here pins that — if a
     // future variant is added, this needs an explicit decision about

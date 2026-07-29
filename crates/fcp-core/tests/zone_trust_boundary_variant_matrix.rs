@@ -1,13 +1,13 @@
 //! Pin `FlowCheckResult` 4-variant zone-crossing truth table +
 //! `ProvenanceViolation` 10-variant Display matrix — the closest analogue to
-//! "ZoneTrustBoundary variant matrix" (flywheel_connectors-bd9cb).
+//! "`ZoneTrustBoundary` variant matrix" (flywheel_connectors-bd9cb).
 //!
 //! Bead asks for `ZoneTrustBoundary` Display + serde tag pinning. No type
 //! literally named `ZoneTrustBoundary` exists in fcp-core. The trust-
 //! boundary surface across zones is split between:
 //!   * [`FlowCheckResult`] at `crates/fcp-core/src/provenance.rs:712` —
-//!     a 4-variant enum (Allowed / RequiresElevation /
-//!     RequiresDeclassification / RequiresBoth) returned by
+//!     a 4-variant enum (Allowed / `RequiresElevation` /
+//!     `RequiresDeclassification` / `RequiresBoth`) returned by
 //!     `ProvenanceRecord::can_flow_to(target_zone)`. This IS the zone-
 //!     crossing trust-boundary check.
 //!   * [`ProvenanceViolation`] at `crates/fcp-core/src/provenance.rs:725`
@@ -15,24 +15,24 @@
 //!     a zone-crossing/operation-driving check fails.
 //!
 //! Existing `provenance_golden_vectors.rs` uses both but does NOT pin
-//! the full 4-variant FlowCheckResult zone matrix or the 10-variant
-//! ProvenanceViolation Display per variant.
+//! the full 4-variant `FlowCheckResult` zone matrix or the 10-variant
+//! `ProvenanceViolation` Display per variant.
 //!
 //! Coverage:
-//!   * 4-variant FlowCheckResult enumerated and asserted distinct,
+//!   * 4-variant `FlowCheckResult` enumerated and asserted distinct,
 //!   * `can_flow_to` Bell-LaPadula+Biba truth table on all 4 outcomes
-//!     (Allowed when both ok, RequiresElevation when integrity-down
-//!     blocked, RequiresDeclassification when confidentiality-up blocked,
-//!     RequiresBoth when both blocked),
+//!     (Allowed when both ok, `RequiresElevation` when integrity-down
+//!     blocked, `RequiresDeclassification` when confidentiality-up blocked,
+//!     `RequiresBoth` when both blocked),
 //!   * Public→Owner sentinel (lowest trust into highest zone fires
-//!     RequiresBoth — both elevation and declassification needed),
+//!     `RequiresBoth` — both elevation and declassification needed),
 //!   * Owner→Public sentinel (highest trust into lowest zone is
 //!     Allowed: integrity flows down freely, confidentiality also flows
 //!     down ... but wait, confidentiality flows UP freely, so Owner→Public
 //!     would require declassification),
-//!   * 10 ProvenanceViolation variants Display phrasing pinned verbatim,
+//!   * 10 `ProvenanceViolation` variants Display phrasing pinned verbatim,
 //!   * Distinct-Display sentinel across all 10 variants,
-//!   * std::error::Error impl on ProvenanceViolation.
+//!   * `std::error::Error` impl on `ProvenanceViolation`.
 
 use fcp_core::{
     ConfidentialityLevel, FlowCheckResult, IntegrityLevel, ProvenanceRecord, ProvenanceViolation,

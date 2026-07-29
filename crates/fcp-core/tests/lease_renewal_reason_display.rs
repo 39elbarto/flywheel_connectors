@@ -1,5 +1,5 @@
 //! Pin `LeaseValidationError` + `LeasePurpose` variant Display — the closest
-//! analogue to "LeaseRenewalReason variant Display"
+//! analogue to "`LeaseRenewalReason` variant Display"
 //! (flywheel_connectors-wdmd7).
 //!
 //! Bead asks for `LeaseRenewalReason` Display + serde pinning. No type
@@ -12,15 +12,16 @@
 //!     stale `lease_seq` (the canonical "stale renewal" reason),
 //!   * `SubjectMismatch`, `ZoneMismatch`, `PurposeMismatch`,
 //!     `CoordinatorMismatch`, `InsufficientQuorum`.
+//!
 //! [`LeasePurpose`] at `crates/fcp-core/src/lease.rs:53` is the input that
-//! feeds `PurposeMismatch`, with its own snake_case Display + serde rename.
+//! feeds `PurposeMismatch`, with its own `snake_case` Display + serde rename.
 //!
 //! This test pins:
 //!   * Every `LeaseValidationError` Display match-arm phrase verbatim,
 //!   * Payload preservation in the rendered string for every variant carrying
 //!     a `u64` / id field,
 //!   * Distinct discriminants → distinct Display strings,
-//!   * `LeasePurpose` 6-variant snake_case Display + serde rename + Display
+//!   * `LeasePurpose` 6-variant `snake_case` Display + serde rename + Display
 //!     matches serde wire form,
 //!   * Round-trip every `LeasePurpose` variant through JSON + CBOR.
 
@@ -28,7 +29,7 @@ use ciborium::Value as CborValue;
 use fcp_core::{LeasePurpose, LeaseValidationError, ObjectId, TailscaleNodeId, ZoneId};
 use serde_json::json;
 
-fn obj(byte: u8) -> ObjectId {
+const fn obj(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
@@ -68,7 +69,7 @@ fn lease_validation_error_superseded_display_pins_stale_renewal_phrasing() {
     };
     let msg = err.to_string();
     assert_eq!(msg, "lease superseded: held seq 7, current seq 12");
-    assert!(msg.contains("7"), "must mention held seq: {msg}");
+    assert!(msg.contains('7'), "must mention held seq: {msg}");
     assert!(msg.contains("12"), "must mention current seq: {msg}");
 }
 
@@ -76,10 +77,7 @@ fn lease_validation_error_superseded_display_pins_stale_renewal_phrasing() {
 fn lease_validation_error_subject_mismatch_display_pins_phrasing() {
     let expected = obj(0x11);
     let got = obj(0x22);
-    let err = LeaseValidationError::SubjectMismatch {
-        expected: expected.clone(),
-        got: got.clone(),
-    };
+    let err = LeaseValidationError::SubjectMismatch { expected, got };
     let msg = err.to_string();
     assert_eq!(
         msg,
@@ -160,10 +158,6 @@ fn all_lease_validation_error_variants_have_distinct_display() {
         LeaseValidationError::Superseded {
             held_seq: 1,
             current_seq: 2,
-        },
-        LeaseValidationError::CoordinatorMismatch {
-            expected: node("a"),
-            got: node("b"),
         },
         LeaseValidationError::InsufficientQuorum {
             required: 1,

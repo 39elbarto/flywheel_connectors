@@ -3,8 +3,10 @@
 //! Communicates with signal-cli's REST daemon API.
 //! Uses HTTP calls to `signal-cli-rest-api`.
 
+use fcp_sdk::ConnectorRuntime;
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
+    AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status,
+    transport_error_reached_service,
 };
 use fcp_sdk::retry::RetryDecision;
 use reqwest::{Client, Url};
@@ -100,10 +102,14 @@ impl SignalClient {
                 let resp = match client.post(&url).json(&body).send().await {
                     Ok(r) => r,
                     Err(e) => {
-                        return AttemptOutcome::Retryable {
-                            error: SignalError::Http(e),
-                            retry_after: None,
-                        };
+                        // br-kxd3e: only a connect-phase failure proves the
+                        // request never reached the daemon.
+                        let replayable = !transport_error_reached_service(&e);
+                        return AttemptOutcome::retryable_if_replayable(
+                            SignalError::Http(e),
+                            None,
+                            replayable,
+                        );
                     }
                 };
 
@@ -135,15 +141,13 @@ impl SignalClient {
 
                 if !resp.status().is_success() {
                     let text = resp.text().await.unwrap_or_default();
-                    let decision = classify_http_status(status, None);
-                    let err = SignalError::from_api_response(status, &text);
-                    if !matches!(decision, RetryDecision::Terminal) {
-                        return AttemptOutcome::Retryable {
-                            error: err,
-                            retry_after: None,
-                        };
-                    }
-                    return AttemptOutcome::Terminal(err);
+                    // br-kxd3e: every remaining retryable class here is a 5xx,
+                    // which means the daemon received the send and may already
+                    // have delivered it. signal-cli offers no dedup key, so the
+                    // honest outcome is one error rather than N more messages.
+                    // 429 is handled above, before this gate, because it was
+                    // refused WITHOUT the message being sent.
+                    return AttemptOutcome::Terminal(SignalError::from_api_response(status, &text));
                 }
 
                 match resp.json::<SendMessageResponse>().await {
@@ -480,6 +484,9 @@ impl SignalClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
 
     fn test_config(daemon_url: &str) -> SignalConfig {
         SignalConfig::from_value(serde_json::json!({
@@ -487,6 +494,174 @@ mod tests {
             "phone_number": "+15551234567"
         }))
         .expect("valid config")
+    }
+
+    struct LoopbackHttpServer {
+        uri: String,
+        handle: thread::JoinHandle<()>,
+    }
+
+    struct LoopbackHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: String,
+        content_type: &'static str,
+        body_contains: Option<&'static str>,
+    }
+
+    impl LoopbackHttpServer {
+        fn start(responses: Vec<LoopbackHttpResponse>) -> Self {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind Signal loopback HTTP listener");
+            let address = listener.local_addr().expect("Signal listener address");
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (mut stream, _) = listener
+                        .accept()
+                        .expect("accept Signal loopback HTTP client");
+                    let request = read_http_request(&mut stream);
+                    let first_line = request.lines().next().unwrap_or_default();
+                    let expected_prefix = format!("{} {}", response.method, response.path);
+                    assert!(
+                        first_line.starts_with(&expected_prefix),
+                        "unexpected Signal HTTP request line: {first_line:?}",
+                    );
+                    if let Some(expected_body) = response.body_contains {
+                        assert!(
+                            request.contains(expected_body),
+                            "Signal HTTP request body missing {expected_body:?}: {request:?}",
+                        );
+                    }
+                    write_http_response(&mut stream, &response);
+                }
+            });
+
+            Self {
+                uri: format!("http://{address}"),
+                handle,
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn join(self) {
+            self.handle
+                .join()
+                .expect("Signal loopback HTTP thread should finish");
+        }
+    }
+
+    impl LoopbackHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: &serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: serde_json::to_string(body).expect("Signal JSON response should serialize"),
+                content_type: "application/json",
+                body_contains: None,
+            }
+        }
+
+        fn text(method: &'static str, path: &'static str, status: u16, body: &'static str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: body.to_owned(),
+                content_type: "text/plain",
+                body_contains: None,
+            }
+        }
+
+        fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: String::new(),
+                content_type: "text/plain",
+                body_contains: None,
+            }
+        }
+
+        fn with_body_contains(mut self, expected: &'static str) -> Self {
+            self.body_contains = Some(expected);
+            self
+        }
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream
+                .read(&mut buf)
+                .expect("read Signal loopback HTTP request");
+            if read == 0 {
+                break None;
+            }
+            request.extend_from_slice(&buf[..read]);
+            if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break Some(position + 4);
+            }
+        };
+
+        if let Some(header_end) = header_end {
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let read = stream
+                    .read(&mut buf)
+                    .expect("read Signal loopback HTTP request body");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..read]);
+            }
+        }
+
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn write_http_response(stream: &mut TcpStream, response: &LoopbackHttpResponse) {
+        let reason = match response.status {
+            204 => "No Content",
+            401 => "Unauthorized",
+            _ => "OK",
+        };
+        let message = format!(
+            "HTTP/1.1 {} {reason}\r\n\
+             Content-Type: {}\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            response.status,
+            response.content_type,
+            response.body.len(),
+            response.body,
+        );
+        stream
+            .write_all(message.as_bytes())
+            .expect("write Signal loopback HTTP response");
+        stream.flush().expect("flush Signal loopback HTTP response");
     }
 
     #[test]
@@ -532,19 +707,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_message_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/v2/send"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "timestamp": "1700000001000"
-                })),
-            )
-            .mount(&mock_server)
-            .await;
+        let server = LoopbackHttpServer::start(vec![LoopbackHttpResponse::json(
+            "POST",
+            "/v2/send",
+            200,
+            &serde_json::json!({
+                "timestamp": "1700000001000"
+            }),
+        )]);
 
-        let client = SignalClient::new(&test_config(&mock_server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let client = SignalClient::new(&test_config(server.uri())).unwrap();
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let resp = client
             .send_message(
                 &runtime,
@@ -558,26 +731,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.timestamp, 1_700_000_001_000);
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
     async fn send_message_includes_quote_timestamp() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/v2/send"))
-            .and(wiremock::matchers::body_string_contains(
-                "\"quote_timestamp\":42",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = LoopbackHttpServer::start(vec![
+            LoopbackHttpResponse::json(
+                "POST",
+                "/v2/send",
+                200,
+                &serde_json::json!({
                     "timestamp": "42"
-                })),
+                }),
             )
-            .mount(&mock_server)
-            .await;
+            .with_body_contains("\"quote_timestamp\":42"),
+        ]);
 
-        let client = SignalClient::new(&test_config(&mock_server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let client = SignalClient::new(&test_config(server.uri())).unwrap();
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let response = client
             .send_message(
                 &runtime,
@@ -592,52 +764,51 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.timestamp, 42);
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
     async fn receive_messages_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/receive/%2B15551234567"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+        let server = LoopbackHttpServer::start(vec![LoopbackHttpResponse::json(
+            "GET",
+            "/v1/receive/%2B15551234567",
+            200,
+            &serde_json::json!([
                     {
                         "source": "+15559876543",
                         "sourceDevice": 1,
+                    "timestamp": 1_700_000_000_000_u64,
+                    "dataMessage": {
                         "timestamp": 1_700_000_000_000_u64,
-                        "dataMessage": {
-                            "timestamp": 1_700_000_000_000_u64,
-                            "message": "Hello back"
-                        }
+                        "message": "Hello back"
                     }
-                ])),
-            )
-            .mount(&mock_server)
-            .await;
+                }
+            ]),
+        )]);
 
-        let client = SignalClient::new(&test_config(&mock_server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let client = SignalClient::new(&test_config(server.uri())).unwrap();
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let envelopes = client.receive_messages(&runtime, 10).await.unwrap();
         assert_eq!(envelopes.len(), 1);
         assert_eq!(envelopes[0].source, Some("+15559876543".into()));
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_check_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/about"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "versions": ["v1", "v2"],
-                    "build": 1
-                })),
-            )
-            .mount(&mock_server)
-            .await;
+        let server = LoopbackHttpServer::start(vec![LoopbackHttpResponse::json(
+            "GET",
+            "/v1/about",
+            200,
+            &serde_json::json!({
+                "versions": ["v1", "v2"],
+                "build": 1
+            }),
+        )]);
 
-        let client = SignalClient::new(&test_config(&mock_server.uri())).unwrap();
+        let client = SignalClient::new(&test_config(server.uri())).unwrap();
         assert!(client.health_check().await.is_ok());
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
@@ -651,15 +822,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_message_401_unauthorized() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/v2/send"))
-            .respond_with(wiremock::ResponseTemplate::new(401).set_body_string("unauthorized"))
-            .mount(&mock_server)
-            .await;
+        let server = LoopbackHttpServer::start(vec![LoopbackHttpResponse::text(
+            "POST",
+            "/v2/send",
+            401,
+            "unauthorized",
+        )]);
 
-        let client = SignalClient::new(&test_config(&mock_server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let client = SignalClient::new(&test_config(server.uri())).unwrap();
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let result = client
             .send_message(
                 &runtime,
@@ -673,24 +844,22 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SignalError::Unauthorized(_)));
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
     async fn trust_identity_uses_verified_safety_number_when_provided() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("PUT"))
-            .and(wiremock::matchers::path(
+        let server = LoopbackHttpServer::start(vec![
+            LoopbackHttpResponse::empty(
+                "PUT",
                 "/v1/identities/%2B15551234567/trust/%2B15559876543",
-            ))
-            .and(wiremock::matchers::body_string_contains(
-                "\"verified_safety_number\":\"12345 67890\"",
-            ))
-            .respond_with(wiremock::ResponseTemplate::new(204))
-            .mount(&mock_server)
-            .await;
+                204,
+            )
+            .with_body_contains("\"verified_safety_number\":\"12345 67890\""),
+        ]);
 
-        let client = SignalClient::new(&test_config(&mock_server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let client = SignalClient::new(&test_config(server.uri())).unwrap();
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         client
             .trust_identity(
                 &runtime,
@@ -702,36 +871,36 @@ mod tests {
             )
             .await
             .expect("trust identity");
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
     async fn list_groups_success() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/groups/%2B15551234567"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+        let server = LoopbackHttpServer::start(vec![LoopbackHttpResponse::json(
+            "GET",
+            "/v1/groups/%2B15551234567",
+            200,
+            &serde_json::json!([
                     {
                         "id": "Z3JvdXBfMQ==",
                         "name": "Test Group 1",
-                        "members": ["+15551111111"],
-                        "admins": ["+15551111111"]
-                    },
-                    {
-                        "id": "Z3JvdXBfMg==",
-                        "name": "Test Group 2",
-                        "members": ["+15552222222"],
-                        "admins": []
-                    }
-                ])),
-            )
-            .mount(&mock_server)
-            .await;
+                    "members": ["+15551111111"],
+                    "admins": ["+15551111111"]
+                },
+                {
+                    "id": "Z3JvdXBfMg==",
+                    "name": "Test Group 2",
+                    "members": ["+15552222222"],
+                    "admins": []
+                }
+            ]),
+        )]);
 
-        let client = SignalClient::new(&test_config(&mock_server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let client = SignalClient::new(&test_config(server.uri())).unwrap();
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let groups = client.list_groups(&runtime).await.unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].name, Some("Test Group 1".into()));
+        server.join();
     }
 }

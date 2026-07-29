@@ -14,16 +14,16 @@
 //!    Pin every value — drift would silently change wire codes.
 //! 2. **`code` and `from_code` are inverses** for every variant.
 //! 3. **`from_code` returns `None` for unknown codes** (including
-//!    JSON-RPC reserved -32700 = ParseError, which this enum does
+//!    JSON-RPC reserved -32700 = `ParseError`, which this enum does
 //!    NOT cover).
 //! 4. **`default_message` returns the documented English string**
 //!    for each variant (clients display these as the default).
-//! 5. **`is_standard_jsonrpc` ⇔ {InvalidRequest, MethodNotFound,
-//!    InvalidParams, InternalError}**; `is_mcp_specific` is the
+//! 5. **`is_standard_jsonrpc` ⇔ {`InvalidRequest`, `MethodNotFound`,
+//!    `InvalidParams`, `InternalError`}**; `is_mcp_specific` is the
 //!    complement.
 //! 6. **`Display` is `"{message} ({code})"`** — operator log greps
 //!    depend on this exact form.
-//! 7. **`McpErrorCode` Hash + Copy + Eq** — appears in HashMap keys
+//! 7. **`McpErrorCode` Hash + Copy + Eq** — appears in `HashMap` keys
 //!    in error-rate trackers.
 //! 8. **`McpJsonRpcRequest::new`** sets jsonrpc="2.0", preserves id
 //!    and method, params=None.

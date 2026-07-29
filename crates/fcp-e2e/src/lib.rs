@@ -3377,6 +3377,10 @@ mod openai_e2e_tests {
                 id: ConnectorId::from_static("openai"),
             }
         }
+
+        fn instance_id(&self) -> &str {
+            self.connector.instance_id()
+        }
     }
 
     fcp_core::impl_fcp_sealed!(OpenAiConnectorAdapter);
@@ -3542,6 +3546,7 @@ mod openai_e2e_tests {
         signing_key: &Ed25519SigningKey,
         capability: &str,
         operations: &[&str],
+        instance_id: &str,
     ) -> CapabilityToken {
         let capability = match capability {
             "openai.simple_chat" | "openai.get_usage" => "openai.chat",
@@ -3555,6 +3560,8 @@ mod openai_e2e_tests {
         let mut constraints_cbor = Vec::new();
         ciborium::into_writer(&constraints, &mut constraints_cbor)
             .expect("serialize test constraints");
+        // dja9u typestate ratchet: OpenAI connector requires instance-bound tokens
+        // (verify_bound). Tokens MUST carry target_instance matching the connector.
         let cose = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
@@ -3562,7 +3569,9 @@ mod openai_e2e_tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("valid constraints")
+            .target_instance(instance_id)
             .sign(signing_key)
             .expect("capability token sign");
         CapabilityToken::from_raw(cose)
@@ -3687,7 +3696,14 @@ mod openai_e2e_tests {
         let mut connector = OpenAiConnectorAdapter::new();
         let signing_key = Ed25519SigningKey::generate();
         let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["openai.chat"]);
-        let token = build_token(&signing_key, "openai.chat", &["openai.chat"]);
+        // Token is correctly instance-bound but carries the wrong capability/operation,
+        // so the connector denies on capability mismatch (not on missing binding).
+        let token = build_token(
+            &signing_key,
+            "wrong.capability",
+            &["wrong.operation"],
+            connector.instance_id(),
+        );
         let invoke = invoke_request(
             "openai.simple_chat",
             json!({ "message": "blocked request" }),
@@ -3753,7 +3769,12 @@ mod openai_e2e_tests {
             signing_key.verifying_key().to_bytes(),
             &["openai.simple_chat"],
         );
-        let token = build_token(&signing_key, "openai.simple_chat", &["openai.simple_chat"]);
+        let token = build_token(
+            &signing_key,
+            "openai.simple_chat",
+            &["openai.simple_chat"],
+            connector.instance_id(),
+        );
         let invoke = invoke_request(
             "openai.simple_chat",
             json!({ "message": "hello from e2e" }),
@@ -3804,8 +3825,14 @@ mod openai_e2e_tests {
 
         for operation_name in ["chat", "simple_chat"] {
             let host_allow = operation_host_allow_list(&manifest, operation_name);
-            assert_eq!(host_allow, vec!["api.openai.com".to_string()]);
+            // Commit 6ae32da1c pinned the OpenAI-compatible DeepSeek endpoint alongside
+            // the canonical OpenAI host.
+            assert_eq!(
+                host_allow,
+                vec!["api.openai.com".to_string(), "api.deepseek.com".to_string(),]
+            );
             assert!(host_allowed("api.openai.com", &host_allow));
+            assert!(host_allowed("api.deepseek.com", &host_allow));
             assert!(!host_allowed("example.com", &host_allow));
             assert!(!host_allowed("api.anthropic.com", &host_allow));
         }
@@ -3900,6 +3927,10 @@ mod slack_e2e_tests {
                 connector: SlackConnector::new(),
                 id: ConnectorId::from_static("slack"),
             }
+        }
+
+        fn instance_id(&self) -> &str {
+            self.connector.instance_id()
         }
     }
 
@@ -4062,6 +4093,7 @@ mod slack_e2e_tests {
         signing_key: &Ed25519SigningKey,
         capability: &str,
         operations: &[&str],
+        instance_id: &str,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = fcp_core::CapabilityConstraints {
@@ -4071,6 +4103,8 @@ mod slack_e2e_tests {
         let mut constraints_cbor = Vec::new();
         ciborium::into_writer(&constraints, &mut constraints_cbor)
             .expect("serialize test constraints");
+        // dja9u typestate ratchet: the Slack connector requires instance-bound
+        // tokens (verify_bound); target_instance must match the connector.
         let cose = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
@@ -4078,7 +4112,9 @@ mod slack_e2e_tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("valid constraints")
+            .target_instance(instance_id)
             .sign(signing_key)
             .expect("capability token sign");
         CapabilityToken::from_raw(cose)
@@ -4107,6 +4143,11 @@ mod slack_e2e_tests {
             approval_tokens: Vec::new(),
         }
     }
+
+    /// Sanctioned secretless credential reference (e99o6 ratchet): the Slack
+    /// connector rejects raw `token`/`xox?-` secret config fields and instead
+    /// expects a `credential_id` UUID, sending `X-FCP-Credential-ID` to Slack.
+    const TEST_SLACK_CREDENTIAL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     fn slack_manifest_toml() -> toml::Value {
         toml::from_str(include_str!("../../../connectors/slack/manifest.toml"))
@@ -4155,6 +4196,7 @@ mod slack_e2e_tests {
             &signing_key,
             "slack.list_channels",
             &["slack.list_channels"],
+            connector.instance_id(),
         );
         let invoke = invoke_request(
             "slack.post_message",
@@ -4163,7 +4205,7 @@ mod slack_e2e_tests {
         );
 
         let dynamic = DynamicSuite {
-            config: json!({ "token": "xoxb-e2e-test-token" }),
+            config: json!({ "credential_id": TEST_SLACK_CREDENTIAL_ID }),
             handshake: handshake.clone(),
             invoke: Some(invoke),
             expect_invoke_error: true,
@@ -4213,7 +4255,12 @@ mod slack_e2e_tests {
             signing_key.verifying_key().to_bytes(),
             &["slack.post_message"],
         );
-        let token = build_token(&signing_key, "slack.post_message", &["slack.post_message"]);
+        let token = build_token(
+            &signing_key,
+            "slack.post_message",
+            &["slack.post_message"],
+            connector.instance_id(),
+        );
         let invoke = invoke_request(
             "slack.post_message",
             json!({ "channel": "C01234567", "text": "hello from e2e" }),
@@ -4222,7 +4269,7 @@ mod slack_e2e_tests {
 
         connector
             .configure(json!({
-                "token": "xoxb-e2e-valid-token",
+                "credential_id": TEST_SLACK_CREDENTIAL_ID,
                 "base_url": mock_server.uri()
             }))
             .await
@@ -4299,7 +4346,7 @@ mod slack_e2e_tests {
 
         connector
             .configure(json!({
-                "token": "xoxb-e2e-wrong-cap",
+                "credential_id": TEST_SLACK_CREDENTIAL_ID,
                 "base_url": mock_server.uri()
             }))
             .await
@@ -4315,6 +4362,7 @@ mod slack_e2e_tests {
             &signing_key,
             "slack.list_channels",
             &["slack.list_channels"],
+            connector.instance_id(),
         );
         let invoke = invoke_request(
             "slack.post_message",
@@ -4361,12 +4409,13 @@ mod slack_e2e_tests {
             &signing_key,
             "slack.list_channels",
             &["slack.list_channels"],
+            connector.instance_id(),
         );
         let invoke = invoke_request("slack.list_channels", json!({}), token);
 
         connector
             .configure(json!({
-                "token": "xoxb-e2e-read-token",
+                "credential_id": TEST_SLACK_CREDENTIAL_ID,
                 "base_url": mock_server.uri()
             }))
             .await

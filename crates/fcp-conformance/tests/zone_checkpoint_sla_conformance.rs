@@ -1,4 +1,4 @@
-//! Conformance: ZoneCheckpoint revocation freshness SLA evaluator
+//! Conformance: `ZoneCheckpoint` revocation freshness SLA evaluator
 //! (flywheel_connectors-pf6vc — references C1.4).
 //!
 //! `ZoneCheckpoint::revocation_freshness_sla_secs` declares the
@@ -50,7 +50,7 @@ fn test_zone() -> ZoneId {
     ZoneId::work()
 }
 
-fn test_object_id(seed: u8) -> ObjectId {
+const fn test_object_id(seed: u8) -> ObjectId {
     ObjectId::from_bytes([seed; 32])
 }
 
@@ -88,7 +88,7 @@ fn test_checkpoint(rev_seq: u64, sla_secs: u64) -> ZoneCheckpoint {
     }
 }
 
-fn checker(checkpoint_updated_at: u64, sla_secs: u64) -> RevocationSlaChecker {
+const fn checker(checkpoint_updated_at: u64, sla_secs: u64) -> RevocationSlaChecker {
     RevocationSlaChecker::new(0, checkpoint_updated_at, sla_secs)
 }
 
@@ -131,7 +131,7 @@ fn stale_checkpoint_at_default_sla_blocks_critical_only() {
                 "default SLA breach must carry overdue_secs = age - sla = 1"
             );
         }
-        other => panic!("age=301, sla=300 expected Breached{{1}}, got {other:?}"),
+        RevocationSlaStatus::Fresh => panic!("age=301, sla=300 expected Breached{{1}}, got Fresh"),
     }
     assert!(!status.is_fresh(), "is_fresh must be false on Breached");
 
@@ -158,13 +158,22 @@ fn custom_sla_value_breach_pinned() {
     let chk = checker(1_000, 60);
     match chk.check_sla(1_061) {
         RevocationSlaStatus::Breached { overdue_secs: 1 } => {}
-        other => panic!("custom 60s SLA at age=61 expected Breached{{1}}, got {other:?}"),
+        RevocationSlaStatus::Breached { overdue_secs } => {
+            panic!(
+                "custom 60s SLA at age=61 expected Breached{{1}}, got overdue_secs={overdue_secs}"
+            )
+        }
+        RevocationSlaStatus::Fresh => {
+            panic!("custom 60s SLA at age=61 expected Breached{{1}}, got Fresh")
+        }
     }
 
     // Just inside the window.
     match chk.check_sla(1_060) {
         RevocationSlaStatus::Fresh => {}
-        other => panic!("custom 60s SLA at age=60 (exactly at SLA) expected Fresh, got {other:?}"),
+        RevocationSlaStatus::Breached { overdue_secs } => panic!(
+            "custom 60s SLA at age=60 (exactly at SLA) expected Fresh, got overdue_secs={overdue_secs}"
+        ),
     }
 }
 
@@ -177,9 +186,9 @@ fn exactly_at_boundary_is_fresh() {
         let now = sla;
         match chk.check_sla(now) {
             RevocationSlaStatus::Fresh => {}
-            other => {
-                panic!("BOUNDARY REGRESSION: age == sla_secs ({sla}) expected Fresh, got {other:?}")
-            }
+            RevocationSlaStatus::Breached { overdue_secs } => panic!(
+                "BOUNDARY REGRESSION: age == sla_secs ({sla}) expected Fresh, got overdue_secs={overdue_secs}"
+            ),
         }
     }
 }
@@ -192,7 +201,12 @@ fn boundary_plus_one_breaches_with_overdue_one() {
         let now = sla + 1;
         match chk.check_sla(now) {
             RevocationSlaStatus::Breached { overdue_secs: 1 } => {}
-            other => panic!("age=={sla}+1, sla={sla} expected Breached{{1}}, got {other:?}"),
+            RevocationSlaStatus::Breached { overdue_secs } => panic!(
+                "age=={sla}+1, sla={sla} expected Breached{{1}}, got overdue_secs={overdue_secs}"
+            ),
+            RevocationSlaStatus::Fresh => {
+                panic!("age=={sla}+1, sla={sla} expected Breached{{1}}, got Fresh")
+            }
         }
     }
 }
@@ -205,9 +219,9 @@ fn future_dated_checkpoint_saturates_to_fresh() {
     for now in [0u64, 1, 5_000, 9_999] {
         match chk.check_sla(now) {
             RevocationSlaStatus::Fresh => {}
-            other => panic!(
+            RevocationSlaStatus::Breached { overdue_secs } => panic!(
                 "SATURATION REGRESSION: future-dated checkpoint (now={now}, checkpoint_updated_at=10000) \
-                 expected Fresh, got {other:?}"
+                 expected Fresh, got overdue_secs={overdue_secs}"
             ),
         }
         // Critical proceeds when the checkpoint is in the future.
@@ -224,11 +238,16 @@ fn zero_second_sla_is_strictest_gate() {
     let chk = checker(1_000, 0);
     match chk.check_sla(1_000) {
         RevocationSlaStatus::Fresh => {}
-        other => panic!("sla=0, age=0 expected Fresh, got {other:?}"),
+        RevocationSlaStatus::Breached { overdue_secs } => {
+            panic!("sla=0, age=0 expected Fresh, got overdue_secs={overdue_secs}")
+        }
     }
     match chk.check_sla(1_001) {
         RevocationSlaStatus::Breached { overdue_secs: 1 } => {}
-        other => panic!("sla=0, age=1 expected Breached{{1}}, got {other:?}"),
+        RevocationSlaStatus::Breached { overdue_secs } => {
+            panic!("sla=0, age=1 expected Breached{{1}}, got overdue_secs={overdue_secs}")
+        }
+        RevocationSlaStatus::Fresh => panic!("sla=0, age=1 expected Breached{{1}}, got Fresh"),
     }
     // Critical must abort the moment age > 0 under sla=0.
     assert!(

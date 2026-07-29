@@ -1,7 +1,7 @@
 //! Pin `CapabilityGrant` serde shape — the closest analogue to
-//! "ConnectorEntitlement serde" (flywheel_connectors-g5oxv).
+//! "`ConnectorEntitlement` serde" (flywheel_connectors-g5oxv).
 //!
-//! Bead asks for `ConnectorEntitlement serde JSON+CBOR roundtrip`.
+//! Bead asks for "`ConnectorEntitlement` serde JSON+CBOR roundtrip".
 //! No type literally named `ConnectorEntitlement` exists in fcp-core.
 //! The closest "entitlement" analogue is `CapabilityGrant`
 //! (capability.rs:1465) — a single capability grant within a token,
@@ -14,30 +14,30 @@
 //! }
 //! ```
 //!
-//! Used in fixtures across policy_golden_vectors.rs but NOT yet
+//! Used in fixtures across `policy_golden_vectors.rs` but NOT yet
 //! pinned for its own serde shape. The `operation: Option<...>`
 //! field carries `#[serde(skip_serializing_if = "Option::is_none")]`
-//! so the wire form differs based on Some/None.
+//! so the wire form differs based on `Some`/`None`.
 //!
 //! Targets:
 //!
-//!   1. **CapabilityGrant JSON shape with operation Some**.
-//!   2. **CapabilityGrant JSON shape with operation None** —
-//!      operation field omitted via skip_serializing_if (just the
+//!   1. **`CapabilityGrant` JSON shape with `operation` `Some`**.
+//!   2. **`CapabilityGrant` JSON shape with `operation` `None`** —
+//!      operation field omitted via `skip_serializing_if` (just the
 //!      `capability` field appears).
-//!   3. **operation defaults to None** when missing from wire form
-//!      (combined with skip_serializing_if it's a round-trippable
+//!   3. **`operation` defaults to `None`** when missing from wire form
+//!      (combined with `skip_serializing_if` it's a round-trippable
 //!      omission; pin via partial-JSON deserialize).
 //!   4. **JSON round-trip preserves both shapes**.
 //!   5. **CBOR round-trip preserves both shapes**.
-//!   6. **Equality semantics** — CapabilityGrant derives PartialEq;
+//!   6. **Equality semantics** — `CapabilityGrant` derives `PartialEq`;
 //!      structurally identical grants are equal, distinct in any
 //!      field are unequal.
-//!   7. **Vec<CapabilityGrant> serialization preserves order**.
+//!   7. **`Vec<CapabilityGrant>` serialization preserves order**.
 //!   8. **Distinct grants produce distinct serialization** (capability
 //!      and operation axes).
 //!   9. **Cross-format consistency** — JSON and CBOR decode to the
-//!      same CapabilityGrant.
+//!      same `CapabilityGrant`.
 
 use fcp_core::{CapabilityGrant, CapabilityId, OperationId};
 
@@ -252,7 +252,7 @@ fn vec_of_capability_grants_preserves_insertion_order_through_json_roundtrip() {
     assert_eq!(back, original);
     // Order matters on the wire — pin via byte-level distinction
     // from a reordered version.
-    let mut reversed = original.clone();
+    let mut reversed = original;
     reversed.reverse();
     let reversed_json = serde_json::to_string(&reversed).expect("serialize");
     assert_ne!(

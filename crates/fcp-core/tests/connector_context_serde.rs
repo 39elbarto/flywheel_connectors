@@ -1,5 +1,5 @@
 //! Pin `InvokeContext` serde shape — the closest analogue to
-//! "ConnectorContext serde" (flywheel_connectors-kqfbb).
+//! "`ConnectorContext` serde" (flywheel_connectors-kqfbb).
 //!
 //! Bead asks for `ConnectorContext serde JSON+CBOR roundtrip`. No
 //! type literally named `ConnectorContext` exists in fcp-core. The
@@ -8,7 +8,7 @@
 //!
 //!  - Internationalization (locale)
 //!  - Pagination control
-//!  - Distributed tracing (trace_id, request_tags)
+//!  - Distributed tracing (`trace_id`, `request_tags`)
 //!
 //! Field shape:
 //!
@@ -25,15 +25,15 @@
 //! pin Default and a handful of fields. This test pins the GAPS:
 //!
 //!   1. **Default empty context serializes to `{}`** — every
-//!      Option is None and the HashMap is empty, so all four fields
-//!      are omitted via skip_serializing_if.
-//!   2. **Per-field skip_serializing_if shape** — Some/None
+//!      Option is None and the `HashMap` is empty, so all four fields
+//!      are omitted via `skip_serializing_if`.
+//!   2. **Per-field `skip_serializing_if` shape** — Some/None
 //!      distinction on every Optional field.
-//!   3. **Empty `request_tags` HashMap is omitted** via
+//!   3. **Empty `request_tags` `HashMap` is omitted** via
 //!      `skip_serializing_if = "HashMap::is_empty"`.
 //!   4. **Default values** for unset fields when deserializing
-//!      partial JSON — locale/pagination/trace_id default to None,
-//!      request_tags defaults to empty.
+//!      partial JSON — `locale/pagination/trace_id` default to None,
+//!      `request_tags` defaults to empty.
 //!   5. **JSON round-trip** preserves all 4 fields with various
 //!      population shapes.
 //!   6. **CBOR round-trip** preserves the same.

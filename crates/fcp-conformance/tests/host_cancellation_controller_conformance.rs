@@ -10,9 +10,9 @@
 //!    `complete` marks it finished, `cancel` requests cancellation.
 //!    The outcome MUST be:
 //!    - `Cancelled` on first cancel of a tracked, not-yet-completed,
-//!       not-yet-cancelled operation,
+//!      not-yet-cancelled operation,
 //!    - `Pending` on a second cancel of an already-cancel-requested
-//!       operation (idempotent),
+//!      operation (idempotent),
 //!    - `TooLate` when called after `complete`.
 //! 2. **Principal-mismatch defense (br-jdaro).** When `track` was
 //!    called with `Some(owner)`, `cancel` MUST reject any caller

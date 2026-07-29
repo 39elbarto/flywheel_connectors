@@ -20,9 +20,9 @@ fn err(message: impl Into<String>) -> Box<dyn Error> {
     std::io::Error::other(message.into()).into()
 }
 
-fn ensure_eq<T>(actual: T, expected: T, context: &str) -> TestResult
+fn ensure_eq<T>(actual: &T, expected: &T, context: &str) -> TestResult
 where
-    T: PartialEq + Debug,
+    T: PartialEq + Debug + ?Sized,
 {
     if actual == expected {
         Ok(())
@@ -49,20 +49,20 @@ const JOIN_RESPONSE_VARIANTS: &[(EnrollmentStatus, &str)] = &[
 fn zone_join_response_display_and_json_tags_are_pinned() -> TestResult {
     for &(variant, tag) in JOIN_RESPONSE_VARIANTS {
         ensure_eq(
-            variant.to_string(),
-            tag.to_string(),
+            variant.to_string().as_str(),
+            tag,
             &format!("Display for zone-join response {variant:?}"),
         )?;
 
         let json = serde_json::to_value(variant)?;
         ensure_eq(
-            json,
-            json!(tag),
+            &json,
+            &json!(tag),
             &format!("JSON serde tag for zone-join response {variant:?}"),
         )?;
 
         let decoded: EnrollmentStatus = serde_json::from_value(json!(tag))?;
-        ensure_eq(decoded, variant, "JSON roundtrip")?;
+        ensure_eq(&decoded, &variant, "JSON roundtrip")?;
     }
 
     Ok(())
@@ -75,11 +75,11 @@ fn zone_join_response_cbor_tags_are_text_scalars() -> TestResult {
         ciborium::ser::into_writer(&variant, &mut bytes)?;
 
         let decoded: EnrollmentStatus = ciborium::de::from_reader(bytes.as_slice())?;
-        ensure_eq(decoded, variant, "CBOR roundtrip")?;
+        ensure_eq(&decoded, &variant, "CBOR roundtrip")?;
 
         let value: CborValue = ciborium::de::from_reader(bytes.as_slice())?;
         match value {
-            CborValue::Text(text) => ensure_eq(text, tag.to_string(), "CBOR text tag")?,
+            CborValue::Text(text) => ensure_eq(text.as_str(), tag, "CBOR text tag")?,
             other => {
                 return Err(err(format!(
                     "zone-join response must encode as CBOR Text, got {other:?}"
@@ -102,8 +102,8 @@ fn zone_join_response_tags_are_distinct_and_complete() -> TestResult {
     }
 
     ensure_eq(
-        seen,
-        std::collections::HashSet::from(["pending", "approved", "rejected", "revoked", "expired"]),
+        &seen,
+        &std::collections::HashSet::from(["pending", "approved", "rejected", "revoked", "expired"]),
         "zone-join response variant set",
     )?;
 
@@ -130,13 +130,13 @@ fn zone_join_response_join_semantics_are_pinned() -> TestResult {
         let renewable = variant.is_renewable();
 
         ensure_eq(
-            accepted,
-            variant == EnrollmentStatus::Approved,
+            &accepted,
+            &(variant == EnrollmentStatus::Approved),
             &format!("{variant:?} join-accepted predicate"),
         )?;
         ensure_eq(
-            renewable,
-            matches!(
+            &renewable,
+            &matches!(
                 variant,
                 EnrollmentStatus::Approved | EnrollmentStatus::Expired
             ),

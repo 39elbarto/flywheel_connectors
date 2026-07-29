@@ -1,13 +1,13 @@
-//! Pin `ZoneKeyAlgorithm` snake_case-quirk rejection sentinels +
-//! ZoneKeyManifest embedded-algorithm round-trip
+//! Pin `ZoneKeyAlgorithm` `snake_case`-quirk rejection sentinels +
+//! `ZoneKeyManifest` embedded-algorithm round-trip
 //! (flywheel_connectors-aznqw).
 //!
 //! [`ZoneKeyAlgorithm`] at `crates/fcp-core/src/zone_keys.rs:107` is a
-//! 2-variant enum (ChaCha20Poly1305 / XChaCha20Poly1305) with
+//! 2-variant enum (`ChaCha20Poly1305` / `XChaCha20Poly1305`) with
 //! `#[serde(rename_all = "snake_case")]`. Its surprising wire form is
-//! `cha_cha20_poly1305` / `x_cha_cha20_poly1305` — serde's snake_case
+//! `cha_cha20_poly1305` / `x_cha_cha20_poly1305` — serde's `snake_case`
 //! aggressively splits at every uppercase transition (even inside the
-//! ChaCha20 acronym), producing a form that's easy to misread when
+//! `ChaCha20` acronym), producing a form that's easy to misread when
 //! authoring zone-key manifests by hand.
 //!
 //! Existing `zone_namespace_display_serde_tag.rs` already pins the
@@ -17,16 +17,16 @@
 //!     `chacha20_poly1305` (without the inner `_`) MUST NOT decode —
 //!     pin so a future tolerant alias silently changes the wire
 //!     vocabulary,
-//!   * PascalCase / SCREAMING / kebab-case rejection sentinels,
+//!   * `PascalCase` / `SCREAMING` / `kebab-case` rejection sentinels,
 //!   * Distinct-variant pairwise pin (the only 2 variants must produce
 //!     distinct wire bytes; the X-prefix differentiates them),
-//!   * ZoneKeyManifest with embedded algorithm: JSON+CBOR round-trip
-//!     preserves both ChaCha and XChaCha algorithms inside the
+//!   * `ZoneKeyManifest` with embedded algorithm: JSON+CBOR round-trip
+//!     preserves both `ChaCha` and `XChaCha` algorithms inside the
 //!     manifest envelope,
-//!   * HashMap-key behavior (algorithm derives Hash via PartialEq+Eq
+//!   * `HashMap`-key behavior (algorithm derives `Hash` via `PartialEq`+`Eq`
 //!     ... actually no — let me check).
-//!   * skip_serializing_if + default-Vec semantics for the 4 optional
-//!     ZoneKeyManifest fields.
+//!   * `skip_serializing_if` + default-`Vec` semantics for the 4 optional
+//!     `ZoneKeyManifest` fields.
 
 use ciborium::Value as CborValue;
 use fcp_cbor::SchemaId;
@@ -269,11 +269,15 @@ fn copy_clone_eq_derive_is_intact() {
     // ZoneKeyAlgorithm must remain Copy + Clone + PartialEq — these
     // properties are relied on by storage code that copies the
     // discriminator without ownership.
+    fn assert_copy<T: Copy>() {}
+    fn assert_clone<T: Clone>() {}
+
+    assert_copy::<ZoneKeyAlgorithm>();
+    assert_clone::<ZoneKeyAlgorithm>();
+
     let a = ZoneKeyAlgorithm::ChaCha20Poly1305;
     let b = a; // Copy
-    let c = a.clone();
     assert_eq!(a, b);
-    assert_eq!(a, c);
     assert_ne!(a, ZoneKeyAlgorithm::XChaCha20Poly1305);
 }
 

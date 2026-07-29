@@ -288,10 +288,10 @@ cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e swarm_stat
 
 `fcp-tailnet-invoke-evidence` emits the `tailnet-invoke-evidence/v1`
 JSONL contract for direct-LAN and DERP/fallback invoke proof attempts. The
-runner probes configured Tailscale LocalAPI state, records online-peer and route
+runner probes live Tailscale status, records online-peer and route
 prerequisites, and can POST a caller-supplied `InvokeRequest` JSON body to a
 tailnet-reachable `fcp-host` `/rpc/invoke` endpoint. It emits `real_transport`
-records only when the invoke succeeds and LocalAPI route telemetry proves the
+records only when the invoke succeeds and live route telemetry proves the
 requested direct-LAN or DERP/fallback path; otherwise it emits a structured skip.
 The fully automatic two-node `fcp-mesh` / `fcp-tailscale` transport harness is
 still pending.
@@ -307,21 +307,24 @@ URLs, raw tailnet hostnames, and local user paths before JSONL serialization.
 cargo run -p fcp-host --bin fcp-tailnet-invoke-evidence -- --route direct-lan
 ```
 
-Operators with an HTTP-exposed Tailscale LocalAPI can pass
+By default the runner reads live telemetry from `tailscale status --json`.
+Operators with an HTTP-exposed Tailscale LocalAPI can instead pass
 `--localapi-url <url>` or set `FCP_TAILSCALE_LOCALAPI_URL`; missing
 prerequisites remain machine-readable in `missing_prerequisites` and the full
-redacted `prerequisites` list. If a configured real invoke probe runs but fails,
-the structured skip retains the redacted per-attempt error/timeout diagnostics
-without claiming `real_transport`. Use `--route all` to emit one direct-LAN
-record and one DERP/fallback record from the same invocation.
+redacted `prerequisites` list. If a configured real invoke probe runs but cannot
+be promoted to `real_transport`, the structured skip retains the redacted
+caller/responder node hashes, per-attempt error/timeout diagnostics, and any
+successful-attempt latency summary without claiming `real_transport`. Use
+`--route all` to emit one direct-LAN record and one DERP/fallback record from
+the same invocation.
 
 For real invoke samples, also pass `--invoke-url <tailnet-host-rpc-invoke-url>`
 and one of `--invoke-request-json <json>` or `--invoke-request-file <path>`.
 The invoke URL must be an explicit tailnet-class `http`/`https` endpoint at
 `/rpc/invoke`: a MagicDNS `.ts.net` host, `.tailnet.` host, or tailnet IP. This
 prevents a public or localhost HTTP endpoint from combining with unrelated
-LocalAPI route telemetry to produce misleading `real_transport` evidence.
-LocalAPI route telemetry is also scoped to the responder peer identified by the
+Tailscale route telemetry to produce misleading `real_transport` evidence.
+Route telemetry is also scoped to the responder peer identified by the
 invoke URL host/IP or `--responder-node-id`; direct/DERP evidence from a
 different active peer does not satisfy the route prerequisite. Use
 `--invoke-attempts <n>` to collect multiple samples for percentile output.
@@ -493,7 +496,15 @@ Targeted verification:
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-invoke-audit cargo test -p fcp-host invoke_audit_chain --lib
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-invoke-audit-bench cargo bench -p fcp-host --bench invoke_audit_throughput -- invoke_audit_same_zone --sample-size 10 --warm-up-time 1 --measurement-time 2
+
+USE_RCH=1 TARGET_DIR=/tmp/fcp-invoke-audit-storm-e2e scripts/e2e/invoke_audit_storm_verification.sh --run-id=invoke-audit-storm
 ```
+
+The `invoke_audit_storm_verification.sh` lane extracts
+`INVOKE_AUDIT_STORM_JSONL` records for c=128 and c=512 same-zone storms,
+including command line, source revision, worker identity, target directory,
+topology, latency samples, CAS retry/fallback counters, and chain
+isomorphism checks.
 
 ## Known Flakes and Workarounds
 

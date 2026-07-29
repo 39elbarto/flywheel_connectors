@@ -66,7 +66,10 @@ impl RedactedReplayBundle {
             .iter()
             .map(|secret| {
                 let (fingerprint, material) = secret.with_bytes(|bytes| {
-                    (sha256_first_16_hex(bytes), ZeroizingSecret::new(bytes.to_vec()))
+                    (
+                        sha256_first_16_hex(bytes),
+                        ZeroizingSecret::new(bytes.to_vec()),
+                    )
                 });
                 SecretRedaction {
                     material,
@@ -91,7 +94,10 @@ impl RedactedReplayBundle {
             .iter()
             .map(|secret| {
                 let (fingerprint, material) = secret.material.with_bytes(|bytes| {
-                    (sha256_first_16_hex(bytes), ZeroizingSecret::new(bytes.to_vec()))
+                    (
+                        sha256_first_16_hex(bytes),
+                        ZeroizingSecret::new(bytes.to_vec()),
+                    )
                 });
                 SecretRedaction {
                     material,

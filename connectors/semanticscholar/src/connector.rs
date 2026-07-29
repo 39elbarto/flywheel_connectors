@@ -1,11 +1,13 @@
 //! FCP Semantic Scholar Connector implementation.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
+    ApprovalMode, BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult, OperationId,
+    OperationInfo, SelfCheckReport,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -17,10 +19,28 @@ use crate::{
     error::SemanticScholarError,
 };
 
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const MAX_PAPER_SEARCH_LIMIT: i64 = 100;
 const MAX_GRAPH_LIST_LIMIT: i64 = 1000;
 const MAX_RECOMMENDATIONS_LIMIT: i64 = 500;
 const MIN_LIMIT: i64 = 1;
+
+const OP_PAPER_SEARCH: &str = "semanticscholar.paper.search";
+const OP_PAPER_GET: &str = "semanticscholar.paper.get";
+const OP_PAPER_CITATIONS: &str = "semanticscholar.paper.citations";
+const OP_PAPER_REFERENCES: &str = "semanticscholar.paper.references";
+const OP_PAPER_RECOMMENDATIONS: &str = "semanticscholar.paper.recommendations";
+const OP_AUTHOR_GET: &str = "semanticscholar.author.get";
+const OP_AUTHOR_PAPERS: &str = "semanticscholar.author.papers";
+const OPERATION_ORDER: [&str; 7] = [
+    OP_PAPER_SEARCH,
+    OP_PAPER_GET,
+    OP_PAPER_CITATIONS,
+    OP_PAPER_REFERENCES,
+    OP_PAPER_RECOMMENDATIONS,
+    OP_AUTHOR_GET,
+    OP_AUTHOR_PAPERS,
+];
 
 /// Parsed and validated Semantic Scholar connector configuration.
 #[derive(Debug, Clone)]
@@ -787,302 +807,70 @@ fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
-/// Build a single [`OperationInfo`].
-#[allow(clippy::too_many_arguments)]
-fn op_info(
-    id: &'static str,
-    summary: &str,
-    input_schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    capability: &'static str,
-    risk_level: RiskLevel,
-    safety_tier: SafetyTier,
-    idempotency: IdempotencyClass,
-    ai_hints: AgentHint,
-) -> OperationInfo {
-    OperationInfo {
-        id: OperationId::from_static(id),
-        summary: summary.into(),
-        input_schema,
-        output_schema,
-        capability: CapabilityId::from_static(capability),
-        risk_level,
-        description: None,
-        rate_limit: None,
-        requires_approval: None,
-        safety_tier,
-        idempotency,
-        ai_hints,
+/// Build the typed operations catalog from the embedded manifest.
+fn operations_info() -> Vec<OperationInfo> {
+    static OPERATIONS: OnceLock<Vec<OperationInfo>> = OnceLock::new();
+    OPERATIONS
+        .get_or_init(|| {
+            ordered_manifest_operations()
+                .into_iter()
+                .map(|(id, operation)| operation_info_from_manifest(id, &operation))
+                .collect()
+        })
+        .clone()
+}
+
+fn ordered_manifest_operations() -> Vec<(String, OperationSection)> {
+    let manifest =
+        ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should parse");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|known_id| *known_id == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
 }
 
-/// Build the operations info for introspection.
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        op_info(
-            "semanticscholar.paper.search",
-            "Search for papers by keyword",
-            json!({
-                "type": "object",
-                "required": ["query"],
-                "properties": {
-                    "query": {"type": "string"},
-                    "fields": {"type": "string", "description": "Comma-separated field names"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-                    "offset": {"type": "integer"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["data"],
-                "properties": {
-                    "data": {"type": "array"},
-                    "total": {"type": "integer"}
-                }
-            }),
-            "semanticscholar.papers.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Search for academic papers by keyword or topic.".into(),
-                common_mistakes: vec![
-                    "Not specifying fields — only paperId and title returned by default.".into(),
-                ],
-                examples: vec![
-                    r#"{"query": "transformer attention mechanism", "limit": 10, "fields": "title,abstract,year,citationCount"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("semanticscholar.paper.get"),
-                    CapabilityId::from_static("semanticscholar.paper.recommendations"),
-                ],
-            },
-        ),
-        op_info(
-            "semanticscholar.paper.get",
-            "Get paper details by ID (S2 paper ID, DOI, ArXiv ID, etc.)",
-            json!({
-                "type": "object",
-                "required": ["paper_id"],
-                "properties": {
-                    "paper_id": {"type": "string", "description": "S2 paper ID, DOI, ArXiv ID, etc."},
-                    "fields": {"type": "string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["paperId", "title"],
-                "properties": {
-                    "paperId": {"type": "string"},
-                    "title": {"type": "string"}
-                }
-            }),
-            "semanticscholar.papers.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get details for a specific paper by ID.".into(),
-                common_mistakes: vec![
-                    "Passing a bare arXiv ID without the 'ARXIV:' prefix — use 'ARXIV:2301.08745' or the S2 corpus ID or DOI format.".into(),
-                ],
-                examples: vec![
-                    r#"{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "fields": "title,abstract,authors,year,citationCount"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("semanticscholar.paper.search"),
-                    CapabilityId::from_static("semanticscholar.paper.citations"),
-                ],
-            },
-        ),
-        op_info(
-            "semanticscholar.paper.citations",
-            "Get citations of a paper",
-            json!({
-                "type": "object",
-                "required": ["paper_id"],
-                "properties": {
-                    "paper_id": {"type": "string"},
-                    "fields": {"type": "string"},
-                    "limit": {"type": "integer", "maximum": 1000}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["data"],
-                "properties": {
-                    "data": {"type": "array"}
-                }
-            }),
-            "semanticscholar.papers.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get papers that cite a given paper.".into(),
-                common_mistakes: vec![
-                    "Confusing citations (papers that cite this paper) with references (papers this paper cites) — use paper.references for the bibliography.".into(),
-                ],
-                examples: vec![
-                    r#"{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 50}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("semanticscholar.paper.get"),
-                    CapabilityId::from_static("semanticscholar.paper.references"),
-                ],
-            },
-        ),
-        op_info(
-            "semanticscholar.paper.references",
-            "Get references of a paper",
-            json!({
-                "type": "object",
-                "required": ["paper_id"],
-                "properties": {
-                    "paper_id": {"type": "string"},
-                    "fields": {"type": "string"},
-                    "limit": {"type": "integer", "maximum": 1000}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["data"],
-                "properties": {
-                    "data": {"type": "array"}
-                }
-            }),
-            "semanticscholar.papers.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get papers referenced by a given paper.".into(),
-                common_mistakes: vec![
-                    "Not requesting additional fields — only paperId and title are returned by default; add 'year,authors,citationCount' in the fields parameter.".into(),
-                ],
-                examples: vec![
-                    r#"{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 50}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("semanticscholar.paper.get"),
-                    CapabilityId::from_static("semanticscholar.paper.citations"),
-                ],
-            },
-        ),
-        op_info(
-            "semanticscholar.paper.recommendations",
-            "Get recommended papers based on a seed paper",
-            json!({
-                "type": "object",
-                "required": ["paper_id"],
-                "properties": {
-                    "paper_id": {"type": "string"},
-                    "fields": {"type": "string"},
-                    "limit": {"type": "integer", "maximum": 500}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["recommendedPapers"],
-                "properties": {
-                    "recommendedPapers": {"type": "array"}
-                }
-            }),
-            "semanticscholar.papers.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get recommended similar papers.".into(),
-                common_mistakes: vec![
-                    "Expecting deterministic results — recommendations are model-based and may vary between calls for the same seed paper.".into(),
-                ],
-                examples: vec![
-                    r#"{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 10}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("semanticscholar.paper.search"),
-                ],
-            },
-        ),
-        op_info(
-            "semanticscholar.author.get",
-            "Get author details",
-            json!({
-                "type": "object",
-                "required": ["author_id"],
-                "properties": {
-                    "author_id": {"type": "string"},
-                    "fields": {"type": "string"}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["authorId", "name"],
-                "properties": {
-                    "authorId": {"type": "string"},
-                    "name": {"type": "string"}
-                }
-            }),
-            "semanticscholar.authors.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get details for a specific author.".into(),
-                common_mistakes: vec![
-                    "Not specifying the fields parameter — only authorId and name are returned by default; request hIndex, paperCount, etc. explicitly.".into(),
-                ],
-                examples: vec![
-                    r#"{"author_id": "1741101", "fields": "name,hIndex,paperCount,citationCount"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("semanticscholar.author.papers"),
-                ],
-            },
-        ),
-        op_info(
-            "semanticscholar.author.papers",
-            "Get papers by an author",
-            json!({
-                "type": "object",
-                "required": ["author_id"],
-                "properties": {
-                    "author_id": {"type": "string"},
-                    "fields": {"type": "string"},
-                    "limit": {"type": "integer", "maximum": 1000}
-                }
-            }),
-            json!({
-                "type": "object",
-                "required": ["data"],
-                "properties": {
-                    "data": {"type": "array"}
-                }
-            }),
-            "semanticscholar.authors.read",
-            RiskLevel::Low,
-            SafetyTier::Safe,
-            IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Get all papers by a specific author.".into(),
-                common_mistakes: vec![
-                    "Setting limit too high without pagination — the API caps at 1000 results per request, use offset for prolific authors.".into(),
-                ],
-                examples: vec![
-                    r#"{"author_id": "1741101", "limit": 50, "fields": "title,year,citationCount"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("semanticscholar.author.get"),
-                ],
-            },
-        ),
-    ]
+fn operation_info_from_manifest(id: String, operation: &OperationSection) -> OperationInfo {
+    let description = operation.description.clone();
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema.clone(),
+        output_schema: operation.output_schema.clone(),
+        capability: operation.capability.clone(),
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints.clone(),
+        rate_limit: operation
+            .rate_limit
+            .as_ref()
+            .map(|rate_limit| rate_limit.0.clone()),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_prelude::{IdempotencyClass, RiskLevel, SafetyTier};
 
     // -- Config tests --
 
@@ -1346,10 +1134,74 @@ mod tests {
         serde_json::to_value(operations_info()).unwrap()
     }
 
+    fn strict_semanticscholar_manifest() -> Result<ConnectorManifest, String> {
+        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
     #[test]
     fn operations_info_has_7_operations() {
         let ops = operations_info();
         assert_eq!(ops.len(), 7);
+    }
+
+    #[test]
+    fn runtime_operation_catalog_matches_manifest_metadata() -> Result<(), String> {
+        let manifest = strict_semanticscholar_manifest()?;
+        let operations = operations_info();
+
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (index, operation) in operations.iter().enumerate() {
+            let operation_id = operation.id.as_str();
+            assert_eq!(
+                operation_id, OPERATION_ORDER[index],
+                "operation order changed at index {index}"
+            );
+
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| format!("manifest missing operation {operation_id}"))?;
+
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(
+                operation.requires_approval,
+                approval_mode_from_manifest(manifest_operation.requires_approval)
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.ai_hints).expect("serialize runtime hints"),
+                serde_json::to_value(&manifest_operation.ai_hints)
+                    .expect("serialize manifest hints")
+            );
+            assert_eq!(
+                serde_json::to_value(&operation.rate_limit).map_err(|error| error.to_string())?,
+                serde_json::to_value(
+                    manifest_operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.0.clone()),
+                )
+                .map_err(|error| error.to_string())?
+            );
+            assert!(
+                manifest_operation.network_constraints.is_some(),
+                "{operation_id} should retain manifest network constraints"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]

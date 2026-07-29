@@ -9,23 +9,23 @@
 //!    documented identity + protocol-version fallback.
 //! 2. **Resource list** — `McpResourceListRequest`/`McpResourceEntry`/
 //!    `McpResourceListResponse` with camelCase serde + skip-when-None.
-//! 3. **SessionStatus predicates** — `is_alive` / `is_ended` /
-//!    `Display` (complement to host_mcp_method_routing_conformance
+//! 3. **`SessionStatus` predicates** — `is_alive` / `is_ended` /
+//!    `Display` (complement to `host_mcp_method_routing_conformance`
 //!    which pinned only the serde wire form + distinctness).
 //!
 //! Properties pinned (NORMATIVE):
 //!
 //! - `McpServerInfo::fcp_host()` returns name="fcp-host" and
-//!   version=non-empty (CARGO_PKG_VERSION at compile time).
+//!   version=non-empty (`CARGO_PKG_VERSION` at compile time).
 //! - `McpInitializeResponse::fcp_default(V2025_03)` keeps
-//!   protocol_version=V2025_03; same for V2024_11 (negotiation
+//!   `protocol_version=V2025_03`; same for `V2024_11` (negotiation
 //!   accepts both supported versions).
 //! - `McpServerInfo` and `McpClientInfo` use camelCase serde
 //!   (no rename effect since fields are single-token, but pin the
 //!   roundtrip).
 //! - `McpResourceEntry.mime_type` serializes as `mimeType`
 //!   (camelCase rename, matching MCP spec).
-//! - `McpResourceEntry` description and mime_type skip-when-None.
+//! - `McpResourceEntry` description and `mime_type` skip-when-None.
 //! - `McpResourceListRequest.cursor` skip-when-None.
 //! - `McpResourceListResponse.next_cursor` serializes as
 //!   `nextCursor` and skip-when-None; `resources` is required.
@@ -34,7 +34,7 @@
 //! - `McpPromptCapability.list_changed` → `listChanged`.
 //! - `SessionStatus::is_alive` ⇔ {Active, Idle}.
 //! - `SessionStatus::is_ended` ⇔ {Expired, Terminated}.
-//! - `SessionStatus::Display` returns the snake_case string for each.
+//! - `SessionStatus::Display` returns the `snake_case` string for each.
 
 use fcp_host::{
     McpClientInfo, McpInitializeResponse, McpPromptCapability, McpProtocolVersion,

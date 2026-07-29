@@ -1,5 +1,5 @@
 //! Pin role-classifier serde tags on the closest analogues to
-//! "MeshNodeRole" (flywheel_connectors-jtbfy).
+//! "`MeshNodeRole`" (flywheel_connectors-jtbfy).
 //!
 //! Bead asks for `MeshNodeRole serde tag`. No type literally named
 //! `MeshNodeRole` exists in fcp-core. The role-shaped classifiers
@@ -7,37 +7,37 @@
 //! split across two enums in `quorum.rs`:
 //!
 //!  - `RiskTier` (quorum.rs:56) — 4-variant tier classifier
-//!    (Safe / Risky / Dangerous / CriticalWrite) that determines
+//!    (Safe / Risky / Dangerous / `CriticalWrite`) that determines
 //!    how many mesh-node signatures a quorum requires.
 //!  - `QuorumPurpose` (quorum.rs:88) — 8-variant operation purpose
 //!    that a mesh node participates in
-//!    (AuditHead / ZoneCheckpoint / RevocationHead /
-//!    DangerousLease / RiskyLease / SafeLease / KeyRotation /
-//!    MembershipChange).
+//!    (`AuditHead` / `ZoneCheckpoint` / `RevocationHead` /
+//!    `DangerousLease` / `RiskyLease` / `SafeLease` / `KeyRotation` /
+//!    `MembershipChange`).
 //!
 //! NEITHER carries `#[serde(rename_all = ...)]`, so the wire form
-//! is the **PascalCase variant name verbatim** — DIFFERENT from
-//! `RiskTier::as_str` / `Display`, which return snake_case. Pin
+//! is the **`PascalCase` variant name verbatim** — DIFFERENT from
+//! `RiskTier::as_str` / `Display`, which return `snake_case`. Pin
 //! the dual encoding loudly because operator tooling that filters
 //! audit logs by token MUST know which form to expect from each
 //! channel.
 //!
 //! Targets:
 //!
-//!   1. **`RiskTier::as_str` snake_case tokens** pinned per variant
+//!   1. **`RiskTier::as_str` `snake_case` tokens** pinned per variant
 //!      (the documented Display surface).
 //!   2. **`RiskTier::Display` byte-for-byte agrees with `as_str`**.
-//!   3. **`RiskTier` serde JSON form is PascalCase variant name**
+//!   3. **`RiskTier` serde JSON form is `PascalCase` variant name**
 //!      — pin the documented mismatch between Display and serde so
 //!      a future `rename_all` swap is loud.
 //!   4. **`RiskTier` JSON + CBOR round-trip** preserves variant.
-//!   5. **`QuorumPurpose` serde JSON form is PascalCase variant
+//!   5. **`QuorumPurpose` serde JSON form is `PascalCase` variant
 //!      name** for every variant.
 //!   6. **`QuorumPurpose` JSON + CBOR round-trip** preserves variant.
 //!   7. **`QuorumPurpose::default_risk_tier()` truth table** per
 //!      variant — the documented mapping at quorum.rs:110.
 //!   8. **Pairwise distinct serde forms** for both enums.
-//!   9. **Both enums reject lower snake_case** as wire input — the
+//!   9. **Both enums reject lower `snake_case`** as wire input — the
 //!      mismatch is part of the wire contract.
 
 use ciborium::value::Value as CborValue;
@@ -266,22 +266,18 @@ fn quorum_purpose_serde_forms_pairwise_distinct() {
 
 #[test]
 fn risk_tier_variants_pairwise_unequal() {
-    for i in 0..RISK_TIER_SERDE.len() {
-        for j in (i + 1)..RISK_TIER_SERDE.len() {
-            assert_ne!(
-                RISK_TIER_SERDE[i].0, RISK_TIER_SERDE[j].0,
-                "{:?} and {:?} MUST be distinct",
-                RISK_TIER_SERDE[i].0, RISK_TIER_SERDE[j].0
-            );
+    for (i, &(left, _)) in RISK_TIER_SERDE.iter().enumerate() {
+        for &(right, _) in RISK_TIER_SERDE.iter().skip(i + 1) {
+            assert_ne!(left, right, "{left:?} and {right:?} MUST be distinct");
         }
     }
 }
 
 #[test]
 fn quorum_purpose_variants_pairwise_unequal() {
-    for i in 0..QUORUM_PURPOSE_SERDE.len() {
-        for j in (i + 1)..QUORUM_PURPOSE_SERDE.len() {
-            assert_ne!(QUORUM_PURPOSE_SERDE[i].0, QUORUM_PURPOSE_SERDE[j].0);
+    for (i, &(left, _)) in QUORUM_PURPOSE_SERDE.iter().enumerate() {
+        for &(right, _) in QUORUM_PURPOSE_SERDE.iter().skip(i + 1) {
+            assert_ne!(left, right);
         }
     }
 }

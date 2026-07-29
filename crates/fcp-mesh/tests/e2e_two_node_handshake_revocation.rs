@@ -1,7 +1,7 @@
 //! E2E two-real-MeshNode handshake + zone-key + revocation
 //! (testing-perfect-e2e-integration-tests-with-logging-and-no-mocks).
 //!
-//! AmberLark, 2026-05-02 — alpha-domain coverage sweep.
+//! `AmberLark`, 2026-05-02 — alpha-domain coverage sweep.
 //!
 //! ## What this exercises
 //!
@@ -11,7 +11,7 @@
 //! register interaction between the two nodes and asserts that:
 //!
 //! 1. Each node tracks its own local state independently (zones,
-//!    peer count) — no leakage between MeshNode instances.
+//!    peer count) — no leakage between `MeshNode` instances.
 //! 2. After mutual peer registration, each node knows about the
 //!    other's signing key and can route a future
 //!    `handle_revocation_push` (signed by the registered key) without
@@ -37,7 +37,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use fcp_crypto::Ed25519SigningKey;
 use fcp_mesh::{MeshNode, MeshNodeConfig};
@@ -52,6 +52,15 @@ use tracing::{Level, info, info_span};
 /// Phase budget — per-operation wall-clock cap. Catches accidental
 /// quadratic regressions in peer/zone tracking.
 const PHASE_BUDGET_MS: u128 = 500;
+
+struct TwoNodeScenario {
+    node_a: MeshNode,
+    node_b: MeshNode,
+    alice_id: NodeId,
+    bob_id: NodeId,
+    alice_signing: Ed25519SigningKey,
+    bob_signing: Ed25519SigningKey,
+}
 
 fn build_real_mesh_node(
     name: &'static str,
@@ -77,6 +86,170 @@ fn deterministic_signing_key(seed_byte: u8) -> Ed25519SigningKey {
         .expect("32-byte seed is always a valid Ed25519 key")
 }
 
+fn elapsed_ms_within_budget(phase_name: &str, elapsed: Duration) -> u64 {
+    let elapsed_ms = elapsed.as_millis();
+    assert!(
+        elapsed_ms < PHASE_BUDGET_MS,
+        "{phase_name} phase exceeded {PHASE_BUDGET_MS}ms budget: {elapsed_ms}ms"
+    );
+    u64::try_from(elapsed_ms).expect("phase duration in milliseconds fits into u64")
+}
+
+fn build_two_node_scenario(scenario_id: &str) -> TwoNodeScenario {
+    let phase = info_span!("phase.build_two_nodes").entered();
+    let phase_start = Instant::now();
+
+    let node_a = build_real_mesh_node(
+        "alice-node",
+        /* sender_instance_id */ 0xA1,
+        /* local_node_id */ 1001,
+    );
+    let node_b = build_real_mesh_node("bob-node", 0xB2, 1002);
+
+    let scenario = TwoNodeScenario {
+        node_a,
+        node_b,
+        alice_id: NodeId::new("alice-node"),
+        bob_id: NodeId::new("bob-node"),
+        alice_signing: deterministic_signing_key(0xAA),
+        bob_signing: deterministic_signing_key(0xBB),
+    };
+
+    let elapsed_ms = elapsed_ms_within_budget("build_two_nodes", phase_start.elapsed());
+    info!(scenario_id, phase = "build_two_nodes", elapsed_ms, "ok");
+    drop(phase);
+
+    scenario
+}
+
+fn assert_fresh_nodes(scenario: &TwoNodeScenario) {
+    assert_eq!(
+        scenario.node_a.peer_count(),
+        0,
+        "fresh node A starts with 0 peers"
+    );
+    assert_eq!(
+        scenario.node_b.peer_count(),
+        0,
+        "fresh node B starts with 0 peers"
+    );
+    assert!(
+        scenario.node_a.local_zones().is_empty(),
+        "fresh node A has no local zones"
+    );
+    assert!(
+        scenario.node_b.local_zones().is_empty(),
+        "fresh node B has no local zones"
+    );
+}
+
+fn register_mutual_peers(scenario_id: &str, scenario: &mut TwoNodeScenario) {
+    let phase = info_span!("phase.mutual_peer_registration").entered();
+    let phase_start = Instant::now();
+
+    scenario.node_a.register_peer_signing_key(
+        scenario.bob_id.clone(),
+        scenario.bob_signing.verifying_key(),
+    );
+    scenario
+        .node_a
+        .update_peer_zones(&scenario.bob_id, HashSet::from([ZoneId::work()]));
+
+    scenario.node_b.register_peer_signing_key(
+        scenario.alice_id.clone(),
+        scenario.alice_signing.verifying_key(),
+    );
+    scenario
+        .node_b
+        .update_peer_zones(&scenario.alice_id, HashSet::from([ZoneId::work()]));
+
+    let elapsed_ms = elapsed_ms_within_budget("mutual_peer_registration", phase_start.elapsed());
+    info!(
+        scenario_id,
+        phase = "mutual_peer_registration",
+        elapsed_ms,
+        node_a_peers = scenario.node_a.peer_count() as u64,
+        node_b_peers = scenario.node_b.peer_count() as u64,
+        "ok"
+    );
+    drop(phase);
+}
+
+fn assert_mutual_peer_registration(scenario: &TwoNodeScenario) {
+    assert_eq!(
+        scenario.node_a.peer_count(),
+        1,
+        "node A should track exactly 1 peer (Bob) after mutual registration"
+    );
+    assert_eq!(
+        scenario.node_b.peer_count(),
+        1,
+        "node B should track exactly 1 peer (Alice) after mutual registration"
+    );
+}
+
+fn update_local_zones_independently(scenario_id: &str, scenario: &mut TwoNodeScenario) {
+    let phase = info_span!("phase.local_zone_isolation").entered();
+    let phase_start = Instant::now();
+
+    scenario
+        .node_a
+        .update_local_zones(HashSet::from([ZoneId::work(), ZoneId::private()]));
+    scenario
+        .node_b
+        .update_local_zones(HashSet::from([ZoneId::work()]));
+
+    let elapsed_ms = elapsed_ms_within_budget("local_zone_isolation", phase_start.elapsed());
+    info!(
+        scenario_id,
+        phase = "local_zone_isolation",
+        elapsed_ms,
+        node_a_zone_count = scenario.node_a.local_zones().len() as u64,
+        node_b_zone_count = scenario.node_b.local_zones().len() as u64,
+        "ok"
+    );
+    drop(phase);
+}
+
+fn assert_local_zone_isolation(scenario: &TwoNodeScenario) {
+    assert_eq!(
+        scenario.node_a.local_zones().len(),
+        2,
+        "node A's local zones must reflect its OWN update, not B's"
+    );
+    assert_eq!(
+        scenario.node_b.local_zones().len(),
+        1,
+        "node B's local zones must reflect its OWN update, not A's"
+    );
+    assert!(scenario.node_a.local_zones().contains(&ZoneId::private()));
+    assert!(!scenario.node_b.local_zones().contains(&ZoneId::private()));
+}
+
+fn remove_peer_idempotently(scenario_id: &str, scenario: &mut TwoNodeScenario) {
+    let phase = info_span!("phase.peer_removal").entered();
+    let phase_start = Instant::now();
+
+    scenario.node_a.remove_peer(&scenario.bob_id);
+    assert_eq!(
+        scenario.node_a.peer_count(),
+        0,
+        "node A's peer count should drop to 0 after removing Bob"
+    );
+    assert_eq!(
+        scenario.node_b.peer_count(),
+        1,
+        "node B's peer count must NOT change when A removes Bob"
+    );
+
+    scenario.node_a.remove_peer(&scenario.bob_id);
+    assert_eq!(scenario.node_a.peer_count(), 0);
+
+    let elapsed_ms = elapsed_ms_within_budget("peer_removal", phase_start.elapsed());
+    info!(scenario_id, phase = "peer_removal", elapsed_ms, "ok");
+    drop(phase);
+}
+
 #[test]
 fn e2e_two_real_mesh_nodes_register_peers_and_zones_independently() {
     let _tracing = tracing::subscriber::set_default(
@@ -93,168 +266,18 @@ fn e2e_two_real_mesh_nodes_register_peers_and_zones_independently() {
         "starting two-real-MeshNode peer/zone isolation test"
     );
 
-    // ── Phase 1: build two real MeshNode instances ─────────────────
-    let phase = info_span!("phase.build_two_nodes").entered();
-    let phase_start = Instant::now();
-
-    let mut node_a = build_real_mesh_node(
-        "alice-node",
-        /* sender_instance_id */ 0xA1,
-        /* local_node_id */ 1001,
-    );
-    let mut node_b = build_real_mesh_node("bob-node", 0xB2, 1002);
-
-    let alice_id = NodeId::new("alice-node");
-    let bob_id = NodeId::new("bob-node");
-    let alice_signing = deterministic_signing_key(0xAA);
-    let bob_signing = deterministic_signing_key(0xBB);
-
-    let phase_elapsed = phase_start.elapsed();
-    assert!(
-        phase_elapsed.as_millis() < PHASE_BUDGET_MS,
-        "build_two_nodes phase exceeded {}ms budget: {}ms",
-        PHASE_BUDGET_MS,
-        phase_elapsed.as_millis()
-    );
-    info!(
-        scenario_id,
-        phase = "build_two_nodes",
-        elapsed_ms = phase_elapsed.as_millis() as u64,
-        "ok"
-    );
-    drop(phase);
-
-    // Both nodes start with zero peers and empty zone sets.
-    assert_eq!(node_a.peer_count(), 0, "fresh node A starts with 0 peers");
-    assert_eq!(node_b.peer_count(), 0, "fresh node B starts with 0 peers");
-    assert!(
-        node_a.local_zones().is_empty(),
-        "fresh node A has no local zones"
-    );
-    assert!(
-        node_b.local_zones().is_empty(),
-        "fresh node B has no local zones"
-    );
-
-    // ── Phase 2: each node registers the OTHER as a peer + signing key ──
-    let phase = info_span!("phase.mutual_peer_registration").entered();
-    let phase_start = Instant::now();
-
-    // A learns B's signing key + assigns B to a zone.
-    node_a.register_peer_signing_key(bob_id.clone(), bob_signing.verifying_key());
-    node_a.update_peer_zones(&bob_id, HashSet::from([ZoneId::work()]));
-
-    // B learns A's signing key + assigns A to a zone.
-    node_b.register_peer_signing_key(alice_id.clone(), alice_signing.verifying_key());
-    node_b.update_peer_zones(&alice_id, HashSet::from([ZoneId::work()]));
-
-    let phase_elapsed = phase_start.elapsed();
-    assert!(
-        phase_elapsed.as_millis() < PHASE_BUDGET_MS,
-        "mutual_peer_registration phase exceeded {}ms budget: {}ms",
-        PHASE_BUDGET_MS,
-        phase_elapsed.as_millis()
-    );
-    info!(
-        scenario_id,
-        phase = "mutual_peer_registration",
-        elapsed_ms = phase_elapsed.as_millis() as u64,
-        node_a_peers = node_a.peer_count() as u64,
-        node_b_peers = node_b.peer_count() as u64,
-        "ok"
-    );
-    drop(phase);
-
-    // Each node knows about exactly ONE peer (the other).
-    assert_eq!(
-        node_a.peer_count(),
-        1,
-        "node A should track exactly 1 peer (Bob) after mutual registration"
-    );
-    assert_eq!(
-        node_b.peer_count(),
-        1,
-        "node B should track exactly 1 peer (Alice) after mutual registration"
-    );
-
-    // ── Phase 3: each node updates its OWN local zones independently ──
-    let phase = info_span!("phase.local_zone_isolation").entered();
-    let phase_start = Instant::now();
-
-    node_a.update_local_zones(HashSet::from([ZoneId::work(), ZoneId::private()]));
-    node_b.update_local_zones(HashSet::from([ZoneId::work()]));
-
-    let phase_elapsed = phase_start.elapsed();
-    assert!(
-        phase_elapsed.as_millis() < PHASE_BUDGET_MS,
-        "local_zone_isolation phase exceeded {}ms budget: {}ms",
-        PHASE_BUDGET_MS,
-        phase_elapsed.as_millis()
-    );
-    info!(
-        scenario_id,
-        phase = "local_zone_isolation",
-        elapsed_ms = phase_elapsed.as_millis() as u64,
-        node_a_zone_count = node_a.local_zones().len() as u64,
-        node_b_zone_count = node_b.local_zones().len() as u64,
-        "ok"
-    );
-    drop(phase);
-
-    // Independent state — A has {work, private}, B has only {work}.
-    assert_eq!(
-        node_a.local_zones().len(),
-        2,
-        "node A's local zones must reflect its OWN update, not B's"
-    );
-    assert_eq!(
-        node_b.local_zones().len(),
-        1,
-        "node B's local zones must reflect its OWN update, not A's"
-    );
-    assert!(node_a.local_zones().contains(&ZoneId::private()));
-    assert!(!node_b.local_zones().contains(&ZoneId::private()));
-
-    // ── Phase 4: peer removal exercises the cleanup path ───────────
-    let phase = info_span!("phase.peer_removal").entered();
-    let phase_start = Instant::now();
-
-    node_a.remove_peer(&bob_id);
-    assert_eq!(
-        node_a.peer_count(),
-        0,
-        "node A's peer count should drop to 0 after removing Bob"
-    );
-    // Node B still has Alice (independent state).
-    assert_eq!(
-        node_b.peer_count(),
-        1,
-        "node B's peer count must NOT change when A removes Bob"
-    );
-
-    // Repeating remove_peer is idempotent (no panic, count stays at 0).
-    node_a.remove_peer(&bob_id);
-    assert_eq!(node_a.peer_count(), 0);
-
-    let phase_elapsed = phase_start.elapsed();
-    assert!(
-        phase_elapsed.as_millis() < PHASE_BUDGET_MS,
-        "peer_removal phase exceeded {}ms budget: {}ms",
-        PHASE_BUDGET_MS,
-        phase_elapsed.as_millis()
-    );
-    info!(
-        scenario_id,
-        phase = "peer_removal",
-        elapsed_ms = phase_elapsed.as_millis() as u64,
-        "ok"
-    );
-    drop(phase);
+    let mut scenario = build_two_node_scenario(scenario_id);
+    assert_fresh_nodes(&scenario);
+    register_mutual_peers(scenario_id, &mut scenario);
+    assert_mutual_peer_registration(&scenario);
+    update_local_zones_independently(scenario_id, &mut scenario);
+    assert_local_zone_isolation(&scenario);
+    remove_peer_idempotently(scenario_id, &mut scenario);
 
     info!(scenario_id, "test passed");
 }
 
-/// Pin that `register_zone_owner_key` is INDEPENDENT per MeshNode —
+/// Pin that `register_zone_owner_key` is INDEPENDENT per `MeshNode` —
 /// registering an owner key on node A must not appear on node B. This
 /// catches a future regression where zone-owner-key state leaks
 /// through a shared static.

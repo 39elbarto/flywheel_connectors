@@ -1,0 +1,103 @@
+{
+  "status": "ok",
+  "command": "audit",
+  "subcommand": "explain",
+  "filters": {
+    "zone_id": "z:work",
+    "since": "24h",
+    "since_seconds": 86400,
+    "reference_time_unix": 1700086400,
+    "cutoff_unix": 1700000000
+  },
+  "source": {
+    "kind": "audit-chain-artifact"
+  },
+  "entries_returned": 2,
+  "audit_chain_range": {
+    "start_seq": 4,
+    "end_seq": 5
+  },
+  "entries": [
+    {
+      "id": "entry-work-admission",
+      "event_type": "capability.admission",
+      "severity": "info",
+      "seq": 4,
+      "occurred_at": 1700082000,
+      "zone_id": "z:work",
+      "actor": "agent:codex",
+      "connector_id": "fcp.slack:base:v1",
+      "operation_id": "messages.send",
+      "correlation_id": "corr-work",
+      "tombstoned": false,
+      "quorum_height": 7,
+      "quorum_signers": [
+        "node-a",
+        "node-b",
+        "node-c"
+      ],
+      "decision_rationale": null,
+      "reason_code": null,
+      "datalog_derivation": "allow if zone=z:work and cap=messages.send"
+    },
+    {
+      "id": "entry-work-invoke",
+      "event_type": "capability.invoke",
+      "severity": "info",
+      "seq": 5,
+      "occurred_at": 1700083000,
+      "zone_id": "z:work",
+      "actor": "agent:codex",
+      "connector_id": "fcp.slack:base:v1",
+      "operation_id": "messages.send",
+      "correlation_id": "corr-work",
+      "tombstoned": true,
+      "quorum_height": null,
+      "quorum_signers": [],
+      "decision_rationale": "work zone policy allowed messages.send",
+      "reason_code": "policy.allow.zone_work",
+      "datalog_derivation": null
+    }
+  ],
+  "explanation": {
+    "connector_id": "fcp.slack:base:v1",
+    "operation_id": "messages.send",
+    "occurred_at": 1700083000,
+    "actor": "agent:codex",
+    "zone_id": "z:work",
+    "correlation_id": "corr-work",
+    "invocation_audit_entry_id": "entry-work-invoke",
+    "reasons": [
+      {
+        "kind": "capability_grant",
+        "statement": "capability token tok-work-1 granted messages.send for connector fcp.slack:base:v1 operation messages.send under issuer kid-work",
+        "evidence": [
+          "capability_token:tok-work-1"
+        ]
+      },
+      {
+        "kind": "audit_admission",
+        "statement": "audit event entry-work-admission (seq 4) confirmed admission before connector dispatch",
+        "evidence": [
+          "audit_entry:entry-work-admission"
+        ]
+      },
+      {
+        "kind": "decision_receipt",
+        "statement": "decision receipt receipt-work-1 returned allow with reason work zone policy allowed messages.send",
+        "evidence": [
+          "receipt:receipt-work-1"
+        ]
+      },
+      {
+        "kind": "revocation_cascade",
+        "statement": "revocation cascade did not trigger because kid-work remained intact in the replay evidence",
+        "evidence": [
+          "audit_entry:entry-work-invoke"
+        ]
+      }
+    ],
+    "warnings": []
+  },
+  "warnings": []
+}

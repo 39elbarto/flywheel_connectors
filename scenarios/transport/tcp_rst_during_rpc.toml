@@ -1,0 +1,19 @@
+name = "tcp_rst_during_rpc"
+blast_radius = 1
+recovery_objective_secs = 30
+
+[[rollback_steps]]
+name = "clear_rpc_rst_rule"
+action = "clear_tcp_rst_rule"
+target = "fcpc_rpc_stream"
+
+[rollback_steps.args]
+phase = "rpc-headers"
+
+[[rollback_steps]]
+name = "verify_rpc_retry_idempotent"
+action = "verify_rpc_retry_single_commit"
+target = "fcpc_rpc_stream"
+
+[rollback_steps.args]
+timeout_secs = "30"

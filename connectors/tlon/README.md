@@ -1,9 +1,9 @@
 # Tlon Connector V3 Contract
 
-> **Status**: implemented runtime surface; incubating provider maturity
+> **Status**: PROVEN runtime contract documented with remote Tlon verifier proof
 > **Bead**: `flywheel_connectors-6n7.18`
 > **Parent**: `flywheel_connectors-6n7`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/tlon_connector_verification.sh`
 > **Tlon developer upstream**: https://dev.tlon.io/
 > **Urbit upstream**: https://urbit.org/
 
@@ -11,7 +11,7 @@
 
 `fcp.tlon` exposes a credentialed Urbit Eyre channel runtime for Tlon and Urbit messaging. It supports direct-message send, channel send, and local target normalization through the FCP connector lifecycle and line-delimited JSON-RPC process loop.
 
-The runtime is implemented, but provider maturity is still incubating. It has loopback no-mock HTTP evidence against an Eyre-shaped server, not production evidence against a real Tlon or Urbit ship.
+The runtime contract is proven with remote verifier evidence, including loopback no-mock HTTP coverage against an Eyre-shaped server. It does not claim production evidence against a real Tlon or Urbit ship.
 
 ## Runtime Snapshot
 
@@ -31,6 +31,7 @@ Important runtime truths:
 - `configure` rejects userinfo, query strings, fragments, unsupported schemes, public `http`, and private or loopback targets unless `allow_private_network = true`.
 - `handshake` requires prior configuration and returns `surface_status = "implemented"`.
 - `handshake` advertises active `tlon.dm` and `tlon.channel` capabilities.
+- Bound runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `health` reports `healthy` after successful configure and handshake.
 - `self_check` reports `ok` for session-cookie auth and `degraded` with `credential_injection_required` for credential-id mode.
 - `introspect` advertises all three operations with `implemented = true`.
@@ -132,6 +133,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - `connectors/tlon/src/main.rs` defines the line-delimited JSON-RPC process loop.
 - `connectors/tlon/src/error.rs` defines provider error classes and FCP error conversion.
 - `connectors/tlon/manifest.toml` defines the operation catalog, strict schemas, capability declarations, sandbox boundary, and zone policy.
+- `connectors/tlon/tests/local_non_mock.rs` covers the raw loopback Eyre channel boundary without `wiremock`.
 - `connectors/tlon/tests/integration.rs` covers loopback provider behavior, denial paths, evidence redaction, and JSON-RPC process behavior.
 - `connectors/tlon/tests/conformance_contract.rs` covers manifest/runtime operation parity and schema strictness.
 
@@ -158,7 +160,9 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 **Rerun commands**:
 
+- `bash scripts/e2e/tlon_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-tlon-readme cargo check -p fcp-tlon --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-tlon-readme cargo test -p fcp-tlon --test local_non_mock -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-tlon-readme cargo test -p fcp-tlon --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-tlon-readme cargo clippy -p fcp-tlon --all-targets --no-deps -- -D warnings`
-- `ubs connectors/tlon/src/connector.rs connectors/tlon/tests/integration.rs connectors/tlon/tests/conformance_contract.rs connectors/tlon/README.md`
+- `ubs connectors/tlon/src/connector.rs connectors/tlon/tests/local_non_mock.rs connectors/tlon/tests/integration.rs connectors/tlon/tests/conformance_contract.rs connectors/tlon/README.md scripts/e2e/tlon_connector_verification.sh`

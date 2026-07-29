@@ -8,6 +8,8 @@
 //! (capacity-exceeded returns a partial decode rather than silently
 //! truncating).
 
+#![allow(clippy::match_wildcard_for_single_variants)]
+
 use fcp_mesh::iblt::{IBLT_HASH_COUNT, Iblt, IbltError};
 use fcp_prelude::ObjectId;
 

@@ -1,7 +1,7 @@
 //! `AdmissionController` decode-slot + amplification back-pressure
 //! conformance.
 //!
-//! This pins the part of the AdmissionController contract that is
+//! This pins the part of the `AdmissionController` contract that is
 //! distinct from the bytes/symbols budget covered by br-d2uly:
 //!
 //! 1. **Decode-slot acquire/release** — `try_acquire_decode` tracks
@@ -18,7 +18,7 @@
 //! 4. **Per-peer isolation** — one peer saturating their decode
 //!    slots MUST NOT block another peer.
 //! 5. **Anti-amplification** — `check_amplification` rejects
-//!    response_symbols > request_symbols * max_amplification_factor
+//!    `response_symbols` > `request_symbols` * `max_amplification_factor`
 //!    for unauthenticated requests, but exempts authenticated peers
 //!    with proof-of-need.
 //!

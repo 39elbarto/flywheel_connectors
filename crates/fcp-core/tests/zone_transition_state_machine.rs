@@ -1,5 +1,5 @@
 //! Pin `EnrollmentStatus` 5-variant Display + serde + predicate truth tables —
-//! the closest analogue to "ZoneTransition state machine"
+//! the closest analogue to "`ZoneTransition` state machine"
 //! (flywheel_connectors-nn11p).
 //!
 //! Bead asks for `ZoneTransition` state machine + serde pinning. No type
@@ -19,7 +19,7 @@
 //! tables exhaustively or the JSON shape.
 //!
 //! Coverage:
-//!   * 5-variant snake_case serde rename matrix,
+//!   * 5-variant `snake_case` serde rename matrix,
 //!   * Display matches serde wire form for every variant,
 //!   * `is_enrolled` exhaustive truth table (only Approved → true),
 //!   * `is_renewable` exhaustive truth table (Approved + Expired only),
@@ -27,8 +27,8 @@
 //!     re-enter the lifecycle"; Rejected and Revoked are documented
 //!     terminals (no renewal path),
 //!   * JSON + CBOR roundtrip per variant,
-//!   * PascalCase rejection sentinel,
-//!   * Use as HashMap key (Hash + Eq) for status-grouping in registries.
+//!   * `PascalCase` rejection sentinel,
+//!   * Use as `HashMap` key (Hash + Eq) for status-grouping in registries.
 
 use ciborium::Value as CborValue;
 use fcp_core::EnrollmentStatus;

@@ -150,6 +150,7 @@ fn make_resource_pool_node(index: usize, connector_id: &ConnectorId, zone: &Zone
         131_072_u32.saturating_sub(u32::try_from(index).unwrap_or(u32::MAX).saturating_mul(256))
     };
 
+    let object_id_byte = u8::try_from(index % 256).expect("modulo 256 fits in u8");
     let profile = DeviceProfile::builder(node_id)
         .cpu_cores(if index == 0 { 64 } else { 32 })
         .cpu_arch(CpuArch::X86_64)
@@ -160,7 +161,7 @@ fn make_resource_pool_node(index: usize, connector_id: &ConnectorId, zone: &Zone
         .add_connector(InstalledConnector::new(
             connector_id.clone(),
             "1.0.0",
-            ObjectId::from_bytes([index as u8; 32]),
+            ObjectId::from_bytes([object_id_byte; 32]),
         ))
         .build();
 
@@ -190,7 +191,7 @@ fn attach_resource_pool_state(input: PlannerInput, zone: &ZoneId) -> PlannerInpu
             let used = if index == 0 {
                 limit
             } else {
-                (index % 8) as u16
+                u16::try_from(index % 8).expect("modulo 8 fits in u16")
             };
             ResourcePoolStatus::new(
                 format!("rr-work-{index:03}"),

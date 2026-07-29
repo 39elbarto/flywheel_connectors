@@ -18,16 +18,16 @@
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. `OutputCaptureConfig::default`: stdout_capacity=64 KiB,
-//!    stderr_capacity=64 KiB, parse_json_lines=true, max_json_lines=100.
+//! 1. `OutputCaptureConfig::default`: `stdout_capacity=64` KiB,
+//!    `stderr_capacity=64` KiB, `parse_json_lines=true`, `max_json_lines=100`.
 //! 2. `OutputCaptureConfig` builders chain mutably + preserve fields.
 //! 3. `BufferStats` 4-field serde roundtrip identity.
-//! 4. `InstallStatus` 6 variants snake_case + `failed`/`updating`
+//! 4. `InstallStatus` 6 variants `snake_case` + `failed`/`updating`
 //!    payload carriage; rejects unknown tag.
 //! 5. `VerificationStatus` 4 variants with `is_ok` ⇔
 //!    `Verified | Unverified | Skipped` (Failed is the only NOT-ok).
-//! 6. `InstallOptions::default`: dry_run=false, mirror_to_mesh=false,
-//!    skip_signature=false, target_override=None, force=false
+//! 6. `InstallOptions::default`: `dry_run=false`, `mirror_to_mesh=false`,
+//!    `skip_signature=false`, `target_override=None`, force=false
 //!    (most-permissive false, fail-safe).
 //! 7. `InstallStep::passed` constructor sets passed=true and
 //!    populates fields.

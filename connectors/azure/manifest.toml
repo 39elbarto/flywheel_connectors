@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:8d79d6e6a1e8ea22960d4b7d806f636b3d070884e5b2629eef9ba1b9f54967db"
+interface_hash = "blake3-256:fcp.interface.v2:054130c021f34660ba460c6649c80c154f46f4e22f124bf96d8f86959250c7ce"
 
 [connector]
 id = "fcp.azure"
@@ -446,6 +446,72 @@ common_mistakes = ["Assuming subscription visibility guarantees access to every 
 examples = []
 related = ["azure.management.list_resource_groups"]
 
+[provides.operations."azure.storage.blob_delete"]
+description = "Delete a blob from Azure Storage."
+capability = "azure.storage.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."azure.storage.blob_delete".input_schema]
+required = [
+    "storage_account",
+    "container",
+    "blob_name",
+]
+type = "object"
+
+[provides.operations."azure.storage.blob_delete".input_schema.properties.blob_base_url]
+description = "Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."
+type = "string"
+
+[provides.operations."azure.storage.blob_delete".input_schema.properties.blob_name]
+type = "string"
+
+[provides.operations."azure.storage.blob_delete".input_schema.properties.container]
+type = "string"
+
+[provides.operations."azure.storage.blob_delete".input_schema.properties.storage_account]
+type = "string"
+
+[provides.operations."azure.storage.blob_delete".output_schema]
+required = ["deleted"]
+type = "object"
+
+[provides.operations."azure.storage.blob_delete".output_schema.properties.blob_name]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."azure.storage.blob_delete".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."azure.storage.blob_delete".network_constraints]
+host_allow = ["*.blob.core.windows.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."azure.storage.blob_delete".ai_hints]
+when_to_use = "Delete a blob from an Azure storage container."
+common_mistakes = ["Assuming delete is a dry-run operation; it removes the target blob."]
+examples = []
+related = ["azure.storage.blob_list_blobs"]
+
 [provides.operations."azure.storage.blob_get"]
 description = "Download a blob and return its contents base64-encoded."
 capability = "azure.storage.read"
@@ -543,6 +609,10 @@ type = "string"
 [provides.operations."azure.storage.blob_list_blobs".input_schema.properties.container]
 type = "string"
 
+[provides.operations."azure.storage.blob_list_blobs".input_schema.properties.prefix]
+description = "Optional blob name prefix for narrowing the listing."
+type = "string"
+
 [provides.operations."azure.storage.blob_list_blobs".input_schema.properties.storage_account]
 type = "string"
 
@@ -587,6 +657,7 @@ examples = []
 related = [
     "azure.storage.blob_list_containers",
     "azure.storage.blob_get",
+    "azure.storage.blob_delete",
 ]
 
 [provides.operations."azure.storage.blob_list_containers"]
@@ -722,7 +793,10 @@ common_mistakes = [
     "Assuming the upload is preview-only when it can overwrite an existing blob.",
 ]
 examples = []
-related = ["azure.storage.blob_get"]
+related = [
+    "azure.storage.blob_get",
+    "azure.storage.blob_delete",
+]
 
 [sandbox]
 profile = "strict"

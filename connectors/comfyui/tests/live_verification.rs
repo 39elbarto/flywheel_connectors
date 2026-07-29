@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 const OP_HEALTH: &str = "comfyui.health";
 const CAP_HEALTH: &str = "comfyui.health.read";
+const LIVE_GATE_ENV: &str = "FCP_LIVE_DEVICE";
 
 fn valid_token(
     signing_key: &Ed25519SigningKey,
@@ -39,6 +40,16 @@ fn valid_token(
 async fn comfyui_live_health_or_structured_skip_jsonl() {
     let git_revision =
         std::env::var("COMFYUI_E2E_GIT_REVISION").unwrap_or_else(|_| "unknown".into());
+    if !live_gate_enabled() {
+        emit_live_jsonl(
+            &git_revision,
+            "skipped",
+            &format!("{LIVE_GATE_ENV} is not set to 1"),
+            None,
+        );
+        return;
+    }
+
     let Some(base_url) = std::env::var("COMFYUI_BASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -100,12 +111,19 @@ async fn comfyui_live_health_or_structured_skip_jsonl() {
     }
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 fn emit_live_jsonl(git_revision: &str, status: &str, reason: &str, endpoint_class: Option<&str>) {
     println!(
         "COMFYUI_E2E_JSONL {}",
         serde_json::json!({
             "event": "comfyui_live_health",
             "fixture_mode": "live",
+            "suite_class": "device_required",
+            "gate_env_var": LIVE_GATE_ENV,
             "git_revision": git_revision,
             "operation": OP_HEALTH,
             "status": status,

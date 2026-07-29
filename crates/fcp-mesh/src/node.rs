@@ -8,29 +8,36 @@
 //! without embedding transport specifics.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::too_many_lines)]
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
+use fcp_cbor::CanonicalSerializer;
+use fcp_crypto::{CryptoError, CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{
-    CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
-    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm,
-    ZoneTransportPolicy,
+    CapabilityVerifier, ConnectorStateChange, EvictionPolicy, FcpError, InvokeRequest,
+    InvokeValidationError, Lease as CoreLease, LeaseValidationError as CoreLeaseValidationError,
+    ObjectId, ObjectIdKey, OperationIntent, OperationReceipt, RevocationRegistry, StorageMeta,
+    StoredObject, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneTransportPolicy,
+    validate_lease as validate_core_lease,
 };
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
-use fcp_store::{ObjectStore, QuarantineStore, SymbolStore};
+use fcp_store::{
+    ConnectorStateStoreError, FcpStoreConnectorStateStore, ObjectStore, ObjectSymbolMeta,
+    QuarantineStore, StoredSymbol, SymbolStore,
+};
 use fcp_tailscale::NodeId;
-use fcp_telemetry::TraceContext;
 use fcp_telemetry::trace_capture::{
     AdmissionOutcome, CapturedTrace, GossipEvent, LeaseEvent, RoutingDecision, SessionEvent,
     TraceCapture, TraceCaptureConfig, TraceEvent, TraceExportFormat,
 };
+use fcp_telemetry::{TraceContext, metrics};
 use hex::encode;
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::admission::{
     AdmissionController, AdmissionError, AdmissionPolicy, ObjectAdmissionClass,
@@ -42,12 +49,16 @@ use crate::degraded::{
 };
 use crate::device::DeviceProfile;
 use crate::gossip::{
-    GossipConfig, GossipMessage, GossipRequest, GossipResponse, GossipSummary, MeshGossip,
-    PeerCapabilityAdvertisement, PeerProtocolCapabilities, RevocationPushMessage,
+    GossipConfig, GossipMessage, GossipRequest, GossipResponse, GossipSummary, IbltPlaceholder,
+    MAX_OBJECT_IDS_PER_REQUEST, MeshGossip, PeerCapabilityAdvertisement, PeerProtocolCapabilities,
+    ReconcileRequest, ReconcileResponse, RevocationPushMessage,
 };
 use crate::planner::{
-    CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
-    PlannerInput,
+    BetaPosterior, CandidateNode, DecisionReason, ExecutionPlanner, HeldLease, LeasePurpose,
+    NodeInfo, PlannerContext, PlannerInput, ResourcePoolClass, ThompsonChoice, ThompsonScheduler,
+};
+use crate::revocation::{
+    RevocationFreshnessDecision, RevocationFreshnessFrontier, VersionVectorOrder,
 };
 use crate::session::MeshSession;
 use crate::symbol_request::{
@@ -55,6 +66,8 @@ use crate::symbol_request::{
     SymbolResponse, SymbolResponseBuilder, TargetedRepairEngine, TransferKey, ValidatedRequest,
 };
 use crate::transport::{RankedPath, TransportPath, TransportSelector};
+
+const DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES: usize = 2;
 
 /// MeshNode configuration (builder-style).
 #[derive(Debug, Clone)]
@@ -177,6 +190,14 @@ pub enum MeshNodeError {
     #[error("enforcement error: {0}")]
     Enforcement(#[from] MeshNodeEnforcementError),
 
+    /// Durable lease object failed validation before mesh publication.
+    #[error("lease validation error: {0}")]
+    LeaseValidation(#[from] CoreLeaseValidationError),
+
+    /// Durable lease quorum signing bytes could not be canonicalized.
+    #[error("lease quorum signing bytes error: {0}")]
+    LeaseQuorumSigningBytes(#[from] CryptoError),
+
     /// Required peer signing key is not registered.
     #[error("missing peer signing key for {peer}")]
     PeerSigningKeyMissing { peer: String },
@@ -254,6 +275,21 @@ pub enum MeshNodeError {
     #[error("revocation push from {peer} has invalid owner signature for zone {zone_id}")]
     InvalidOwnerSignature { peer: String, zone_id: String },
 
+    /// Revocation push advertises a frontier already dominated by local state.
+    #[error(
+        "stale revocation frontier from {peer} for zone {zone_id}: incoming seq {incoming_seq} is behind local seq {local_seq}"
+    )]
+    StaleRevocationFrontier {
+        /// Peer that forwarded the stale push.
+        peer: String,
+        /// Zone the push targeted.
+        zone_id: String,
+        /// Incoming revocation sequence from the push.
+        incoming_seq: u64,
+        /// Local effective sequence for the same zone.
+        local_seq: u64,
+    },
+
     /// Trace capture not enabled.
     #[error("trace capture not enabled")]
     TraceNotEnabled,
@@ -269,6 +305,14 @@ pub enum MeshNodeError {
     /// Gossip payload exceeded the pre-deserialize raw byte budget.
     #[error("gossip payload too large: {len} bytes exceeds max {max}")]
     GossipPayloadTooLarge { len: usize, max: usize },
+
+    /// Connector-state root observation failed.
+    #[error("connector-state store error: {0}")]
+    ConnectorStateStore(#[from] ConnectorStateStoreError),
+
+    /// Canonical object serialization failed.
+    #[error("canonical serialization error: {0}")]
+    Serialization(#[from] fcp_cbor::SerializationError),
 }
 
 /// Enforcement errors for control-plane requests.
@@ -344,6 +388,10 @@ pub struct MeshNodeMetrics {
     pub gossip_updates: u64,
     /// Peer updates applied.
     pub peer_updates: u64,
+    /// HierVV revocation-frontier size observations recorded.
+    pub revocation_hiervv_size_samples: u64,
+    /// Last serialized HierVV revocation-frontier size in bytes.
+    pub revocation_hiervv_size_last_bytes: u64,
 }
 
 /// Verified revocation push ready to apply to a revocation registry fetch path.
@@ -359,6 +407,114 @@ pub struct VerifiedRevocationPush {
     pub new_rev_seq: u64,
     /// Push timestamp.
     pub timestamp: u64,
+    /// Hierarchical-vector freshness decision used before accepting the push.
+    pub freshness: RevocationFreshnessDecision,
+}
+
+/// Outbound gossip request produced while handling an inbound control-plane message.
+#[derive(Debug, Clone)]
+pub struct GossipFollowupRequest {
+    /// Peer the transport should send this request to.
+    pub peer: TailscaleNodeId,
+    /// Bounded request body to send.
+    pub request: GossipRequest,
+}
+
+/// Verified peer availability that should be fetched by the transport layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GossipFetchPlan {
+    /// Peer that advertised the available objects/symbols.
+    pub peer: TailscaleNodeId,
+    /// Zone the advertised objects/symbols belong to.
+    pub zone_id: ZoneId,
+    /// Missing objects this node should fetch from `peer`.
+    pub object_ids: Vec<ObjectId>,
+    /// Missing symbols this node should fetch from `peer`.
+    pub symbols: Vec<(ObjectId, u32)>,
+}
+
+/// Symbol bytes fetched from a peer, paired with the object-level symbol metadata
+/// needed to admit them into the local symbol store.
+#[derive(Debug, Clone)]
+pub struct GossipFetchedSymbol {
+    /// Metadata for the object this symbol helps reconstruct.
+    pub object_meta: ObjectSymbolMeta,
+    /// Fetched symbol bytes.
+    pub symbol: StoredSymbol,
+}
+
+/// Object and symbol bytes materialized for a verified gossip request.
+#[must_use]
+#[derive(Debug, Clone, Default)]
+pub struct GossipFetchPayload {
+    /// Object payloads available to transfer to the requester.
+    pub objects: Vec<StoredObject>,
+    /// Symbol payloads available to transfer to the requester.
+    pub symbols: Vec<GossipFetchedSymbol>,
+}
+
+impl GossipFetchPayload {
+    /// Whether the responder has no bytes to transfer.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty() && self.symbols.is_empty()
+    }
+}
+
+/// Availability response plus the matching bytes for transport handoff.
+#[must_use]
+#[derive(Debug, Clone)]
+pub struct GossipFetchReply {
+    /// Bounded availability response to return to the requester.
+    pub response: GossipResponse,
+    /// Stored bytes that match the advertised availability.
+    pub payload: GossipFetchPayload,
+}
+
+/// Result of applying fetched gossip bytes to the local stores.
+#[must_use]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GossipFetchApplyOutcome {
+    /// Object payloads accepted into the local object store and announced.
+    pub objects_applied: Vec<ObjectId>,
+    /// Accepted object payloads that look like connector-state roots.
+    ///
+    /// The transport byte-application layer cannot validate connector/zone
+    /// ownership because it does not know the caller's `ObjectIdKey` or
+    /// connector id. Host/mesh adapters should pass these candidates to
+    /// `observe_connector_state_root` with the appropriate
+    /// `FcpStoreConnectorStateStore`.
+    pub connector_state_root_candidates: Vec<ObjectId>,
+    /// Symbol payloads accepted into the local symbol store and announced.
+    pub symbols_applied: Vec<(ObjectId, u32)>,
+}
+
+impl GossipFetchApplyOutcome {
+    /// Whether the fetched payload changed no local availability state.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.objects_applied.is_empty()
+            && self.connector_state_root_candidates.is_empty()
+            && self.symbols_applied.is_empty()
+    }
+}
+
+/// Result of applying fetched gossip bytes and observing connector-state roots.
+#[must_use]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GossipFetchApplyObserveOutcome {
+    /// Store-application result for fetched object and symbol bytes.
+    pub apply: GossipFetchApplyOutcome,
+    /// Connector-state changes validated from fetched root candidates.
+    pub connector_state_changes: Vec<ConnectorStateChange>,
+}
+
+impl GossipFetchApplyObserveOutcome {
+    /// Whether the fetched payload changed no local availability or state-root state.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.apply.is_empty() && self.connector_state_changes.is_empty()
+    }
 }
 
 /// Structured result of dispatching an inbound gossip message.
@@ -369,6 +525,12 @@ pub struct GossipDispatchOutcome {
     pub revocation_push: Option<VerifiedRevocationPush>,
     /// Immediate response the transport should return to the requester.
     pub response: Option<GossipResponse>,
+    /// Immediate reconcile response the transport should return to the requester.
+    pub reconcile_response: Option<ReconcileResponse>,
+    /// Follow-up request the transport should send to the selected peer.
+    pub followup_request: Option<GossipFollowupRequest>,
+    /// Verified availability that the transport should fetch from a peer.
+    pub fetch_plan: Option<GossipFetchPlan>,
 }
 
 impl GossipDispatchOutcome {
@@ -376,6 +538,9 @@ impl GossipDispatchOutcome {
         Self {
             revocation_push: Some(revocation_push),
             response: None,
+            reconcile_response: None,
+            followup_request: None,
+            fetch_plan: None,
         }
     }
 
@@ -383,6 +548,65 @@ impl GossipDispatchOutcome {
         Self {
             revocation_push: None,
             response: Some(response),
+            reconcile_response: None,
+            followup_request: None,
+            fetch_plan: None,
+        }
+    }
+
+    fn with_reconcile_response(reconcile_response: ReconcileResponse) -> Self {
+        Self {
+            revocation_push: None,
+            response: None,
+            reconcile_response: Some(reconcile_response),
+            followup_request: None,
+            fetch_plan: None,
+        }
+    }
+
+    fn with_followup_request(followup_request: GossipFollowupRequest) -> Self {
+        Self {
+            revocation_push: None,
+            response: None,
+            reconcile_response: None,
+            followup_request: Some(followup_request),
+            fetch_plan: None,
+        }
+    }
+
+    fn with_fetch_plan(fetch_plan: GossipFetchPlan) -> Self {
+        Self {
+            revocation_push: None,
+            response: None,
+            reconcile_response: None,
+            followup_request: None,
+            fetch_plan: Some(fetch_plan),
+        }
+    }
+}
+
+/// Dispatch result for transports that want verified request bytes inline.
+#[must_use]
+#[derive(Debug, Clone, Default)]
+pub struct GossipDispatchFetchOutcome {
+    /// Standard dispatch result retained for existing transport behavior.
+    pub dispatch: GossipDispatchOutcome,
+    /// Materialized bytes for an inbound gossip request, when applicable.
+    pub fetch_reply: Option<GossipFetchReply>,
+}
+
+impl GossipDispatchFetchOutcome {
+    fn from_dispatch(dispatch: GossipDispatchOutcome) -> Self {
+        Self {
+            dispatch,
+            fetch_reply: None,
+        }
+    }
+
+    fn with_fetch_reply(fetch_reply: GossipFetchReply) -> Self {
+        Self {
+            dispatch: GossipDispatchOutcome::with_response(fetch_reply.response.clone()),
+            fetch_reply: Some(fetch_reply),
         }
     }
 }
@@ -396,6 +620,7 @@ pub struct MeshNode {
     symbol_requests: SymbolRequestHandler,
     symbol_metrics: SymbolRequestMetrics,
     planner: ExecutionPlanner,
+    thompson_scheduler: ThompsonScheduler,
     degraded_encoder: DegradedModeEncoder,
     degraded_decoder: DegradedModeDecoder,
     object_store: Arc<dyn ObjectStore>,
@@ -414,6 +639,7 @@ pub struct MeshNode {
     /// are rejected fail-closed rather than accepted on peer signature
     /// alone.
     zone_owner_keys: HashMap<ZoneId, Ed25519VerifyingKey>,
+    revocation_frontier: RevocationFreshnessFrontier,
     peers: HashMap<NodeId, PeerState>,
     local_profile: Option<DeviceProfile>,
     /// Zones this node is authorized for, sourced from enrollment /
@@ -456,6 +682,7 @@ impl MeshNode {
             symbol_requests: SymbolRequestHandler::new(config.symbol_request_policy),
             symbol_metrics: SymbolRequestMetrics::default(),
             planner: ExecutionPlanner::new(),
+            thompson_scheduler: ThompsonScheduler::new(),
             degraded_encoder: DegradedModeEncoder::new(
                 config.raptorq_config.clone(),
                 config.sender_instance_id,
@@ -467,6 +694,7 @@ impl MeshNode {
             sessions: HashMap::new(),
             peer_signing_keys: HashMap::new(),
             zone_owner_keys: HashMap::new(),
+            revocation_frontier: RevocationFreshnessFrontier::new(),
             local_node,
             local_node_ts,
             peers: HashMap::new(),
@@ -945,6 +1173,79 @@ impl MeshNode {
         self.zone_owner_keys.remove(zone_id);
     }
 
+    /// Observe a registry owner's current revocation head for `zone_id`.
+    ///
+    /// This lets the revocation registry owner seed the HierVV freshness
+    /// frontier from its durable `RevocationRegistry` before mesh pushes or
+    /// reconciliation traffic are evaluated.
+    pub fn observe_revocation_registry_head(
+        &mut self,
+        zone_id: &ZoneId,
+        registry: &RevocationRegistry,
+    ) -> RevocationFreshnessDecision {
+        self.observe_revocation_frontier(zone_id, registry.head_seq)
+    }
+
+    /// Observe a local revocation frontier update for `zone_id`.
+    ///
+    /// This lets registry/reconciliation callers seed the mesh node with the
+    /// current effective revocation frontier before handling priority pushes.
+    pub fn observe_revocation_frontier(
+        &mut self,
+        zone_id: &ZoneId,
+        rev_seq: u64,
+    ) -> RevocationFreshnessDecision {
+        self.revocation_frontier.observe(zone_id.as_str(), rev_seq)
+    }
+
+    /// Effective local revocation frontier counter for `zone_id`.
+    #[must_use]
+    pub fn revocation_frontier_counter(&self, zone_id: &ZoneId) -> u64 {
+        self.revocation_frontier.counter_for(zone_id.as_str())
+    }
+
+    /// Serializable snapshot of the current local revocation freshness frontier.
+    ///
+    /// Callers that own durable registry state can persist this value with their
+    /// registry checkpoint and later pass it to
+    /// [`Self::reconcile_revocation_frontier`] after restart.
+    #[must_use]
+    pub fn revocation_frontier_snapshot(&self) -> RevocationFreshnessFrontier {
+        self.revocation_frontier.clone()
+    }
+
+    /// Reconcile a persisted or remote revocation freshness frontier.
+    ///
+    /// The merge is rollback-safe: if local state already dominates `frontier`,
+    /// the local frontier is left unchanged and `VersionVectorOrder::DominatedBy`
+    /// is returned. Equal, dominating, and concurrent frontiers are merged.
+    pub fn reconcile_revocation_frontier(
+        &mut self,
+        frontier: &RevocationFreshnessFrontier,
+    ) -> VersionVectorOrder {
+        let order = self.revocation_frontier.reconcile(frontier);
+        debug!(
+            target: "fcp.mesh.revocation.freshness",
+            hier_vv_status = order.as_str(),
+            decision = if matches!(order, VersionVectorOrder::DominatedBy) {
+                "reject_stale"
+            } else {
+                "accept"
+            },
+            "reconciled revocation freshness frontier"
+        );
+        order
+    }
+
+    /// Serialized size of the current local revocation freshness frontier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if canonical serialization of the HierVV frontier fails.
+    pub fn revocation_frontier_size_bytes(&self) -> Result<usize, String> {
+        self.revocation_frontier.canonical_len()
+    }
+
     /// Current peer count (excluding local).
     #[must_use]
     pub fn peer_count(&self) -> usize {
@@ -1033,6 +1334,16 @@ impl MeshNode {
     /// Plan execution candidates for a connector.
     #[must_use]
     pub fn plan_execution(&self, context: &PlannerContext, now_ms: u64) -> Vec<CandidateNode> {
+        let mut rng = rand::thread_rng();
+        self.plan_execution_with_rng(context, now_ms, &mut rng)
+    }
+
+    fn plan_execution_with_rng<R: rand::Rng + ?Sized>(
+        &self,
+        context: &PlannerContext,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Vec<CandidateNode> {
         let mut input = self.build_planner_input(now_ms);
         if context.singleton_writer {
             // Do not apply singleton enforcement from an unrelated lease when the
@@ -1042,7 +1353,106 @@ impl MeshNode {
                 .as_ref()
                 .and_then(|subject_id| self.preferred_singleton_holder(Some(subject_id), now_ms));
         }
-        self.planner.plan(&input, context)
+        let candidates = self.planner.plan(&input, context);
+        self.apply_thompson_ranking(candidates, context, rng)
+    }
+
+    fn apply_thompson_ranking<R: rand::Rng + ?Sized>(
+        &self,
+        mut candidates: Vec<CandidateNode>,
+        context: &PlannerContext,
+        rng: &mut R,
+    ) -> Vec<CandidateNode> {
+        let Some(operation_class) = context.resource_pool_class else {
+            return candidates;
+        };
+        if candidates.len() < 2 {
+            return candidates;
+        }
+
+        let node_ids: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .collect();
+        if !self
+            .thompson_scheduler
+            .has_evidence_for(&node_ids, operation_class)
+        {
+            return candidates;
+        }
+
+        let Some(choice) = self
+            .thompson_scheduler
+            .choose_with_rng(&node_ids, operation_class, rng)
+        else {
+            return candidates;
+        };
+        let Some(selected_index) = candidates
+            .iter()
+            .position(|candidate| candidate.node_id.as_str() == choice.node_id.as_str())
+        else {
+            return candidates;
+        };
+
+        if selected_index != 0 {
+            let selected = candidates.remove(selected_index);
+            candidates.insert(0, selected);
+        }
+        Self::rewrite_execution_ranks(&mut candidates, &choice);
+        candidates
+    }
+
+    fn rewrite_execution_ranks(candidates: &mut [CandidateNode], choice: &ThompsonChoice) {
+        for (rank, candidate) in candidates.iter_mut().enumerate() {
+            candidate.decision_reasons.retain(|reason| {
+                !matches!(
+                    reason,
+                    DecisionReason::SelectedAsBest { .. }
+                        | DecisionReason::EligibleNotSelected { .. }
+                )
+            });
+
+            if rank == 0 {
+                candidate
+                    .decision_reasons
+                    .push(DecisionReason::SelectedAsBest { rank: 1 });
+                candidate.decision_reasons.push(DecisionReason::Custom(format!(
+                    "thompson_sample operation_class={:?} sample={:.6} posterior_mean={:.6} posterior_variance={:.6}",
+                    choice.operation_class,
+                    choice.sample,
+                    choice.posterior_mean,
+                    choice.posterior_variance
+                )));
+            } else {
+                candidate
+                    .decision_reasons
+                    .push(DecisionReason::EligibleNotSelected {
+                        rank: rank + 1,
+                        better_count: rank,
+                    });
+            }
+        }
+    }
+
+    /// Record the outcome of a routed execution for adaptive scheduling.
+    pub fn record_execution_outcome(
+        &mut self,
+        node_id: NodeId,
+        operation_class: ResourcePoolClass,
+        success: bool,
+    ) {
+        self.thompson_scheduler
+            .record_outcome(node_id, operation_class, success);
+    }
+
+    /// Return the current adaptive routing posterior for a node and operation class.
+    #[must_use]
+    pub fn execution_posterior(
+        &self,
+        node_id: &NodeId,
+        operation_class: ResourcePoolClass,
+    ) -> BetaPosterior {
+        self.thompson_scheduler.posterior(node_id, operation_class)
     }
 
     /// Enforce capability, holder proof, and revocation checks for an invoke request.
@@ -1185,6 +1595,86 @@ impl MeshNode {
             }
         }
         added
+    }
+
+    /// Observe a replicated connector-state root and announce it through gossip.
+    ///
+    /// `fcp-store` owns root validation and cache invalidation; `fcp-mesh`
+    /// owns object availability gossip. This bridge keeps that dependency
+    /// direction acyclic while making a validated root visible to peers after
+    /// the object has arrived locally.
+    ///
+    /// # Errors
+    /// Returns an error if the state store rejects the root object as missing,
+    /// malformed, foreign to the connector+zone store, or referencing a missing
+    /// head object.
+    pub async fn observe_connector_state_root(
+        &mut self,
+        state_store: &FcpStoreConnectorStateStore,
+        root_object_id: ObjectId,
+        now_ms: u64,
+    ) -> Result<ConnectorStateChange, ConnectorStateStoreError> {
+        let change = state_store.observe_replicated_root(root_object_id).await?;
+        self.announce_object(
+            &change.zone_id,
+            &root_object_id,
+            ObjectAdmissionClass::Admitted,
+            now_ms,
+        );
+        Ok(change)
+    }
+
+    /// Store a durable core lease object locally and announce it for gossip.
+    ///
+    /// The lease coordinator owns admission and fencing-token selection. This
+    /// bridge validates the already-issued lease with the mesh default quorum
+    /// before turning it into a content-addressed mesh object, so peers only
+    /// fetch quorum-backed authority objects through the normal gossip path.
+    ///
+    /// # Errors
+    /// Returns an error if canonical lease encoding or local object storage
+    /// fails.
+    pub async fn publish_signed_lease_object(
+        &mut self,
+        lease: &CoreLease,
+        object_id_key: &ObjectIdKey,
+        now_ms: u64,
+    ) -> Result<ObjectId, MeshNodeError> {
+        validate_core_lease(
+            lease,
+            &lease.subject_object_id,
+            lease.zone_id(),
+            lease.purpose,
+            lease.lease_seq,
+            now_ms / 1000,
+            DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+        )?;
+        self.verify_lease_quorum_signatures(lease)?;
+
+        let body = CanonicalSerializer::serialize(lease, &lease.header.schema)?;
+        let object_id = StoredObject::derive_id(&lease.header, &body, object_id_key)?;
+        let stored = StoredObject {
+            object_id,
+            header: lease.header.clone(),
+            body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Lease {
+                    expires_at: lease.exp,
+                },
+            },
+        };
+
+        match self.object_store.put(stored).await {
+            Ok(()) | Err(fcp_store::ObjectStoreError::AlreadyExists(_)) => {}
+            Err(err) => return Err(MeshNodeError::ObjectStore(err)),
+        }
+        self.announce_object(
+            &lease.header.zone_id,
+            &object_id,
+            ObjectAdmissionClass::Admitted,
+            now_ms,
+        );
+        Ok(object_id)
     }
 
     /// Announce a symbol for gossip (admitted objects only).
@@ -1549,6 +2039,22 @@ impl MeshNode {
             })
     }
 
+    fn verify_lease_quorum_signatures(&self, lease: &CoreLease) -> Result<(), MeshNodeError> {
+        let signing_bytes = lease.quorum_signing_bytes()?;
+        for signature in lease.quorum_signatures.iter() {
+            let peer = NodeId::new(signature.node_id.as_str());
+            let key = self.peer_signing_key(&peer)?;
+            let signature_bytes = Ed25519Signature::from_bytes(&signature.signature);
+            key.verify(&signing_bytes, &signature_bytes).map_err(|_| {
+                MeshNodeError::PeerSignatureInvalid {
+                    peer: signature.node_id.as_str().to_string(),
+                    message_kind: "lease quorum",
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     fn verify_summary_signature(&self, summary: &GossipSummary) -> Result<NodeId, MeshNodeError> {
         let signature =
             summary
@@ -1745,6 +2251,145 @@ impl MeshNode {
         Ok(peer)
     }
 
+    fn verify_gossip_response(
+        &self,
+        response: &GossipResponse,
+        now_secs: u64,
+    ) -> Result<NodeId, MeshNodeError> {
+        if response.to != self.local_node_ts {
+            return Err(MeshNodeError::RecipientMismatch {
+                message_kind: "gossip response",
+                expected: self.local_node_ts.as_str().to_string(),
+                actual: response.to.as_str().to_string(),
+            });
+        }
+
+        let peer = NodeId::new(response.from.as_str());
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip response",
+            })?;
+        if !state.zones.contains(&response.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: response.zone_id.to_string(),
+            });
+        }
+
+        let max_objects = self.gossip.max_objects_per_request();
+        let max_symbols = self.gossip.max_symbols_per_request();
+        if response.have_objects.len() > max_objects || response.have_symbols.len() > max_symbols {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "gossip response from {} for zone {} exceeded availability budget: have_objects={}, have_symbols={}, max_objects={}, max_symbols={}",
+                response.from.as_str(),
+                response.zone_id,
+                response.have_objects.len(),
+                response.have_symbols.len(),
+                max_objects,
+                max_symbols
+            )));
+        }
+
+        if crate::gossip::is_outside_freshness_window(
+            response.timestamp,
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
+            return Err(MeshNodeError::StaleGossipMessage {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip response",
+            });
+        }
+
+        Ok(peer)
+    }
+
+    fn verify_reconcile_request(
+        &self,
+        request: &ReconcileRequest,
+        now_secs: u64,
+    ) -> Result<NodeId, MeshNodeError> {
+        let peer = NodeId::new(request.from.as_str());
+
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "reconcile request",
+            })?;
+        if !state.zones.contains(&request.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: request.zone_id.to_string(),
+            });
+        }
+        if crate::gossip::is_outside_freshness_window(
+            request.timestamp,
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
+            return Err(MeshNodeError::StaleGossipMessage {
+                peer: peer.as_str().to_string(),
+                message_kind: "reconcile request",
+            });
+        }
+
+        Ok(peer)
+    }
+
+    fn verify_reconcile_response(
+        &self,
+        response: &ReconcileResponse,
+        now_secs: u64,
+    ) -> Result<NodeId, MeshNodeError> {
+        let peer = NodeId::new(response.from.as_str());
+
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "reconcile response",
+            })?;
+        if !state.zones.contains(&response.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: response.zone_id.to_string(),
+            });
+        }
+        if response.peer_missing_objects.len() > MAX_OBJECT_IDS_PER_REQUEST
+            || response.we_missing_objects.len() > MAX_OBJECT_IDS_PER_REQUEST
+        {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "reconcile response from {} for zone {} exceeded object budget: peer_missing={}, we_missing={}, max={}",
+                response.from.as_str(),
+                response.zone_id,
+                response.peer_missing_objects.len(),
+                response.we_missing_objects.len(),
+                MAX_OBJECT_IDS_PER_REQUEST
+            )));
+        }
+        if crate::gossip::is_outside_freshness_window(
+            response.timestamp,
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
+            return Err(MeshNodeError::StaleGossipMessage {
+                peer: peer.as_str().to_string(),
+                message_kind: "reconcile response",
+            });
+        }
+
+        Ok(peer)
+    }
+
     async fn load_symbol_meta(
         &self,
         request: &SymbolRequest,
@@ -1870,6 +2515,28 @@ impl MeshNode {
             }
         })?;
 
+        let freshness = self
+            .revocation_frontier
+            .evaluate(push.zone_id.as_str(), push.new_rev_seq);
+        debug!(
+            target: "fcp.mesh.revocation.freshness",
+            hier_vv_status = freshness.hier_vv_status(),
+            decision = freshness.decision_label(),
+            zone_id = %push.zone_id,
+            incoming_seq = freshness.incoming_counter,
+            local_seq = freshness.local_counter,
+            "evaluated revocation push freshness"
+        );
+        if !freshness.is_accepted() {
+            self.record_revocation_hiervv_size(&push.zone_id, &freshness);
+            return Err(MeshNodeError::StaleRevocationFrontier {
+                peer: push.from.as_str().to_string(),
+                zone_id: push.zone_id.to_string(),
+                incoming_seq: freshness.incoming_counter,
+                local_seq: freshness.local_counter,
+            });
+        }
+
         if crate::gossip::is_outside_freshness_window(
             push.timestamp,
             now_secs,
@@ -1881,6 +2548,10 @@ impl MeshNode {
                 message_kind: "revocation push",
             });
         }
+        let freshness = self
+            .revocation_frontier
+            .observe(push.zone_id.as_str(), push.new_rev_seq);
+        self.record_revocation_hiervv_size(&push.zone_id, &freshness);
         self.metrics.gossip_updates = self.metrics.gossip_updates.saturating_add(1);
         Ok(VerifiedRevocationPush {
             from: NodeId::new(push.from.as_str()),
@@ -1888,7 +2559,53 @@ impl MeshNode {
             revoked_ids: push.revoked_ids,
             new_rev_seq: push.new_rev_seq,
             timestamp: push.timestamp,
+            freshness,
         })
+    }
+
+    fn record_revocation_hiervv_size(
+        &mut self,
+        zone_id: &ZoneId,
+        freshness: &RevocationFreshnessDecision,
+    ) {
+        match self.revocation_frontier.canonical_len() {
+            Ok(size_bytes) => {
+                let size_bytes_u64 = u64::try_from(size_bytes).unwrap_or(u64::MAX);
+                let histogram_value = f64::from(u32::try_from(size_bytes).unwrap_or(u32::MAX));
+                self.metrics.revocation_hiervv_size_samples = self
+                    .metrics
+                    .revocation_hiervv_size_samples
+                    .saturating_add(1);
+                self.metrics.revocation_hiervv_size_last_bytes = size_bytes_u64;
+                metrics::record_histogram(
+                    metrics::REVOCATION_HIERVV_SIZE_BYTES_METRIC,
+                    histogram_value,
+                    &[
+                        ("zone", zone_id.as_str()),
+                        ("hier_vv_status", freshness.hier_vv_status()),
+                        ("decision", freshness.decision_label()),
+                    ],
+                );
+                debug!(
+                    target: "fcp.mesh.revocation.freshness",
+                    hier_vv_status = freshness.hier_vv_status(),
+                    decision = freshness.decision_label(),
+                    zone_id = %zone_id,
+                    hier_vv_size_bytes = size_bytes_u64,
+                    metric = metrics::REVOCATION_HIERVV_SIZE_BYTES_METRIC,
+                    "recorded revocation HierVV size"
+                );
+            }
+            Err(error) => {
+                debug!(
+                    target: "fcp.mesh.revocation.freshness",
+                    zone_id = %zone_id,
+                    error = %error,
+                    metric = metrics::REVOCATION_HIERVV_SIZE_BYTES_METRIC,
+                    "failed to record revocation HierVV size"
+                );
+            }
+        }
     }
 
     /// Verify and answer a bounded gossip request.
@@ -1913,10 +2630,469 @@ impl MeshNode {
         Ok(self.gossip.handle_request(&request))
     }
 
+    /// Verify a gossip request and materialize the advertised bytes.
+    ///
+    /// This is the transport-agnostic responder side of the fetch path: it
+    /// reuses the same bounded availability response as
+    /// [`Self::handle_gossip_request`], then loads matching object and symbol
+    /// bytes from the local stores. The requester can feed `response` through
+    /// [`Self::handle_gossip_response`] and pass `payload` into
+    /// [`Self::apply_gossip_fetch_payload`].
+    ///
+    /// # Errors
+    ///
+    /// Returns request verification errors from [`Self::handle_gossip_request`]
+    /// or store/validation errors if advertised bytes cannot be materialized.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_gossip_request
+    pub async fn prepare_gossip_fetch_reply(
+        &mut self,
+        request: GossipRequest,
+        now_secs: u64,
+    ) -> Result<GossipFetchReply, MeshNodeError> {
+        let response = self.handle_gossip_request(request, now_secs)?;
+        let payload = self.gossip_fetch_payload_for_response(&response).await?;
+        Ok(GossipFetchReply { response, payload })
+    }
+
+    async fn gossip_fetch_payload_for_response(
+        &self,
+        response: &GossipResponse,
+    ) -> Result<GossipFetchPayload, MeshNodeError> {
+        if response.from != self.local_node_ts {
+            return Err(MeshNodeError::RecipientMismatch {
+                message_kind: "gossip fetch payload",
+                expected: self.local_node_ts.as_str().to_string(),
+                actual: response.from.as_str().to_string(),
+            });
+        }
+
+        let plan = GossipFetchPlan {
+            peer: response.from.clone(),
+            zone_id: response.zone_id.clone(),
+            object_ids: response.have_objects.clone(),
+            symbols: response.have_symbols.clone(),
+        };
+        let requested_objects: BTreeSet<_> = plan.object_ids.iter().copied().collect();
+        let requested_symbols: BTreeSet<_> = plan.symbols.iter().copied().collect();
+        let mut payload = GossipFetchPayload::default();
+
+        for object_id in &response.have_objects {
+            let object = self.object_store.get(object_id).await?;
+            Self::validate_fetched_object(&plan, &requested_objects, &object)?;
+            payload.objects.push(object);
+        }
+
+        for (object_id, esi) in &response.have_symbols {
+            let fetched = GossipFetchedSymbol {
+                object_meta: self.symbol_store.get_object_meta(object_id).await?,
+                symbol: self.symbol_store.get_symbol(object_id, *esi).await?,
+            };
+            Self::validate_fetched_symbol(&plan, &requested_symbols, &fetched)?;
+            payload.symbols.push(fetched);
+        }
+
+        Ok(payload)
+    }
+
+    /// Verify a bounded gossip response and surface missing fetch candidates.
+    ///
+    /// The response only advertises availability; the caller still owns the
+    /// transport/storage fetch that moves object or symbol bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the response is for another recipient, the peer
+    /// is unknown, the peer is not authorized for the zone, the timestamp is
+    /// stale, or the advertised availability exceeds configured budgets.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_gossip_request
+    pub fn handle_gossip_response(
+        &mut self,
+        response: GossipResponse,
+        now_secs: u64,
+    ) -> Result<Option<GossipFetchPlan>, MeshNodeError> {
+        self.verify_gossip_response(&response, now_secs)?;
+
+        let GossipResponse {
+            from,
+            to: _,
+            zone_id,
+            have_objects,
+            have_symbols,
+            timestamp: _,
+        } = response;
+
+        let object_ids: Vec<_> = have_objects
+            .into_iter()
+            .filter(|object_id| !self.gossip.has_object(&zone_id, object_id))
+            .collect();
+        let symbols: Vec<_> = have_symbols
+            .into_iter()
+            .filter(|(object_id, esi)| !self.gossip.has_symbol(&zone_id, object_id, *esi))
+            .collect();
+
+        if object_ids.is_empty() && symbols.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(GossipFetchPlan {
+            peer: from,
+            zone_id,
+            object_ids,
+            symbols,
+        }))
+    }
+
+    /// Apply object and symbol bytes fetched for a verified gossip fetch plan.
+    ///
+    /// The transport layer owns the actual peer I/O. This method owns the
+    /// safety boundary after bytes arrive: it re-checks peer zone membership,
+    /// rejects unsolicited payloads, validates zone/object/ESI bindings, stores
+    /// accepted bytes locally, and announces the resulting local availability.
+    ///
+    /// Content-address enforcement (`object_id == derive_id(header, body,
+    /// zone_key)`) is owned by the object store's injected
+    /// [`ObjectIdVerifier`](fcp_store::ObjectIdVerifier): `MeshNode` holds no
+    /// zone keys by design, so whoever constructs a live-network node MUST
+    /// inject a store built with a `KeyedObjectIdVerifier` for every served
+    /// zone (fails closed with `VerifierKeyMissing` on unknown zones).
+    /// Without it, a hostile peer can bind attacker-controlled bytes to a
+    /// legitimately requested object id — this method warns loudly when that
+    /// invariant is not met (bead mesh-node-content-id-verifier-wiring-h3xmd).
+    /// Trace-replay and test nodes replaying already-captured traces are the
+    /// only legitimate verifier-less callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the peer is no longer enrolled for the zone, if any
+    /// payload does not match the fetch plan, or if the local stores reject the
+    /// fetched bytes.
+    pub async fn apply_gossip_fetch_payload(
+        &mut self,
+        plan: &GossipFetchPlan,
+        objects: Vec<StoredObject>,
+        symbols: Vec<GossipFetchedSymbol>,
+        now_ms: u64,
+    ) -> Result<GossipFetchApplyOutcome, MeshNodeError> {
+        let peer = self.verify_gossip_fetch_plan_peer(plan)?;
+        if !objects.is_empty() && !self.object_store.has_object_id_verifier() {
+            warn!(
+                peer = plan.peer.as_str(),
+                zone_id = %plan.zone_id,
+                object_count = objects.len(),
+                "accepting peer-supplied objects into an object store without a \
+                 content-id verifier; live-network nodes MUST install a \
+                 KeyedObjectIdVerifier or a hostile peer can poison the cache \
+                 (bead mesh-node-content-id-verifier-wiring-h3xmd)"
+            );
+        }
+        let requested_objects: BTreeSet<_> = plan.object_ids.iter().copied().collect();
+        let requested_symbols: BTreeSet<_> = plan.symbols.iter().copied().collect();
+        let mut outcome = GossipFetchApplyOutcome::default();
+
+        for object in objects {
+            Self::validate_fetched_object(plan, &requested_objects, &object)?;
+            self.validate_fetched_lease_object(&object, now_ms)?;
+            let object_id = object.object_id;
+            let is_connector_state_root =
+                object.header.schema == fcp_store::FcpStoreConnectorStateStore::root_schema_id();
+            match self.object_store.put(object).await {
+                Ok(()) | Err(fcp_store::ObjectStoreError::AlreadyExists(_)) => {}
+                Err(err) => return Err(MeshNodeError::ObjectStore(err)),
+            }
+            self.announce_object(
+                &plan.zone_id,
+                &object_id,
+                ObjectAdmissionClass::Admitted,
+                now_ms,
+            );
+            outcome.objects_applied.push(object_id);
+            if is_connector_state_root {
+                outcome.connector_state_root_candidates.push(object_id);
+            }
+        }
+
+        for fetched in symbols {
+            let (object_id, esi) =
+                Self::validate_fetched_symbol(plan, &requested_symbols, &fetched)?;
+            self.symbol_store
+                .put_object_meta(fetched.object_meta)
+                .await?;
+            self.symbol_store.put_symbol(fetched.symbol).await?;
+            self.announce_symbol(
+                &plan.zone_id,
+                &object_id,
+                esi,
+                ObjectAdmissionClass::Admitted,
+                now_ms,
+            );
+            outcome.symbols_applied.push((object_id, esi));
+        }
+
+        debug!(
+            peer = %peer.as_str(),
+            zone_id = %plan.zone_id,
+            objects = outcome.objects_applied.len(),
+            symbols = outcome.symbols_applied.len(),
+            "applied gossip fetch payload"
+        );
+
+        Ok(outcome)
+    }
+
+    /// Apply fetched gossip bytes and observe any connector-state root candidates.
+    ///
+    /// Use this from host/transport adapters that already know the appropriate
+    /// connector-state store. It keeps the byte-admission and cache-invalidation
+    /// handoff in one call: fetched objects/symbols are admitted first, then any
+    /// fetched connector-state roots are validated by `fcp-store` and announced.
+    ///
+    /// # Errors
+    ///
+    /// Returns byte-application errors from [`Self::apply_gossip_fetch_payload`]
+    /// or connector-state validation errors from `FcpStoreConnectorStateStore`.
+    pub async fn apply_gossip_fetch_payload_and_observe_connector_state_roots(
+        &mut self,
+        state_store: &FcpStoreConnectorStateStore,
+        plan: &GossipFetchPlan,
+        objects: Vec<StoredObject>,
+        symbols: Vec<GossipFetchedSymbol>,
+        now_ms: u64,
+    ) -> Result<GossipFetchApplyObserveOutcome, MeshNodeError> {
+        let apply = self
+            .apply_gossip_fetch_payload(plan, objects, symbols, now_ms)
+            .await?;
+        let connector_state_changes = self
+            .observe_connector_state_root_candidates(
+                state_store,
+                &apply.connector_state_root_candidates,
+                now_ms,
+            )
+            .await?;
+
+        Ok(GossipFetchApplyObserveOutcome {
+            apply,
+            connector_state_changes,
+        })
+    }
+
+    /// Observe already-admitted connector-state root candidates.
+    ///
+    /// `apply_gossip_fetch_payload` can only identify schema-level candidates.
+    /// This helper performs the connector/zone/key-aware validation step and
+    /// returns concrete cache-invalidation changes for every accepted root.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first connector-state store validation error.
+    pub async fn observe_connector_state_root_candidates(
+        &mut self,
+        state_store: &FcpStoreConnectorStateStore,
+        root_object_ids: &[ObjectId],
+        now_ms: u64,
+    ) -> Result<Vec<ConnectorStateChange>, ConnectorStateStoreError> {
+        let mut changes = Vec::with_capacity(root_object_ids.len());
+        for root_object_id in root_object_ids {
+            changes.push(
+                self.observe_connector_state_root(state_store, *root_object_id, now_ms)
+                    .await?,
+            );
+        }
+        Ok(changes)
+    }
+
+    fn verify_gossip_fetch_plan_peer(
+        &self,
+        plan: &GossipFetchPlan,
+    ) -> Result<NodeId, MeshNodeError> {
+        let peer = NodeId::new(plan.peer.as_str());
+        let peer_state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip fetch payload",
+            })?;
+        if !peer_state.zones.contains(&plan.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: plan.zone_id.to_string(),
+            });
+        }
+        Ok(peer)
+    }
+
+    fn validate_fetched_object(
+        plan: &GossipFetchPlan,
+        requested_objects: &BTreeSet<ObjectId>,
+        object: &StoredObject,
+    ) -> Result<(), MeshNodeError> {
+        if !requested_objects.contains(&object.object_id) {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched object {} from {} was not requested for zone {}",
+                object.object_id,
+                plan.peer.as_str(),
+                plan.zone_id
+            )));
+        }
+        if object.header.zone_id != plan.zone_id {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched object {} from {} has zone {}, expected {}",
+                object.object_id,
+                plan.peer.as_str(),
+                object.header.zone_id,
+                plan.zone_id
+            )));
+        }
+        object.validate_structure().map_err(|err| {
+            MeshNodeError::GossipDecode(format!(
+                "fetched object {} from {} failed structural validation: {}",
+                object.object_id,
+                plan.peer.as_str(),
+                err
+            ))
+        })
+    }
+
+    fn validate_fetched_lease_object(
+        &self,
+        object: &StoredObject,
+        now_ms: u64,
+    ) -> Result<(), MeshNodeError> {
+        if object.header.schema != CoreLease::schema_id() {
+            return Ok(());
+        }
+
+        let lease: CoreLease =
+            CanonicalSerializer::deserialize(&object.body, &object.header.schema)?;
+        validate_core_lease(
+            &lease,
+            &lease.subject_object_id,
+            lease.zone_id(),
+            lease.purpose,
+            lease.lease_seq,
+            now_ms / 1000,
+            DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+        )?;
+        self.verify_lease_quorum_signatures(&lease)
+    }
+
+    fn validate_fetched_symbol(
+        plan: &GossipFetchPlan,
+        requested_symbols: &BTreeSet<(ObjectId, u32)>,
+        fetched: &GossipFetchedSymbol,
+    ) -> Result<(ObjectId, u32), MeshNodeError> {
+        let object_id = fetched.symbol.meta.object_id;
+        let esi = fetched.symbol.meta.esi;
+        if !requested_symbols.contains(&(object_id, esi)) {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched symbol {}:{} from {} was not requested for zone {}",
+                object_id,
+                esi,
+                plan.peer.as_str(),
+                plan.zone_id
+            )));
+        }
+        if fetched.object_meta.object_id != object_id {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched symbol {}:{} from {} carries object metadata for {}",
+                object_id,
+                esi,
+                plan.peer.as_str(),
+                fetched.object_meta.object_id
+            )));
+        }
+        if fetched.object_meta.zone_id != plan.zone_id
+            || fetched.symbol.meta.zone_id != plan.zone_id
+        {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched symbol {}:{} from {} has zone metadata {}/{}, expected {}",
+                object_id,
+                esi,
+                plan.peer.as_str(),
+                fetched.object_meta.zone_id,
+                fetched.symbol.meta.zone_id,
+                plan.zone_id
+            )));
+        }
+        Ok((object_id, esi))
+    }
+
+    /// Verify and answer a bounded IBLT reconcile request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requester is unknown, not authorized for the
+    /// claimed zone, stale, or sends an invalid/oversized IBLT payload.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_gossip_request
+    pub fn handle_reconcile_request(
+        &mut self,
+        request: ReconcileRequest,
+        now_secs: u64,
+    ) -> Result<Option<ReconcileResponse>, MeshNodeError> {
+        self.verify_reconcile_request(&request, now_secs)?;
+        let peer_iblt = IbltPlaceholder::decode_with_limits(
+            &request.iblt,
+            self.gossip.reconciliation_batch_size(),
+            self.gossip.max_iblt_bytes(),
+        )
+        .map_err(|err| {
+            MeshNodeError::GossipDecode(format!(
+                "reconcile request IBLT from {} for zone {} rejected: {}",
+                request.from.as_str(),
+                request.zone_id,
+                err.reason_code()
+            ))
+        })?;
+
+        Ok(self.gossip.reconcile_zone_iblt(
+            &request.zone_id,
+            &request.from,
+            peer_iblt.as_iblt(),
+            self.gossip.reconciliation_batch_size(),
+            now_secs,
+        ))
+    }
+
+    /// Verify a reconcile response and produce the next bounded object request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the responder is unknown, not authorized for the
+    /// claimed zone, stale, or sends over-budget object lists.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_reconcile_request
+    pub fn handle_reconcile_response(
+        &mut self,
+        response: ReconcileResponse,
+        now_secs: u64,
+    ) -> Result<Option<GossipFollowupRequest>, MeshNodeError> {
+        self.verify_reconcile_response(&response, now_secs)?;
+
+        let target_peer = response.from.clone();
+        let zone_id = response.zone_id.clone();
+        let missing_objects: Vec<_> = response
+            .we_missing_objects
+            .into_iter()
+            .filter(|object_id| !self.gossip.has_object(&zone_id, object_id))
+            .collect();
+
+        if missing_objects.is_empty() {
+            return Ok(None);
+        }
+
+        let request = self
+            .gossip
+            .create_request(&zone_id, missing_objects, now_secs);
+        Ok(Some(GossipFollowupRequest {
+            peer: target_peer,
+            request,
+        }))
+    }
+
     /// Dispatch a gossip control-plane message through the verified node entrypoint.
     ///
     /// Returns any verified revocation push plus an immediate gossip
-    /// response that the transport should return to the requester.
+    /// response that the transport should return to the requester, or a
+    /// bounded follow-up request the transport should send to a peer.
     ///
     /// # Errors
     ///
@@ -1942,30 +3118,59 @@ impl MeshNode {
             GossipMessage::Request(request) => self
                 .handle_gossip_request(request, now_secs)
                 .map(GossipDispatchOutcome::with_response),
-            GossipMessage::Response(response) => {
-                debug!(
-                    peer_id = %response.from.as_str(),
-                    zone_id = %response.zone_id,
-                    "gossip response is caller-managed; MeshNode has no inbound response state machine yet"
-                );
-                Ok(GossipDispatchOutcome::default())
-            }
-            GossipMessage::ReconcileRequest(request) => {
-                debug!(
-                    peer_id = %request.from.as_str(),
-                    zone_id = %request.zone_id,
-                    "reconcile request is deferred until the stateful reconcile dispatch path lands"
-                );
-                Ok(GossipDispatchOutcome::default())
-            }
-            GossipMessage::ReconcileResponse(response) => {
-                debug!(
-                    peer_id = %response.from.as_str(),
-                    zone_id = %response.zone_id,
-                    "reconcile response is deferred until the stateful reconcile dispatch path lands"
-                );
-                Ok(GossipDispatchOutcome::default())
-            }
+            GossipMessage::Response(response) => self
+                .handle_gossip_response(response, now_secs)
+                .map(|fetch_plan| {
+                    fetch_plan.map_or_else(
+                        GossipDispatchOutcome::default,
+                        GossipDispatchOutcome::with_fetch_plan,
+                    )
+                }),
+            GossipMessage::ReconcileRequest(request) => self
+                .handle_reconcile_request(request, now_secs)
+                .map(|response| {
+                    response.map_or_else(
+                        GossipDispatchOutcome::default,
+                        GossipDispatchOutcome::with_reconcile_response,
+                    )
+                }),
+            GossipMessage::ReconcileResponse(response) => self
+                .handle_reconcile_response(response, now_secs)
+                .map(|followup| {
+                    followup.map_or_else(
+                        GossipDispatchOutcome::default,
+                        GossipDispatchOutcome::with_followup_request,
+                    )
+                }),
+        }
+    }
+
+    /// Dispatch a parsed gossip message and materialize request bytes when needed.
+    ///
+    /// Existing callers that only need control-plane actions should continue to
+    /// use [`Self::handle_gossip_message`]. Transport adapters that can carry
+    /// requested bytes inline can use this method to receive the same
+    /// [`GossipDispatchOutcome`] plus a [`GossipFetchReply`] for inbound
+    /// `GossipMessage::Request` payloads.
+    ///
+    /// # Errors
+    ///
+    /// Propagates verification errors from the underlying gossip handlers and
+    /// store/validation errors from [`Self::prepare_gossip_fetch_reply`] when
+    /// request bytes cannot be materialized.
+    pub async fn handle_gossip_message_with_fetch_reply(
+        &mut self,
+        message: GossipMessage,
+        now_secs: u64,
+    ) -> Result<GossipDispatchFetchOutcome, MeshNodeError> {
+        match message {
+            GossipMessage::Request(request) => self
+                .prepare_gossip_fetch_reply(request, now_secs)
+                .await
+                .map(GossipDispatchFetchOutcome::with_fetch_reply),
+            other => self
+                .handle_gossip_message(other, now_secs)
+                .map(GossipDispatchFetchOutcome::from_dispatch),
         }
     }
 
@@ -2010,6 +3215,36 @@ impl MeshNode {
         let message: GossipMessage = serde_json::from_slice(payload)
             .map_err(|e| MeshNodeError::GossipDecode(e.to_string()))?;
         self.handle_gossip_message(message, now_secs)
+    }
+
+    /// Decode and dispatch a raw gossip payload, materializing request bytes.
+    ///
+    /// This is the async counterpart to [`Self::dispatch_gossip_payload`] for
+    /// transports that want a single verified request path that returns both
+    /// the availability response and the bytes matching that availability.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same decode and verification errors as
+    /// [`Self::dispatch_gossip_payload`], plus store/validation errors if an
+    /// inbound request advertises bytes that cannot be loaded safely.
+    pub async fn dispatch_gossip_payload_with_fetch_reply(
+        &mut self,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<GossipDispatchFetchOutcome, MeshNodeError> {
+        let max_payload = self.gossip.max_wire_payload_bytes();
+        if payload.len() > max_payload {
+            return Err(MeshNodeError::GossipPayloadTooLarge {
+                len: payload.len(),
+                max: max_payload,
+            });
+        }
+
+        let message: GossipMessage = serde_json::from_slice(payload)
+            .map_err(|e| MeshNodeError::GossipDecode(e.to_string()))?;
+        self.handle_gossip_message_with_fetch_reply(message, now_secs)
+            .await
     }
 
     /// Dispatch an already-parsed `GossipMessage` that was delivered
@@ -2437,23 +3672,24 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TransportPathKind;
-    use crate::device::DeviceProfileBuilder;
-    use crate::planner::{LeasePurpose, PlannerContext};
-    use bytes::Bytes;
-    use fcp_crypto::Ed25519SigningKey;
-    use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
-    use fcp_protocol::session::{
-        MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
+    use crate::{
+        DeviceProfileBuilder, LeaseCoordinator, SignedLeaseIssueOutcome, SignedLeaseIssueRequest,
+        TransportPathKind,
     };
+    use bytes::Bytes;
+    use fcp_core::{
+        ConnectorId, ConnectorStateChangeKind, ConnectorStateModel, ConnectorStateRoot, EpochId,
+        ObjectHeader, Provenance, ZoneKeyId,
+    };
+    use fcp_crypto::Ed25519SigningKey;
     use fcp_protocol::{
-        DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, SymbolAck, SymbolAckReason,
-        SymbolRequest,
+        DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, MeshSessionId, SessionCryptoSuite, SessionKeys,
+        SessionReplayPolicy, SymbolAckReason, TransportLimits,
     };
     use fcp_raptorq::ObjectTransmissionInformation;
     use fcp_store::{
-        MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
-        ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
+        FcpStoreConnectorStateStore, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
+        MemorySymbolStoreConfig, ObjectAdmissionPolicy, ObjectSymbolMeta, QuarantineStore,
         QuarantinedObject, StoredSymbol, SymbolMeta,
     };
 
@@ -2550,6 +3786,180 @@ mod tests {
     fn test_object_id(name: &str) -> ObjectId {
         let hash = blake3::hash(name.as_bytes());
         ObjectId::from_bytes(*hash.as_bytes())
+    }
+
+    fn test_stored_object(zone_id: &ZoneId, name: &str, body: &[u8]) -> StoredObject {
+        let schema =
+            fcp_cbor::SchemaId::new("fcp.test", "FetchedObject", semver::Version::new(1, 0, 0));
+        let header = ObjectHeader {
+            schema,
+            zone_id: zone_id.clone(),
+            created_at: 1,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let mut keyed_body = name.as_bytes().to_vec();
+        keyed_body.extend_from_slice(body);
+        let object_id =
+            StoredObject::derive_id(&header, &keyed_body, &ObjectIdKey::from_bytes([0x99; 32]))
+                .expect("derive object id");
+        StoredObject {
+            object_id,
+            header,
+            body: keyed_body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Pinned,
+            },
+        }
+    }
+
+    fn test_connector_state_root_object(
+        zone_id: &ZoneId,
+        connector_id: ConnectorId,
+        object_id_key: ObjectIdKey,
+    ) -> StoredObject {
+        let schema = FcpStoreConnectorStateStore::root_schema_id();
+        let header = ObjectHeader {
+            schema: schema.clone(),
+            zone_id: zone_id.clone(),
+            created_at: 1,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let root = ConnectorStateRoot {
+            header: header.clone(),
+            connector_id,
+            instance_id: None,
+            zone_id: zone_id.clone(),
+            model: ConnectorStateModel::SingletonWriter,
+            head: None,
+            state_schema_version: 1,
+        };
+        let body = CanonicalSerializer::serialize(&root, &schema).expect("serialize root");
+        let object_id =
+            StoredObject::derive_id(&header, &body, &object_id_key).expect("derive root id");
+        StoredObject {
+            object_id,
+            header,
+            body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Pinned,
+            },
+        }
+    }
+
+    fn test_core_lease(zone_id: &ZoneId, subject_object_id: ObjectId) -> fcp_prelude::Lease {
+        let schema = fcp_cbor::SchemaId::new("fcp.lease", "lease", semver::Version::new(1, 0, 0));
+        let header = ObjectHeader {
+            schema,
+            zone_id: zone_id.clone(),
+            created_at: 10,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![subject_object_id],
+            foreign_refs: Vec::new(),
+            ttl_secs: Some(60),
+            placement: None,
+        };
+        fcp_prelude::Lease {
+            header,
+            holder: TailscaleNodeId::new("node-1"),
+            lease_seq: 7,
+            exp: 70,
+            subject_object_id,
+            purpose: fcp_prelude::LeasePurpose::ConnectorStateWrite,
+            quorum_signatures: test_signature_set(&["node-1", "node-2"]),
+        }
+    }
+
+    fn test_signature_set(signers: &[&str]) -> fcp_core::SignatureSet {
+        let mut signatures = fcp_core::SignatureSet::new();
+        for (idx, signer) in signers.iter().enumerate() {
+            let signature_byte = u8::try_from(idx).unwrap_or(u8::MAX);
+            signatures.add(fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new(*signer),
+                [signature_byte; 64],
+                1_000 + u64::try_from(idx).unwrap_or(u64::MAX),
+            ));
+        }
+        signatures
+    }
+
+    fn sign_lease_quorum(lease: &mut fcp_prelude::Lease, signers: &[(&str, &Ed25519SigningKey)]) {
+        lease.quorum_signatures = fcp_core::SignatureSet::new();
+        let signing_bytes = lease
+            .quorum_signing_bytes()
+            .expect("lease quorum signing bytes");
+        let mut signatures = fcp_core::SignatureSet::new();
+        for (idx, (node_id, signing_key)) in signers.iter().enumerate() {
+            signatures.add(fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new(*node_id),
+                signing_key.sign(&signing_bytes).to_bytes(),
+                1_000 + u64::try_from(idx).unwrap_or(u64::MAX),
+            ));
+        }
+        lease.quorum_signatures = signatures;
+    }
+
+    fn register_lease_signer_keys(node: &mut MeshNode, signers: &[(&str, &Ed25519SigningKey)]) {
+        for (node_id, signing_key) in signers {
+            node.register_peer_signing_key(NodeId::new(*node_id), signing_key.verifying_key());
+        }
+    }
+
+    fn stored_lease_object(
+        lease: &fcp_prelude::Lease,
+        object_id_key: &ObjectIdKey,
+    ) -> (ObjectId, StoredObject) {
+        let body =
+            CanonicalSerializer::serialize(lease, &lease.header.schema).expect("serialize lease");
+        let object_id =
+            StoredObject::derive_id(&lease.header, &body, object_id_key).expect("derive lease id");
+        let stored = StoredObject {
+            object_id,
+            header: lease.header.clone(),
+            body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Lease {
+                    expires_at: lease.exp,
+                },
+            },
+        };
+        (object_id, stored)
+    }
+
+    fn test_object_symbol_meta(object_id: ObjectId, zone_id: &ZoneId) -> ObjectSymbolMeta {
+        let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
+        ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti,
+            source_symbols: 2,
+            first_symbol_at: 0,
+        }
+    }
+
+    fn test_stored_symbol(
+        object_id: ObjectId,
+        zone_id: &ZoneId,
+        esi: u32,
+        fill: u8,
+    ) -> StoredSymbol {
+        StoredSymbol {
+            meta: SymbolMeta {
+                object_id,
+                esi,
+                zone_id: zone_id.clone(),
+                source_node: Some(1),
+                stored_at: 0,
+            },
+            data: Bytes::from(vec![fill; 64]),
+        }
     }
 
     #[test]
@@ -2708,7 +4118,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -2839,7 +4249,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -2900,7 +4310,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -2963,7 +4373,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -3028,7 +4438,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -3280,6 +4690,525 @@ mod tests {
             node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
         assert!(added);
         assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn observe_connector_state_root_announces_validated_root_for_gossip() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let connector_id = ConnectorId::from_static("fcp:test:1.0.0");
+        let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
+        let state_store = FcpStoreConnectorStateStore::new(
+            Arc::clone(node.object_store()),
+            object_id_key,
+            connector_id.clone(),
+            zone_id.clone(),
+        );
+
+        let schema = FcpStoreConnectorStateStore::root_schema_id();
+        let header = ObjectHeader {
+            schema: schema.clone(),
+            zone_id: zone_id.clone(),
+            created_at: 42,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+        let root = ConnectorStateRoot {
+            header: header.clone(),
+            connector_id,
+            instance_id: None,
+            zone_id: zone_id.clone(),
+            model: ConnectorStateModel::SingletonWriter,
+            head: None,
+            state_schema_version: 1,
+        };
+        let body = CanonicalSerializer::serialize(&root, &schema).expect("serialize root");
+        let root_object_id =
+            StoredObject::derive_id(&header, &body, &object_id_key).expect("derive root id");
+        let stored = StoredObject {
+            object_id: root_object_id,
+            header,
+            body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Pinned,
+            },
+        };
+
+        fcp_async_core::runtime::block_on_sync(async {
+            node.object_store().put(stored).await.expect("put root");
+            let change = node
+                .observe_connector_state_root(&state_store, root_object_id, 42_000)
+                .await
+                .expect("observe root");
+            assert_eq!(change.kind, ConnectorStateChangeKind::RootUpdated);
+            assert_eq!(change.object_id, Some(root_object_id));
+            assert_eq!(change.zone_id, zone_id);
+            assert_eq!(change.seq, None);
+        })
+        .expect("runtime");
+
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            Vec::new(),
+            42_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+
+        let request = GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            zone_id,
+            vec![root_object_id],
+            42,
+        );
+        let response = node
+            .handle_gossip_request(request, 42)
+            .expect("gossip request");
+        assert_eq!(response.have_objects, vec![root_object_id]);
+        assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn publish_signed_lease_object_stores_and_announces_gossip_object() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state");
+        let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
+        let signer_a = Ed25519SigningKey::generate();
+        let signer_b = Ed25519SigningKey::generate();
+        let mut lease = test_core_lease(&zone_id, subject_object_id);
+        sign_lease_quorum(&mut lease, &[("node-1", &signer_a), ("node-2", &signer_b)]);
+        register_lease_signer_keys(&mut node, &[("node-1", &signer_a), ("node-2", &signer_b)]);
+
+        let lease_object_id = fcp_async_core::runtime::block_on_sync(async {
+            let lease_object_id = node
+                .publish_signed_lease_object(&lease, &object_id_key, 50_000)
+                .await
+                .expect("publish lease");
+            let stored_lease = node
+                .object_store()
+                .get(&lease_object_id)
+                .await
+                .expect("stored lease");
+            assert_eq!(stored_lease.header.schema, lease.header.schema);
+            assert_eq!(
+                stored_lease.storage.retention,
+                EvictionPolicy::Lease {
+                    expires_at: lease.exp,
+                }
+            );
+            let decoded: fcp_prelude::Lease =
+                CanonicalSerializer::deserialize(&stored_lease.body, &stored_lease.header.schema)
+                    .expect("decode lease");
+            assert_eq!(decoded.holder, lease.holder);
+            assert_eq!(decoded.lease_seq, lease.lease_seq);
+            assert_eq!(decoded.subject_object_id, subject_object_id);
+            assert_eq!(
+                decoded.quorum_signatures.len(),
+                DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES
+            );
+            lease_object_id
+        })
+        .expect("runtime");
+
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+
+        let request = GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            zone_id,
+            vec![lease_object_id],
+            50,
+        );
+        let response = node
+            .handle_gossip_request(request, 50)
+            .expect("gossip request");
+        assert_eq!(response.have_objects, vec![lease_object_id]);
+        assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn publish_signed_lease_object_rejects_invalid_quorum_signature_before_gossip() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state");
+        let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
+        let signer_a = Ed25519SigningKey::generate();
+        let signer_b = Ed25519SigningKey::generate();
+        let attacker = Ed25519SigningKey::generate();
+        let mut lease = test_core_lease(&zone_id, subject_object_id);
+        sign_lease_quorum(&mut lease, &[("node-1", &signer_a), ("node-2", &attacker)]);
+        register_lease_signer_keys(&mut node, &[("node-1", &signer_a), ("node-2", &signer_b)]);
+
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            node.publish_signed_lease_object(&lease, &object_id_key, 50_000)
+                .await
+                .expect_err("forged quorum signature must not publish")
+        })
+        .expect("runtime");
+
+        assert!(matches!(
+            err,
+            MeshNodeError::PeerSignatureInvalid {
+                peer,
+                message_kind: "lease quorum",
+            } if peer == "node-2"
+        ));
+        assert_eq!(node.metrics().gossip_announcements, 0);
+    }
+
+    #[test]
+    fn publish_signed_lease_object_rejects_insufficient_quorum_before_gossip() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state");
+        let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
+        let mut lease = test_core_lease(&zone_id, subject_object_id);
+        lease.quorum_signatures = fcp_core::SignatureSet::new();
+
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            node.publish_signed_lease_object(&lease, &object_id_key, 50_000)
+                .await
+                .expect_err("quorum-deficient lease must not publish")
+        })
+        .expect("runtime");
+
+        assert!(matches!(
+            err,
+            MeshNodeError::LeaseValidation(CoreLeaseValidationError::InsufficientQuorum {
+                required: DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+                got: 0,
+            })
+        ));
+        assert_eq!(node.metrics().gossip_announcements, 0);
+    }
+
+    #[test]
+    fn apply_gossip_fetch_payload_rejects_invalid_lease_quorum_signature_before_admission() {
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state-forged-lease");
+        let object_id_key = ObjectIdKey::from_bytes([0x72; 32]);
+        let signer_a = Ed25519SigningKey::generate();
+        let signer_b = Ed25519SigningKey::generate();
+        let attacker = Ed25519SigningKey::generate();
+        let mut lease = test_core_lease(&zone_id, subject_object_id);
+        sign_lease_quorum(&mut lease, &[("node-1", &signer_a), ("node-2", &attacker)]);
+        let (lease_object_id, stored) = stored_lease_object(&lease, &object_id_key);
+
+        let mut receiver = test_node("node-receiver");
+        let issuer_peer = NodeId::new("node-issuer");
+        receiver.update_peer_state(
+            issuer_peer.clone(),
+            test_device_profile("node-issuer"),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        receiver.update_peer_zones(&issuer_peer, zone_set(zone_id.clone()));
+        register_lease_signer_keys(
+            &mut receiver,
+            &[("node-1", &signer_a), ("node-2", &signer_b)],
+        );
+
+        let plan = GossipFetchPlan {
+            peer: TailscaleNodeId::new("node-issuer"),
+            zone_id,
+            object_ids: vec![lease_object_id],
+            symbols: Vec::new(),
+        };
+
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            let err = receiver
+                .apply_gossip_fetch_payload(&plan, vec![stored], Vec::new(), 50_001)
+                .await
+                .expect_err("forged fetched lease must not be admitted");
+            assert!(
+                receiver.object_store().get(&lease_object_id).await.is_err(),
+                "forged lease object must not be stored before signature rejection"
+            );
+            err
+        })
+        .expect("runtime");
+
+        assert!(matches!(
+            err,
+            MeshNodeError::PeerSignatureInvalid {
+                peer,
+                message_kind: "lease quorum",
+            } if peer == "node-2"
+        ));
+    }
+
+    fn test_node_with_verifier(name: &str, verifier: fcp_store::KeyedObjectIdVerifier) -> MeshNode {
+        let object_store = Arc::new(
+            MemoryObjectStore::new(MemoryObjectStoreConfig::default())
+                .with_verifier(verifier.into_arc()),
+        );
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+        MeshNode::new(
+            MeshNodeConfig::new(name).with_sender_instance_id(42),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        )
+    }
+
+    fn enroll_fetch_peer(node: &mut MeshNode, peer_name: &str, zone_id: &ZoneId) -> NodeId {
+        let peer = NodeId::new(peer_name);
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile(peer_name),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+        peer
+    }
+
+    #[test]
+    fn apply_gossip_fetch_payload_with_verifier_store_enforces_content_ids() {
+        // bead mesh-node-content-id-verifier-wiring-h3xmd: a live-network
+        // node's object store must carry a KeyedObjectIdVerifier so a peer
+        // cannot bind attacker-controlled bytes to a requested object id.
+        let zone_id = ZoneId::work();
+        // Same key test_stored_object derives ids under.
+        let object_id_key = ObjectIdKey::from_bytes([0x99; 32]);
+        let mut verifier = fcp_store::KeyedObjectIdVerifier::default();
+        verifier.insert(zone_id.clone(), object_id_key);
+        let mut node = test_node_with_verifier("node-verifier", verifier);
+        assert!(node.object_store().has_object_id_verifier());
+        enroll_fetch_peer(&mut node, "node-issuer", &zone_id);
+
+        let genuine = test_stored_object(&zone_id, "verifier-genuine", b"payload");
+        let genuine_id = genuine.object_id;
+        let mut forged = test_stored_object(&zone_id, "verifier-forged", b"original");
+        let forged_id = forged.object_id;
+        forged.body = b"attacker-swapped-bytes".to_vec();
+
+        fcp_async_core::runtime::block_on_sync(async {
+            let plan = GossipFetchPlan {
+                peer: TailscaleNodeId::new("node-issuer"),
+                zone_id: zone_id.clone(),
+                object_ids: vec![genuine_id],
+                symbols: Vec::new(),
+            };
+            let outcome = node
+                .apply_gossip_fetch_payload(&plan, vec![genuine], Vec::new(), 50_001)
+                .await
+                .expect("genuine content-addressed object must be admitted");
+            assert_eq!(outcome.objects_applied, vec![genuine_id]);
+
+            let plan = GossipFetchPlan {
+                peer: TailscaleNodeId::new("node-issuer"),
+                zone_id: zone_id.clone(),
+                object_ids: vec![forged_id],
+                symbols: Vec::new(),
+            };
+            let err = node
+                .apply_gossip_fetch_payload(&plan, vec![forged], Vec::new(), 50_002)
+                .await
+                .expect_err("forged (id, bytes) binding must be refused");
+            assert!(matches!(
+                err,
+                MeshNodeError::ObjectStore(fcp_store::ObjectStoreError::ContentIdMismatch { .. })
+            ));
+            assert!(
+                node.object_store().get(&forged_id).await.is_err(),
+                "forged object must not reach the store"
+            );
+        })
+        .expect("runtime");
+    }
+
+    #[test]
+    fn apply_gossip_fetch_payload_verifier_fails_closed_on_unknown_zone() {
+        // The verifier must fail closed (VerifierKeyMissing) for zones it has
+        // no ObjectIdKey for, instead of admitting unverifiable bytes.
+        let zone_id = ZoneId::work();
+        let other_zone: ZoneId = "z:private".parse().expect("zone id");
+        let mut verifier = fcp_store::KeyedObjectIdVerifier::default();
+        verifier.insert(other_zone, ObjectIdKey::from_bytes([0x99; 32]));
+        let mut node = test_node_with_verifier("node-verifier-closed", verifier);
+        enroll_fetch_peer(&mut node, "node-issuer", &zone_id);
+
+        let object = test_stored_object(&zone_id, "verifier-unknown-zone", b"payload");
+        let object_id = object.object_id;
+
+        fcp_async_core::runtime::block_on_sync(async {
+            let plan = GossipFetchPlan {
+                peer: TailscaleNodeId::new("node-issuer"),
+                zone_id: zone_id.clone(),
+                object_ids: vec![object_id],
+                symbols: Vec::new(),
+            };
+            let err = node
+                .apply_gossip_fetch_payload(&plan, vec![object], Vec::new(), 50_001)
+                .await
+                .expect_err("objects for zones without a verifier key must be refused");
+            assert!(matches!(
+                err,
+                MeshNodeError::ObjectStore(fcp_store::ObjectStoreError::VerifierKeyMissing { .. })
+            ));
+            assert!(node.object_store().get(&object_id).await.is_err());
+        })
+        .expect("runtime");
+    }
+
+    #[test]
+    fn issued_signed_lease_gossips_fetches_and_validates_authority_object() {
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state-lease-authority");
+        let object_id_key = ObjectIdKey::from_bytes([0x9A; 32]);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let holder = fcp_prelude::select_coordinator(&zone_id, &subject_object_id, &eligible_nodes)
+            .expect("three eligible nodes should produce an HRW holder");
+        let mut coordinator = LeaseCoordinator::with_defaults();
+        let request = SignedLeaseIssueRequest {
+            params: fcp_core::LeaseParams {
+                schema: fcp_cbor::SchemaId::new(
+                    "fcp.lease",
+                    "lease",
+                    semver::Version::new(1, 0, 0),
+                ),
+                zone_id: zone_id.clone(),
+                holder: holder.clone(),
+                lease_seq: 0,
+                ttl_secs: 300,
+                subject_object_id,
+                provenance: Provenance::new(zone_id.clone()),
+                purpose: fcp_prelude::LeasePurpose::ConnectorStateWrite,
+                quorum_signatures: test_signature_set(&["node-a", "node-b"]),
+            },
+            existing_leases: Vec::new(),
+            eligible_nodes,
+            required_signatures: DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+            now_secs: 1_000,
+        };
+        let (outcome, timeline) = coordinator.issue_signed_lease(request);
+        assert!(
+            matches!(outcome, SignedLeaseIssueOutcome::Granted { .. }),
+            "HRW-selected holder should issue a durable signed lease: {outcome:?}"
+        );
+        let SignedLeaseIssueOutcome::Granted { lease } = outcome else {
+            return;
+        };
+        assert_eq!(lease.holder, holder);
+        assert_eq!(lease.lease_seq, 1);
+        assert_eq!(
+            lease.quorum_signatures.len(),
+            DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES
+        );
+        assert!(
+            timeline
+                .iter()
+                .any(|event| event.operation == "lease.acquired")
+        );
+        let signer_a = Ed25519SigningKey::generate();
+        let signer_b = Ed25519SigningKey::generate();
+        let mut lease = *lease;
+        sign_lease_quorum(&mut lease, &[("node-a", &signer_a), ("node-b", &signer_b)]);
+
+        let mut issuer = test_node(holder.as_str());
+        register_lease_signer_keys(&mut issuer, &[("node-a", &signer_a), ("node-b", &signer_b)]);
+        let mut receiver = test_node("node-receiver");
+        register_lease_signer_keys(
+            &mut receiver,
+            &[("node-a", &signer_a), ("node-b", &signer_b)],
+        );
+        let receiver_peer = NodeId::new("node-receiver");
+        let issuer_peer = NodeId::new(holder.as_str());
+        issuer.update_peer_state(
+            receiver_peer.clone(),
+            test_device_profile("node-receiver"),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        issuer.update_peer_zones(&receiver_peer, zone_set(zone_id.clone()));
+        receiver.update_peer_state(
+            issuer_peer.clone(),
+            test_device_profile(holder.as_str()),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        receiver.update_peer_zones(&issuer_peer, zone_set(zone_id.clone()));
+
+        fcp_async_core::runtime::block_on_sync(async {
+            let lease_object_id = issuer
+                .publish_signed_lease_object(&lease, &object_id_key, 50_000)
+                .await
+                .expect("publisher stores and announces issued lease");
+
+            let fetch_reply = issuer
+                .prepare_gossip_fetch_reply(
+                    GossipRequest::for_objects(
+                        TailscaleNodeId::new("node-receiver"),
+                        zone_id.clone(),
+                        vec![lease_object_id],
+                        50,
+                    ),
+                    50,
+                )
+                .await
+                .expect("issuer prepares lease fetch payload");
+            assert_eq!(fetch_reply.response.have_objects, vec![lease_object_id]);
+            assert_eq!(fetch_reply.payload.objects.len(), 1);
+
+            let plan = receiver
+                .handle_gossip_response(fetch_reply.response, 50)
+                .expect("receiver verifies gossip response")
+                .expect("receiver should fetch missing lease object");
+            assert_eq!(plan.object_ids, vec![lease_object_id]);
+            let apply = receiver
+                .apply_gossip_fetch_payload(&plan, fetch_reply.payload.objects, Vec::new(), 50_001)
+                .await
+                .expect("receiver applies fetched lease object");
+            assert_eq!(apply.objects_applied, vec![lease_object_id]);
+
+            let stored_lease = receiver
+                .object_store()
+                .get(&lease_object_id)
+                .await
+                .expect("receiver stored fetched lease object");
+            let decoded: fcp_prelude::Lease =
+                CanonicalSerializer::deserialize(&stored_lease.body, &stored_lease.header.schema)
+                    .expect("decode fetched lease");
+            assert_eq!(decoded.holder, holder);
+            assert_eq!(decoded.lease_seq, 1);
+            assert_eq!(decoded.subject_object_id, subject_object_id);
+            coordinator
+                .validate_signed_lease(
+                    &decoded,
+                    &subject_object_id,
+                    &zone_id,
+                    fcp_prelude::LeasePurpose::ConnectorStateWrite,
+                    1,
+                    1_001,
+                    DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+                )
+                .expect("fetched lease should validate quorum and fencing authority");
+            assert_eq!(receiver.metrics().gossip_announcements, 1);
+        })
+        .expect("runtime");
     }
 
     #[test]
@@ -3912,6 +5841,44 @@ mod tests {
     }
 
     #[test]
+    fn revocation_frontier_snapshot_reconciles_after_restart_without_downgrade() {
+        let mut original = test_node("node-1");
+        original.observe_revocation_frontier(&ZoneId::work(), 42);
+        let snapshot = original.revocation_frontier_snapshot();
+        let encoded = serde_json::to_vec(&snapshot).expect("frontier snapshot serializes");
+        let decoded: RevocationFreshnessFrontier =
+            serde_json::from_slice(&encoded).expect("frontier snapshot deserializes");
+
+        let mut restarted = test_node("node-2");
+        assert_eq!(
+            restarted.reconcile_revocation_frontier(&decoded),
+            VersionVectorOrder::Dominates
+        );
+        assert_eq!(restarted.revocation_frontier_counter(&ZoneId::work()), 42);
+
+        let stale = RevocationFreshnessFrontier::from_counter("z:work", 41);
+        assert_eq!(
+            restarted.reconcile_revocation_frontier(&stale),
+            VersionVectorOrder::DominatedBy
+        );
+        assert_eq!(restarted.revocation_frontier_counter(&ZoneId::work()), 42);
+    }
+
+    #[test]
+    fn observe_revocation_registry_head_seeds_hiervv_frontier() {
+        let mut registry = RevocationRegistry::new();
+        registry.update_head(ObjectId::from_bytes([0x77; 32]), 10, 1_000);
+
+        let mut node = test_node("node-1");
+        let decision = node.observe_revocation_registry_head(&ZoneId::work(), &registry);
+
+        assert_eq!(decision.order, VersionVectorOrder::Dominates);
+        assert_eq!(node.revocation_frontier_counter(&ZoneId::work()), 10);
+        let team_a: ZoneId = "z:work:team-a".parse().unwrap();
+        assert_eq!(node.revocation_frontier_counter(&team_a), 10);
+    }
+
+    #[test]
     fn handle_revocation_push_returns_verified_descriptor() {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
@@ -3942,6 +5909,18 @@ mod tests {
             .expect("push should verify");
         assert_eq!(verified.new_rev_seq, 42);
         assert_eq!(verified.revoked_ids.len(), 1);
+        assert_eq!(
+            verified.freshness.action,
+            crate::RevocationFreshnessAction::Accept
+        );
+        assert_eq!(node.revocation_frontier_counter(&ZoneId::work()), 42);
+        assert_eq!(node.metrics().revocation_hiervv_size_samples, 1);
+        assert!(node.metrics().revocation_hiervv_size_last_bytes > 0);
+        assert_eq!(
+            u64::try_from(node.revocation_frontier_size_bytes().expect("size encodes"))
+                .expect("size fits in u64"),
+            node.metrics().revocation_hiervv_size_last_bytes
+        );
     }
 
     #[test]
@@ -4162,6 +6141,94 @@ mod tests {
     }
 
     #[test]
+    fn handle_revocation_push_accepts_hiervv_parent_frontier_over_child_scopes() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let team_a: ZoneId = "z:work:team-a".parse().unwrap();
+        let team_b: ZoneId = "z:work:team-b".parse().unwrap();
+        node.observe_revocation_frontier(&team_a, 7);
+        node.observe_revocation_frontier(&team_b, 9);
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xCE; 32])],
+            10,
+            1_000,
+        );
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
+
+        let verified = node
+            .handle_revocation_push(push, 1_001)
+            .expect("parent frontier should dominate child scopes despite receiver clock skew");
+
+        assert_eq!(
+            verified.freshness.order,
+            crate::VersionVectorOrder::Dominates
+        );
+        assert_eq!(node.revocation_frontier_counter(&team_a), 10);
+        assert_eq!(node.revocation_frontier_counter(&team_b), 10);
+    }
+
+    #[test]
+    fn handle_revocation_push_rejects_dominated_hiervv_frontier() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+        node.observe_revocation_frontier(&ZoneId::work(), 10);
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xCF; 32])],
+            9,
+            1_000,
+        );
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
+
+        let err = node
+            .handle_revocation_push(push, 1_000)
+            .expect_err("dominated revocation frontier must be rejected");
+
+        assert!(matches!(
+            err,
+            MeshNodeError::StaleRevocationFrontier {
+                incoming_seq: 9,
+                local_seq: 10,
+                ..
+            }
+        ));
+        assert_eq!(node.revocation_frontier_counter(&ZoneId::work()), 10);
+        assert_eq!(node.metrics().gossip_updates, 0);
+        assert_eq!(node.metrics().revocation_hiervv_size_samples, 1);
+        assert!(node.metrics().revocation_hiervv_size_last_bytes > 0);
+    }
+
+    #[test]
     fn handle_revocation_push_rejects_future_dated_message() {
         // Regression for br-flywheel_connectors-hawuq: a peer with a fast clock
         // (or an adversary) could emit a RevocationPushMessage whose timestamp
@@ -4331,6 +6398,649 @@ mod tests {
         assert_eq!(response.zone_id, ZoneId::work());
         assert_eq!(response.have_objects, vec![known_object]);
         assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_with_fetch_reply_materializes_request_bytes() {
+        let mut responder = test_node("node-1");
+        let mut requester = test_node("peer-1");
+        let responder_peer = NodeId::new("node-1");
+        let requester_peer = NodeId::new("peer-1");
+        let zone_id = ZoneId::work();
+
+        responder.update_peer_state(
+            requester_peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        responder.update_peer_zones(&requester_peer, zone_set(zone_id.clone()));
+        requester.update_peer_state(
+            responder_peer.clone(),
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        requester.update_peer_zones(&responder_peer, zone_set(zone_id.clone()));
+
+        let stored_object = test_stored_object(&zone_id, "dispatch-fetch-object", b"fetch-body");
+        let object_id = stored_object.object_id;
+        let symbol_object_id = test_object_id("dispatch-fetch-symbol-object");
+        let symbol_meta = test_object_symbol_meta(symbol_object_id, &zone_id);
+        let stored_symbol = test_stored_symbol(symbol_object_id, &zone_id, 5, 0xD5);
+
+        assert!(responder.announce_object(
+            &zone_id,
+            &object_id,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+        assert!(responder.announce_symbol(
+            &zone_id,
+            &symbol_object_id,
+            5,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        fcp_async_core::runtime::block_on_sync(async {
+            responder
+                .object_store
+                .put(stored_object.clone())
+                .await
+                .expect("responder stores object bytes");
+            responder
+                .symbol_store
+                .put_object_meta(symbol_meta)
+                .await
+                .expect("responder stores symbol metadata");
+            responder
+                .symbol_store
+                .put_symbol(stored_symbol.clone())
+                .await
+                .expect("responder stores symbol bytes");
+
+            let request = GossipRequest {
+                from: TailscaleNodeId::new("peer-1"),
+                zone_id: zone_id.clone(),
+                object_ids: vec![object_id],
+                symbols: vec![(symbol_object_id, 5)],
+                timestamp: 1_000,
+                signature: None,
+            };
+            let payload =
+                serde_json::to_vec(&GossipMessage::Request(request)).expect("JSON encode");
+
+            let outcome = responder
+                .dispatch_gossip_payload_with_fetch_reply(&payload, 1_000)
+                .await
+                .expect("dispatch should materialize fetch reply");
+            let response = outcome
+                .dispatch
+                .response
+                .expect("standard dispatch still carries availability response");
+            assert_eq!(response.have_objects, vec![object_id]);
+            assert_eq!(response.have_symbols, vec![(symbol_object_id, 5)]);
+            let fetch_reply = outcome
+                .fetch_reply
+                .expect("request dispatch carries materialized bytes");
+            assert_eq!(fetch_reply.response.have_objects, vec![object_id]);
+            assert_eq!(fetch_reply.payload.objects.len(), 1);
+            assert_eq!(fetch_reply.payload.symbols.len(), 1);
+
+            let plan = requester
+                .handle_gossip_response(fetch_reply.response, 1_000)
+                .expect("requester verifies response")
+                .expect("requester produces fetch plan");
+            let apply = requester
+                .apply_gossip_fetch_payload(
+                    &plan,
+                    fetch_reply.payload.objects,
+                    fetch_reply.payload.symbols,
+                    1_001,
+                )
+                .await
+                .expect("requester applies materialized bytes");
+            assert_eq!(apply.objects_applied, vec![object_id]);
+            assert_eq!(apply.symbols_applied, vec![(symbol_object_id, 5)]);
+            assert!(apply.connector_state_root_candidates.is_empty());
+
+            let local_object = requester
+                .object_store
+                .get(&object_id)
+                .await
+                .expect("requester stores fetched object");
+            assert_eq!(local_object.body, stored_object.body);
+            let local_symbol = requester
+                .symbol_store
+                .get_symbol(&symbol_object_id, 5)
+                .await
+                .expect("requester stores fetched symbol");
+            assert_eq!(local_symbol.data, stored_symbol.data);
+        })
+        .expect("runtime");
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_routes_response_to_fetch_plan() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let zone_id = ZoneId::work();
+        let known_object = ObjectId::from_bytes([0x61; 32]);
+        let missing_object = ObjectId::from_bytes([0x62; 32]);
+        let known_symbol_object = ObjectId::from_bytes([0x63; 32]);
+        let missing_symbol_object = ObjectId::from_bytes([0x64; 32]);
+        assert!(node.announce_object(
+            &zone_id,
+            &known_object,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+        assert!(node.announce_symbol(
+            &zone_id,
+            &known_symbol_object,
+            7,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        let response = GossipResponse {
+            from: TailscaleNodeId::new("peer-1"),
+            to: TailscaleNodeId::new("node-1"),
+            zone_id: zone_id.clone(),
+            have_objects: vec![known_object, missing_object],
+            have_symbols: vec![(known_symbol_object, 7), (missing_symbol_object, 3)],
+            timestamp: 1_000,
+        };
+        let payload = serde_json::to_vec(&GossipMessage::Response(response)).expect("JSON encode");
+
+        let outcome = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect("dispatch should succeed");
+        assert!(outcome.revocation_push.is_none());
+        assert!(outcome.response.is_none());
+        assert!(outcome.reconcile_response.is_none());
+        assert!(outcome.followup_request.is_none());
+        let fetch_plan = outcome
+            .fetch_plan
+            .expect("response dispatch must surface missing fetch candidates");
+        assert_eq!(fetch_plan.peer, TailscaleNodeId::new("peer-1"));
+        assert_eq!(fetch_plan.zone_id, zone_id);
+        assert_eq!(fetch_plan.object_ids, vec![missing_object]);
+        assert_eq!(fetch_plan.symbols, vec![(missing_symbol_object, 3)]);
+    }
+
+    #[test]
+    fn apply_gossip_fetch_payload_persists_peer_bytes_and_announces_availability() {
+        let mut node = test_node("node-1");
+        let peer_node = test_node("peer-1");
+        let peer = NodeId::new("peer-1");
+        let requester = NodeId::new("requester-1");
+        let zone_id = ZoneId::work();
+
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+        node.update_peer_state(
+            requester.clone(),
+            test_device_profile("requester-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&requester, zone_set(zone_id.clone()));
+
+        let fetched_object = test_stored_object(&zone_id, "object-fetch", b"peer-object-bytes");
+        let fetched_object_id = fetched_object.object_id;
+        let symbol_object_id = test_object_id("symbol-fetch-object");
+        let symbol_meta = test_object_symbol_meta(symbol_object_id, &zone_id);
+        let fetched_symbol = test_stored_symbol(symbol_object_id, &zone_id, 7, 0xA7);
+
+        fcp_async_core::runtime::block_on_sync(async {
+            peer_node
+                .object_store
+                .put(fetched_object.clone())
+                .await
+                .expect("peer stores object bytes");
+            peer_node
+                .symbol_store
+                .put_object_meta(symbol_meta.clone())
+                .await
+                .expect("peer stores symbol metadata");
+            peer_node
+                .symbol_store
+                .put_symbol(fetched_symbol.clone())
+                .await
+                .expect("peer stores symbol bytes");
+
+            let response = GossipResponse {
+                from: TailscaleNodeId::new("peer-1"),
+                to: TailscaleNodeId::new("node-1"),
+                zone_id: zone_id.clone(),
+                have_objects: vec![fetched_object_id],
+                have_symbols: vec![(symbol_object_id, 7)],
+                timestamp: 1_000,
+            };
+            let plan = node
+                .handle_gossip_response(response, 1_000)
+                .expect("verified response")
+                .expect("fetch plan");
+
+            let object_bytes = peer_node
+                .object_store
+                .get(&fetched_object_id)
+                .await
+                .expect("transport fetched object bytes");
+            let symbol_bytes = GossipFetchedSymbol {
+                object_meta: peer_node
+                    .symbol_store
+                    .get_object_meta(&symbol_object_id)
+                    .await
+                    .expect("transport fetched symbol metadata"),
+                symbol: peer_node
+                    .symbol_store
+                    .get_symbol(&symbol_object_id, 7)
+                    .await
+                    .expect("transport fetched symbol bytes"),
+            };
+
+            let outcome = node
+                .apply_gossip_fetch_payload(&plan, vec![object_bytes], vec![symbol_bytes], 1_000)
+                .await
+                .expect("apply fetched bytes");
+            assert_eq!(outcome.objects_applied, vec![fetched_object_id]);
+            assert!(outcome.connector_state_root_candidates.is_empty());
+            assert_eq!(outcome.symbols_applied, vec![(symbol_object_id, 7)]);
+
+            let local_object = node
+                .object_store
+                .get(&fetched_object_id)
+                .await
+                .expect("local object bytes stored");
+            assert_eq!(local_object.body, fetched_object.body);
+            let local_symbol = node
+                .symbol_store
+                .get_symbol(&symbol_object_id, 7)
+                .await
+                .expect("local symbol bytes stored");
+            assert_eq!(local_symbol.data, fetched_symbol.data);
+        })
+        .expect("runtime");
+
+        let request = GossipRequest {
+            from: TailscaleNodeId::new("requester-1"),
+            zone_id,
+            object_ids: vec![fetched_object_id],
+            symbols: vec![(symbol_object_id, 7)],
+            timestamp: 1_000,
+            signature: None,
+        };
+        let response = node
+            .handle_gossip_request(request, 1_000)
+            .expect("local node advertises applied bytes");
+        assert_eq!(response.have_objects, vec![fetched_object_id]);
+        assert_eq!(response.have_symbols, vec![(symbol_object_id, 7)]);
+    }
+
+    #[test]
+    fn apply_gossip_fetch_payload_surfaces_connector_state_roots_for_observation() {
+        let mut node = test_node("node-1");
+        let peer_node = test_node("peer-1");
+        let peer = NodeId::new("peer-1");
+        let zone_id = ZoneId::work();
+        let connector_id = ConnectorId::from_static("slack:chat:v1");
+        let object_id_key = ObjectIdKey::from_bytes([0xB5; 32]);
+
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+
+        let fetched_root =
+            test_connector_state_root_object(&zone_id, connector_id.clone(), object_id_key);
+        let fetched_root_id = fetched_root.object_id;
+
+        fcp_async_core::runtime::block_on_sync(async {
+            peer_node
+                .object_store
+                .put(fetched_root)
+                .await
+                .expect("peer stores connector-state root bytes");
+
+            let response = GossipResponse {
+                from: TailscaleNodeId::new("peer-1"),
+                to: TailscaleNodeId::new("node-1"),
+                zone_id: zone_id.clone(),
+                have_objects: vec![fetched_root_id],
+                have_symbols: vec![],
+                timestamp: 1_000,
+            };
+            let plan = node
+                .handle_gossip_response(response, 1_000)
+                .expect("verified response")
+                .expect("fetch plan");
+            let object_bytes = peer_node
+                .object_store
+                .get(&fetched_root_id)
+                .await
+                .expect("transport fetched connector-state root bytes");
+
+            let object_store = Arc::clone(node.object_store());
+            let state_store = FcpStoreConnectorStateStore::new(
+                object_store,
+                object_id_key,
+                connector_id,
+                zone_id.clone(),
+            );
+            let outcome = node
+                .apply_gossip_fetch_payload_and_observe_connector_state_roots(
+                    &state_store,
+                    &plan,
+                    vec![object_bytes],
+                    vec![],
+                    1_001,
+                )
+                .await
+                .expect("apply fetched connector-state root and observe candidate");
+            assert_eq!(outcome.apply.objects_applied, vec![fetched_root_id]);
+            assert_eq!(
+                outcome.apply.connector_state_root_candidates,
+                vec![fetched_root_id]
+            );
+            assert!(outcome.apply.symbols_applied.is_empty());
+            assert_eq!(outcome.connector_state_changes.len(), 1);
+
+            let change = &outcome.connector_state_changes[0];
+            assert_eq!(change.kind, ConnectorStateChangeKind::RootUpdated);
+            assert_eq!(change.object_id, Some(fetched_root_id));
+            assert_eq!(change.zone_id, zone_id);
+            assert_eq!(change.seq, None);
+        })
+        .expect("runtime");
+    }
+
+    #[test]
+    fn prepare_gossip_fetch_reply_materializes_bytes_for_apply_and_observe() {
+        let mut requester = test_node("node-1");
+        let mut responder = test_node("peer-1");
+        let requester_peer = NodeId::new("node-1");
+        let responder_peer = NodeId::new("peer-1");
+        let zone_id = ZoneId::work();
+        let connector_id = ConnectorId::from_static("slack:chat:v1");
+        let object_id_key = ObjectIdKey::from_bytes([0xB6; 32]);
+
+        requester.update_peer_state(
+            responder_peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        requester.update_peer_zones(&responder_peer, zone_set(zone_id.clone()));
+        responder.update_peer_state(
+            requester_peer.clone(),
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        responder.update_peer_zones(&requester_peer, zone_set(zone_id.clone()));
+
+        let fetched_root =
+            test_connector_state_root_object(&zone_id, connector_id.clone(), object_id_key);
+        let fetched_root_id = fetched_root.object_id;
+        let symbol_object_id = test_object_id("inline-fetch-symbol-object");
+        let symbol_meta = test_object_symbol_meta(symbol_object_id, &zone_id);
+        let fetched_symbol = test_stored_symbol(symbol_object_id, &zone_id, 11, 0xBC);
+
+        assert!(responder.announce_object(
+            &zone_id,
+            &fetched_root_id,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+        assert!(responder.announce_symbol(
+            &zone_id,
+            &symbol_object_id,
+            11,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        fcp_async_core::runtime::block_on_sync(async {
+            responder
+                .object_store
+                .put(fetched_root)
+                .await
+                .expect("responder stores connector-state root bytes");
+            responder
+                .symbol_store
+                .put_object_meta(symbol_meta)
+                .await
+                .expect("responder stores symbol metadata");
+            responder
+                .symbol_store
+                .put_symbol(fetched_symbol)
+                .await
+                .expect("responder stores symbol bytes");
+
+            let request = GossipRequest {
+                from: TailscaleNodeId::new("node-1"),
+                zone_id: zone_id.clone(),
+                object_ids: vec![fetched_root_id],
+                symbols: vec![(symbol_object_id, 11)],
+                timestamp: 1_000,
+                signature: None,
+            };
+            let reply = responder
+                .prepare_gossip_fetch_reply(request, 1_000)
+                .await
+                .expect("responder materializes fetch reply");
+            assert_eq!(reply.response.have_objects, vec![fetched_root_id]);
+            assert_eq!(reply.response.have_symbols, vec![(symbol_object_id, 11)]);
+            assert_eq!(reply.payload.objects.len(), 1);
+            assert_eq!(reply.payload.symbols.len(), 1);
+
+            let plan = requester
+                .handle_gossip_response(reply.response, 1_000)
+                .expect("requester verifies availability response")
+                .expect("requester produces fetch plan");
+            let state_store = FcpStoreConnectorStateStore::new(
+                Arc::clone(requester.object_store()),
+                object_id_key,
+                connector_id,
+                zone_id.clone(),
+            );
+            let outcome = requester
+                .apply_gossip_fetch_payload_and_observe_connector_state_roots(
+                    &state_store,
+                    &plan,
+                    reply.payload.objects,
+                    reply.payload.symbols,
+                    1_001,
+                )
+                .await
+                .expect("requester applies bytes and observes state root");
+
+            assert_eq!(outcome.apply.objects_applied, vec![fetched_root_id]);
+            assert_eq!(
+                outcome.apply.connector_state_root_candidates,
+                vec![fetched_root_id]
+            );
+            assert_eq!(outcome.apply.symbols_applied, vec![(symbol_object_id, 11)]);
+            assert_eq!(outcome.connector_state_changes.len(), 1);
+            assert_eq!(
+                outcome.connector_state_changes[0].kind,
+                ConnectorStateChangeKind::RootUpdated
+            );
+            assert_eq!(
+                outcome.connector_state_changes[0].object_id,
+                Some(fetched_root_id)
+            );
+        })
+        .expect("runtime");
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_rejects_response_for_different_recipient() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let response = GossipResponse {
+            from: TailscaleNodeId::new("peer-1"),
+            to: TailscaleNodeId::new("node-2"),
+            zone_id: ZoneId::work(),
+            have_objects: vec![ObjectId::from_bytes([0x65; 32])],
+            have_symbols: Vec::new(),
+            timestamp: 1_000,
+        };
+        let payload = serde_json::to_vec(&GossipMessage::Response(response)).expect("JSON encode");
+
+        let err = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect_err("response for another recipient must be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::RecipientMismatch {
+                message_kind: "gossip response",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_routes_reconcile_request_to_response() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let zone_id = ZoneId::work();
+        let shared = ObjectId::from_bytes([0x41; 32]);
+        let local_only = ObjectId::from_bytes([0x42; 32]);
+        let peer_only = ObjectId::from_bytes([0x43; 32]);
+        assert!(node.announce_object(&zone_id, &shared, ObjectAdmissionClass::Admitted, 1_000,));
+        assert!(
+            node.announce_object(&zone_id, &local_only, ObjectAdmissionClass::Admitted, 1_000,)
+        );
+
+        let mut peer_sketch = IbltPlaceholder::with_mask(
+            node.gossip.reconciliation_batch_size(),
+            crate::iblt::IbltMask::for_zone(&zone_id),
+        );
+        peer_sketch.note_local_change(&shared, None);
+        peer_sketch.note_local_change(&peer_only, None);
+        let request = ReconcileRequest {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: zone_id.clone(),
+            iblt: peer_sketch.encode(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            timestamp: 1_000,
+        };
+        let payload =
+            serde_json::to_vec(&GossipMessage::ReconcileRequest(request)).expect("JSON encode");
+
+        let outcome = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect("dispatch should succeed");
+        assert!(outcome.revocation_push.is_none());
+        assert!(outcome.response.is_none());
+        let response = outcome
+            .reconcile_response
+            .expect("reconcile dispatch must surface an immediate response");
+        assert_eq!(response.from, TailscaleNodeId::new("node-1"));
+        assert_eq!(response.zone_id, zone_id);
+        assert_eq!(response.timestamp, 1_000);
+        assert_eq!(response.peer_missing_objects.len(), 1);
+        assert!(response.peer_missing_objects.contains(&local_only));
+        assert_eq!(response.we_missing_objects.len(), 1);
+        assert!(response.we_missing_objects.contains(&peer_only));
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_routes_reconcile_response_to_followup_request() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let zone_id = ZoneId::work();
+        let already_known = ObjectId::from_bytes([0x51; 32]);
+        let missing = ObjectId::from_bytes([0x52; 32]);
+        let peer_missing = ObjectId::from_bytes([0x53; 32]);
+        assert!(node.announce_object(
+            &zone_id,
+            &already_known,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        let response = ReconcileResponse {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: zone_id.clone(),
+            peer_missing_objects: vec![peer_missing],
+            we_missing_objects: vec![already_known, missing],
+            timestamp: 1_000,
+        };
+        let payload =
+            serde_json::to_vec(&GossipMessage::ReconcileResponse(response)).expect("JSON encode");
+
+        let outcome = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect("dispatch should succeed");
+        assert!(outcome.revocation_push.is_none());
+        assert!(outcome.response.is_none());
+        assert!(outcome.reconcile_response.is_none());
+        let followup = outcome
+            .followup_request
+            .expect("reconcile response must surface a follow-up request");
+        assert_eq!(followup.peer, TailscaleNodeId::new("peer-1"));
+        assert_eq!(followup.request.from, TailscaleNodeId::new("node-1"));
+        assert_eq!(followup.request.zone_id, zone_id);
+        assert_eq!(followup.request.object_ids, vec![missing]);
+        assert!(followup.request.symbols.is_empty());
+        assert_eq!(followup.request.timestamp, 1_000);
     }
 
     #[test]
@@ -4583,6 +7293,61 @@ mod tests {
         let candidates = node.plan_execution(&context, 2000);
         // Node has the required connector installed, should be a candidate
         assert!(!candidates.is_empty());
+    }
+
+    #[test]
+    fn plan_execution_uses_thompson_scheduler_after_recorded_outcomes() {
+        use crate::device::{DeviceProfileBuilder, InstalledConnector};
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let mut node = test_node("node-1");
+        let connector_id =
+            fcp_core::ConnectorId::new("fcp.test", "adaptive", "v1").expect("valid connector id");
+        let installed = InstalledConnector::new(
+            connector_id.clone(),
+            "1.0.0",
+            ObjectId::from_bytes([0xBC; 32]),
+        );
+        let peer_id = NodeId::new("peer-1");
+        let operation_class = ResourcePoolClass::RequestResponse;
+
+        let local_profile = DeviceProfileBuilder::new(NodeId::new("node-1"))
+            .add_connector(installed.clone())
+            .build();
+        let peer_profile = DeviceProfileBuilder::new(peer_id.clone())
+            .add_connector(installed)
+            .build();
+
+        node.update_local_state(local_profile, HashSet::new(), Vec::new());
+        node.update_peer_state(
+            peer_id.clone(),
+            peer_profile,
+            HashSet::new(),
+            Vec::new(),
+            1000,
+        );
+
+        for _ in 0..200 {
+            node.record_execution_outcome(NodeId::new("node-1"), operation_class, false);
+            node.record_execution_outcome(peer_id.clone(), operation_class, true);
+        }
+
+        let context = PlannerContext::new(connector_id).with_resource_pool_class(operation_class);
+        let mut rng = StdRng::seed_from_u64(0xFC04_2004);
+        let candidates = node.plan_execution_with_rng(&context, 2000, &mut rng);
+
+        assert_eq!(candidates[0].node_id.as_str(), "peer-1");
+        assert!(
+            candidates[0].decision_reasons.iter().any(|reason| matches!(
+                reason,
+                DecisionReason::Custom(message) if message.contains("thompson_sample")
+            )),
+            "selected candidate should carry Thompson sampling evidence"
+        );
+
+        let posterior = node.execution_posterior(&peer_id, operation_class);
+        assert_eq!(posterior.alpha(), 201);
+        assert_eq!(posterior.beta(), 1);
     }
 
     // Regression for flywheel_connectors-fqzmp: build_planner_input used to
@@ -6149,7 +8914,7 @@ mod tests {
                 .put_object_meta(ObjectSymbolMeta {
                     object_id,
                     zone_id: zone_id.clone(),
-                    oti: ObjectTransmissionInfo::from(oti),
+                    oti,
                     source_symbols: 4,
                     first_symbol_at: 0,
                 })

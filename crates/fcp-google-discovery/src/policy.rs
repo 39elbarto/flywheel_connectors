@@ -771,10 +771,7 @@ mod tests {
     #[test]
     fn default_catalog_loads_and_contains_expected_services() {
         let catalog = default_google_policy_catalog();
-        assert_eq!(
-            catalog.generated_from_bead,
-            "flywheel_connectors-lszk.45.3.7"
-        );
+        assert_eq!(catalog.generated_from_bead, "bd-bia.4");
         assert!(catalog.service("gmail").is_some());
         assert!(catalog.service("calendar").is_some());
         assert!(catalog.service("admin").is_some());

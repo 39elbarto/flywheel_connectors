@@ -24,7 +24,10 @@ use crate::policy::{
 const GOOGLE_AUTHORIZATION_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_DEVICE_AUTHORIZATION_URL: &str = "https://oauth2.googleapis.com/device/code";
 const DEFAULT_PROVISIONING_RECIPE_VERSION: &str = "1";
-const DEFAULT_CALLBACK_PORT: u16 = 8765;
+/// `0` tells the host to bind `127.0.0.1:0` and keep that listener open for
+/// the complete authorization-code callback flow. The selected ephemeral port
+/// is then substituted into the loopback redirect URI before consent starts.
+const RANDOM_LOOPBACK_CALLBACK_PORT: u16 = 0;
 #[cfg(test)]
 const DEFAULT_DEVICE_CODE_POLL_INTERVAL_SECONDS: u64 = 5;
 const DEFAULT_ESTIMATED_DURATION_MS: u64 = 180_000;
@@ -91,7 +94,7 @@ impl Default for GoogleProvisioningAuthFlow {
     fn default() -> Self {
         Self::AuthorizationCodePkce {
             auto_browser: true,
-            callback_port: DEFAULT_CALLBACK_PORT,
+            callback_port: RANDOM_LOOPBACK_CALLBACK_PORT,
         }
     }
 }
@@ -305,15 +308,6 @@ const fn validate_auth_flow(
     auth_flow: &GoogleProvisioningAuthFlow,
 ) -> Result<(), GoogleProvisioningError> {
     match auth_flow {
-        GoogleProvisioningAuthFlow::AuthorizationCodePkce { callback_port, .. }
-            if *callback_port == 0 =>
-        {
-            Err(GoogleProvisioningError::InvalidAuthFlowParameter {
-                flow: "authorization_code_pkce",
-                field: "callback_port",
-                value: 0,
-            })
-        }
         GoogleProvisioningAuthFlow::DeviceCode {
             poll_interval_seconds,
         } if *poll_interval_seconds == 0 => {
@@ -614,7 +608,7 @@ fn authorization_prompt_message(
             auto_browser,
             callback_port,
         } => format!(
-            "Run Google OAuth authorization-code + PKCE for {} with scopes {}. auto_browser={} callback_port={}.",
+            "Run Google OAuth authorization-code + PKCE for {} with scopes {}. auto_browser={} callback_port={} (0 means bind a random available 127.0.0.1 port and retain the listener through callback validation).",
             surface.display_name,
             join_sentence_list(&surface.default_scopes),
             auto_browser,
@@ -680,11 +674,8 @@ mod tests {
         let bundle = load_default_google_provisioning_bundle("gmail")
             .expect("gmail bundle should load from embedded catalog");
 
-        assert_eq!(bundle.policy_version, "2026-03-06");
-        assert_eq!(
-            bundle.generated_from_bead,
-            "flywheel_connectors-lszk.45.3.7"
-        );
+        assert_eq!(bundle.policy_version, "2026-08-02");
+        assert_eq!(bundle.generated_from_bead, "bd-bia.4");
         assert_eq!(bundle.surface.surface_id, "gmail");
         assert_eq!(
             bundle.surface.default_scopes,
@@ -862,7 +853,7 @@ mod tests {
                 callback_port,
             } => {
                 assert!(auto_browser);
-                assert_eq!(callback_port, DEFAULT_CALLBACK_PORT);
+                assert_eq!(callback_port, RANDOM_LOOPBACK_CALLBACK_PORT);
             }
             GoogleProvisioningAuthFlow::DeviceCode { .. } => {
                 panic!("expected AuthorizationCodePkce, got DeviceCode")
@@ -1148,23 +1139,22 @@ mod tests {
     }
 
     #[test]
-    fn bundle_rejects_zero_callback_port() {
+    fn bundle_uses_zero_callback_port_as_random_loopback_sentinel() {
         let catalog = GooglePolicyCatalog::load_default().expect("embedded catalog should load");
-        let err = catalog
+        let bundle = catalog
             .provisioning_bundle_with_auth_flow(
-                "gmail",
+                "drive",
                 GoogleProvisioningAuthFlow::AuthorizationCodePkce {
                     auto_browser: true,
                     callback_port: 0,
                 },
             )
-            .expect_err("zero callback_port should fail closed");
+            .expect("zero callback_port should request random loopback allocation");
         assert!(matches!(
-            err,
-            GoogleProvisioningError::InvalidAuthFlowParameter {
-                flow: "authorization_code_pkce",
-                field: "callback_port",
-                value: 0,
+            bundle.automation.auth_flow,
+            GoogleProvisioningAuthFlow::AuthorizationCodePkce {
+                callback_port: RANDOM_LOOPBACK_CALLBACK_PORT,
+                ..
             }
         ));
     }
@@ -1528,6 +1518,30 @@ mod tests {
                 bundle.setup.estimated_duration_ms.is_some(),
                 "{} should have estimated duration",
                 surface.surface_id
+            );
+        }
+    }
+
+    #[test]
+    fn drive_and_sheets_share_the_broad_drive_scope_and_api_prerequisites() {
+        for surface_id in ["drive", "sheets"] {
+            let bundle = load_default_google_provisioning_bundle(surface_id)
+                .unwrap_or_else(|err| panic!("{surface_id} bundle should load: {err}"));
+            assert_eq!(
+                bundle.surface.default_scopes,
+                vec!["https://www.googleapis.com/auth/drive".to_string()]
+            );
+            assert!(
+                bundle
+                    .automation
+                    .required_api_enablement
+                    .contains(&"Google Drive API".to_string())
+            );
+            assert!(
+                bundle
+                    .automation
+                    .required_api_enablement
+                    .contains(&"Google Sheets API".to_string())
             );
         }
     }

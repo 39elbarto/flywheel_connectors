@@ -1,6 +1,6 @@
 {
-  "version": "2026-03-06",
-  "generated_from_bead": "flywheel_connectors-lszk.45.3.7",
+  "version": "2026-08-02",
+  "generated_from_bead": "bd-bia.4",
   "provisioning_policy": {
     "intent": "Provisioning must keep default scopes narrow, treat consent restrictions as first-class policy, and separate setup-time Google Cloud automation from runtime connector credentials.",
     "default_scope_posture": "Start with the least-broad scope set that supports the selected workflow; widen only on explicit feature selection or a method-level requirement that cannot be satisfied otherwise.",
@@ -336,6 +336,92 @@
         "notes": [
           "Admin Reports is a domain-admin surface, not an end-user personal-data connector; setup must make tenant and admin assumptions explicit.",
           "Audit and usage scopes should stay separately explainable because many environments will permit one but not the other."
+        ]
+      },
+      {
+        "surface_id": "drive",
+        "display_name": "Google Drive connector provisioning",
+        "default_scopes": [
+          "https://www.googleapis.com/auth/drive"
+        ],
+        "required_api_enablement": [
+          "Google Drive API",
+          "Google Sheets API"
+        ],
+        "project_prerequisites": [
+          "OAuth consent screen configured for the selected project.",
+          "A Desktop OAuth client created for the host loopback authorization flow.",
+          "The operator has explicitly accepted the restricted broad Drive scope required for existing My Drive, Shared with me, and Shared Drive content."
+        ],
+        "escalation_paths": [
+          {
+            "trigger": "An official method-level check proves a selected Sheets operation cannot use the broad Drive scope.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/spreadsheets"
+            ],
+            "notes": [
+              "This is a fail-closed exception path, not part of the default grant; record the exact method and official evidence before enabling it."
+            ]
+          }
+        ],
+        "gcloud_assisted_steps": [
+          "Confirm both Google Drive API and Google Sheets API are enabled before launching user consent.",
+          "Verify the selected OAuth client is a Desktop app and keep browser consent as the human approval gate."
+        ],
+        "fallback_steps": [
+          "Provide manual Google Cloud console steps to enable Drive and Sheets APIs and create a Desktop OAuth client.",
+          "Bind an available random 127.0.0.1 callback port, validate OAuth state and PKCE, request offline access with explicit consent, and verify the exact account through Drive about.get before storing the refresh grant."
+        ],
+        "runtime_materialization": [
+          "Store client_id, client_secret, refresh_token, and verified account_email in the dedicated google-workspace-fcp-oauth secret service.",
+          "Runtime receives only credential references or ephemeral access tokens; persistent connector configuration must not contain OAuth values."
+        ],
+        "notes": [
+          "The broad Drive scope is intentionally selected for complete existing-file and shared-content workflows; provider-side OAuth cannot remove delete authority, so connector capability enforcement remains mandatory.",
+          "The same grant serves selected Sheets methods without adding a separate spreadsheets scope."
+        ]
+      },
+      {
+        "surface_id": "sheets",
+        "display_name": "Google Sheets connector provisioning",
+        "default_scopes": [
+          "https://www.googleapis.com/auth/drive"
+        ],
+        "required_api_enablement": [
+          "Google Drive API",
+          "Google Sheets API"
+        ],
+        "project_prerequisites": [
+          "OAuth consent screen configured for the selected project.",
+          "A Desktop OAuth client created for the host loopback authorization flow.",
+          "The Drive connector and Sheets connector use the same dedicated Google Workspace grant and exact-account policy."
+        ],
+        "escalation_paths": [
+          {
+            "trigger": "An official method-level check proves a selected Sheets operation cannot use the broad Drive scope.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/spreadsheets"
+            ],
+            "notes": [
+              "This is a fail-closed exception path, not part of the default grant; record the exact method and official evidence before enabling it."
+            ]
+          }
+        ],
+        "gcloud_assisted_steps": [
+          "Confirm both Google Drive API and Google Sheets API are enabled before launching user consent.",
+          "Do not add a spreadsheets scope unless an official method-level check proves the selected Drive scope insufficient."
+        ],
+        "fallback_steps": [
+          "Use the same manual Desktop OAuth setup and random loopback flow as the Drive surface.",
+          "Verify granted scope, refresh-token presence, and exact account identity before materializing the shared runtime credential reference."
+        ],
+        "runtime_materialization": [
+          "Reuse only the dedicated google-workspace-fcp-oauth credential reference shared with the Drive connector.",
+          "Runtime receives an ephemeral access token or credential handle and removes any mode-0600 runtime token file on exit."
+        ],
+        "notes": [
+          "Sheets operations are authorized through the broad Drive grant chosen for the combined Drive and Sheets workflow.",
+          "Spreadsheet-file deletion remains prohibited by the connector boundary even though the provider grant is broader."
         ]
       },
       {

@@ -1,3 +1,8 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_google_discovery::auth::{
@@ -8,13 +13,18 @@ use fcp_google_sheets::client::SheetsClient;
 use fcp_google_sheets::connector::SheetsConnector;
 use fcp_google_sheets::types::{BatchUpdateValuesRequest, ValueRange};
 use fcp_prelude::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, HandshakeRequest, InstanceId, ZoneId,
+    CapabilityConstraints, CapabilityId, CapabilityToken, FcpError, HandshakeRequest, InstanceId,
+    ZoneId,
 };
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path},
 };
+
+fn fixture_bearer() -> String {
+    "test-token".to_owned()
+}
 
 #[fcp_async_core::runtime::test]
 async fn bearer_token_requests_use_authorization_header() {
@@ -33,7 +43,7 @@ async fn bearer_token_requests_use_authorization_header() {
         .await;
 
     let client = SheetsClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
-        access_token: "test-token".into(),
+        access_token: fixture_bearer(),
         source: GoogleAuthSourceKind::AccessToken,
         granted_scopes: Vec::new(),
         quota_project_id: None,
@@ -81,13 +91,69 @@ async fn credential_reference_requests_use_fcp_credential_header() {
 
 fn test_client(server: &MockServer) -> SheetsClient {
     SheetsClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
-        access_token: "test-token".into(),
+        access_token: fixture_bearer(),
         source: GoogleAuthSourceKind::AccessToken,
         granted_scopes: Vec::new(),
         quota_project_id: None,
     })
     .expect("client")
     .with_base_url(format!("{}/v4", server.uri()))
+}
+
+async fn configured_connector_token(
+    server: &MockServer,
+    capability: &'static str,
+    operations: &[&'static str],
+) -> (SheetsConnector, CapabilityToken) {
+    let mut connector = SheetsConnector::new();
+    connector
+        .handle_configure(json!({
+            "access_token": fixture_bearer(),
+            "base_url": format!("{}/v4", server.uri()),
+        }))
+        .await
+        .unwrap();
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    connector
+        .handle_handshake(
+            serde_json::to_value(HandshakeRequest {
+                protocol_version: "2.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [7_u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static(capability)],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: Some(instance_id.clone()),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["google-sheets:spreadsheet:sheet123".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).unwrap();
+    let now = Utc::now();
+    let token = CapabilityToken::from_raw(
+        CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .target_instance(instance_id.as_str())
+            .principal("user:test")
+            .operations(operations)
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .unwrap()
+            .sign(&signing_key)
+            .unwrap(),
+    );
+    (connector, token)
 }
 
 #[fcp_async_core::runtime::test]
@@ -172,6 +238,169 @@ async fn structural_batch_and_copy_use_only_fixed_sheets_endpoints() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn high_risk_clear_and_structural_delete_require_confirmation_and_read_back() {
+    let clear_server = MockServer::start().await;
+    let (mut clear_connector, clear_token) = configured_connector_token(
+        &clear_server,
+        "sheets.values.write",
+        &["sheets.clear_values"],
+    )
+    .await;
+    let denied_clear = clear_connector
+        .handle_invoke(json!({
+            "operation": "sheets.clear_values",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:B2"
+            },
+            "capability_token": clear_token.clone()
+        }))
+        .await
+        .expect_err("clear without confirmation must fail before provider I/O");
+    assert!(matches!(denied_clear, FcpError::InvalidRequest { .. }));
+    assert!(clear_server.received_requests().await.unwrap().is_empty());
+
+    let clear_reads = Arc::new(AtomicUsize::new(0));
+    let clear_reads_for_response = Arc::clone(&clear_reads);
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values/Sheet1%21A1%3AB2"))
+        .respond_with(move |_request: &wiremock::Request| {
+            if clear_reads_for_response.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "range": "Sheet1!A1:B2",
+                    "majorDimension": "ROWS",
+                    "values": [["keep-a-copy", 42]]
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "range": "Sheet1!A1:B2",
+                    "majorDimension": "ROWS",
+                    "values": []
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&clear_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/v4/spreadsheets/sheet123/values/Sheet1%21A1%3AB2:clear",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "spreadsheetId": "sheet123",
+            "clearedRange": "Sheet1!A1:B2"
+        })))
+        .expect(1)
+        .mount(&clear_server)
+        .await;
+    let clear_result = clear_connector
+        .handle_invoke(json!({
+            "operation": "sheets.clear_values",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:B2",
+                "confirm_clear": true
+            },
+            "capability_token": clear_token
+        }))
+        .await
+        .expect("confirmed clear with preflight and readback");
+    assert_eq!(
+        clear_result["preflight"]["values"],
+        json!([["keep-a-copy", 42]])
+    );
+    assert_eq!(clear_result["readback"]["values"], json!([]));
+    assert_eq!(clear_reads.load(Ordering::SeqCst), 2);
+
+    let structure_server = MockServer::start().await;
+    let (mut structure_connector, structure_token) = configured_connector_token(
+        &structure_server,
+        "sheets.structure.write",
+        &["sheets.batch_update_spreadsheet"],
+    )
+    .await;
+    let delete_request = json!({"deleteSheet": {"sheetId": 7}});
+    let denied_delete = structure_connector
+        .handle_invoke(json!({
+            "operation": "sheets.batch_update_spreadsheet",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "requests": [delete_request.clone()]
+            },
+            "capability_token": structure_token.clone()
+        }))
+        .await
+        .expect_err("structural delete without confirmation must fail before provider I/O");
+    assert!(matches!(denied_delete, FcpError::InvalidRequest { .. }));
+    assert!(
+        structure_server
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let metadata_reads = Arc::new(AtomicUsize::new(0));
+    let metadata_reads_for_response = Arc::clone(&metadata_reads);
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123"))
+        .respond_with(move |_request: &wiremock::Request| {
+            if metadata_reads_for_response.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "spreadsheetId": "sheet123",
+                    "properties": {"title": "Safety fixture"},
+                    "sheets": [{"properties": {"sheetId": 7, "title": "Delete me"}}]
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "spreadsheetId": "sheet123",
+                    "properties": {"title": "Safety fixture"},
+                    "sheets": []
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&structure_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v4/spreadsheets/sheet123:batchUpdate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "spreadsheetId": "sheet123",
+            "replies": [{}]
+        })))
+        .expect(1)
+        .mount(&structure_server)
+        .await;
+    let delete_result = structure_connector
+        .handle_invoke(json!({
+            "operation": "sheets.batch_update_spreadsheet",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "requests": [delete_request],
+                "confirm_destructive": true
+            },
+            "capability_token": structure_token
+        }))
+        .await
+        .expect("confirmed structural delete with preflight and readback");
+    assert_eq!(delete_result["destructive"], true);
+    assert_eq!(
+        delete_result["preflight"]["sheets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        delete_result["readback"]["sheets"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(metadata_reads.load(Ordering::SeqCst), 2);
+}
+
+#[fcp_async_core::runtime::test]
 async fn collaborator_conflict_and_malformed_response_fail_closed() {
     let conflict_server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -239,7 +468,7 @@ async fn append_idempotency_key_prevents_duplicate_provider_call() {
     let mut connector = SheetsConnector::new();
     connector
         .handle_configure(json!({
-            "access_token": "test-token",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/v4", server.uri()),
         }))
         .await

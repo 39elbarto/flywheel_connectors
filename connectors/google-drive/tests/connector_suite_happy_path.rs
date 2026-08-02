@@ -31,9 +31,13 @@ fn init_json_test_logging() {
     });
 }
 
+fn fixture_bearer() -> String {
+    "ya29_test_drive".to_owned()
+}
+
 fn direct_test_client(server: &MockServer) -> DriveClient {
     DriveClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
-        access_token: "test_access_token".to_string(),
+        access_token: fixture_bearer(),
         source: GoogleAuthSourceKind::AccessToken,
         granted_scopes: Vec::new(),
         quota_project_id: None,
@@ -485,7 +489,7 @@ async fn connector_suite_happy_path_lists_files() {
     let suite = ConnectorSuite {
         test_name: "google_drive_happy_path".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake,
@@ -611,7 +615,7 @@ async fn mark_for_deletion_review_moves_owned_file_without_trashing_it() {
     let suite = ConnectorSuite {
         test_name: "google_drive_mark_deletion_review".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake: handshake_request(
@@ -719,7 +723,7 @@ async fn mark_for_deletion_review_shortcuts_foreign_file_without_changing_origin
     let suite = ConnectorSuite {
         test_name: "google_drive_mark_foreign_deletion_review".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake: handshake_request(
@@ -741,6 +745,165 @@ async fn mark_for_deletion_review_shortcuts_foreign_file_without_changing_origin
         .await
         .expect("connector suite run");
     assert!(report.passed, "foreign original should remain unchanged");
+}
+
+#[fcp_async_core::runtime::test]
+async fn shared_drive_original_move_requires_confirmation_and_stays_in_the_same_drive() {
+    let server = MockServer::start().await;
+    let review_name = format!(
+        "[FCP-DELETE-REVIEW {}] team-plan.pdf",
+        Utc::now().format("%Y-%m-%d")
+    );
+    let original = json!({
+        "id": "file_shared_drive",
+        "name": "team-plan.pdf",
+        "mimeType": "application/pdf",
+        "parents": ["team_parent"],
+        "trashed": false,
+        "owners": [],
+        "permissions": [{"id": "perm_team", "role": "organizer", "type": "user"}],
+        "driveId": "team_drive",
+        "md5Checksum": "team123",
+        "capabilities": {"canMoveItemWithinDrive": true}
+    });
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/file_shared_drive"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(original))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/about"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "drive#about",
+            "user": {"emailAddress": "me@example.com"}
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    let mut connector = DriveConnector::new();
+    connector
+        .handle_configure(json!({
+            "access_token": fixture_bearer(),
+            "base_url": format!("{}/drive/v3", server.uri()),
+        }))
+        .await
+        .unwrap();
+    connector
+        .handle_handshake(
+            serde_json::to_value(handshake_request(
+                signing_key.verifying_key().to_bytes(),
+                &["drive.quarantine.write"],
+                &instance_id,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let denied = connector
+        .handle_invoke(json!({
+            "operation": "drive.mark_for_deletion_review",
+            "input": {
+                "file_id": "file_shared_drive",
+                "mode": "move_shared_drive_original"
+            },
+            "capability_token": build_token(
+                &signing_key,
+                "drive.mark_for_deletion_review",
+                &instance_id,
+            )
+        }))
+        .await
+        .expect_err("shared Drive original move must require explicit confirmation");
+    assert!(matches!(denied, FcpError::InvalidRequest { .. }));
+
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .and(query_param("corpora", "drive"))
+        .and(query_param("driveId", "team_drive"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "drive#fileList",
+            "files": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files"))
+        .and(body_json(json!({
+            "name": "_FCP_DELETE_REVIEW",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": ["team_drive"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "team_review",
+            "name": "_FCP_DELETE_REVIEW",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": ["team_drive"],
+            "driveId": "team_drive",
+            "trashed": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/drive/v3/files/file_shared_drive"))
+        .and(body_json(json!({"name": review_name})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_shared_drive",
+            "name": review_name,
+            "mimeType": "application/pdf",
+            "parents": ["team_parent"],
+            "driveId": "team_drive",
+            "trashed": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/drive/v3/files/file_shared_drive"))
+        .and(query_param("addParents", "team_review"))
+        .and(query_param("removeParents", "team_parent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_shared_drive",
+            "name": review_name,
+            "mimeType": "application/pdf",
+            "parents": ["team_review"],
+            "trashed": false,
+            "owners": [],
+            "permissions": [{"id": "perm_team", "role": "organizer", "type": "user"}],
+            "driveId": "team_drive",
+            "md5Checksum": "team123",
+            "capabilities": {"canMoveItemWithinDrive": true}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "drive.mark_for_deletion_review",
+            "input": {
+                "file_id": "file_shared_drive",
+                "mode": "move_shared_drive_original",
+                "confirm_shared_drive_move": true
+            },
+            "capability_token": build_token(
+                &signing_key,
+                "drive.mark_for_deletion_review",
+                &instance_id,
+            )
+        }))
+        .await
+        .expect("confirmed Shared Drive move within the same Drive");
+    assert_eq!(result["receipt"]["mode"], "shared_drive_move");
+    assert_eq!(result["receipt"]["drive_id"], "team_drive");
+    assert_eq!(result["file"]["parents"], json!(["team_review"]));
+    assert_eq!(result["file"]["trashed"], false);
 }
 
 #[fcp_async_core::runtime::test]
@@ -814,7 +977,7 @@ async fn restore_from_deletion_review_moves_and_renames_owned_file() {
     let suite = ConnectorSuite {
         test_name: "google_drive_restore_deletion_review".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake: handshake_request(
@@ -873,7 +1036,7 @@ async fn upload_file_sends_real_multipart_related_body() {
     let suite = ConnectorSuite {
         test_name: "google_drive_multipart_upload".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake: handshake_request(
@@ -946,7 +1109,7 @@ async fn upload_file_completes_validated_resumable_session() {
     let suite = ConnectorSuite {
         test_name: "google_drive_resumable_upload".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake: handshake_request(
@@ -1004,7 +1167,7 @@ async fn update_content_uses_patch_without_trash_fields() {
     let suite = ConnectorSuite {
         test_name: "google_drive_update_content".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake: handshake_request(
@@ -1052,7 +1215,7 @@ async fn resumable_upload_rejects_session_location_path_change() {
     let suite = ConnectorSuite {
         test_name: "google_drive_resumable_location_rejected".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake: handshake_request(
@@ -1094,7 +1257,7 @@ async fn upload_rejects_invalid_base64_before_provider_io() {
     let suite = ConnectorSuite {
         test_name: "google_drive_invalid_upload_base64".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake: handshake_request(
@@ -1182,7 +1345,7 @@ async fn connector_suite_error_path_reports_not_found_file() {
     let suite = ConnectorSuite {
         test_name: "google_drive_get_file_not_found".to_string(),
         config: json!({
-            "access_token": "ya29_test_drive",
+            "access_token": fixture_bearer(),
             "base_url": format!("{}/drive/v3", server.uri()),
         }),
         handshake,

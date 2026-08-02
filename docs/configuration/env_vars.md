@@ -62,3 +62,33 @@ active mesh from an isolated single host.
 Legacy evaluation variable from the earlier V2 cutover prototype. New fcp-host
 boot behavior is controlled by `FCP_V2_INSUFFICIENT_PEERS_BEHAVIOR` and
 `FCP_TRUTH_PRECEDENCE_DEFAULT=v2`.
+
+## Operation-scoped owner single-host admission
+
+### `FCP_HOST_OWNER_SINGLE_HOST_ADMISSION`
+
+Optional JSON object for an explicitly owner-approved, single-host
+`Risky`/`Dangerous` invocation. This does not classify the host as mesh-active
+and does not weaken the default evaluation-mode denial. The object must bind one
+exact operation:
+
+```json
+{
+  "version": 1,
+  "mode": "owner-approved-single-host",
+  "zone_id": "z:private",
+  "connector_id": "google-drive",
+  "operation": "drive.create_folder"
+}
+```
+
+The host admits the deployment tier only when all fields exactly match the
+live request. Missing, malformed, broadened, or mismatched objects fail closed.
+`Safe`, `Critical`, and `Forbidden` tiers never use this path. Capability,
+zone, approval-token, provenance, network, rate-limit, and connector allowlist
+checks still run normally. Every admitted request emits the warning-level
+`deployment_tier.owner_single_host_admitted` audit event.
+
+This variable is intended for a short-lived owner-controlled runtime that
+starts for one operation and then exits. Do not set it globally for a service
+or use it as a substitute for mesh-active production deployment.

@@ -5166,6 +5166,61 @@ fn enforce_live_capability_constraints(
 }
 
 const DEPLOYMENT_TIER_DENIED_AUDIT_EVENT_TYPE: &str = "deployment_tier.denied";
+const OWNER_SINGLE_HOST_ADMITTED_AUDIT_EVENT_TYPE: &str =
+    "deployment_tier.owner_single_host_admitted";
+const OWNER_SINGLE_HOST_ADMISSION_ENV: &str = "FCP_HOST_OWNER_SINGLE_HOST_ADMISSION";
+const OWNER_SINGLE_HOST_ADMISSION_MODE: &str = "owner-approved-single-host";
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct OwnerSingleHostAdmission {
+    version: u8,
+    mode: String,
+    zone_id: String,
+    connector_id: String,
+    operation: String,
+}
+
+impl OwnerSingleHostAdmission {
+    fn parse(raw: &str) -> HostResult<Self> {
+        let admission: Self = serde_json::from_str(raw).map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "{OWNER_SINGLE_HOST_ADMISSION_ENV} must be a valid owner admission object: {error}"
+            ))
+        })?;
+        if admission.version != 1 || admission.mode != OWNER_SINGLE_HOST_ADMISSION_MODE {
+            return Err(HostError::InvalidFilter(format!(
+                "{OWNER_SINGLE_HOST_ADMISSION_ENV} requires version=1 and mode={OWNER_SINGLE_HOST_ADMISSION_MODE}"
+            )));
+        }
+        if admission.zone_id.trim().is_empty()
+            || admission.connector_id.trim().is_empty()
+            || admission.operation.trim().is_empty()
+        {
+            return Err(HostError::InvalidFilter(format!(
+                "{OWNER_SINGLE_HOST_ADMISSION_ENV} identifiers must be non-empty"
+            )));
+        }
+        Ok(admission)
+    }
+
+    fn matches(&self, request: &InvokeRequest, tier: SafetyTier) -> bool {
+        matches!(tier, SafetyTier::Risky | SafetyTier::Dangerous)
+            && self.zone_id == request.zone_id.as_str()
+            && self.connector_id == request.connector_id.as_str()
+            && self.operation == request.operation.as_str()
+    }
+}
+
+fn owner_single_host_admission_allows(
+    request: &InvokeRequest,
+    tier: SafetyTier,
+    raw: Option<&str>,
+) -> HostResult<bool> {
+    raw.map(OwnerSingleHostAdmission::parse)
+        .transpose()
+        .map(|admission| admission.is_some_and(|value| value.matches(request, tier)))
+}
 
 fn current_deployment_classification() -> DeploymentClassification {
     // The host binary does not yet have live mesh quorum signals wired into
@@ -5380,6 +5435,20 @@ fn emit_deployment_tier_denial_audit_event(
         operation = request.operation.as_str(),
         zone_id = request.zone_id.as_str(),
         "deployment_tier_denied_audit_event"
+    );
+}
+
+fn emit_owner_single_host_admission_audit_event(request: &InvokeRequest, tier: SafetyTier) {
+    tracing::warn!(
+        audit_event_type = OWNER_SINGLE_HOST_ADMITTED_AUDIT_EVENT_TYPE,
+        reason_code = "OWNER_APPROVED_SINGLE_HOST_OPERATION",
+        safety_tier = ?tier,
+        deployment_mode = "evaluation",
+        request_id = request.id.0.as_str(),
+        connector_id = request.connector_id.as_str(),
+        operation = request.operation.as_str(),
+        zone_id = request.zone_id.as_str(),
+        "owner_single_host_admitted_audit_event"
     );
 }
 
@@ -6162,6 +6231,16 @@ fn enforce_live_deployment_tier(request: &InvokeRequest, tier: SafetyTier) -> Ho
     match admit_safety_tier(&classification, tier) {
         Ok(()) => Ok(()),
         Err(refusal) => {
+            if matches!(
+                refusal,
+                DeploymentTierRefusal::TierRequiresMeshActive { .. }
+            ) {
+                let raw = read_optional_trimmed_env_string(OWNER_SINGLE_HOST_ADMISSION_ENV)?;
+                if owner_single_host_admission_allows(request, tier, raw.as_deref())? {
+                    emit_owner_single_host_admission_audit_event(request, tier);
+                    return Ok(());
+                }
+            }
             emit_deployment_tier_denial_audit_event(request, tier, &classification, &refusal);
             Err(HostError::PreflightFailed(deployment_tier_refusal_message(
                 &refusal,
@@ -24363,6 +24442,110 @@ done"#;
         )
         .expect("blank env should decode");
         assert_eq!(value, None);
+    }
+
+    fn owner_single_host_test_request() -> InvokeRequest {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::from_bytes(&[31_u8; 32])
+            .expect("test signing key");
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static("google-drive"),
+            operation: OperationId::from_static("drive.create_folder"),
+            zone_id: ZoneId::private(),
+            input: json!({"name": "FCP Test Artifacts"}),
+            capability_token: test_capability_token(
+                &signing_key,
+                "drive.metadata.write",
+                "drive.create_folder",
+                ZoneId::private().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    fn owner_single_host_test_admission() -> String {
+        serde_json::to_string(&json!({
+            "version": 1,
+            "mode": OWNER_SINGLE_HOST_ADMISSION_MODE,
+            "zone_id": "z:private",
+            "connector_id": "google-drive",
+            "operation": "drive.create_folder"
+        }))
+        .expect("serialize owner admission")
+    }
+
+    #[test]
+    fn owner_single_host_admission_allows_only_exact_risky_or_dangerous_request() {
+        let request = owner_single_host_test_request();
+        let raw = owner_single_host_test_admission();
+
+        assert!(
+            owner_single_host_admission_allows(&request, SafetyTier::Risky, Some(&raw))
+                .expect("valid risky owner admission")
+        );
+        assert!(
+            owner_single_host_admission_allows(&request, SafetyTier::Dangerous, Some(&raw))
+                .expect("valid dangerous owner admission")
+        );
+        for tier in [
+            SafetyTier::Safe,
+            SafetyTier::Critical,
+            SafetyTier::Forbidden,
+        ] {
+            assert!(
+                !owner_single_host_admission_allows(&request, tier, Some(&raw))
+                    .expect("non-write tiers remain outside owner admission"),
+                "tier {tier:?} must not use owner single-host admission"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_single_host_admission_fails_closed_on_missing_or_mismatched_binding() {
+        let request = owner_single_host_test_request();
+        assert!(
+            !owner_single_host_admission_allows(&request, SafetyTier::Risky, None)
+                .expect("missing admission is a normal denial")
+        );
+
+        for (field, value) in [
+            ("zone_id", "z:work"),
+            ("connector_id", "google-sheets"),
+            ("operation", "drive.copy_file"),
+        ] {
+            let mut admission: Value =
+                serde_json::from_str(&owner_single_host_test_admission()).expect("test JSON");
+            admission[field] = Value::String(value.to_string());
+            let raw = serde_json::to_string(&admission).expect("serialize mismatch");
+            assert!(
+                !owner_single_host_admission_allows(&request, SafetyTier::Risky, Some(&raw))
+                    .expect("well-formed mismatched admission is denied"),
+                "mismatched {field} must deny"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_single_host_admission_rejects_malformed_or_ambiguous_objects() {
+        let request = owner_single_host_test_request();
+        for raw in [
+            "not-json",
+            r#"{"version":2,"mode":"owner-approved-single-host","zone_id":"z:private","connector_id":"google-drive","operation":"drive.create_folder"}"#,
+            r#"{"version":1,"mode":"mesh-active","zone_id":"z:private","connector_id":"google-drive","operation":"drive.create_folder"}"#,
+            r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:private","connector_id":"google-drive","operation":"drive.create_folder","allow_all":true}"#,
+        ] {
+            let error = owner_single_host_admission_allows(&request, SafetyTier::Risky, Some(raw))
+                .expect_err("malformed or broadened admission must fail closed");
+            assert!(matches!(error, HostError::InvalidFilter(_)));
+        }
     }
 
     #[test]

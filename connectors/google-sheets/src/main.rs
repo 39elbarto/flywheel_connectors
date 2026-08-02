@@ -28,6 +28,7 @@ use std::io::{BufRead, Write};
 
 use anyhow::Result;
 use fcp_async_core::runtime::Builder;
+use fcp_prelude::{FcpError, FcpResult, InvokeRequest, InvokeResponse};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use fcp_google_sheets::connector::SheetsConnector;
@@ -90,7 +91,7 @@ async fn handle_message(connector: &mut SheetsConnector, message: &str) -> serde
         "doctor" => connector.handle_doctor().await,
         "self_check" => connector.handle_self_check().await,
         "introspect" => connector.handle_introspect().await,
-        "invoke" => connector.handle_invoke(params).await,
+        "invoke" => handle_invoke(connector, params).await,
         "simulate" => connector.handle_simulate(params).await,
         "shutdown" => connector.handle_shutdown(params).await,
         _ => Err(fcp_core::FcpError::InvalidRequest {
@@ -128,4 +129,21 @@ async fn handle_message(connector: &mut SheetsConnector, message: &str) -> serde
             response
         }
     }
+}
+
+async fn handle_invoke(
+    connector: &mut SheetsConnector,
+    params: serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let request: InvokeRequest =
+        serde_json::from_value(params.clone()).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid invoke request: {error}"),
+        })?;
+    let output = connector.handle_invoke(params).await?;
+    serde_json::to_value(InvokeResponse::ok(request.id, output)).map_err(|error| {
+        FcpError::Internal {
+            message: format!("Failed to serialize invoke response: {error}"),
+        }
+    })
 }

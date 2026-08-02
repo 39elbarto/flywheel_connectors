@@ -107,7 +107,7 @@ fn drive_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         | "drive.restore_from_deletion_review"
         | "drive.restore_file" => Ok(CapabilityId::from_static("drive.quarantine.write")),
         "drive.list_deletion_review" => Ok(CapabilityId::from_static("drive.read")),
-        "drive.upload_file" | "drive.copy_file" => {
+        "drive.upload_file" | "drive.update_content" | "drive.copy_file" => {
             Ok(CapabilityId::from_static("drive.content.write"))
         }
         "drive.create_folder"
@@ -186,6 +186,13 @@ fn validate_drive_input(operation: &str, input: &serde_json::Value) -> FcpResult
             require_str(input, "name")?;
             require_str(input, "mime_type")?;
             require_str(input, "content_base64")?;
+            validate_upload_mode(input)?;
+        }
+        "drive.update_content" => {
+            require_str(input, "file_id")?;
+            require_str(input, "mime_type")?;
+            require_str(input, "content_base64")?;
+            validate_upload_mode(input)?;
         }
         "drive.update_metadata" => {
             require_str(input, "file_id")?;
@@ -284,6 +291,7 @@ fn drive_resource_uris_for_operation(
         | "drive.list_permissions"
         | "drive.list_revisions"
         | "drive.list_comments"
+        | "drive.update_content"
         | "drive.update_metadata"
         | "drive.move_file"
         | "drive.copy_file"
@@ -331,7 +339,7 @@ fn drive_resource_uris_for_operation(
 }
 
 use crate::{
-    client::{DEFAULT_BASE_URL, DriveClient},
+    client::{DEFAULT_BASE_URL, DriveClient, DriveUploadMode},
     error::DriveError,
     types::{DoctorCheck, DoctorReport},
 };
@@ -351,6 +359,7 @@ const OPERATION_ORDER: &[&str] = &[
     "drive.export_file",
     "drive.create_folder",
     "drive.upload_file",
+    "drive.update_content",
     "drive.update_metadata",
     "drive.move_file",
     "drive.copy_file",
@@ -773,6 +782,7 @@ impl DriveConnector {
             "drive.export_file" => self.invoke_export_file(input).await,
             "drive.create_folder" => self.invoke_create_folder(input).await,
             "drive.upload_file" => self.invoke_upload_file(input).await,
+            "drive.update_content" => self.invoke_update_content(input).await,
             "drive.update_metadata" => self.invoke_update_metadata(input).await,
             "drive.move_file" => self.invoke_move_file(input).await,
             "drive.copy_file" => self.invoke_copy_file(input).await,
@@ -977,12 +987,35 @@ impl DriveConnector {
         let mime_type = require_str(&input, "mime_type")?;
         let content = require_str(&input, "content_base64")?;
         let parent_id = input.get("parent_id").and_then(|v| v.as_str());
+        let mode = parse_upload_mode(&input)?;
 
         let file = client
-            .upload_file(name, mime_type, parent_id, content)
+            .upload_file(name, mime_type, parent_id, content, mode)
             .await
             .map_err(|e: DriveError| e.to_fcp_error())?;
 
+        Ok(json!({ "file": file }))
+    }
+
+    async fn invoke_update_content(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+        let mime_type = require_str(&input, "mime_type")?;
+        let content = require_str(&input, "content_base64")?;
+        let mode = parse_upload_mode(&input)?;
+        let file = client
+            .update_content(
+                file_id,
+                mime_type,
+                content,
+                mode,
+                optional_str(&input, "resource_key"),
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
         Ok(json!({ "file": file }))
     }
 
@@ -1570,6 +1603,21 @@ fn optional_str<'a>(input: &'a serde_json::Value, field: &str) -> Option<&'a str
     input.get(field).and_then(serde_json::Value::as_str)
 }
 
+fn validate_upload_mode(input: &serde_json::Value) -> FcpResult<()> {
+    parse_upload_mode(input).map(|_| ())
+}
+
+fn parse_upload_mode(input: &serde_json::Value) -> FcpResult<DriveUploadMode> {
+    match optional_str(input, "upload_mode").unwrap_or("multipart") {
+        "multipart" => Ok(DriveUploadMode::Multipart),
+        "resumable" => Ok(DriveUploadMode::Resumable),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "upload_mode must be multipart or resumable".into(),
+        }),
+    }
+}
+
 fn optional_u32(input: &serde_json::Value, field: &str) -> FcpResult<Option<u32>> {
     match input.get(field) {
         None => Ok(None),
@@ -1762,7 +1810,9 @@ mod tests {
             "drive.mark_for_deletion_review"
             | "drive.restore_from_deletion_review"
             | "drive.restore_file" => "drive.quarantine.write",
-            "drive.upload_file" | "drive.copy_file" => "drive.content.write",
+            "drive.upload_file" | "drive.update_content" | "drive.copy_file" => {
+                "drive.content.write"
+            }
             "drive.create_folder"
             | "drive.update_metadata"
             | "drive.move_file"

@@ -28,7 +28,7 @@ const MAX_SCHEMA_VALIDATION_DEPTH: usize = 64;
 pub enum GoogleUploadMode {
     /// `uploadType=media` (bytes-only payload).
     Simple,
-    /// `uploadType=multipart` (metadata + media payload in multipart/form-data).
+    /// `uploadType=multipart` (metadata + media payload in multipart/related).
     Multipart,
     /// `uploadType=resumable` (session-init metadata request).
     Resumable,
@@ -465,6 +465,7 @@ impl GoogleRestExecutor {
         let rendered_path = render_path_template(path_template, &request.parameters)?;
         let mut url = build_url(request.base_url, &rendered_path)?;
         append_query_parameters(&mut url, request)?;
+        let request_url = url.clone();
 
         let validation_body = body_for_validation(request);
         validate_request_body(
@@ -489,10 +490,27 @@ impl GoogleRestExecutor {
 
         builder = apply_payload(builder, &method, request, validation_body.as_ref())?;
 
-        let response = builder
+        let mut response = builder
             .send()
             .await
             .map_err(|source| GoogleRestError::Http { source })?;
+
+        if response.status().is_success() {
+            if let Some(upload) = request
+                .upload
+                .as_ref()
+                .filter(|upload| upload.mode == GoogleUploadMode::Resumable)
+            {
+                response = send_resumable_content(
+                    &self.client,
+                    response,
+                    &request_url,
+                    upload,
+                    request.auth,
+                )
+                .await?;
+            }
+        }
         let status = response.status();
         let content_type = response
             .headers()
@@ -1011,24 +1029,11 @@ fn apply_payload(
                 let metadata = validation_body
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
-
-                let metadata_part = reqwest::multipart::Part::text(metadata.to_string())
-                    .mime_str("application/json; charset=UTF-8")
-                    .map_err(|error| GoogleRestError::InvalidUploadContentType {
-                        content_type: "application/json; charset=UTF-8".to_string(),
-                        message: error.to_string(),
-                    })?;
-                let media_part = reqwest::multipart::Part::bytes(upload.bytes.clone())
-                    .mime_str(&upload.content_type)
-                    .map_err(|error| GoogleRestError::InvalidUploadContentType {
-                        content_type: upload.content_type.clone(),
-                        message: error.to_string(),
-                    })?;
-
-                let form = reqwest::multipart::Form::new()
-                    .part("metadata", metadata_part)
-                    .part("media", media_part);
-                builder = builder.multipart(form);
+                let (content_type, body) =
+                    multipart_related_body(&metadata, upload.content_type.as_str(), &upload.bytes)?;
+                builder = builder
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(body);
             }
             GoogleUploadMode::Resumable => {
                 let metadata = validation_body
@@ -1054,6 +1059,103 @@ fn apply_payload(
     }
 
     Ok(builder)
+}
+
+fn multipart_related_body(
+    metadata: &serde_json::Value,
+    media_content_type: &str,
+    media: &[u8],
+) -> Result<(String, Vec<u8>), GoogleRestError> {
+    reqwest::header::HeaderValue::from_str(media_content_type).map_err(|error| {
+        GoogleRestError::InvalidUploadContentType {
+            content_type: media_content_type.to_string(),
+            message: error.to_string(),
+        }
+    })?;
+
+    let metadata = metadata.to_string();
+    let mut suffix = 0_u32;
+    let boundary = loop {
+        let candidate = format!("fcp-google-upload-boundary-{suffix}");
+        if !metadata.contains(&candidate)
+            && !media
+                .windows(candidate.len())
+                .any(|window| window == candidate.as_bytes())
+        {
+            break candidate;
+        }
+        suffix =
+            suffix
+                .checked_add(1)
+                .ok_or_else(|| GoogleRestError::InvalidUploadConfiguration {
+                    message: "could not choose a collision-free multipart boundary".to_string(),
+                })?;
+    };
+
+    let mut body = Vec::with_capacity(metadata.len() + media.len() + 256);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
+    body.extend_from_slice(metadata.as_bytes());
+    body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(format!("Content-Type: {media_content_type}\r\n\r\n").as_bytes());
+    body.extend_from_slice(media);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    Ok((format!("multipart/related; boundary={boundary}"), body))
+}
+
+async fn send_resumable_content(
+    client: &reqwest::Client,
+    init_response: reqwest::Response,
+    init_url: &reqwest::Url,
+    upload: &GoogleUploadPayload,
+    auth: Option<&GoogleMaterializedAuth>,
+) -> Result<reqwest::Response, GoogleRestError> {
+    let location = init_response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| GoogleRestError::InvalidUploadConfiguration {
+            message: "resumable upload response did not include a valid Location header"
+                .to_string(),
+        })?;
+    let session_url = reqwest::Url::parse(location).map_err(|error| {
+        GoogleRestError::InvalidUploadConfiguration {
+            message: format!("resumable upload Location is not an absolute URL: {error}"),
+        }
+    })?;
+
+    let same_origin = session_url.scheme() == init_url.scheme()
+        && session_url.host_str() == init_url.host_str()
+        && session_url.port_or_known_default() == init_url.port_or_known_default();
+    if !same_origin
+        || session_url.path() != init_url.path()
+        || !session_url.username().is_empty()
+        || session_url.password().is_some()
+        || session_url.fragment().is_some()
+    {
+        return Err(GoogleRestError::InvalidUploadConfiguration {
+            message: "resumable upload Location must preserve the initiation origin and path"
+                .to_string(),
+        });
+    }
+
+    let mut builder = client
+        .put(session_url)
+        .header(reqwest::header::CONTENT_TYPE, upload.content_type.as_str())
+        .header(reqwest::header::CONTENT_LENGTH, upload.bytes.len())
+        .body(upload.bytes.clone());
+    if let Some(auth) = auth {
+        let mut headers = Vec::new();
+        auth.apply_headers(&mut headers);
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+    }
+    builder
+        .send()
+        .await
+        .map_err(|source| GoogleRestError::Http { source })
 }
 
 /// Extract the `Retry-After` header value in milliseconds.
@@ -1526,6 +1628,38 @@ mod tests {
         assert_eq!(payload.content_type, "application/pdf");
         assert_eq!(payload.bytes, vec![0x25, 0x50, 0x44, 0x46]);
         assert_eq!(payload.metadata, Some(meta));
+    }
+
+    #[test]
+    fn multipart_upload_uses_rfc_2387_related_body() {
+        let metadata = serde_json::json!({"name": "notes.txt"});
+        let (content_type, body) =
+            multipart_related_body(&metadata, "text/plain", b"hello").expect("multipart body");
+        let body = String::from_utf8(body).expect("text fixture");
+
+        assert_eq!(
+            content_type,
+            "multipart/related; boundary=fcp-google-upload-boundary-0"
+        );
+        assert!(body.contains("Content-Type: application/json; charset=UTF-8\r\n\r\n"));
+        assert!(body.contains("{\"name\":\"notes.txt\"}"));
+        assert!(body.contains("Content-Type: text/plain\r\n\r\nhello"));
+        assert!(body.ends_with("--fcp-google-upload-boundary-0--\r\n"));
+        assert!(!body.contains("form-data"));
+    }
+
+    #[test]
+    fn multipart_upload_rejects_header_injection_in_media_type() {
+        let error = multipart_related_body(
+            &serde_json::json!({}),
+            "text/plain\r\nx-evil: true",
+            b"hello",
+        )
+        .expect_err("invalid content type");
+        assert!(matches!(
+            error,
+            GoogleRestError::InvalidUploadContentType { .. }
+        ));
     }
 
     // ── GoogleResponseBody ────────────────────────────────────────────

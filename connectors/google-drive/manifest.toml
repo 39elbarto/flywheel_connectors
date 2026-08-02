@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:1ffd04742d1b5ed06d5ffe678ef3aecffd05e8f78a050196d96465aec765acff"
+interface_hash = "blake3-256:fcp.interface.v2:d8e2bd7e42d81048774e568c939cc0da71dcc406988f4f637960ac94da1987d2"
 
 [connector]
 id = "fcp.google_drive"
@@ -251,6 +251,10 @@ type = "string"
 type = "string"
 [provides.operations."drive.upload_file".input_schema.properties.parent_id]
 type = "string"
+[provides.operations."drive.upload_file".input_schema.properties.upload_mode]
+type = "string"
+enum = ["multipart", "resumable"]
+default = "multipart"
 
 [provides.operations."drive.upload_file".output_schema]
 required = ["file"]
@@ -275,9 +279,22 @@ max_response_bytes = 5242880
 
 [provides.operations."drive.upload_file".ai_hints]
 when_to_use = "Upload file bytes (base64-encoded) to Drive with an explicit MIME type and optional parent folder."
-common_mistakes = ["Large files should use resumable upload (not yet supported by this connector)", "Each call creates a new file — repeat calls produce duplicates"]
-examples = ["{\"name\":\"report.txt\",\"mime_type\":\"text/plain\",\"content_base64\":\"SGVsbG8=\"}"]
-related = ["drive.create_folder", "drive.get_file"]
+common_mistakes = ["Use multipart for small files and resumable when interruption tolerance matters", "Each call creates a new file — repeat calls produce duplicates"]
+examples = ["{\"name\":\"report.txt\",\"mime_type\":\"text/plain\",\"content_base64\":\"SGVsbG8=\",\"upload_mode\":\"multipart\"}"]
+related = ["drive.create_folder", "drive.update_content", "drive.get_file"]
+
+[provides.operations."drive.update_content"]
+description = "Replace file content through multipart or resumable upload without trash or delete semantics"
+capability = "drive.content.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+revocation_freshness = "critical"
+input_schema = { type = "object", required = ["file_id", "mime_type", "content_base64"], properties = { file_id = { type = "string" }, mime_type = { type = "string" }, content_base64 = { type = "string" }, upload_mode = { type = "string", enum = ["multipart", "resumable"], default = "multipart" }, resource_key = { type = "string" } } }
+output_schema = { type = "object", required = ["file"], properties = { file = { type = "object" } } }
+network_constraints = { host_allow = ["www.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 15000, total_timeout_ms = 600000, max_response_bytes = 5242880 }
+ai_hints = { when_to_use = "Replace the bytes of an existing Drive file while preserving its file ID.", common_mistakes = ["This overwrites content and needs interactive approval", "Use drive.update_metadata for renaming or descriptions"], examples = ["{\"file_id\":\"abc123\",\"mime_type\":\"text/plain\",\"content_base64\":\"SGVsbG8=\",\"upload_mode\":\"resumable\"}"], related = ["drive.upload_file", "drive.update_metadata"] }
 
 # ────────────────────────────────────────────────────────────────
 

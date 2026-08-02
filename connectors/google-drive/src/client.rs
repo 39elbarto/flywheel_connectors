@@ -8,12 +8,13 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
 use fcp_google_discovery::executor::{
     GoogleApiError, GoogleExecuteRequest, GoogleExecuteResponse, GoogleResponseBody,
-    GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
+    GoogleResponseMode, GoogleRestError, GoogleRestExecutor, GoogleUploadPayload,
 };
-use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use fcp_google_discovery::{DiscoveryMediaUpload, DiscoveryMethod, DiscoveryParameter};
 use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, Url, header};
@@ -27,6 +28,15 @@ use crate::{
 
 /// Default Google Drive API v3 base URL.
 pub const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/drive/v3";
+
+/// Bounded Google Drive upload modes exposed by the connector.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DriveUploadMode {
+    /// One RFC 2387 `multipart/related` request for metadata and small content.
+    Multipart,
+    /// Session initialization followed by a full-content `PUT` to the validated session URL.
+    Resumable,
+}
 
 /// Google Drive API v3 client.
 pub struct DriveClient {
@@ -246,30 +256,52 @@ impl DriveClient {
         self.post_json(&url, &body).await
     }
 
-    /// Upload a file (metadata-only, content via media upload is separate).
+    /// Upload a new file using a real Drive media-upload protocol.
     pub async fn upload_file(
         &self,
         name: &str,
         mime_type: &str,
         parent_id: Option<&str>,
         content_base64: &str,
+        mode: DriveUploadMode,
     ) -> DriveResult<DriveFile> {
-        let url = format!(
-            "{}/files?uploadType=multipart&fields=id,name,mimeType,size",
-            self.base_url,
-        );
+        let bytes = decode_upload_content(content_base64)?;
         let mut metadata = serde_json::json!({
             "name": name,
             "mimeType": mime_type,
         });
         if let Some(parent) = parent_id {
+            sanitize_path_segment(parent, "parent_id")?;
             metadata["parents"] = serde_json::json!([parent]);
         }
-        let body = serde_json::json!({
-            "metadata": metadata,
-            "media_body_base64": content_base64,
-        });
-        self.post_json(&url, &body).await
+        self.execute_media_upload("POST", None, None, mime_type, bytes, metadata, mode)
+            .await
+    }
+
+    /// Replace a file's content without exposing trash or delete semantics.
+    pub async fn update_content(
+        &self,
+        file_id: &str,
+        mime_type: &str,
+        content_base64: &str,
+        mode: DriveUploadMode,
+        resource_key: Option<&str>,
+    ) -> DriveResult<DriveFile> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        if let Some(resource_key) = resource_key {
+            sanitize_path_segment(resource_key, "resource_key")?;
+        }
+        let bytes = decode_upload_content(content_base64)?;
+        self.execute_media_upload(
+            "PATCH",
+            Some(file_id),
+            resource_key,
+            mime_type,
+            bytes,
+            json!({"mimeType": mime_type}),
+            mode,
+        )
+        .await
     }
 
     /// Download a file's content as bytes (returned as base64).
@@ -785,6 +817,110 @@ impl DriveClient {
             .await
             .map_err(map_rest_error)
     }
+
+    async fn execute_media_upload(
+        &self,
+        http_method: &'static str,
+        file_id: Option<&str>,
+        resource_key: Option<&str>,
+        mime_type: &str,
+        bytes: Vec<u8>,
+        metadata: Value,
+        mode: DriveUploadMode,
+    ) -> DriveResult<DriveFile> {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let parsed_base = Url::parse(&self.base_url).map_err(|error| DriveError::Api {
+            status_code: 400,
+            message: format!("invalid Drive base URL: {error}"),
+        })?;
+        let api_path = parsed_base.path().trim_matches('/');
+        let upload_path = file_id.map_or_else(
+            || format!("upload/{api_path}/files"),
+            |file_id| format!("upload/{api_path}/files/{}", urlencoding::encode(file_id)),
+        );
+        let mut origin = parsed_base.origin().ascii_serialization();
+        if !origin.ends_with('/') {
+            origin.push('/');
+        }
+
+        let mut parameters = BTreeMap::new();
+        parameters.insert("supportsAllDrives".to_string(), vec!["true".to_string()]);
+        parameters.insert(
+            "fields".to_string(),
+            vec!["id,name,mimeType,size,parents,trashed,driveId,md5Checksum".to_string()],
+        );
+        if let Some(resource_key) = resource_key {
+            parameters.insert("resourceKey".to_string(), vec![resource_key.to_string()]);
+        }
+        let method_parameters = parameters
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    DiscoveryParameter {
+                        location: Some("query".to_string()),
+                        required: false,
+                        repeated: true,
+                        type_name: Some("string".to_string()),
+                        format: None,
+                        description: None,
+                    },
+                )
+            })
+            .collect();
+        let method = DiscoveryMethod {
+            key: format!("drive.upload.{}", http_method.to_ascii_lowercase()),
+            id: format!("drive.upload.{}", http_method.to_ascii_lowercase()),
+            http_method: http_method.to_string(),
+            path: upload_path.clone(),
+            flat_path: None,
+            canonical_path: upload_path.clone(),
+            resource_path: Vec::new(),
+            description: None,
+            scopes: Vec::new(),
+            request_ref: None,
+            response_ref: None,
+            parameters: method_parameters,
+            supports_media_download: false,
+            supports_media_upload: true,
+            media_upload: Some(DiscoveryMediaUpload {
+                accept: vec!["*/*".to_string()],
+                max_size: None,
+                simple_path: Some(upload_path.clone()),
+                resumable_path: Some(upload_path),
+            }),
+        };
+        let upload = match mode {
+            DriveUploadMode::Multipart => {
+                GoogleUploadPayload::multipart(mime_type, bytes, metadata)
+            }
+            DriveUploadMode::Resumable => {
+                GoogleUploadPayload::resumable(mime_type, bytes, metadata)
+            }
+        };
+        let schemas = BTreeMap::new();
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, &origin);
+        request.parameters = parameters;
+        request.upload = Some(upload);
+        request.response_mode = GoogleResponseMode::Json;
+        request.auth = Some(&self.auth);
+
+        let response = self
+            .executor
+            .execute(&request)
+            .await
+            .map_err(map_rest_error)?;
+        decode_json_response(response)
+    }
+}
+
+fn decode_upload_content(content_base64: &str) -> DriveResult<Vec<u8>> {
+    BASE64_STANDARD
+        .decode(content_base64)
+        .map_err(|error| DriveError::Api {
+            status_code: 400,
+            message: format!("content_base64 is not valid standard base64: {error}"),
+        })
 }
 
 fn decode_json_response<T: serde::de::DeserializeOwned>(

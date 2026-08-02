@@ -27,7 +27,7 @@ The current crate exposes these operations:
 - `drive.get_file`
 - `drive.download_file`
 - `drive.create_folder`
-- `drive.upload_file`
+- `drive.upload_file`, `drive.update_content`
 - `drive.list_shared_with_me`, `drive.list_drives`
 - `drive.list_permissions`, `drive.list_revisions`, `drive.list_comments`
 - `drive.export_file`
@@ -53,7 +53,8 @@ Important runtime truths the contract preserves:
 - Path-segment validation rejects empty strings, slashes, backslashes, `..`, query strings, fragments, encoded slash/backslash/query/fragment markers, and literal percent characters.
 - `drive.list_files` URL-encodes `query` and `page_token`, and rejects `max_results` outside `1..=1000`.
 - `drive.download_file` requests `alt=media` and returns `content_base64`; if the executor returns JSON instead of binary, the current runtime returns the JSON value as a string.
-- `drive.upload_file` calls `files?uploadType=multipart` but sends a JSON wrapper containing `metadata` and `media_body_base64` through `GoogleRestExecutor`. It does not implement Google resumable upload.
+- `drive.upload_file` and `drive.update_content` decode standard base64 locally and support real RFC 2387 `multipart/related` or resumable session upload.
+- Resumable mode initializes a session and sends the complete content in one `PUT`; the returned session URL must preserve the initiation origin and path before credentials or bytes are sent.
 - permission operations are separated behind `drive.share.write` and explicit interactive approval metadata.
 - `drive.restore_file` can only set `trashed=false`; there is no inverse operation.
 - Deletion review never uses Google trash: owned files are renamed and moved into `_FCP_DELETE_REVIEW`; foreign-owned and Shared Drive files default to a personal shortcut that leaves the original unchanged.
@@ -75,12 +76,11 @@ This README documents the runtime truth and keeps current drift visible:
 - Manifest optional capabilities include `media.download` and `media.upload`; runtime operations use the narrower Drive capability families below.
 - Manifest marks sensitive writes as policy or interactive approval. Runtime introspection exposes that approval intent; the current connector boundary verifies bound capability tokens and the wrapper layer remains responsible for approval-token policy enforcement.
 - Runtime `drive.download_file` can return a JSON string in `content_base64` if the executor gives the client a JSON response body.
-- Runtime `drive.upload_file` advertises multipart upload but sends a JSON wrapper rather than constructing a true multipart request body or resumable upload session.
 - Runtime `handle_shutdown` calls client shutdown but does not clear client, verifier, session, configured flags, or handshaken flags.
 - `self_check()` reports `DEFAULT_BASE_URL` in details even when a loopback or custom base URL was configured.
 - The dedicated tracked verification shell script is `scripts/e2e/google_drive_connector_verification.sh`.
 
-A follow-up parity bead should align connector ID spelling, reconcile media capabilities, add approval-token enforcement for approval-marked write operations, fix upload/download response semantics, clamp or reject out-of-range pagination input, reset lifecycle state consistently on shutdown, and report the active base URL in self-check.
+A follow-up parity bead should align connector ID spelling, reconcile media capabilities, add approval-token enforcement for approval-marked write operations, fix download response semantics, reset lifecycle state consistently on shutdown, and report the active base URL in self-check.
 
 ## First-Slice Scope
 
@@ -150,7 +150,8 @@ The current Google Drive README slice documents the existing runtime surface:
 | `drive.get_file` | `GET /drive/v3/files/{file_id}?fields=...` | `drive.read` | `Safe` | `Low` | `Strict` | Reads metadata for one Drive file or folder. |
 | `drive.download_file` | `GET /drive/v3/files/{file_id}?alt=media` | `drive.read` | `Safe` | `Low` | `Strict` | Downloads file content and returns it as `content_base64` when the executor returns binary. |
 | `drive.create_folder` | `POST /drive/v3/files?fields=id,name,mimeType,parents` | `drive.metadata.write` | `Risky` | `Medium` | `None` | Creates a new folder, optionally under a parent folder. |
-| `drive.upload_file` | `POST /drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size` | `drive.content.write` | `Dangerous` | `High` | `None` | Creates a new file from base64 input using the current JSON-wrapper upload path. |
+| `drive.upload_file` | `POST /upload/drive/v3/files?uploadType=multipart|resumable` | `drive.content.write` | `Dangerous` | `High` | `None` | Creates a new file from validated base64 through real multipart/related or a validated resumable session. |
+| `drive.update_content` | `PATCH /upload/drive/v3/files/{file_id}?uploadType=multipart|resumable` | `drive.content.write` | `Dangerous` | `High` | `Strict` | Replaces bytes while preserving the file ID and without exposing trash or delete fields. |
 | `drive.restore_file` | `PATCH /drive/v3/files/{file_id}` with exactly `trashed=false` | `drive.quarantine.write` | `Dangerous` | `High` | `Strict` | Restores a file; setting `trashed=true` is rejected recursively before provider I/O. |
 | `drive.mark_for_deletion_review` | Bounded metadata read plus safe rename/move or personal shortcut creation | `drive.quarantine.write` | `Dangerous` | `High` | `None` | Marks an item for later manual review without trashing or deleting it and returns a restoration receipt. |
 | `drive.list_deletion_review` | Bounded `files.list` under `_FCP_DELETE_REVIEW` | `drive.read` | `Safe` | `Low` | `Strict` | Lists only the selected review-folder context. |
@@ -173,6 +174,7 @@ Runtime capability-token verification binds operations to these resource URI sha
 | `drive.add_permission` | `drive://files/{file_id}/permissions` |
 | `drive.create_folder` | `drive://folders/{parent_id_or_root}/children` |
 | `drive.upload_file` | `drive://folders/{parent_id_or_root}/children` |
+| `drive.update_content` | `drive://files/{file_id}` |
 
 ## Explicit Non-Goals
 
@@ -266,7 +268,7 @@ The verification surface captures:
 - If configuration fails, provide exactly one Google auth source at the top level.
 - If live checks fail with a credential reference, materialize host credentials before invoking provider operations.
 - If `drive.download_file` fails on Google-native documents, use `drive.export_file` with an explicit supported MIME type.
-- If `drive.upload_file` fails against real Drive, inspect the current upload body contract before assuming resumable or true multipart upload is implemented.
+- If upload fails, verify standard base64, the MIME type, and whether `upload_mode` is `multipart` or `resumable`.
 - If list pagination behaves unexpectedly, validate `max_results`, `query`, and `page_token` against Drive API syntax and provider limits.
 - If provider returns 403, treat it as an auth/permission failure rather than a retryable transport error.
 

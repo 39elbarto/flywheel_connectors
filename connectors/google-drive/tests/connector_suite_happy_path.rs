@@ -84,11 +84,8 @@ impl FcpConnector for GoogleDriveAdapter {
 
     async fn health(&self) -> HealthSnapshot {
         match self.connector.handle_health().await {
-            Ok(payload) => match payload.get("status").and_then(serde_json::Value::as_str) {
-                Some("healthy") => HealthSnapshot::ready(),
-                Some(other) => HealthSnapshot::degraded(format!("drive_status:{other}")),
-                None => HealthSnapshot::error("drive_status:missing".to_string()),
-            },
+            Ok(payload) => serde_json::from_value(payload)
+                .unwrap_or_else(|err| HealthSnapshot::error(err.to_string())),
             Err(err) => HealthSnapshot::error(err.to_string()),
         }
     }

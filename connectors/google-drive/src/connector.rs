@@ -9,8 +9,8 @@ use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
     ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, Introspection, OperationId, OperationInfo, SelfCheckReport, SessionId,
-    SimulateRequest, SimulateResponse,
+    HandshakeResponse, HealthSnapshot, Introspection, OperationId, OperationInfo, SelfCheckReport,
+    SessionId, SimulateRequest, SimulateResponse,
 };
 use reqwest::Url;
 use serde_json::json;
@@ -524,19 +524,21 @@ impl DriveConnector {
     }
 
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let status = if self.client.is_some() {
-            "healthy"
+        let mut snapshot = if self.client.is_some() {
+            HealthSnapshot::ready()
         } else {
-            "not_configured"
+            HealthSnapshot::degraded("not_configured")
         };
         let metrics = self.base.metrics();
-        Ok(json!({
-            "status": status,
+        snapshot.details = Some(json!({
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
-        }))
+        }));
+        serde_json::to_value(snapshot).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize health response: {error}"),
+        })
     }
 
     /// Handle doctor diagnostics.
@@ -2154,7 +2156,8 @@ mod tests {
     async fn health_unconfigured() {
         let connector = DriveConnector::new();
         let result = connector.handle_health().await.unwrap();
-        assert_eq!(result["status"], "not_configured");
+        assert_eq!(result["status"]["state"], "degraded");
+        assert_eq!(result["status"]["reason"], "not_configured");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2165,7 +2168,7 @@ mod tests {
             .await
             .unwrap();
         let result = connector.handle_health().await.unwrap();
-        assert_eq!(result["status"], "healthy");
+        assert_eq!(result["status"]["state"], "ready");
     }
 
     #[fcp_async_core::runtime::test]

@@ -9,8 +9,8 @@ use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
-    SafetyTier,
+    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, OperationId, OperationInfo,
+    RiskLevel, SafetyTier,
 };
 use reqwest::Url;
 use serde_json::json;
@@ -275,19 +275,21 @@ impl SheetsConnector {
     }
 
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let status = if self.client.is_some() {
-            "healthy"
+        let mut snapshot = if self.client.is_some() {
+            HealthSnapshot::ready()
         } else {
-            "not_configured"
+            HealthSnapshot::degraded("not_configured")
         };
         let metrics = self.base.metrics();
-        Ok(json!({
-            "status": status,
+        snapshot.details = Some(json!({
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
-        }))
+        }));
+        serde_json::to_value(snapshot).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize health response: {error}"),
+        })
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
@@ -1285,7 +1287,8 @@ mod tests {
     fn health_unconfigured() {
         let connector = SheetsConnector::new();
         let result = run_async_test(connector.handle_health()).unwrap();
-        assert_eq!(result["status"], "not_configured");
+        assert_eq!(result["status"]["state"], "degraded");
+        assert_eq!(result["status"]["reason"], "not_configured");
     }
 
     #[test]
@@ -1297,7 +1300,7 @@ mod tests {
                 .await
                 .unwrap();
             let result = connector.handle_health().await.unwrap();
-            assert_eq!(result["status"], "healthy");
+            assert_eq!(result["status"]["state"], "ready");
         });
     }
 

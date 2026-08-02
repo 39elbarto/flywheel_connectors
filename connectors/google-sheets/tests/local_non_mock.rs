@@ -289,7 +289,7 @@ async fn local_non_mock_get_values_uses_sheets_request_boundary() {
     let (mut connector, signing_key, instance_id) = setup_connector(fixture.base_url()).await;
 
     let health = connector.handle_health().await.expect("health response");
-    assert_eq!(health["status"], "healthy");
+    assert_eq!(health["status"]["state"], "ready");
 
     let doctor = connector.handle_doctor().await.expect("doctor response");
     assert_eq!(doctor["status"], "healthy");
@@ -386,7 +386,7 @@ async fn local_non_mock_self_check_reports_configured_without_secret_leakage() {
         .await
         .expect("self-check response");
 
-    assert_eq!(health["status"], "healthy");
+    assert_eq!(health["status"]["state"], "ready");
     assert_eq!(report["status"], "pass");
     assert_eq!(report["check"], "configured");
     assert!(!health.to_string().contains(LOOPBACK_AUTH_VALUE));

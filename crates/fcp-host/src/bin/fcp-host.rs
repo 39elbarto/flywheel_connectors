@@ -154,6 +154,7 @@ use tower::ServiceExt;
 type ConnectorConfig = ManagedConnectorConfig;
 
 const CONNECTOR_STATE_DIR_ENV: &str = "FCP_CONNECTOR_STATE";
+const REQUESTED_INSTANCE_ID_ENV: &str = "FCP_REQUESTED_INSTANCE_ID";
 const CONNECTOR_STATE_OBJECT_ID_KEY_ENV: &str = "FCP_CONNECTOR_STATE_OBJECT_ID_KEY";
 const FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV: &str = "FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY";
 const FCP_CONFIG_DIR_ENV: &str = "FCP_CONFIG_DIR";
@@ -355,6 +356,7 @@ struct SubprocessConnector {
     _runner_task: JoinHandle<()>,
     resilience: Arc<ResilienceLayer>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    requested_instance_id: Option<InstanceId>,
     state_root: Option<PathBuf>,
     handshaken_zone: Mutex<Option<ZoneId>>,
 }
@@ -384,6 +386,21 @@ fn connector_placement_request(
     input.prewarm_strategy = config.prewarm.strategy;
 
     LocalPlacementRequest::new(config.id.clone(), operation_class, input.derive_hint())
+}
+
+fn requested_instance_id_from_config(config: &ConnectorConfig) -> HostResult<Option<InstanceId>> {
+    config
+        .env
+        .get(REQUESTED_INSTANCE_ID_ENV)
+        .map(|value| {
+            value.parse::<InstanceId>().map_err(|error| {
+                HostError::RegistryError(format!(
+                    "connector '{}' has invalid {REQUESTED_INSTANCE_ID_ENV}: {error}",
+                    config.id
+                ))
+            })
+        })
+        .transpose()
 }
 
 fn connector_placement_pressure(
@@ -441,6 +458,7 @@ impl SubprocessConnector {
         placement_operation_class: PlacementOperationClass,
     ) -> HostResult<Self> {
         let summary = connector_summary_from_config(&config)?;
+        let requested_instance_id = requested_instance_id_from_config(&config)?;
         resilience.ensure_connector(&summary.id);
         let placement_request = connector_placement_request(&config, placement_operation_class);
         let pressure =
@@ -477,6 +495,7 @@ impl SubprocessConnector {
             _runner_task: runner_task,
             resilience,
             capability_verifying_key,
+            requested_instance_id,
             state_root,
             handshaken_zone: Mutex::new(None),
         };
@@ -592,7 +611,7 @@ impl SubprocessConnector {
             capabilities_requested: Vec::new(),
             host: None,
             transport_caps: None,
-            requested_instance_id: None,
+            requested_instance_id: self.requested_instance_id.clone(),
         };
         let handshake_params = serde_json::to_value(request)
             .map_err(|err| HostError::RegistryError(format!("handshake encode error: {err}")))?;
@@ -6346,17 +6365,12 @@ async fn verify_live_request(
         .iter()
         .cloned()
         .collect::<Vec<String>>();
-    // The gateway has no link from a capability token back to the
-    // specific SubprocessConnector instance that will ultimately
-    // execute the operation — handshake uses `requested_instance_id:
-    // None` and the connector chooses its own id, which the gateway
-    // never captures. Passing a per-request random `InstanceId::new()`
-    // here used to satisfy the verifier's signature while being the
-    // worst of both worlds: tokens that declared an `instance_id`
-    // claim were always rejected (the random UUID never matched),
-    // while tokens that did NOT declare one passed without any
-    // instance check. Use `without_instance_binding` to honestly say
-    // "gateway can't enforce this; defer to the connector process"
+    // The gateway verifies from the zone vantage and deliberately does not
+    // claim instance binding. A SubprocessConnector can pin an explicit
+    // requested instance ID during handshake, but the connector process is
+    // still the enforcement point that compares that ID with the signed
+    // token. Use `without_instance_binding` here and defer the fifth check to
+    // that connector-side verifier.
     // (br-flywheel_connectors-5qp7o).
     let verifier = CapabilityVerifier::without_instance_binding(
         capability_key.to_bytes(),
@@ -14614,6 +14628,35 @@ mod tests {
     }
 
     #[test]
+    fn requested_instance_id_uses_explicit_connector_environment_value() {
+        let mut config = subprocess_test_connector_config("fcp.test.instance:utility:1.0.0");
+        config.env.insert(
+            REQUESTED_INSTANCE_ID_ENV.to_string(),
+            "inst_google_workspace_test".to_string(),
+        );
+
+        let instance_id = requested_instance_id_from_config(&config)
+            .expect("valid requested instance ID")
+            .expect("requested instance ID should be present");
+
+        assert_eq!(instance_id.as_str(), "inst_google_workspace_test");
+    }
+
+    #[test]
+    fn requested_instance_id_rejects_noncanonical_connector_environment_value() {
+        let mut config = subprocess_test_connector_config("fcp.test.instance:utility:1.0.0");
+        config.env.insert(
+            REQUESTED_INSTANCE_ID_ENV.to_string(),
+            "contains spaces".to_string(),
+        );
+
+        let error = requested_instance_id_from_config(&config)
+            .expect_err("noncanonical requested instance ID must fail closed");
+
+        assert!(error.to_string().contains(REQUESTED_INSTANCE_ID_ENV));
+    }
+
+    #[test]
     fn connector_inventory_update_replaces_empty_fields() {
         let existing = ConnectorConfig {
             id: "fcp.test.replace:utility:1.0.0".to_string(),
@@ -14899,6 +14942,7 @@ deny_ptrace = true
             _runner_task: runner_task,
             resilience: Arc::new(ResilienceLayer::default()),
             capability_verifying_key: None,
+            requested_instance_id: None,
             state_root: None,
             handshaken_zone: Mutex::new(None),
         });
@@ -23287,6 +23331,7 @@ done"#
             _runner_task: runner_task,
             resilience: Arc::new(ResilienceLayer::default()),
             capability_verifying_key: None,
+            requested_instance_id: None,
             state_root: None,
             handshaken_zone: Mutex::new(None),
         };
@@ -25154,6 +25199,7 @@ done"#;
             _runner_task: runner_task,
             resilience: Arc::new(ResilienceLayer::default()),
             capability_verifying_key: Some(signing_key.verifying_key().to_bytes()),
+            requested_instance_id: None,
             state_root: Some(state_root.path().to_path_buf()),
             handshaken_zone: Mutex::new(None),
         });

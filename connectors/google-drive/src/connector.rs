@@ -285,6 +285,7 @@ fn drive_resource_uris_for_operation(
             Ok(vec!["drive://files".into()])
         }
         "drive.list_drives" => Ok(vec!["drive://shared-drives".into()]),
+        "drive.about" => Ok(vec!["drive://about".into()]),
         "drive.get_file"
         | "drive.download_file"
         | "drive.export_file"
@@ -1961,6 +1962,13 @@ mod tests {
         assert!(!host_is_drive_googleapis("drive.googleapis.com"));
         assert!(!host_is_drive_googleapis("googleapis.com.evil.com"));
         assert!(!host_is_drive_googleapis("evil-googleapis.com"));
+    }
+
+    #[test]
+    fn about_operation_has_a_capability_resource_binding() {
+        let resources = drive_resource_uris_for_operation("drive.about", &json!({}))
+            .expect("drive.about must reach capability verification");
+        assert_eq!(resources, vec!["drive://about"]);
     }
 
     #[test]

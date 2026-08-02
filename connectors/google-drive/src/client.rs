@@ -17,6 +17,7 @@ use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
 use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, Url, header};
+use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::{
@@ -126,16 +127,81 @@ impl DriveClient {
         query: Option<&str>,
         max_results: Option<u32>,
         page_token: Option<&str>,
+        corpora: Option<&str>,
+        drive_id: Option<&str>,
     ) -> DriveResult<FileListResponse> {
         let mut url = format!(
-            "{}/files?fields=kind,nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,trashed,shared)",
+            "{}/files?fields=kind,nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,modifiedTime,parents,webViewLink,trashed,shared,owners,driveId,md5Checksum,capabilities(canMoveItemWithinDrive),shortcutDetails)",
             self.base_url,
         );
-        if let Some(q) = query {
-            let _ = write!(url, "&q={}", urlencoding::encode(q));
-        }
+        let safe_query = match query {
+            Some(q) if q.trim().is_empty() => "trashed = false".to_string(),
+            Some(q) => format!("({q}) and trashed = false"),
+            None => "trashed = false".to_string(),
+        };
+        let _ = write!(url, "&q={}", urlencoding::encode(&safe_query));
         if let Some(max) = max_results {
+            if !(1..=1000).contains(&max) {
+                return Err(DriveError::Api {
+                    status_code: 400,
+                    message: "page_size must be between 1 and 1000".to_string(),
+                });
+            }
             let _ = write!(url, "&pageSize={max}");
+        }
+        if let Some(token) = page_token {
+            let _ = write!(url, "&pageToken={}", urlencoding::encode(token));
+        }
+        if let Some(corpora) = corpora {
+            if !matches!(corpora, "user" | "drive" | "allDrives") {
+                return Err(DriveError::Api {
+                    status_code: 400,
+                    message: "corpora must be user, drive, or allDrives".to_string(),
+                });
+            }
+            let _ = write!(url, "&corpora={corpora}");
+        }
+        if let Some(drive_id) = drive_id {
+            let drive_id = sanitize_path_segment(drive_id, "drive_id")?;
+            let _ = write!(url, "&driveId={}", urlencoding::encode(drive_id));
+        }
+        url.push_str("&supportsAllDrives=true&includeItemsFromAllDrives=true");
+        self.get_json(&url).await
+    }
+
+    /// List items shared with the authenticated account, excluding trash.
+    pub async fn list_shared_with_me(
+        &self,
+        query: Option<&str>,
+        page_size: Option<u32>,
+        page_token: Option<&str>,
+    ) -> DriveResult<FileListResponse> {
+        let q = query.map_or_else(
+            || "sharedWithMe = true".to_string(),
+            |value| format!("sharedWithMe = true and ({value})"),
+        );
+        self.list_files(Some(&q), page_size, page_token, Some("user"), None)
+            .await
+    }
+
+    /// List Shared Drives visible to the authenticated account.
+    pub async fn list_drives(
+        &self,
+        page_size: Option<u32>,
+        page_token: Option<&str>,
+    ) -> DriveResult<Value> {
+        let mut url = format!(
+            "{}/drives?fields=nextPageToken,drives(id,name,hidden,createdTime,capabilities)",
+            self.base_url
+        );
+        if let Some(size) = page_size {
+            if !(1..=100).contains(&size) {
+                return Err(DriveError::Api {
+                    status_code: 400,
+                    message: "page_size must be between 1 and 100".into(),
+                });
+            }
+            let _ = write!(url, "&pageSize={size}");
         }
         if let Some(token) = page_token {
             let _ = write!(url, "&pageToken={}", urlencoding::encode(token));
@@ -144,14 +210,19 @@ impl DriveClient {
     }
 
     /// Get a file's metadata by ID.
-    pub async fn get_file(&self, file_id: &str) -> DriveResult<DriveFile> {
+    pub async fn get_file(
+        &self,
+        file_id: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<DriveFile> {
         let file_id = sanitize_path_segment(file_id, "file_id")?;
         let url = format!(
-            "{}/files/{}?fields=id,name,mimeType,size,description,createdTime,modifiedTime,parents,webViewLink,webContentLink,thumbnailLink,trashed,shared,owners,permissions",
+            "{}/files/{}?supportsAllDrives=true&fields=id,name,mimeType,size,description,createdTime,modifiedTime,parents,webViewLink,webContentLink,thumbnailLink,trashed,shared,owners,permissions,driveId,md5Checksum,capabilities(canMoveItemWithinDrive),shortcutDetails",
             self.base_url,
             urlencoding::encode(file_id),
         );
-        self.get_json(&url).await
+        self.get_json_with_resource_key(&url, file_id, resource_key)
+            .await
     }
 
     /// Create a folder in Drive.
@@ -160,12 +231,16 @@ impl DriveClient {
         name: &str,
         parent_id: Option<&str>,
     ) -> DriveResult<DriveFile> {
-        let url = format!("{}/files?fields=id,name,mimeType,parents", self.base_url);
+        let url = format!(
+            "{}/files?supportsAllDrives=true&fields=id,name,mimeType,parents,driveId,trashed",
+            self.base_url
+        );
         let mut body = serde_json::json!({
             "name": name,
             "mimeType": "application/vnd.google-apps.folder"
         });
         if let Some(parent) = parent_id {
+            sanitize_path_segment(parent, "parent_id")?;
             body["parents"] = serde_json::json!([parent]);
         }
         self.post_json(&url, &body).await
@@ -198,7 +273,11 @@ impl DriveClient {
     }
 
     /// Download a file's content as bytes (returned as base64).
-    pub async fn download_file(&self, file_id: &str) -> DriveResult<String> {
+    pub async fn download_file(
+        &self,
+        file_id: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<String> {
         let file_id = sanitize_path_segment(file_id, "file_id")?;
         let url = format!(
             "{}/files/{}?alt=media",
@@ -206,7 +285,15 @@ impl DriveClient {
             urlencoding::encode(file_id),
         );
         let response = self
-            .execute_with_retry("GET", &url, None, GoogleResponseMode::Binary, true)
+            .execute_with_retry_with_resource_key(
+                "GET",
+                &url,
+                None,
+                GoogleResponseMode::Binary,
+                true,
+                file_id,
+                resource_key,
+            )
             .await?;
         match response.body {
             GoogleResponseBody::Binary(bytes) => Ok(base64_encode(&bytes)),
@@ -215,37 +302,285 @@ impl DriveClient {
         }
     }
 
-    /// Trash a file (move to trash).
-    pub async fn trash_file(&self, file_id: &str) -> DriveResult<DriveFile> {
-        let file_id = sanitize_path_segment(file_id, "file_id")?;
-        let url = format!(
-            "{}/files/{}?fields=id,name,trashed",
-            self.base_url,
-            urlencoding::encode(file_id),
-        );
-        let body = serde_json::json!({ "trashed": true });
-        self.patch_json(&url, &body).await
-    }
-
-    /// Share a file with a user.
-    pub async fn share_file(
+    /// Export a Google Workspace-native file.
+    pub async fn export_file(
         &self,
         file_id: &str,
-        email: &str,
+        mime_type: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<String> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let url = format!(
+            "{}/files/{}/export?mimeType={}",
+            self.base_url,
+            urlencoding::encode(file_id),
+            urlencoding::encode(mime_type),
+        );
+        let response = self
+            .execute_with_retry_with_resource_key(
+                "GET",
+                &url,
+                None,
+                GoogleResponseMode::Binary,
+                true,
+                file_id,
+                resource_key,
+            )
+            .await?;
+        match response.body {
+            GoogleResponseBody::Binary(bytes) => Ok(base64_encode(&bytes)),
+            GoogleResponseBody::Empty => Ok(String::new()),
+            GoogleResponseBody::Json(_) => Err(DriveError::Api {
+                status_code: 502,
+                message: "export returned JSON instead of file bytes".into(),
+            }),
+        }
+    }
+
+    /// List permissions on a file.
+    pub async fn list_permissions(
+        &self,
+        file_id: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<Value> {
+        self.get_file_collection(file_id, "permissions", "permissions(id,type,role,emailAddress,displayName,domain,expirationTime,deleted,pendingOwner)", resource_key).await
+    }
+
+    /// List revisions on a file. Revision deletion is intentionally absent.
+    pub async fn list_revisions(
+        &self,
+        file_id: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<Value> {
+        self.get_file_collection(
+            file_id,
+            "revisions",
+            "revisions(id,mimeType,modifiedTime,keepForever,originalFilename,size)",
+            resource_key,
+        )
+        .await
+    }
+
+    /// List comments on a file.
+    pub async fn list_comments(
+        &self,
+        file_id: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<Value> {
+        self.get_file_collection(file_id, "comments", "comments(id,content,quotedFileContent,resolved,createdTime,modifiedTime,author,deleted,replies)", resource_key).await
+    }
+
+    async fn get_file_collection(
+        &self,
+        file_id: &str,
+        collection: &str,
+        fields: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<Value> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let url = format!(
+            "{}/files/{}/{}?fields=nextPageToken,{}&supportsAllDrives=true",
+            self.base_url,
+            urlencoding::encode(file_id),
+            collection,
+            fields
+        );
+        self.get_json_with_resource_key(&url, file_id, resource_key)
+            .await
+    }
+
+    /// Update an explicit allowlist of safe file metadata fields.
+    pub async fn update_metadata(&self, file_id: &str, patch: &Value) -> DriveResult<DriveFile> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let url = format!(
+            "{}/files/{}?supportsAllDrives=true&fields=id,name,mimeType,description,starred,modifiedTime,parents,trashed,owners,permissions,driveId,md5Checksum,capabilities(canMoveItemWithinDrive)",
+            self.base_url,
+            urlencoding::encode(file_id)
+        );
+        self.patch_json(&url, patch).await
+    }
+
+    /// Move a file between folders without trashing it.
+    pub async fn move_file(
+        &self,
+        file_id: &str,
+        add_parent: &str,
+        remove_parents: &[String],
+    ) -> DriveResult<DriveFile> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let add_parent = sanitize_path_segment(add_parent, "add_parent")?;
+        let mut url = format!(
+            "{}/files/{}?supportsAllDrives=true&addParents={}&fields=id,name,mimeType,parents,trashed,owners,permissions,driveId,md5Checksum,capabilities(canMoveItemWithinDrive)",
+            self.base_url,
+            urlencoding::encode(file_id),
+            urlencoding::encode(add_parent)
+        );
+        if !remove_parents.is_empty() {
+            for parent in remove_parents {
+                sanitize_path_segment(parent, "remove_parent")?;
+            }
+            let _ = write!(
+                url,
+                "&removeParents={}",
+                urlencoding::encode(&remove_parents.join(","))
+            );
+        }
+        self.patch_json(&url, &json!({})).await
+    }
+
+    /// Copy a file. Google-native shortcuts are created through `create_shortcut` instead.
+    pub async fn copy_file(
+        &self,
+        file_id: &str,
+        name: Option<&str>,
+        parent_id: Option<&str>,
+    ) -> DriveResult<DriveFile> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let url = format!(
+            "{}/files/{}/copy?supportsAllDrives=true&fields=id,name,mimeType,parents,trashed,owners,capabilities",
+            self.base_url,
+            urlencoding::encode(file_id)
+        );
+        let mut body = json!({});
+        if let Some(name) = name {
+            body["name"] = json!(name);
+        }
+        if let Some(parent) = parent_id {
+            sanitize_path_segment(parent, "parent_id")?;
+            body["parents"] = json!([parent]);
+        }
+        self.post_json(&url, &body).await
+    }
+
+    /// Create a shortcut without modifying the target file.
+    pub async fn create_shortcut(
+        &self,
+        name: &str,
+        target_id: &str,
+        parent_id: Option<&str>,
+        target_resource_key: Option<&str>,
+    ) -> DriveResult<DriveFile> {
+        sanitize_path_segment(target_id, "target_id")?;
+        let url = format!(
+            "{}/files?supportsAllDrives=true&fields=id,name,mimeType,parents,shortcutDetails",
+            self.base_url
+        );
+        let mut shortcut_details = json!({"targetId": target_id});
+        if let Some(resource_key) = target_resource_key {
+            sanitize_path_segment(resource_key, "target_resource_key")?;
+            shortcut_details["targetResourceKey"] = json!(resource_key);
+        }
+        let mut body = json!({"name": name, "mimeType": "application/vnd.google-apps.shortcut", "shortcutDetails": shortcut_details});
+        if let Some(parent) = parent_id {
+            sanitize_path_segment(parent, "parent_id")?;
+            body["parents"] = json!([parent]);
+        }
+        self.post_json(&url, &body).await
+    }
+
+    /// Add a comment to a file.
+    pub async fn create_comment(&self, file_id: &str, content: &str) -> DriveResult<Value> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let url = format!(
+            "{}/files/{}/comments?fields=id,content,createdTime,modifiedTime,author,resolved",
+            self.base_url,
+            urlencoding::encode(file_id)
+        );
+        self.post_json(&url, &json!({"content": content})).await
+    }
+
+    /// Add a reply to an existing comment.
+    pub async fn create_reply(
+        &self,
+        file_id: &str,
+        comment_id: &str,
+        content: &str,
+    ) -> DriveResult<Value> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let comment_id = sanitize_path_segment(comment_id, "comment_id")?;
+        let url = format!(
+            "{}/files/{}/comments/{}/replies?fields=id,content,createdTime,modifiedTime,author",
+            self.base_url,
+            urlencoding::encode(file_id),
+            urlencoding::encode(comment_id)
+        );
+        self.post_json(&url, &json!({"content": content})).await
+    }
+
+    /// Add a permission.
+    pub async fn add_permission(
+        &self,
+        file_id: &str,
+        permission_type: &str,
         role: &str,
+        email: Option<&str>,
+        domain: Option<&str>,
     ) -> DriveResult<DrivePermission> {
         let file_id = sanitize_path_segment(file_id, "file_id")?;
         let url = format!(
-            "{}/files/{}/permissions",
+            "{}/files/{}/permissions?supportsAllDrives=true&sendNotificationEmail=false&fields=id,type,role,emailAddress,displayName,domain,expirationTime",
             self.base_url,
             urlencoding::encode(file_id),
         );
-        let body = serde_json::json!({
-            "type": "user",
-            "role": role,
-            "emailAddress": email,
-        });
+        let mut body = json!({"type": permission_type, "role": role});
+        if let Some(email) = email {
+            body["emailAddress"] = json!(email);
+        }
+        if let Some(domain) = domain {
+            body["domain"] = json!(domain);
+        }
         self.post_json(&url, &body).await
+    }
+
+    /// Update an existing permission role.
+    pub async fn update_permission(
+        &self,
+        file_id: &str,
+        permission_id: &str,
+        role: &str,
+    ) -> DriveResult<DrivePermission> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let permission_id = sanitize_path_segment(permission_id, "permission_id")?;
+        let url = format!(
+            "{}/files/{}/permissions/{}?supportsAllDrives=true&fields=id,type,role,emailAddress,displayName,domain,expirationTime",
+            self.base_url,
+            urlencoding::encode(file_id),
+            urlencoding::encode(permission_id)
+        );
+        self.patch_json(&url, &json!({"role": role})).await
+    }
+
+    /// Revoke one ACL entry. This cannot delete or trash a Drive file.
+    pub async fn revoke_permission(&self, file_id: &str, permission_id: &str) -> DriveResult<()> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let permission_id = sanitize_path_segment(permission_id, "permission_id")?;
+        let url = format!(
+            "{}/files/{}/permissions/{}?supportsAllDrives=true",
+            self.base_url,
+            urlencoding::encode(file_id),
+            urlencoding::encode(permission_id)
+        );
+        let response = self
+            .execute_with_retry("DELETE", &url, None, GoogleResponseMode::Json, true)
+            .await?;
+        match response.body {
+            GoogleResponseBody::Empty | GoogleResponseBody::Json(_) => Ok(()),
+            GoogleResponseBody::Binary(_) => Err(DriveError::Api {
+                status_code: 502,
+                message: "unexpected binary permission response".into(),
+            }),
+        }
+    }
+
+    /// Restore a trashed file. No operation exists for setting `trashed=true`.
+    pub async fn restore_file(&self, file_id: &str) -> DriveResult<DriveFile> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
+        let url = format!(
+            "{}/files/{}?supportsAllDrives=true&fields=id,name,mimeType,parents,trashed,owners,capabilities",
+            self.base_url,
+            urlencoding::encode(file_id)
+        );
+        self.patch_json(&url, &json!({"trashed": false})).await
     }
 
     /// Get Drive storage quota and user info.
@@ -267,6 +602,52 @@ impl DriveClient {
             .execute_with_retry("GET", url, None, GoogleResponseMode::Json, true)
             .await?;
         decode_json_response(response)
+    }
+
+    async fn get_json_with_resource_key<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        file_id: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<T> {
+        let response = self
+            .execute_with_retry_with_resource_key(
+                "GET",
+                url,
+                None,
+                GoogleResponseMode::Json,
+                true,
+                file_id,
+                resource_key,
+            )
+            .await?;
+        decode_json_response(response)
+    }
+
+    async fn execute_with_retry_with_resource_key(
+        &self,
+        http_method: &'static str,
+        url: &str,
+        body: Option<&Value>,
+        response_mode: GoogleResponseMode,
+        replay_safe: bool,
+        file_id: &str,
+        resource_key: Option<&str>,
+    ) -> DriveResult<GoogleExecuteResponse> {
+        let Some(resource_key) = resource_key else {
+            return self
+                .execute_with_retry(http_method, url, body, response_mode, replay_safe)
+                .await;
+        };
+        sanitize_path_segment(file_id, "file_id")?;
+        sanitize_path_segment(resource_key, "resource_key")?;
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let keyed_url = format!(
+            "{url}{separator}resourceKey={}",
+            urlencoding::encode(resource_key)
+        );
+        self.execute_with_retry(http_method, &keyed_url, body, response_mode, replay_safe)
+            .await
     }
 
     async fn post_json<T: serde::de::DeserializeOwned>(

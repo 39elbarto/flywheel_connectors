@@ -5,13 +5,13 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:077576c9798e2f855de0615217d979736a21017d38e4dc59f2278fc43f98278f"
+interface_hash = "blake3-256:fcp.interface.v2:1ffd04742d1b5ed06d5ffe678ef3aecffd05e8f78a050196d96465aec765acff"
 
 [connector]
 id = "fcp.google_drive"
 name = "Google Drive Connector"
 version = "0.1.0"
-description = "FCP connector for Google Drive v3 (list, get, download, create folders, upload, trash, and share files)"
+description = "No-delete Google Drive v3 connector for files, shared content, exports, metadata, comments, permissions, and reversible restore"
 archetypes = ["operational", "knowledge"]
 format = "wasi"
 status = "proven"
@@ -29,10 +29,20 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = ["drive.read", "drive.write", "media.download", "media.upload"]
-forbidden = ["system.exec", "network.listen"]
+optional = ["drive.read", "drive.content.write", "drive.metadata.write", "drive.share.write", "drive.quarantine.write", "media.download", "media.upload"]
+forbidden = ["system.exec", "network.listen", "drive.delete", "drive.trash", "drive.raw"]
 
 # ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."drive.parse_url"]
+description = "Parse a trusted Google Drive or Docs URL into file_id and optional resource_key"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["url"] }
+output_schema = { type = "object", required = ["file_id"] }
 
 [provides.operations."drive.list_files"]
 description = "List files and folders in Google Drive"
@@ -177,7 +187,7 @@ related = ["drive.get_file"]
 
 [provides.operations."drive.create_folder"]
 description = "Create a new folder in Google Drive"
-capability = "drive.write"
+capability = "drive.metadata.write"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
@@ -223,7 +233,7 @@ related = ["drive.upload_file"]
 
 [provides.operations."drive.upload_file"]
 description = "Upload a file to Google Drive"
-capability = "drive.write"
+capability = "drive.content.write"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -271,95 +281,209 @@ related = ["drive.create_folder", "drive.get_file"]
 
 # ────────────────────────────────────────────────────────────────
 
-[provides.operations."drive.trash_file"]
-description = "Move a file to trash"
-capability = "drive.write"
+# The remaining operations deliberately use explicit typed IDs and object-only
+# schemas. There is no generic HTTP/discovery operation and no file-delete or
+# trash operation in the manifest.
+
+[provides.operations."drive.list_shared_with_me"]
+description = "List files shared with the authenticated account, always excluding trash"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[provides.operations."drive.list_drives"]
+description = "List Shared Drives visible to the authenticated account"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[provides.operations."drive.list_permissions"]
+description = "List file permissions"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."drive.list_revisions"]
+description = "List file revisions without exposing revision deletion"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."drive.list_comments"]
+description = "List comments and replies on a file"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."drive.about"]
+description = "Read the authenticated Drive user and storage quota summary"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", properties = { about = { type = "object" } }, required = ["about"] }
+
+[provides.operations."drive.export_file"]
+description = "Export a Google Workspace-native file to an explicit MIME type"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_id", "mime_type"] }
+output_schema = { type = "object" }
+
+[provides.operations."drive.update_metadata"]
+description = "Update allowlisted non-trash file metadata"
+capability = "drive.metadata.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_id", "patch"] }
+output_schema = { type = "object" }
+
+[provides.operations."drive.move_file"]
+description = "Move a file between folders without trashing it"
+capability = "drive.metadata.write"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
-revocation_freshness = "critical"
+input_schema = { type = "object", required = ["file_id", "add_parent"] }
+output_schema = { type = "object" }
 
-[provides.operations."drive.trash_file".input_schema]
-required = ["file_id"]
-type = "object"
-[provides.operations."drive.trash_file".input_schema.properties.file_id]
-type = "string"
+[provides.operations."drive.copy_file"]
+description = "Copy a file"
+capability = "drive.content.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["file_id"] }
+output_schema = { type = "object" }
 
-[provides.operations."drive.trash_file".output_schema]
-required = ["file"]
-type = "object"
-[provides.operations."drive.trash_file".output_schema.properties.file]
-type = "object"
+[provides.operations."drive.create_shortcut"]
+description = "Create a personal shortcut without modifying the target"
+capability = "drive.metadata.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["name", "target_id"], properties = { name = { type = "string" }, target_id = { type = "string" }, target_resource_key = { type = "string" }, parent_id = { type = "string" } } }
+output_schema = { type = "object" }
 
-[provides.operations."drive.trash_file".network_constraints]
-host_allow = ["www.googleapis.com"]
-port_allow = [443]
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 0
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 1048576
+[provides.operations."drive.create_comment"]
+description = "Create a file comment"
+capability = "drive.metadata.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["file_id", "content"] }
+output_schema = { type = "object" }
 
-[provides.operations."drive.trash_file".ai_hints]
-when_to_use = "Move a file or folder to the Drive trash. Trashed items are auto-deleted after 30 days."
-common_mistakes = ["Trashed items are permanently deleted after 30 days and cannot be recovered after that window", "This is NOT a hard delete — use the trash-empty operation for permanent deletion"]
-examples = ["{\"file_id\": \"1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs\"}"]
-related = ["drive.get_file"]
+[provides.operations."drive.create_reply"]
+description = "Reply to a file comment"
+capability = "drive.metadata.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["file_id", "comment_id", "content"] }
+output_schema = { type = "object" }
 
-# ────────────────────────────────────────────────────────────────
-
-[provides.operations."drive.share_file"]
-description = "Share a file with a user by email"
-capability = "drive.write"
+[provides.operations."drive.add_permission"]
+description = "Add an explicitly typed permission"
+capability = "drive.share.write"
 risk_level = "critical"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "none"
-revocation_freshness = "critical"
+input_schema = { type = "object", required = ["file_id", "permission_type", "role"] }
+output_schema = { type = "object" }
 
-[provides.operations."drive.share_file".input_schema]
-required = ["file_id", "email", "role"]
-type = "object"
-[provides.operations."drive.share_file".input_schema.properties.file_id]
-type = "string"
-[provides.operations."drive.share_file".input_schema.properties.email]
-type = "string"
-[provides.operations."drive.share_file".input_schema.properties.role]
-type = "string"
+[provides.operations."drive.update_permission"]
+description = "Update an existing permission role"
+capability = "drive.share.write"
+risk_level = "critical"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_id", "permission_id", "role"] }
+output_schema = { type = "object" }
 
-[provides.operations."drive.share_file".output_schema]
-required = ["permission"]
-type = "object"
-[provides.operations."drive.share_file".output_schema.properties.permission]
-type = "object"
+[provides.operations."drive.revoke_permission"]
+description = "Revoke one ACL entry; this never deletes a Drive file"
+capability = "drive.share.write"
+risk_level = "critical"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_id", "permission_id"] }
+output_schema = { type = "object" }
 
-[provides.operations."drive.share_file".network_constraints]
-host_allow = ["www.googleapis.com"]
-port_allow = [443]
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 0
-connect_timeout_ms = 10000
-total_timeout_ms = 30000
-max_response_bytes = 1048576
+[provides.operations."drive.restore_file"]
+description = "Restore a trashed file by setting trashed=false"
+capability = "drive.quarantine.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_id"] }
+output_schema = { type = "object" }
 
-[provides.operations."drive.share_file".ai_hints]
-when_to_use = "Grant another user read/comment/write/organize access to a file or folder."
-common_mistakes = ["Sharing is highly sensitive — always confirm the target email with the user before invoking", "Granting organizer role on a shared drive is effectively admin — do not do this casually"]
-examples = ["{\"file_id\":\"1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs\",\"email\":\"user@example.com\",\"role\":\"reader\"}"]
-related = ["drive.get_file"]
+[provides.operations."drive.mark_for_deletion_review"]
+description = "Mark a file for manual deletion review without trashing or deleting it"
+capability = "drive.quarantine.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+input_schema = { type = "object", required = ["file_id"], properties = { file_id = { type = "string" }, resource_key = { type = "string" }, mode = { type = "string", enum = ["default", "move_shared_drive_original"] }, confirm_shared_drive_move = { type = "boolean" } } }
+output_schema = { type = "object", required = ["file", "receipt"], properties = { file = { type = "object" }, receipt = { type = "object" } } }
+
+[provides.operations."drive.list_deletion_review"]
+description = "List files or shortcuts in the bounded deletion-review folder"
+capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { drive_id = { type = "string" }, page_size = { type = "integer" }, page_token = { type = "string" } } }
+output_schema = { type = "object", required = ["files"] }
+
+[provides.operations."drive.restore_from_deletion_review"]
+description = "Restore an owned file from a deletion-review receipt or confirm a shortcut target was unchanged"
+capability = "drive.quarantine.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+input_schema = { type = "object", required = ["receipt"], properties = { receipt = { type = "object" } } }
+output_schema = { type = "object", required = ["restored", "file"], properties = { restored = { type = "boolean" }, file = { type = "object" } } }
 
 # ── Events ──────────────────────────────────────────────────────
 
@@ -397,10 +521,29 @@ burst = 30
 scope = "instance"
 
 [rate_limits.operation_pools]
+"drive.parse_url" = ["drive.read"]
 "drive.list_files" = ["drive.read"]
+"drive.list_shared_with_me" = ["drive.read"]
+"drive.list_drives" = ["drive.read"]
 "drive.get_file" = ["drive.read"]
+"drive.list_permissions" = ["drive.read"]
+"drive.list_revisions" = ["drive.read"]
+"drive.list_comments" = ["drive.read"]
+"drive.about" = ["drive.read"]
 "drive.download_file" = ["drive.read"]
+"drive.export_file" = ["drive.read"]
 "drive.create_folder" = ["drive.write"]
 "drive.upload_file" = ["drive.write"]
-"drive.trash_file" = ["drive.write"]
-"drive.share_file" = ["drive.write"]
+"drive.update_metadata" = ["drive.write"]
+"drive.move_file" = ["drive.write"]
+"drive.copy_file" = ["drive.write"]
+"drive.create_shortcut" = ["drive.write"]
+"drive.create_comment" = ["drive.write"]
+"drive.create_reply" = ["drive.write"]
+"drive.add_permission" = ["drive.write"]
+"drive.update_permission" = ["drive.write"]
+"drive.revoke_permission" = ["drive.write"]
+"drive.mark_for_deletion_review" = ["drive.write"]
+"drive.list_deletion_review" = ["drive.read"]
+"drive.restore_from_deletion_review" = ["drive.write"]
+"drive.restore_file" = ["drive.write"]

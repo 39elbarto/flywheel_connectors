@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use chrono::Utc;
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
@@ -88,12 +89,33 @@ fn validate_drive_base_url(raw: &str) -> FcpResult<String> {
 
 fn drive_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
-        "drive.list_files" | "drive.get_file" | "drive.download_file" => {
-            Ok(CapabilityId::from_static("drive.read"))
+        "drive.list_files"
+        | "drive.parse_url"
+        | "drive.list_shared_with_me"
+        | "drive.list_drives"
+        | "drive.get_file"
+        | "drive.list_permissions"
+        | "drive.list_revisions"
+        | "drive.list_comments"
+        | "drive.about"
+        | "drive.download_file"
+        | "drive.export_file" => Ok(CapabilityId::from_static("drive.read")),
+        "drive.add_permission" | "drive.update_permission" | "drive.revoke_permission" => {
+            Ok(CapabilityId::from_static("drive.share.write"))
         }
-        "drive.create_folder" | "drive.upload_file" | "drive.trash_file" | "drive.share_file" => {
-            Ok(CapabilityId::from_static("drive.write"))
+        "drive.mark_for_deletion_review"
+        | "drive.restore_from_deletion_review"
+        | "drive.restore_file" => Ok(CapabilityId::from_static("drive.quarantine.write")),
+        "drive.list_deletion_review" => Ok(CapabilityId::from_static("drive.read")),
+        "drive.upload_file" | "drive.copy_file" => {
+            Ok(CapabilityId::from_static("drive.content.write"))
         }
+        "drive.create_folder"
+        | "drive.update_metadata"
+        | "drive.move_file"
+        | "drive.create_shortcut"
+        | "drive.create_comment"
+        | "drive.create_reply" => Ok(CapabilityId::from_static("drive.metadata.write")),
         _ => Err(FcpError::OperationNotGranted {
             operation: operation.into(),
         }),
@@ -101,10 +123,61 @@ fn drive_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
 }
 
 fn validate_drive_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    reject_forbidden_drive_input(input)?;
     match operation {
-        "drive.list_files" => {}
-        "drive.get_file" | "drive.download_file" | "drive.trash_file" => {
+        "drive.list_files" | "drive.list_shared_with_me" | "drive.list_drives" | "drive.about" => {}
+        "drive.parse_url" => {
+            require_str(input, "url")?;
+        }
+        "drive.get_file"
+        | "drive.download_file"
+        | "drive.list_permissions"
+        | "drive.list_revisions"
+        | "drive.list_comments"
+        | "drive.restore_file"
+        | "drive.mark_for_deletion_review" => {
             require_str(input, "file_id")?;
+            if operation == "drive.mark_for_deletion_review" {
+                if let Some(mode) = optional_str(input, "mode") {
+                    if !matches!(mode, "default" | "move_shared_drive_original") {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1003,
+                            message: "mode must be default or move_shared_drive_original".into(),
+                        });
+                    }
+                }
+            }
+        }
+        "drive.list_deletion_review" => {}
+        "drive.restore_from_deletion_review" => {
+            let receipt = input
+                .get("receipt")
+                .and_then(serde_json::Value::as_object)
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required object: receipt".into(),
+                })?;
+            for field in ["file_id", "original_name", "review_folder_id", "mode"] {
+                if !receipt.get(field).is_some_and(serde_json::Value::is_string) {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("receipt is missing string field: {field}"),
+                    });
+                }
+            }
+            if !matches!(
+                receipt.get("mode").and_then(serde_json::Value::as_str),
+                Some("owned_move" | "shared_drive_move" | "shortcut")
+            ) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "receipt mode is not recognized".into(),
+                });
+            }
+        }
+        "drive.export_file" => {
+            require_str(input, "file_id")?;
+            require_str(input, "mime_type")?;
         }
         "drive.create_folder" => {
             require_str(input, "name")?;
@@ -114,9 +187,55 @@ fn validate_drive_input(operation: &str, input: &serde_json::Value) -> FcpResult
             require_str(input, "mime_type")?;
             require_str(input, "content_base64")?;
         }
-        "drive.share_file" => {
+        "drive.update_metadata" => {
             require_str(input, "file_id")?;
-            require_str(input, "email")?;
+            let patch = input
+                .get("patch")
+                .and_then(serde_json::Value::as_object)
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required object: patch".into(),
+                })?;
+            if patch.is_empty()
+                || patch
+                    .keys()
+                    .any(|key| !SAFE_METADATA_FIELDS.contains(&key.as_str()))
+            {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "patch contains unsupported metadata field".into(),
+                });
+            }
+        }
+        "drive.move_file" => {
+            require_str(input, "file_id")?;
+            require_str(input, "add_parent")?;
+        }
+        "drive.copy_file" => {
+            require_str(input, "file_id")?;
+        }
+        "drive.create_shortcut" => {
+            require_str(input, "name")?;
+            require_str(input, "target_id")?;
+        }
+        "drive.create_comment" => {
+            require_str(input, "file_id")?;
+            require_str(input, "content")?;
+        }
+        "drive.create_reply" => {
+            require_str(input, "file_id")?;
+            require_str(input, "comment_id")?;
+            require_str(input, "content")?;
+        }
+        "drive.add_permission" => {
+            require_str(input, "file_id")?;
+            let permission_type = require_str(input, "permission_type")?;
+            if !matches!(permission_type, "user" | "group" | "domain" | "anyone") {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Invalid permission_type".into(),
+                });
+            }
             let role = require_str(input, "role")?;
             if !matches!(role, "reader" | "commenter" | "writer" | "organizer") {
                 return Err(FcpError::InvalidRequest {
@@ -125,6 +244,21 @@ fn validate_drive_input(operation: &str, input: &serde_json::Value) -> FcpResult
                         .into(),
                 });
             }
+            if matches!(permission_type, "user" | "group") {
+                require_str(input, "email")?;
+            }
+            if permission_type == "domain" {
+                require_str(input, "domain")?;
+            }
+        }
+        "drive.update_permission" => {
+            require_str(input, "file_id")?;
+            require_str(input, "permission_id")?;
+            require_str(input, "role")?;
+        }
+        "drive.revoke_permission" => {
+            require_str(input, "file_id")?;
+            require_str(input, "permission_id")?;
         }
         _ => {
             return Err(FcpError::OperationNotGranted {
@@ -140,12 +274,50 @@ fn drive_resource_uris_for_operation(
     input: &serde_json::Value,
 ) -> FcpResult<Vec<String>> {
     match operation {
-        "drive.list_files" => Ok(vec!["drive://files".into()]),
-        "drive.get_file" | "drive.download_file" | "drive.trash_file" | "drive.share_file" => {
+        "drive.list_files" | "drive.list_shared_with_me" | "drive.parse_url" => {
+            Ok(vec!["drive://files".into()])
+        }
+        "drive.list_drives" => Ok(vec!["drive://shared-drives".into()]),
+        "drive.get_file"
+        | "drive.download_file"
+        | "drive.export_file"
+        | "drive.list_permissions"
+        | "drive.list_revisions"
+        | "drive.list_comments"
+        | "drive.update_metadata"
+        | "drive.move_file"
+        | "drive.copy_file"
+        | "drive.create_comment"
+        | "drive.restore_file"
+        | "drive.mark_for_deletion_review" => {
             let file_id = require_str(input, "file_id")?;
             Ok(vec![format!("drive://files/{file_id}")])
         }
+        "drive.list_deletion_review" => Ok(vec!["drive://deletion-review".into()]),
+        "drive.restore_from_deletion_review" => {
+            let receipt = input.get("receipt").expect("validated receipt");
+            let file_id = require_str(receipt, "file_id")?;
+            Ok(vec![format!("drive://files/{file_id}")])
+        }
+        "drive.create_reply" => {
+            let file_id = require_str(input, "file_id")?;
+            let comment_id = require_str(input, "comment_id")?;
+            Ok(vec![format!(
+                "drive://files/{file_id}/comments/{comment_id}"
+            )])
+        }
+        "drive.add_permission" | "drive.update_permission" | "drive.revoke_permission" => {
+            let file_id = require_str(input, "file_id")?;
+            Ok(vec![format!("drive://files/{file_id}/permissions")])
+        }
         "drive.create_folder" | "drive.upload_file" => {
+            let parent_id = input
+                .get("parent_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("root");
+            Ok(vec![format!("drive://folders/{parent_id}/children")])
+        }
+        "drive.create_shortcut" => {
             let parent_id = input
                 .get("parent_id")
                 .and_then(serde_json::Value::as_str)
@@ -166,13 +338,41 @@ use crate::{
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const OPERATION_ORDER: &[&str] = &[
+    "drive.parse_url",
     "drive.list_files",
+    "drive.list_shared_with_me",
+    "drive.list_drives",
     "drive.get_file",
+    "drive.list_permissions",
+    "drive.list_revisions",
+    "drive.list_comments",
+    "drive.about",
     "drive.download_file",
+    "drive.export_file",
     "drive.create_folder",
     "drive.upload_file",
-    "drive.trash_file",
-    "drive.share_file",
+    "drive.update_metadata",
+    "drive.move_file",
+    "drive.copy_file",
+    "drive.create_shortcut",
+    "drive.create_comment",
+    "drive.create_reply",
+    "drive.add_permission",
+    "drive.update_permission",
+    "drive.revoke_permission",
+    "drive.mark_for_deletion_review",
+    "drive.list_deletion_review",
+    "drive.restore_from_deletion_review",
+    "drive.restore_file",
+];
+const REVIEW_FOLDER_NAME: &str = "_FCP_DELETE_REVIEW";
+const REVIEW_PREFIX: &str = "[FCP-DELETE-REVIEW ";
+const SAFE_METADATA_FIELDS: &[&str] = &[
+    "name",
+    "description",
+    "starred",
+    "viewedByMeTime",
+    "modifiedTime",
 ];
 
 /// FCP Google Drive Connector.
@@ -560,13 +760,34 @@ impl DriveConnector {
         }
 
         match operation {
+            "drive.parse_url" => Self::invoke_parse_url(&input),
             "drive.list_files" => self.invoke_list_files(input).await,
+            "drive.list_shared_with_me" => self.invoke_list_shared_with_me(input).await,
+            "drive.list_drives" => self.invoke_list_drives(input).await,
             "drive.get_file" => self.invoke_get_file(input).await,
+            "drive.list_permissions" => self.invoke_file_collection(input, "permissions").await,
+            "drive.list_revisions" => self.invoke_file_collection(input, "revisions").await,
+            "drive.list_comments" => self.invoke_file_collection(input, "comments").await,
+            "drive.about" => self.invoke_about().await,
             "drive.download_file" => self.invoke_download_file(input).await,
+            "drive.export_file" => self.invoke_export_file(input).await,
             "drive.create_folder" => self.invoke_create_folder(input).await,
             "drive.upload_file" => self.invoke_upload_file(input).await,
-            "drive.trash_file" => self.invoke_trash_file(input).await,
-            "drive.share_file" => self.invoke_share_file(input).await,
+            "drive.update_metadata" => self.invoke_update_metadata(input).await,
+            "drive.move_file" => self.invoke_move_file(input).await,
+            "drive.copy_file" => self.invoke_copy_file(input).await,
+            "drive.create_shortcut" => self.invoke_create_shortcut(input).await,
+            "drive.create_comment" => self.invoke_create_comment(input).await,
+            "drive.create_reply" => self.invoke_create_reply(input).await,
+            "drive.add_permission" => self.invoke_add_permission(input).await,
+            "drive.update_permission" => self.invoke_update_permission(input).await,
+            "drive.revoke_permission" => self.invoke_revoke_permission(input).await,
+            "drive.mark_for_deletion_review" => self.invoke_mark_for_deletion_review(input).await,
+            "drive.list_deletion_review" => self.invoke_list_deletion_review(input).await,
+            "drive.restore_from_deletion_review" => {
+                self.invoke_restore_from_deletion_review(input).await
+            }
+            "drive.restore_file" => self.invoke_restore_file(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -583,7 +804,13 @@ impl DriveConnector {
         let page_cursor = input.get("page_token").and_then(|v| v.as_str());
 
         let result = client
-            .list_files(query, max_results, page_cursor)
+            .list_files(
+                query,
+                max_results,
+                page_cursor,
+                input.get("corpora").and_then(|v| v.as_str()),
+                input.get("drive_id").and_then(|v| v.as_str()),
+            )
             .await
             .map_err(|e: DriveError| e.to_fcp_error())?;
 
@@ -593,16 +820,99 @@ impl DriveConnector {
         }))
     }
 
+    fn invoke_parse_url(input: &serde_json::Value) -> FcpResult<serde_json::Value> {
+        let raw = require_str(input, "url")?;
+        let parsed = Url::parse(raw).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("invalid Drive URL: {error}"),
+        })?;
+        if parsed.scheme() != "https"
+            || !matches!(
+                parsed.host_str(),
+                Some("drive.google.com" | "docs.google.com")
+            )
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Drive URL must use https on drive.google.com or docs.google.com".into(),
+            });
+        }
+        let segments = parsed
+            .path_segments()
+            .map(|parts| parts.collect::<Vec<_>>())
+            .unwrap_or_default();
+        let file_id = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "id")
+            .map(|(_, value)| value.into_owned())
+            .or_else(|| {
+                segments.windows(2).find_map(|window| {
+                    matches!(window[0], "d" | "folders").then(|| window[1].to_string())
+                })
+            })
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Drive URL does not contain a file or folder ID".into(),
+            })?;
+        if file_id.trim().is_empty() || file_id.contains('/') || file_id.contains('\\') {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Drive URL contains an invalid file ID".into(),
+            });
+        }
+        let resource_key = parsed
+            .query_pairs()
+            .find(|(key, _)| key.eq_ignore_ascii_case("resourcekey"))
+            .map(|(_, value)| value.into_owned());
+        Ok(json!({"file_id": file_id, "resource_key": resource_key}))
+    }
+
+    async fn invoke_list_shared_with_me(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let result = client
+            .list_shared_with_me(
+                input.get("query").and_then(|v| v.as_str()),
+                optional_u32(&input, "page_size")?,
+                input.get("page_token").and_then(|v| v.as_str()),
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"files": result.files, "next_page_token": result.next_page_token}))
+    }
+
+    async fn invoke_list_drives(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        client
+            .list_drives(
+                optional_u32(&input, "page_size")?,
+                input.get("page_token").and_then(|v| v.as_str()),
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())
+    }
+
     async fn invoke_get_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_id = require_str(&input, "file_id")?;
 
         let file = client
-            .get_file(file_id)
+            .get_file(file_id, optional_str(&input, "resource_key"))
             .await
             .map_err(|e: DriveError| e.to_fcp_error())?;
 
         Ok(json!({ "file": file }))
+    }
+
+    async fn invoke_about(&self) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let about = client
+            .about()
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"about": about}))
     }
 
     async fn invoke_download_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -610,7 +920,7 @@ impl DriveConnector {
         let file_id = require_str(&input, "file_id")?;
 
         let content = client
-            .download_file(file_id)
+            .download_file(file_id, optional_str(&input, "resource_key"))
             .await
             .map_err(|e: DriveError| e.to_fcp_error())?;
 
@@ -618,6 +928,34 @@ impl DriveConnector {
             "file_id": file_id,
             "content_base64": content
         }))
+    }
+
+    async fn invoke_export_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+        let mime_type = require_str(&input, "mime_type")?;
+        let content = client
+            .export_file(file_id, mime_type, optional_str(&input, "resource_key"))
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"file_id": file_id, "mime_type": mime_type, "content_base64": content}))
+    }
+
+    async fn invoke_file_collection(
+        &self,
+        input: serde_json::Value,
+        collection: &str,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+        let key = optional_str(&input, "resource_key");
+        match collection {
+            "permissions" => client.list_permissions(file_id, key).await,
+            "revisions" => client.list_revisions(file_id, key).await,
+            "comments" => client.list_comments(file_id, key).await,
+            _ => unreachable!("bounded collection selector"),
+        }
+        .map_err(|e: DriveError| e.to_fcp_error())
     }
 
     async fn invoke_create_folder(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -648,30 +986,556 @@ impl DriveConnector {
         Ok(json!({ "file": file }))
     }
 
-    async fn invoke_trash_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_update_metadata(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_id = require_str(&input, "file_id")?;
-
+        let patch = input.get("patch").expect("validated patch");
         let file = client
-            .trash_file(file_id)
+            .update_metadata(file_id, patch)
             .await
             .map_err(|e: DriveError| e.to_fcp_error())?;
-
         Ok(json!({ "file": file }))
     }
 
-    async fn invoke_share_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_move_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let file_id = require_str(&input, "file_id")?;
-        let email = require_str(&input, "email")?;
-        let role = require_str(&input, "role")?;
-
-        let permission = client
-            .share_file(file_id, email, role)
+        let remove_parents: Vec<String> = input
+            .get("remove_parents")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        let file = client
+            .move_file(
+                require_str(&input, "file_id")?,
+                require_str(&input, "add_parent")?,
+                &remove_parents,
+            )
             .await
             .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"file": file}))
+    }
 
+    async fn invoke_copy_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file = client
+            .copy_file(
+                require_str(&input, "file_id")?,
+                optional_str(&input, "name"),
+                optional_str(&input, "parent_id"),
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"file": file}))
+    }
+
+    async fn invoke_create_shortcut(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file = client
+            .create_shortcut(
+                require_str(&input, "name")?,
+                require_str(&input, "target_id")?,
+                optional_str(&input, "parent_id"),
+                optional_str(&input, "target_resource_key"),
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"shortcut": file}))
+    }
+
+    async fn invoke_create_comment(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        client
+            .create_comment(
+                require_str(&input, "file_id")?,
+                require_str(&input, "content")?,
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())
+    }
+
+    async fn invoke_create_reply(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        client
+            .create_reply(
+                require_str(&input, "file_id")?,
+                require_str(&input, "comment_id")?,
+                require_str(&input, "content")?,
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())
+    }
+
+    async fn invoke_add_permission(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+        let role = require_str(&input, "role")?;
+        let permission = client
+            .add_permission(
+                file_id,
+                require_str(&input, "permission_type")?,
+                role,
+                optional_str(&input, "email"),
+                optional_str(&input, "domain"),
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
         Ok(json!({ "permission": permission }))
+    }
+
+    async fn invoke_update_permission(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let permission = client
+            .update_permission(
+                require_str(&input, "file_id")?,
+                require_str(&input, "permission_id")?,
+                require_str(&input, "role")?,
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"permission": permission}))
+    }
+
+    async fn invoke_revoke_permission(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        client
+            .revoke_permission(
+                require_str(&input, "file_id")?,
+                require_str(&input, "permission_id")?,
+            )
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"revoked": true}))
+    }
+
+    async fn invoke_restore_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file = client
+            .restore_file(require_str(&input, "file_id")?)
+            .await
+            .map_err(|e: DriveError| e.to_fcp_error())?;
+        Ok(json!({"file": file}))
+    }
+
+    async fn invoke_mark_for_deletion_review(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_id = require_str(&input, "file_id")?;
+        let resource_key = optional_str(&input, "resource_key");
+        let file = client
+            .get_file(file_id, resource_key)
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+
+        if file.trashed == Some(true) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "A trashed file cannot enter deletion review; restore it first".into(),
+            });
+        }
+        if file.name.starts_with(REVIEW_PREFIX) {
+            return Ok(json!({"already_marked": true, "file": file}));
+        }
+
+        let original_name = file.name.clone();
+        let original_parents = file.parents.clone().unwrap_or_default();
+        let original_permissions = file.permissions.clone().unwrap_or_default();
+        let original_checksum = file.md5_checksum.clone();
+        let owner_summary = file
+            .owners
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter_map(|owner| owner.email_address.as_deref())
+            .collect::<Vec<_>>()
+            .join(",");
+        let review_name = format!(
+            "[FCP-DELETE-REVIEW {}] {}",
+            Utc::now().format("%Y-%m-%d"),
+            original_name
+        );
+        let about = client.about().await.map_err(|error| error.to_fcp_error())?;
+        let current_email = about.user.and_then(|user| user.email_address);
+        let personally_owned = file.drive_id.is_none()
+            && current_email.as_deref().is_some_and(|email| {
+                file.owners.as_ref().is_some_and(|owners| {
+                    owners
+                        .iter()
+                        .any(|owner| owner.email_address.as_deref() == Some(email))
+                })
+            });
+        let requested_shared_move =
+            optional_str(&input, "mode") == Some("move_shared_drive_original");
+
+        let (mode, review_folder, marked_file, shortcut_id) = if personally_owned
+            || requested_shared_move
+        {
+            if requested_shared_move {
+                if input
+                    .get("confirm_shared_drive_move")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+                {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message:
+                            "move_shared_drive_original requires confirm_shared_drive_move=true"
+                                .into(),
+                    });
+                }
+                if file.drive_id.is_none()
+                    || file
+                        .capabilities
+                        .as_ref()
+                        .and_then(|capabilities| capabilities.can_move_item_within_drive)
+                        != Some(true)
+                {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "Shared Drive item cannot be moved within its Drive".into(),
+                    });
+                }
+            }
+            let review_folder = self
+                .find_or_create_review_folder(file.drive_id.as_deref())
+                .await?;
+            client
+                .update_metadata(file_id, &json!({"name": review_name}))
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            let moved = match client
+                .move_file(file_id, &review_folder.id, &original_parents)
+                .await
+            {
+                Ok(moved) => moved,
+                Err(error) => {
+                    if let Err(rollback_error) = client
+                        .update_metadata(file_id, &json!({"name": original_name}))
+                        .await
+                    {
+                        return Err(FcpError::External {
+                            service: "google-drive".into(),
+                            message: format!(
+                                "Deletion-review move failed ({error}); rename rollback also failed ({rollback_error})"
+                            ),
+                            status_code: None,
+                            retryable: false,
+                            retry_after: None,
+                        });
+                    }
+                    return Err(error.to_fcp_error());
+                }
+            };
+            (
+                if personally_owned {
+                    "owned_move"
+                } else {
+                    "shared_drive_move"
+                },
+                review_folder,
+                moved,
+                None,
+            )
+        } else {
+            let review_folder = self.find_or_create_review_folder(None).await?;
+            let shortcut_name = if owner_summary.is_empty() {
+                review_name.clone()
+            } else {
+                format!("{review_name} [owner: {owner_summary}]")
+            };
+            let shortcut = client
+                .create_shortcut(
+                    &shortcut_name,
+                    file_id,
+                    Some(&review_folder.id),
+                    resource_key,
+                )
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            let unchanged = client
+                .get_file(file_id, resource_key)
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            ("shortcut", review_folder, unchanged, Some(shortcut.id))
+        };
+
+        if marked_file.id != file.id
+            || marked_file.trashed == Some(true)
+            || marked_file.md5_checksum != original_checksum
+            || marked_file.permissions.clone().unwrap_or_default() != original_permissions
+            || (mode == "shortcut"
+                && (marked_file.name != original_name
+                    || marked_file.parents.clone().unwrap_or_default() != original_parents))
+            || (mode != "shortcut"
+                && (marked_file.name != review_name
+                    || !marked_file.parents.as_ref().is_some_and(|parents| {
+                        parents.iter().any(|parent| parent == &review_folder.id)
+                    })))
+        {
+            return Err(FcpError::External {
+                service: "google-drive".into(),
+                message: "Deletion-review verification detected changed identity, content, trash state, or permissions".into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            });
+        }
+
+        let receipt = json!({
+            "version": 1,
+            "mode": mode,
+            "file_id": file.id,
+            "original_name": original_name,
+            "original_parents": original_parents,
+            "review_name": review_name,
+            "review_folder_id": review_folder.id,
+            "drive_id": file.drive_id,
+            "md5_checksum": original_checksum,
+            "permission_ids": original_permissions.iter().map(|permission| permission.id.as_str()).collect::<Vec<_>>(),
+            "permissions": original_permissions,
+            "shortcut_id": shortcut_id,
+            "resource_key": resource_key,
+        });
+        Ok(json!({"file": marked_file, "receipt": receipt}))
+    }
+
+    async fn invoke_list_deletion_review(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let drive_id = optional_str(&input, "drive_id");
+        let Some(folder) = self.find_review_folder(drive_id).await? else {
+            return Ok(json!({"files": [], "review_folder": null}));
+        };
+        let query = format!("'{}' in parents", folder.id.replace('\'', "\\'"));
+        let files = client
+            .list_files(
+                Some(&query),
+                optional_u32(&input, "page_size")?,
+                optional_str(&input, "page_token"),
+                Some(if drive_id.is_some() { "drive" } else { "user" }),
+                drive_id,
+            )
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(
+            json!({"review_folder": folder, "files": files.files, "next_page_token": files.next_page_token}),
+        )
+    }
+
+    async fn invoke_restore_from_deletion_review(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let receipt = input.get("receipt").expect("validated receipt");
+        let mode = require_str(receipt, "mode")?;
+        let file_id = require_str(receipt, "file_id")?;
+        if mode == "shortcut" {
+            let file = client
+                .get_file(file_id, optional_str(receipt, "resource_key"))
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            let shortcut_id = require_str(receipt, "shortcut_id")?;
+            let review_folder_id = require_str(receipt, "review_folder_id")?;
+            let shortcut = client
+                .get_file(shortcut_id, None)
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            if !shortcut
+                .parents
+                .as_ref()
+                .is_some_and(|parents| parents.iter().any(|parent| parent == review_folder_id))
+            {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Review shortcut no longer matches the receipt".into(),
+                });
+            }
+            client
+                .move_file(shortcut_id, "root", &[review_folder_id.to_owned()])
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            let cancelled_shortcut = client
+                .update_metadata(
+                    shortcut_id,
+                    &json!({"name": format!(
+                        "[FCP-REVIEW-CANCELLED] {}",
+                        require_str(receipt, "original_name")?
+                    )}),
+                )
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            return Ok(json!({
+                "restored": true,
+                "original_unchanged": true,
+                "file": file,
+                "cancelled_shortcut": cancelled_shortcut
+            }));
+        }
+
+        let original_parents = receipt
+            .get("original_parents")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "receipt is missing original_parents".into(),
+            })?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "receipt original_parents must contain strings".into(),
+                    })
+            })
+            .collect::<FcpResult<Vec<_>>>()?;
+        if original_parents.len() > 1 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "receipt contains multiple original parents; refusing to guess restoration placement".into(),
+            });
+        }
+        let current = client
+            .get_file(file_id, optional_str(receipt, "resource_key"))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        let review_folder_id = require_str(receipt, "review_folder_id")?;
+        if !current.name.starts_with(REVIEW_PREFIX)
+            || !current
+                .parents
+                .as_ref()
+                .is_some_and(|parents| parents.iter().any(|parent| parent == review_folder_id))
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Current file state does not match the deletion-review receipt".into(),
+            });
+        }
+        let destination = original_parents.first().map_or("root", String::as_str);
+        let moved = client
+            .move_file(file_id, destination, &[review_folder_id.to_owned()])
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        let restored = match client
+            .update_metadata(
+                file_id,
+                &json!({"name": require_str(receipt, "original_name")?}),
+            )
+            .await
+        {
+            Ok(restored) => restored,
+            Err(error) => {
+                if let Err(rollback_error) = client
+                    .move_file(file_id, review_folder_id, &[destination.to_owned()])
+                    .await
+                {
+                    return Err(FcpError::External {
+                        service: "google-drive".into(),
+                        message: format!(
+                            "Restoration rename failed ({error}); folder rollback also failed ({rollback_error})"
+                        ),
+                        status_code: None,
+                        retryable: false,
+                        retry_after: None,
+                    });
+                }
+                return Err(error.to_fcp_error());
+            }
+        };
+        if restored.id != moved.id
+            || restored.trashed == Some(true)
+            || restored.parents.as_deref() != Some(&[destination.to_owned()])
+            || receipt.get("md5_checksum").is_some_and(|checksum| {
+                !checksum.is_null() && checksum.as_str() != restored.md5_checksum.as_deref()
+            })
+            || receipt.get("permissions").is_some_and(|permissions| {
+                !permissions.is_null()
+                    && serde_json::to_value(restored.permissions.clone().unwrap_or_default())
+                        .ok()
+                        .as_ref()
+                        != Some(permissions)
+            })
+        {
+            return Err(FcpError::External {
+                service: "google-drive".into(),
+                message: "Restoration readback did not match the receipt".into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            });
+        }
+        Ok(json!({"restored": true, "file": restored}))
+    }
+
+    async fn find_review_folder(
+        &self,
+        drive_id: Option<&str>,
+    ) -> FcpResult<Option<crate::types::DriveFile>> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let root_id = drive_id.unwrap_or("root");
+        let query = format!(
+            "name = '{REVIEW_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and '{root_id}' in parents"
+        );
+        let response = client
+            .list_files(
+                Some(&query),
+                Some(2),
+                None,
+                Some(if drive_id.is_some() { "drive" } else { "user" }),
+                drive_id,
+            )
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        if response.files.len() > 1 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Multiple deletion-review folders found; refusing to choose one".into(),
+            });
+        }
+        Ok(response.files.into_iter().next())
+    }
+
+    async fn find_or_create_review_folder(
+        &self,
+        drive_id: Option<&str>,
+    ) -> FcpResult<crate::types::DriveFile> {
+        if let Some(folder) = self.find_review_folder(drive_id).await? {
+            return Ok(folder);
+        }
+        self.client
+            .as_ref()
+            .ok_or(FcpError::NotConfigured)?
+            .create_folder(REVIEW_FOLDER_NAME, Some(drive_id.unwrap_or("root")))
+            .await
+            .map_err(|error| error.to_fcp_error())
     }
 
     pub async fn handle_shutdown(
@@ -700,6 +1564,95 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn optional_str<'a>(input: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    input.get(field).and_then(serde_json::Value::as_str)
+}
+
+fn optional_u32(input: &serde_json::Value, field: &str) -> FcpResult<Option<u32>> {
+    match input.get(field) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|number| u32::try_from(number).ok())
+            .map(Some)
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field} must be an unsigned 32-bit integer"),
+            }),
+    }
+}
+
+/// Reject every file deletion/trash/raw escape before capability verification or provider I/O.
+fn reject_forbidden_drive_input(value: &serde_json::Value) -> FcpResult<()> {
+    fn compact(value: &str) -> String {
+        value
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace() && !matches!(ch, '_' | '-' | '.'))
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    fn percent_decode(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut output = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%' && index + 2 < bytes.len() {
+                let hex = &value[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    output.push(byte);
+                    index += 3;
+                    continue;
+                }
+            }
+            output.push(bytes[index]);
+            index += 1;
+        }
+        String::from_utf8_lossy(&output).into_owned()
+    }
+
+    fn walk(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => map.iter().any(|(key, child)| {
+                let normalized = compact(key);
+                (normalized == "trashed" && child.as_bool() == Some(true))
+                    || matches!(
+                        normalized.as_str(),
+                        "delete"
+                            | "harddelete"
+                            | "emptytrash"
+                            | "raw"
+                            | "rawrequest"
+                            | "httpmethod"
+                            | "requestpath"
+                    )
+                    || walk(child)
+            }),
+            serde_json::Value::Array(items) => items.iter().any(walk),
+            serde_json::Value::String(text) => {
+                let decoded_once = percent_decode(text);
+                let decoded_twice = percent_decode(&decoded_once);
+                let normalized = compact(&decoded_twice);
+                normalized.contains("trashed=true")
+                    || normalized.contains("\"trashed\":true")
+                    || normalized.contains("filesdelete")
+                    || normalized.contains("emptytrash")
+                    || normalized.contains("drivetrashfile")
+                    || normalized.contains("googleraw")
+            }
+            _ => false,
+        }
+    }
+
+    if walk(value) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Drive file deletion, trashing, or raw request bypass is forbidden".into(),
+        });
+    }
+    Ok(())
 }
 
 fn operations_info() -> Vec<OperationInfo> {
@@ -791,11 +1744,31 @@ mod tests {
         operation: &'static str,
     ) -> CapabilityToken {
         let capability = match operation {
-            "drive.list_files" | "drive.get_file" | "drive.download_file" => "drive.read",
+            "drive.list_files"
+            | "drive.parse_url"
+            | "drive.list_shared_with_me"
+            | "drive.list_drives"
+            | "drive.get_file"
+            | "drive.list_permissions"
+            | "drive.list_revisions"
+            | "drive.list_comments"
+            | "drive.about"
+            | "drive.list_deletion_review"
+            | "drive.download_file"
+            | "drive.export_file" => "drive.read",
+            "drive.add_permission" | "drive.update_permission" | "drive.revoke_permission" => {
+                "drive.share.write"
+            }
+            "drive.mark_for_deletion_review"
+            | "drive.restore_from_deletion_review"
+            | "drive.restore_file" => "drive.quarantine.write",
+            "drive.upload_file" | "drive.copy_file" => "drive.content.write",
             "drive.create_folder"
-            | "drive.upload_file"
-            | "drive.trash_file"
-            | "drive.share_file" => "drive.write",
+            | "drive.update_metadata"
+            | "drive.move_file"
+            | "drive.create_shortcut"
+            | "drive.create_comment"
+            | "drive.create_reply" => "drive.metadata.write",
             _ => "drive.read",
         };
         let constraints = CapabilityConstraints {
@@ -936,6 +1909,92 @@ mod tests {
         assert!(!host_is_drive_googleapis("drive.googleapis.com"));
         assert!(!host_is_drive_googleapis("googleapis.com.evil.com"));
         assert!(!host_is_drive_googleapis("evil-googleapis.com"));
+    }
+
+    #[test]
+    fn forbidden_surface_is_absent_from_operation_catalog() {
+        let ids = operations_info()
+            .into_iter()
+            .map(|operation| operation.id.to_string())
+            .collect::<Vec<_>>();
+        for forbidden in [
+            "drive.trash_file",
+            "drive.delete_file",
+            "drive.empty_trash",
+            "drive.delete_revision",
+            "drive.raw",
+            "google.execute",
+        ] {
+            assert!(
+                !ids.iter().any(|id| id == forbidden),
+                "{forbidden} leaked into introspection"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_nested_and_encoded_trash_or_raw_bypasses() {
+        for input in [
+            json!({"patch": {"trashed": true}}),
+            json!({"batch": [{"metadata": {"Trashed": true}}]}),
+            json!({"payload": "%7B%22trashed%22%3Atrue%7D"}),
+            json!({"payload": "%257B%2522trashed%2522%253Atrue%257D"}),
+            json!({"method": "files.delete"}),
+            json!({"operation": "drive.trash_file"}),
+            json!({"raw_request": {"http_method": "DELETE", "request_path": "/drive/v3/files/x"}}),
+        ] {
+            assert!(
+                reject_forbidden_drive_input(&input).is_err(),
+                "accepted forbidden input: {input}"
+            );
+        }
+        assert!(reject_forbidden_drive_input(&json!({"patch": {"trashed": false}})).is_ok());
+        assert!(reject_forbidden_drive_input(&json!({"patch": {"name": "safe"}})).is_ok());
+    }
+
+    #[test]
+    fn deletion_review_inputs_fail_closed() {
+        assert!(
+            validate_drive_input(
+                "drive.mark_for_deletion_review",
+                &json!({"file_id": "file_1", "mode": "delete_now"}),
+            )
+            .is_err()
+        );
+        assert!(validate_drive_input("drive.restore_from_deletion_review", &json!({})).is_err());
+        assert!(
+            validate_drive_input(
+                "drive.restore_from_deletion_review",
+                &json!({"receipt": {
+                    "file_id": "file_1",
+                    "original_name": "report.txt",
+                    "review_folder_id": "folder_review",
+                    "mode": "owned_move"
+                }}),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn parses_drive_urls_without_following_external_content() {
+        let parsed = DriveConnector::invoke_parse_url(&json!({
+            "url": "https://drive.google.com/file/d/file_123/view?resourcekey=rk_456"
+        }))
+        .unwrap();
+        assert_eq!(parsed["file_id"], "file_123");
+        assert_eq!(parsed["resource_key"], "rk_456");
+
+        let folder = DriveConnector::invoke_parse_url(&json!({
+            "url": "https://drive.google.com/drive/folders/folder_123"
+        }))
+        .unwrap();
+        assert_eq!(folder["file_id"], "folder_123");
+
+        assert!(
+            DriveConnector::invoke_parse_url(&json!({"url": "https://evil.example/file/d/x"}))
+                .is_err()
+        );
     }
 
     #[fcp_async_core::runtime::test]

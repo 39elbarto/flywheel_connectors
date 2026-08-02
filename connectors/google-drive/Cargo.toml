@@ -29,6 +29,7 @@ fcp-manifest = { path = "../../crates/fcp-manifest" }
 
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -44,4 +45,3 @@ wiremock.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-e2e = { path = "../../crates/fcp-e2e" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
-chrono.workspace = true

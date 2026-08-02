@@ -15,7 +15,7 @@ use serde_json::json;
 use tracing::info;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path},
+    matchers::{body_json, header, method, path, query_param},
 };
 
 static TEST_LOGGER: Once = Once::new();
@@ -218,8 +218,14 @@ fn build_token(
     let mut cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
 
+    let capability = match operation {
+        "drive.mark_for_deletion_review" | "drive.restore_from_deletion_review" => {
+            "drive.quarantine.write"
+        }
+        _ => "drive.read",
+    };
     let cose = CapabilityTokenBuilder::new()
-        .capability_id("drive.read")
+        .capability_id(capability)
         .zone_id("z:work")
         .target_instance(instance_id.as_str())
         .principal("user:test")
@@ -333,6 +339,126 @@ async fn connector_suite_happy_path_lists_files() {
     );
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mark_for_deletion_review_moves_owned_file_without_trashing_it() {
+    let server = MockServer::start().await;
+    let review_name = format!(
+        "[FCP-DELETE-REVIEW {}] report.txt",
+        Utc::now().format("%Y-%m-%d")
+    );
+    let file_json = json!({
+        "id": "file_owned",
+        "name": "report.txt",
+        "mimeType": "text/plain",
+        "parents": ["folder_original"],
+        "trashed": false,
+        "owners": [{"emailAddress": "owner@example.com"}],
+        "permissions": [{"id": "perm_owner", "role": "owner", "type": "user"}],
+        "md5Checksum": "abc123"
+    });
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/file_owned"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(file_json))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/about"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "drive#about",
+            "user": {"emailAddress": "owner@example.com"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "drive#fileList",
+            "files": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files"))
+        .and(body_json(json!({
+            "name": "_FCP_DELETE_REVIEW",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": ["root"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "folder_review",
+            "name": "_FCP_DELETE_REVIEW",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": ["root"],
+            "trashed": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/drive/v3/files/file_owned"))
+        .and(body_json(json!({"name": review_name})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_owned",
+            "name": review_name,
+            "mimeType": "text/plain",
+            "parents": ["folder_original"],
+            "trashed": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/drive/v3/files/file_owned"))
+        .and(query_param("addParents", "folder_review"))
+        .and(query_param("removeParents", "folder_original"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_owned",
+            "name": review_name,
+            "mimeType": "text/plain",
+            "parents": ["folder_review"],
+            "trashed": false,
+            "owners": [{"emailAddress": "owner@example.com"}],
+            "permissions": [{"id": "perm_owner", "role": "owner", "type": "user"}],
+            "md5Checksum": "abc123"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleDriveAdapter::new();
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    let suite = ConnectorSuite {
+        test_name: "google_drive_mark_deletion_review".to_string(),
+        config: json!({
+            "access_token": "ya29_test_drive",
+            "base_url": format!("{}/drive/v3", server.uri()),
+        }),
+        handshake: handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["drive.quarantine.write"],
+            &instance_id,
+        ),
+        invoke: Some(drive_invoke(
+            &signing_key,
+            &instance_id,
+            "drive-mark-review",
+            "drive.mark_for_deletion_review",
+            json!({"file_id": "file_owned"}),
+        )),
+        invoke_expectations: InvokeExpectations::default(),
+    };
+    let mut runner = E2eRunner::new("fcp-google-drive");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
+    assert!(report.passed, "owned file should move into review folder");
 }
 
 #[fcp_async_core::runtime::test]

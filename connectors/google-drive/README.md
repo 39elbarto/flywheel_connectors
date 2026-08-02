@@ -14,21 +14,28 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.google_drive`. The connector exposes the Google Drive API surface implemented in this crate: file listing, metadata lookup, content download, folder creation, file upload, trashing, and user permission creation.
+This document fixes the operator-facing contract for `fcp.google_drive`. The connector exposes an explicit no-delete Google Drive API surface for file discovery, shared content, metadata, downloads and exports, folder/file creation, comments, permissions, movement, copying, shortcuts, and restoration.
 
-The connector is intentionally a bounded Drive bridge. It is not a full Google Workspace admin client, Docs/Sheets/Slides export client, sync engine, permission auditor, shared-drive administrator, resumable uploader, or long-running Drive warehouse.
+The connector is intentionally a bounded Drive bridge. It has no generic HTTP or discovery passthrough and mechanically excludes file trashing, permanent file deletion, empty-trash, and revision deletion.
 
 ## Current Runtime Snapshot
 
 The current crate exposes these operations:
 
 - `drive.list_files`
+- `drive.parse_url`, `drive.about`
 - `drive.get_file`
 - `drive.download_file`
 - `drive.create_folder`
 - `drive.upload_file`
-- `drive.trash_file`
-- `drive.share_file`
+- `drive.list_shared_with_me`, `drive.list_drives`
+- `drive.list_permissions`, `drive.list_revisions`, `drive.list_comments`
+- `drive.export_file`
+- `drive.update_metadata`, `drive.move_file`, `drive.copy_file`, `drive.create_shortcut`
+- `drive.mark_for_deletion_review`, `drive.list_deletion_review`, `drive.restore_from_deletion_review`
+- `drive.create_comment`, `drive.create_reply`
+- `drive.add_permission`, `drive.update_permission`, `drive.revoke_permission`
+- `drive.restore_file`
 
 Important runtime truths the contract preserves:
 
@@ -44,10 +51,14 @@ Important runtime truths the contract preserves:
 - The client uses the shared retry loop with `max_retries = 2`, `initial_delay_ms = 500`, `max_delay_ms = 30000`, and jitter enabled.
 - File IDs are inserted into URL path segments only after local path-segment validation and URL encoding.
 - Path-segment validation rejects empty strings, slashes, backslashes, `..`, query strings, fragments, encoded slash/backslash/query/fragment markers, and literal percent characters.
-- `drive.list_files` URL-encodes `query` and `page_token`, and forwards `max_results` as `pageSize` without clamping it in the client.
+- `drive.list_files` URL-encodes `query` and `page_token`, and rejects `max_results` outside `1..=1000`.
 - `drive.download_file` requests `alt=media` and returns `content_base64`; if the executor returns JSON instead of binary, the current runtime returns the JSON value as a string.
 - `drive.upload_file` calls `files?uploadType=multipart` but sends a JSON wrapper containing `metadata` and `media_body_base64` through `GoogleRestExecutor`. It does not implement Google resumable upload.
-- `drive.share_file` creates a user permission and accepts roles `reader`, `commenter`, `writer`, and `organizer`.
+- permission operations are separated behind `drive.share.write` and explicit interactive approval metadata.
+- `drive.restore_file` can only set `trashed=false`; there is no inverse operation.
+- Deletion review never uses Google trash: owned files are renamed and moved into `_FCP_DELETE_REVIEW`; foreign-owned and Shared Drive files default to a personal shortcut that leaves the original unchanged.
+- `drive.mark_for_deletion_review` returns an inline restoration receipt. The on-demand wrapper is responsible for persisting that receipt and resolving a future receipt ID.
+- Restoring a shortcut-backed review moves the shortcut out of the review folder and marks it `[FCP-REVIEW-CANCELLED]`; the foreign-owned original remains unchanged.
 - Runtime handshake installs a `CapabilityVerifier`.
 - `invoke` requires `capability_token`, validates input, computes resource URIs, and verifies a bound capability token before provider execution.
 - `simulate` validates operation inventory, input shape, configured/handshaken state, and bound capability token before returning an allowed result.
@@ -61,11 +72,10 @@ This README documents the runtime truth and keeps current drift visible:
 - Manifest connector ID is `fcp.google_drive`, while runtime `BaseConnector` ID is `google-drive`.
 - Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime introspection derives operation descriptions, schemas, capability, risk, safety, idempotency, approval mode, rate limits, and AI hints from `manifest.toml`.
-- Manifest optional capabilities include `media.download` and `media.upload`, but operation metadata and capability verification use only `drive.read` and `drive.write`.
-- Manifest marks `drive.create_folder` as policy approval and `drive.upload_file`, `drive.trash_file`, and `drive.share_file` as interactive approval. Runtime introspection now exposes that approval intent, but `invoke` and `simulate` verify bound capability tokens only and do not verify approval tokens.
+- Manifest optional capabilities include `media.download` and `media.upload`; runtime operations use the narrower Drive capability families below.
+- Manifest marks sensitive writes as policy or interactive approval. Runtime introspection exposes that approval intent; the current connector boundary verifies bound capability tokens and the wrapper layer remains responsible for approval-token policy enforcement.
 - Runtime `drive.download_file` can return a JSON string in `content_base64` if the executor gives the client a JSON response body.
 - Runtime `drive.upload_file` advertises multipart upload but sends a JSON wrapper rather than constructing a true multipart request body or resumable upload session.
-- Runtime introspection says `max_results` has a maximum of 1000, but runtime input validation and client dispatch do not clamp the value.
 - Runtime `handle_shutdown` calls client shutdown but does not clear client, verifier, session, configured flags, or handshaken flags.
 - `self_check()` reports `DEFAULT_BASE_URL` in details even when a loopback or custom base URL was configured.
 - The dedicated tracked verification shell script is `scripts/e2e/google_drive_connector_verification.sh`.
@@ -78,7 +88,8 @@ The current Google Drive README slice documents the existing runtime surface:
 
 - Google bearer-token, credential-reference, and OAuth refresh auth selection
 - Drive API base URL policy and loopback test allowance
-- file list/get/download, folder create, file upload, file trash, and user share operations
+- file and shared-drive discovery, metadata and content reads, create/upload/move/copy,
+  comments, shortcuts, narrowly scoped permission changes, and restore-only operations
 - bound capability-token verification during both `invoke` and `simulate`
 - provider error mapping, retry behavior, redaction posture, doctor behavior, and health behavior
 - lifecycle, doctor, health, self-check, introspection, simulation, invoke, and shutdown surfaces
@@ -94,8 +105,12 @@ The current Google Drive README slice documents the existing runtime surface:
 - Forbidden zone: `z:public`.
 - Runtime capability surface:
   - `drive.read` gates file listing, metadata lookup, and file download.
-  - `drive.write` gates folder creation, file upload, trashing, and sharing.
-- Manifest capability surface also lists `media.download` and `media.upload`, but current runtime checks only `drive.read` and `drive.write`.
+  - `drive.content.write` gates uploads and copies.
+  - `drive.metadata.write` gates folder creation, safe metadata updates, moves,
+    shortcuts, and comments.
+  - `drive.share.write` separately gates ACL changes.
+  - `drive.quarantine.write` separately gates deletion-review marking/restoration and restore-only changes.
+- Manifest capability surface also lists `media.download` and `media.upload`; no runtime operation relies on those broad media aliases.
 - The connector does not persist file metadata, file content, permission records, access tokens, credential IDs, provider payloads, or provider error bodies beyond process memory.
 - Drive data can contain private filenames, folder topology, document contents, owners, thumbnails, links, and sharing relationships. Treat all live reads and writes as private or work-zone data.
 
@@ -120,9 +135,12 @@ The current Google Drive README slice documents the existing runtime surface:
 | Capability | Purpose |
 |-----------|---------|
 | `drive.read` | Read Drive file lists, metadata, and file bytes visible to the authenticated principal. |
-| `drive.write` | Create folders, upload files, move files to trash, and create user permissions. |
+| `drive.content.write` | Upload or copy file content without granting metadata or ACL operations. |
+| `drive.metadata.write` | Create folders and perform non-deleting metadata, movement, shortcut, or comment writes. |
+| `drive.share.write` | Add, update, or revoke an ACL entry without deleting a Drive file. |
+| `drive.quarantine.write` | Rename/move an owned item into a review folder, create a personal review shortcut, or restore from a receipt; it cannot trash or delete files. |
 | `media.download` | Manifest-only optional capability in this checkout; runtime checks `drive.read`. |
-| `media.upload` | Manifest-only optional capability in this checkout; runtime checks `drive.write`. |
+| `media.upload` | Manifest-only optional capability; runtime upload checks `drive.content.write`. |
 
 ## Operation Inventory
 
@@ -131,10 +149,13 @@ The current Google Drive README slice documents the existing runtime surface:
 | `drive.list_files` | `GET /drive/v3/files?fields=...` | `drive.read` | `Safe` | `Low` | `Strict` | Lists Drive files and folders visible to the authenticated principal. |
 | `drive.get_file` | `GET /drive/v3/files/{file_id}?fields=...` | `drive.read` | `Safe` | `Low` | `Strict` | Reads metadata for one Drive file or folder. |
 | `drive.download_file` | `GET /drive/v3/files/{file_id}?alt=media` | `drive.read` | `Safe` | `Low` | `Strict` | Downloads file content and returns it as `content_base64` when the executor returns binary. |
-| `drive.create_folder` | `POST /drive/v3/files?fields=id,name,mimeType,parents` | `drive.write` | `Risky` | `Medium` | `None` | Creates a new folder, optionally under a parent folder. |
-| `drive.upload_file` | `POST /drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size` | `drive.write` | `Dangerous` | `High` | `None` | Creates a new file from base64 input using the current JSON-wrapper upload path. |
-| `drive.trash_file` | `PATCH /drive/v3/files/{file_id}?fields=id,name,trashed` | `drive.write` | `Dangerous` | `High` | `Strict` | Moves a file or folder to trash. |
-| `drive.share_file` | `POST /drive/v3/files/{file_id}/permissions` | `drive.write` | `Dangerous` | `Critical` | `None` | Grants another user access to a file or folder. |
+| `drive.create_folder` | `POST /drive/v3/files?fields=id,name,mimeType,parents` | `drive.metadata.write` | `Risky` | `Medium` | `None` | Creates a new folder, optionally under a parent folder. |
+| `drive.upload_file` | `POST /drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size` | `drive.content.write` | `Dangerous` | `High` | `None` | Creates a new file from base64 input using the current JSON-wrapper upload path. |
+| `drive.restore_file` | `PATCH /drive/v3/files/{file_id}` with exactly `trashed=false` | `drive.quarantine.write` | `Dangerous` | `High` | `Strict` | Restores a file; setting `trashed=true` is rejected recursively before provider I/O. |
+| `drive.mark_for_deletion_review` | Bounded metadata read plus safe rename/move or personal shortcut creation | `drive.quarantine.write` | `Dangerous` | `High` | `None` | Marks an item for later manual review without trashing or deleting it and returns a restoration receipt. |
+| `drive.list_deletion_review` | Bounded `files.list` under `_FCP_DELETE_REVIEW` | `drive.read` | `Safe` | `Low` | `Strict` | Lists only the selected review-folder context. |
+| `drive.restore_from_deletion_review` | Receipt-validated safe move/rename | `drive.quarantine.write` | `Dangerous` | `High` | `None` | Restores an owned item or cancels a shortcut-backed review without deleting anything. |
+| `drive.add_permission` | `POST /drive/v3/files/{file_id}/permissions` | `drive.share.write` | `Dangerous` | `Critical` | `None` | Grants an explicitly typed permission after confirmation. |
 
 ## Resource URIs
 
@@ -145,8 +166,11 @@ Runtime capability-token verification binds operations to these resource URI sha
 | `drive.list_files` | `drive://files` |
 | `drive.get_file` | `drive://files/{file_id}` |
 | `drive.download_file` | `drive://files/{file_id}` |
-| `drive.trash_file` | `drive://files/{file_id}` |
-| `drive.share_file` | `drive://files/{file_id}` |
+| `drive.restore_file` | `drive://files/{file_id}` |
+| `drive.mark_for_deletion_review` | `drive://files/{file_id}` |
+| `drive.list_deletion_review` | `drive://deletion-review` |
+| `drive.restore_from_deletion_review` | `drive://files/{receipt.file_id}` |
+| `drive.add_permission` | `drive://files/{file_id}/permissions` |
 | `drive.create_folder` | `drive://folders/{parent_id_or_root}/children` |
 | `drive.upload_file` | `drive://folders/{parent_id_or_root}/children` |
 
@@ -154,11 +178,10 @@ Runtime capability-token verification binds operations to these resource URI sha
 
 The current implementation does not include:
 
-- Google Docs, Sheets, or Slides export before download
 - resumable uploads, multipart body construction outside the current executor wrapper, upload progress, or checksum verification
-- permission listing, permission deletion, link-sharing policy management, domain sharing, ownership transfer, shared-drive administration, or ACL audit
-- file copy, move, rename, patch, labels, revisions, comments, shortcuts, change feeds, watch channels, or hard delete
-- folder search/create idempotency, sync-token storage, durable file indexes, Drive warehouse export, or connector-local credential vaulting
+- link-sharing policy management, ownership transfer, shared-drive administration, or a durable ACL audit store
+- labels, change feeds, watch channels, or any file deletion mechanism
+- connector-local persistence or receipt-ID lookup (the on-demand wrapper owns it), sync-token storage, durable file indexes, Drive warehouse export, or connector-local credential vaulting
 - OAuth consent setup, Drive API enablement, service-account/domain-wide delegation provisioning, or Google Workspace tenant onboarding
 
 These are excluded on purpose:
@@ -183,7 +206,8 @@ These are excluded on purpose:
 The deterministic integration evidence is anchored on connector-local tests covering:
 
 - lifecycle, configuration, base URL policy, loopback allowance, introspection, simulation, doctor, self-check, and shutdown behavior
-- file list/get/download, folder create, file upload, file trash, and file share through deterministic HTTP fixtures
+- file list/get/download and owned-file deletion-review deterministic HTTP fixtures,
+  plus unit proof that the deletion surface is absent and bypass-shaped input is rejected
 - invoke rejection for unknown operation, missing token, missing input, wrong capability, and pre-provider capability verification
 - provider 401, 403, 404, 429, retryable transport/server classes, malformed JSON, quota errors, and FCP error mapping
 - path-segment validation for traversal and double-encoded separators
@@ -229,7 +253,7 @@ The verification surface captures:
 **Dedicated environment**:
 
 - Keep test files and folders separate from personal and production Drives.
-- Use disposable files for upload, trash, and share proof.
+- Use disposable files for upload and permission proof.
 - Avoid organizer role in live proof unless the shared-drive authority model is explicitly under test.
 
 **Redaction rules**:
@@ -241,7 +265,7 @@ The verification surface captures:
 
 - If configuration fails, provide exactly one Google auth source at the top level.
 - If live checks fail with a credential reference, materialize host credentials before invoking provider operations.
-- If `drive.download_file` fails on Google-native documents, export through the appropriate Google API first; this connector does not implement export.
+- If `drive.download_file` fails on Google-native documents, use `drive.export_file` with an explicit supported MIME type.
 - If `drive.upload_file` fails against real Drive, inspect the current upload body contract before assuming resumable or true multipart upload is implemented.
 - If list pagination behaves unexpectedly, validate `max_results`, `query`, and `page_token` against Drive API syntax and provider limits.
 - If provider returns 403, treat it as an auth/permission failure rather than a retryable transport error.

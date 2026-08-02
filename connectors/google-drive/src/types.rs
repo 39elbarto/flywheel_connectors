@@ -22,7 +22,7 @@ pub struct DoctorCheck {
 // ── File ───────────────────────────────────────────────────────
 
 /// A Drive file or folder resource.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveFile {
     pub id: String,
@@ -54,10 +54,37 @@ pub struct DriveFile {
     pub owners: Option<Vec<DriveUser>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permissions: Option<Vec<DrivePermission>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub md5_checksum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<DriveCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcut_details: Option<ShortcutDetails>,
+}
+
+/// File-level capabilities needed by bounded Shared Drive workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_move_item_within_drive: Option<bool>,
+}
+
+/// Target metadata for a Google Drive shortcut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutDetails {
+    pub target_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_resource_key: Option<String>,
 }
 
 /// A Drive user (owner, modifier, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveUser {
     pub display_name: Option<String>,
@@ -67,7 +94,7 @@ pub struct DriveUser {
 }
 
 /// A Drive permission entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DrivePermission {
     pub id: String,
@@ -140,6 +167,10 @@ mod tests {
             shared: None,
             owners: None,
             permissions: None,
+            drive_id: None,
+            md5_checksum: None,
+            capabilities: None,
+            shortcut_details: None,
         };
         let json_str = serde_json::to_string(&file).unwrap();
         let parsed: DriveFile = serde_json::from_str(&json_str).unwrap();

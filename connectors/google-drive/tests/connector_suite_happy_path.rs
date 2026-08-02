@@ -531,7 +531,7 @@ async fn mark_for_deletion_review_moves_owned_file_without_trashing_it() {
         "parents": ["folder_original"],
         "trashed": false,
         "owners": [{"emailAddress": "owner@example.com"}],
-        "permissions": [{"id": "perm_owner", "role": "owner", "type": "user"}],
+        "permissions": [{"id": "perm_owner", "role": "owner", "type": "user", "emailAddress": "Owner@Example.com", "displayName": "Owner Full Name"}],
         "md5Checksum": "abc123"
     });
     Mock::given(method("GET"))
@@ -599,7 +599,7 @@ async fn mark_for_deletion_review_moves_owned_file_without_trashing_it() {
             "parents": ["folder_review"],
             "trashed": false,
             "owners": [{"emailAddress": "owner@example.com"}],
-            "permissions": [{"id": "perm_owner", "role": "owner", "type": "user"}],
+            "permissions": [{"id": "perm_owner", "role": "owner", "type": "user", "emailAddress": "owner@example.com", "displayName": "owner-alias"}],
             "md5Checksum": "abc123"
         })))
         .expect(1)
@@ -635,6 +635,155 @@ async fn mark_for_deletion_review_moves_owned_file_without_trashing_it() {
         .await
         .expect("connector suite run");
     assert!(report.passed, "owned file should move into review folder");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mark_for_deletion_review_rolls_back_security_verification_failure() {
+    let server = MockServer::start().await;
+    let review_name = format!(
+        "[FCP-DELETE-REVIEW {}] report.txt",
+        Utc::now().format("%Y-%m-%d")
+    );
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files/file_owned"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_owned",
+            "name": "report.txt",
+            "mimeType": "text/plain",
+            "parents": ["folder_original"],
+            "trashed": false,
+            "owners": [{"emailAddress": "owner@example.com"}],
+            "permissions": [{"id": "perm_owner", "role": "owner", "type": "user"}],
+            "md5Checksum": "abc123"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/about"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "drive#about",
+            "user": {"emailAddress": "owner@example.com"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/drive/v3/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "drive#fileList",
+            "files": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/drive/v3/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "folder_review",
+            "name": "_FCP_DELETE_REVIEW",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": ["root"],
+            "trashed": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/drive/v3/files/file_owned"))
+        .and(body_json(json!({"name": review_name})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_owned",
+            "name": review_name,
+            "mimeType": "text/plain",
+            "parents": ["folder_original"],
+            "trashed": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/drive/v3/files/file_owned"))
+        .and(query_param("addParents", "folder_review"))
+        .and(query_param("removeParents", "folder_original"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_owned",
+            "name": review_name,
+            "mimeType": "text/plain",
+            "parents": ["folder_review"],
+            "trashed": false,
+            "owners": [{"emailAddress": "owner@example.com"}],
+            "permissions": [{"id": "perm_owner", "role": "writer", "type": "user"}],
+            "md5Checksum": "abc123"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/drive/v3/files/file_owned"))
+        .and(query_param("addParents", "folder_original"))
+        .and(query_param("removeParents", "folder_review"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_owned",
+            "name": review_name,
+            "mimeType": "text/plain",
+            "parents": ["folder_original"],
+            "trashed": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/drive/v3/files/file_owned"))
+        .and(body_json(json!({"name": "report.txt"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file_owned",
+            "name": "report.txt",
+            "mimeType": "text/plain",
+            "parents": ["folder_original"],
+            "trashed": false
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    let mut connector = DriveConnector::new();
+    connector
+        .handle_configure(json!({
+            "access_token": fixture_bearer(),
+            "base_url": format!("{}/drive/v3", server.uri()),
+        }))
+        .await
+        .unwrap();
+    connector
+        .handle_handshake(
+            serde_json::to_value(handshake_request(
+                signing_key.verifying_key().to_bytes(),
+                &["drive.quarantine.write"],
+                &instance_id,
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let error = connector
+        .handle_invoke(json!({
+            "operation": "drive.mark_for_deletion_review",
+            "input": {"file_id": "file_owned"},
+            "capability_token": build_token(
+                &signing_key,
+                "drive.mark_for_deletion_review",
+                &instance_id,
+            )
+        }))
+        .await
+        .expect_err("security-relevant permission drift must fail after rollback");
+    assert!(
+        matches!(error, FcpError::External { ref message, .. } if message.contains("rolled back"))
+    );
 }
 
 #[fcp_async_core::runtime::test]

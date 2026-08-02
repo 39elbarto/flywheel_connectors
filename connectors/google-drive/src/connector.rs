@@ -342,8 +342,32 @@ fn drive_resource_uris_for_operation(
 use crate::{
     client::{DEFAULT_BASE_URL, DriveClient, DriveUploadMode},
     error::DriveError,
-    types::{DoctorCheck, DoctorReport},
+    types::{DoctorCheck, DoctorReport, DrivePermission},
 };
+
+fn permission_security_fields_match(
+    expected: &[DrivePermission],
+    actual: &[DrivePermission],
+) -> bool {
+    expected.len() == actual.len()
+        && expected.iter().all(|expected_permission| {
+            actual.iter().any(|actual_permission| {
+                expected_permission.id == actual_permission.id
+                    && expected_permission.role == actual_permission.role
+                    && expected_permission.permission_type == actual_permission.permission_type
+                    && match (
+                        expected_permission.email_address.as_deref(),
+                        actual_permission.email_address.as_deref(),
+                    ) {
+                        (Some(expected_email), Some(actual_email)) => {
+                            expected_email.eq_ignore_ascii_case(actual_email)
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    }
+            })
+        })
+}
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const OPERATION_ORDER: &[&str] = &[
@@ -1230,6 +1254,12 @@ impl DriveConnector {
         let (mode, review_folder, marked_file, shortcut_id) = if personally_owned
             || requested_shared_move
         {
+            if original_parents.len() > 1 {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Deletion review refuses files with multiple parents because rollback placement would be ambiguous".into(),
+                });
+            }
             if requested_shared_move {
                 if input
                     .get("confirm_shared_drive_move")
@@ -1319,10 +1349,11 @@ impl DriveConnector {
             ("shortcut", review_folder, unchanged, Some(shortcut.id))
         };
 
-        if marked_file.id != file.id
+        let marked_permissions = marked_file.permissions.clone().unwrap_or_default();
+        let verification_failed = marked_file.id != file.id
             || marked_file.trashed == Some(true)
             || marked_file.md5_checksum != original_checksum
-            || marked_file.permissions.clone().unwrap_or_default() != original_permissions
+            || !permission_security_fields_match(&original_permissions, &marked_permissions)
             || (mode == "shortcut"
                 && (marked_file.name != original_name
                     || marked_file.parents.clone().unwrap_or_default() != original_parents))
@@ -1330,8 +1361,41 @@ impl DriveConnector {
                 && (marked_file.name != review_name
                     || !marked_file.parents.as_ref().is_some_and(|parents| {
                         parents.iter().any(|parent| parent == &review_folder.id)
-                    })))
-        {
+                    })));
+        if verification_failed {
+            if mode != "shortcut" {
+                let destination = original_parents.first().map_or("root", String::as_str);
+                let rollback_result = async {
+                    client
+                        .move_file(
+                            file_id,
+                            destination,
+                            std::slice::from_ref(&review_folder.id),
+                        )
+                        .await?;
+                    client
+                        .update_metadata(file_id, &json!({"name": original_name}))
+                        .await?;
+                    Ok::<(), DriveError>(())
+                }
+                .await;
+                let message = match rollback_result {
+                    Ok(()) => {
+                        "Deletion-review verification failed; the name and parent mutation was rolled back"
+                            .to_string()
+                    }
+                    Err(rollback_error) => format!(
+                        "Deletion-review verification failed and rollback was incomplete: {rollback_error}"
+                    ),
+                };
+                return Err(FcpError::External {
+                    service: "google-drive".into(),
+                    message,
+                    status_code: None,
+                    retryable: false,
+                    retry_after: None,
+                });
+            }
             return Err(FcpError::External {
                 service: "google-drive".into(),
                 message: "Deletion-review verification detected changed identity, content, trash state, or permissions".into(),
@@ -1962,6 +2026,54 @@ mod tests {
         assert!(!host_is_drive_googleapis("drive.googleapis.com"));
         assert!(!host_is_drive_googleapis("googleapis.com.evil.com"));
         assert!(!host_is_drive_googleapis("evil-googleapis.com"));
+    }
+
+    #[test]
+    fn deletion_review_permission_check_ignores_display_label_and_email_case() {
+        let expected = vec![DrivePermission {
+            id: "permission-owner".into(),
+            role: "owner".into(),
+            permission_type: "user".into(),
+            email_address: Some("Owner@Example.com".into()),
+            display_name: Some("Owner Full Name".into()),
+        }];
+        let actual = vec![DrivePermission {
+            display_name: Some("owner-alias".into()),
+            email_address: Some("owner@example.com".into()),
+            ..expected[0].clone()
+        }];
+
+        assert!(permission_security_fields_match(&expected, &actual));
+    }
+
+    #[test]
+    fn deletion_review_permission_check_rejects_security_field_drift() {
+        let expected = vec![DrivePermission {
+            id: "permission-owner".into(),
+            role: "owner".into(),
+            permission_type: "user".into(),
+            email_address: Some("owner@example.com".into()),
+            display_name: Some("Owner".into()),
+        }];
+        for actual in [
+            DrivePermission {
+                role: "writer".into(),
+                ..expected[0].clone()
+            },
+            DrivePermission {
+                id: "different-permission".into(),
+                ..expected[0].clone()
+            },
+            DrivePermission {
+                email_address: Some("attacker@example.com".into()),
+                ..expected[0].clone()
+            },
+        ] {
+            assert!(!permission_security_fields_match(
+                &expected,
+                std::slice::from_ref(&actual)
+            ));
+        }
     }
 
     #[test]

@@ -32,8 +32,8 @@ const RANGE: &str = "Sheet1!A1:B2";
 const OP_GET_VALUES: &str = "sheets.get_values";
 const OP_UPDATE_VALUES: &str = "sheets.update_values";
 const READ_CAPABILITY: &str = "sheets.read";
-const WRITE_CAPABILITY: &str = "sheets.write";
-const EXPECTED_GET_PATH: &str = "/v4/spreadsheets/sheet_local_001/values/Sheet1%21A1%3AB2";
+const WRITE_CAPABILITY: &str = "sheets.values.write";
+const EXPECTED_GET_PATH: &str = "/v4/spreadsheets/sheet_local_001/values/Sheet1%21A1%3AB2?majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER";
 const EXPECTED_UPDATE_PATH: &str =
     "/v4/spreadsheets/sheet_local_001/values/Sheet1%21A1%3AB2?valueInputOption=USER_ENTERED";
 

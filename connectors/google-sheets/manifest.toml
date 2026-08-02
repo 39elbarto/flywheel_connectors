@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4133a0434ed4b0b5867971b0db6c7611c766c5b7e2a9bf3deb264a5c388c4991"
+interface_hash = "blake3-256:fcp.interface.v2:4992dd4f611efcb6a0349d3c73237237262df8456b77f1ae26df579ef98b5aca"
 
 [connector]
 id = "fcp.google_sheets"
@@ -31,7 +31,8 @@ forbidden = ["z:public", "z:work"]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
 optional = [
     "sheets.read",
-    "sheets.write",
+    "sheets.values.write",
+    "sheets.structure.write",
 ]
 forbidden = ["system.exec", "network.listen"]
 
@@ -127,7 +128,7 @@ related = ["sheets.update_values", "sheets.get_spreadsheet"]
 
 [provides.operations."sheets.update_values"]
 description = "Write cell values to a range"
-capability = "sheets.write"
+capability = "sheets.values.write"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
@@ -174,14 +175,14 @@ related = ["sheets.get_values", "sheets.append_values"]
 
 [provides.operations."sheets.append_values"]
 description = "Append rows to a sheet"
-capability = "sheets.write"
+capability = "sheets.values.write"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
-idempotency = "none"
+idempotency = "best_effort"
 
 [provides.operations."sheets.append_values".input_schema]
-required = ["spreadsheet_id", "range", "values"]
+required = ["spreadsheet_id", "range", "values", "idempotency_key"]
 type = "object"
 [provides.operations."sheets.append_values".input_schema.properties.spreadsheet_id]
 type = "string"
@@ -189,6 +190,10 @@ type = "string"
 type = "string"
 [provides.operations."sheets.append_values".input_schema.properties.values]
 type = "array"
+[provides.operations."sheets.append_values".input_schema.properties.idempotency_key]
+type = "string"
+minLength = 8
+maxLength = 128
 
 [provides.operations."sheets.append_values".output_schema]
 required = ["table_range"]
@@ -221,19 +226,21 @@ related = ["sheets.update_values", "sheets.get_values"]
 
 [provides.operations."sheets.clear_values"]
 description = "Clear cell values in a range"
-capability = "sheets.write"
+capability = "sheets.values.write"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
 
 [provides.operations."sheets.clear_values".input_schema]
-required = ["spreadsheet_id", "range"]
+required = ["spreadsheet_id", "range", "confirm_clear"]
 type = "object"
 [provides.operations."sheets.clear_values".input_schema.properties.spreadsheet_id]
 type = "string"
 [provides.operations."sheets.clear_values".input_schema.properties.range]
 type = "string"
+[provides.operations."sheets.clear_values".input_schema.properties.confirm_clear]
+type = "boolean"
 
 [provides.operations."sheets.clear_values".output_schema]
 type = "object"
@@ -258,6 +265,189 @@ when_to_use = "Clear all values from a range (keeps formatting)."
 common_mistakes = ["This clears VALUES only, not formatting or formulas", "Cannot be undone -- consider downloading values first"]
 examples = ['{"spreadsheet_id": "abc123", "range": "Sheet1!A1:Z1000"}']
 related = ["sheets.get_values"]
+
+# -----------------------------------------------------------------------
+
+[provides.operations."sheets.batch_get_values"]
+description = "Read up to 100 ranges with explicit render choices"
+capability = "sheets.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."sheets.batch_get_values".input_schema]
+type = "object"
+required = ["spreadsheet_id", "ranges"]
+[provides.operations."sheets.batch_get_values".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.batch_get_values".input_schema.properties.ranges]
+type = "array"
+maxItems = 100
+[provides.operations."sheets.batch_get_values".output_schema]
+type = "object"
+required = ["value_ranges"]
+[provides.operations."sheets.batch_get_values".output_schema.properties.value_ranges]
+type = "array"
+[provides.operations."sheets.batch_get_values".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sheets.batch_update_values"]
+description = "Atomically update up to 100 value ranges"
+capability = "sheets.values.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+[provides.operations."sheets.batch_update_values".input_schema]
+type = "object"
+required = ["spreadsheet_id", "data"]
+[provides.operations."sheets.batch_update_values".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.batch_update_values".input_schema.properties.data]
+type = "array"
+maxItems = 100
+[provides.operations."sheets.batch_update_values".output_schema]
+type = "object"
+required = ["total_updated_cells"]
+[provides.operations."sheets.batch_update_values".output_schema.properties.total_updated_cells]
+type = "integer"
+[provides.operations."sheets.batch_update_values".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sheets.create_spreadsheet"]
+description = "Create a spreadsheet with bounded initial tabs"
+capability = "sheets.structure.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+[provides.operations."sheets.create_spreadsheet".input_schema]
+type = "object"
+required = ["title"]
+[provides.operations."sheets.create_spreadsheet".input_schema.properties.title]
+type = "string"
+maxLength = 200
+[provides.operations."sheets.create_spreadsheet".output_schema]
+type = "object"
+required = ["spreadsheet"]
+[provides.operations."sheets.create_spreadsheet".output_schema.properties.spreadsheet]
+type = "object"
+[provides.operations."sheets.create_spreadsheet".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sheets.copy_sheet"]
+description = "Copy one tab to another spreadsheet"
+capability = "sheets.structure.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+[provides.operations."sheets.copy_sheet".input_schema]
+type = "object"
+required = ["spreadsheet_id", "sheet_id", "destination_spreadsheet_id"]
+[provides.operations."sheets.copy_sheet".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.copy_sheet".input_schema.properties.sheet_id]
+type = "integer"
+minimum = 0
+[provides.operations."sheets.copy_sheet".input_schema.properties.destination_spreadsheet_id]
+type = "string"
+[provides.operations."sheets.copy_sheet".output_schema]
+type = "object"
+required = ["sheet"]
+[provides.operations."sheets.copy_sheet".output_schema.properties.sheet]
+type = "object"
+[provides.operations."sheets.copy_sheet".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sheets.batch_update_spreadsheet"]
+description = "Apply an allowlisted, validated structural batch atomically"
+capability = "sheets.structure.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+[provides.operations."sheets.batch_update_spreadsheet".input_schema]
+type = "object"
+required = ["spreadsheet_id", "requests"]
+[provides.operations."sheets.batch_update_spreadsheet".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.batch_update_spreadsheet".input_schema.properties.requests]
+type = "array"
+maxItems = 100
+[provides.operations."sheets.batch_update_spreadsheet".input_schema.properties.confirm_destructive]
+type = "boolean"
+[provides.operations."sheets.batch_update_spreadsheet".output_schema]
+type = "object"
+required = ["preflight", "response", "readback"]
+[provides.operations."sheets.batch_update_spreadsheet".output_schema.properties.preflight]
+type = "object"
+[provides.operations."sheets.batch_update_spreadsheet".output_schema.properties.response]
+type = "object"
+[provides.operations."sheets.batch_update_spreadsheet".output_schema.properties.readback]
+type = "object"
+[provides.operations."sheets.batch_update_spreadsheet".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 # -- Events ------------------------------------------------------------
 
@@ -288,15 +478,27 @@ burst = 30
 scope = "instance"
 
 [[rate_limits.pools]]
-id = "sheets.write"
+id = "sheets.values.write"
 requests = 300
 window_ms = 60000
 burst = 30
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "sheets.structure.write"
+requests = 120
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "sheets.get_spreadsheet" = ["sheets.read"]
 "sheets.get_values" = ["sheets.read"]
-"sheets.update_values" = ["sheets.write"]
-"sheets.append_values" = ["sheets.write"]
-"sheets.clear_values" = ["sheets.write"]
+"sheets.batch_get_values" = ["sheets.read"]
+"sheets.update_values" = ["sheets.values.write"]
+"sheets.batch_update_values" = ["sheets.values.write"]
+"sheets.append_values" = ["sheets.values.write"]
+"sheets.clear_values" = ["sheets.values.write"]
+"sheets.create_spreadsheet" = ["sheets.structure.write"]
+"sheets.copy_sheet" = ["sheets.structure.write"]
+"sheets.batch_update_spreadsheet" = ["sheets.structure.write"]

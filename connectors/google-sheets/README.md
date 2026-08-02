@@ -11,9 +11,9 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.google_sheets`. The connector exposes the Google Sheets API surface implemented in this crate: spreadsheet metadata lookup, range reads, range updates, row appends, and value clearing.
+This document fixes the operator-facing contract for `fcp.google_sheets`. The connector exposes a bounded practical spreadsheet workflow: metadata and value reads, value writes, idempotent append, confirmed clear, spreadsheet creation, sheet copy, and an allowlisted structural batch editor.
 
-The connector is intentionally a bounded Sheets bridge. It is not a full spreadsheet editor, chart client, pivot-table client, batchUpdate structural editor, Drive permission manager, formula auditor, export client, or long-running spreadsheet warehouse.
+The connector is intentionally not a raw Google API tunnel. It validates request kinds, ranges, IDs, field masks, nesting, cell counts, request counts, and payload sizes before any provider call.
 
 ## Current Runtime Snapshot
 
@@ -21,9 +21,14 @@ The current crate exposes these operations:
 
 - `sheets.get_spreadsheet`
 - `sheets.get_values`
+- `sheets.batch_get_values`
 - `sheets.update_values`
+- `sheets.batch_update_values`
 - `sheets.append_values`
 - `sheets.clear_values`
+- `sheets.create_spreadsheet`
+- `sheets.copy_sheet`
+- `sheets.batch_update_spreadsheet`
 
 Important runtime truths the contract preserves:
 
@@ -42,7 +47,10 @@ Important runtime truths the contract preserves:
 - Range expressions are percent-encoded with `percent_encoding::NON_ALPHANUMERIC` before being placed in the URL path.
 - `sheets.update_values` writes with `valueInputOption=USER_ENTERED`.
 - `sheets.append_values` writes with `valueInputOption=USER_ENTERED` and `insertDataOption=INSERT_ROWS`.
-- `sheets.update_values` and `sheets.append_values` require a two-dimensional `values` array.
+- Value writes require a bounded two-dimensional `values` array; batch reads and writes accept at most 100 ranges and 50,000 cells.
+- `sheets.append_values` requires an 8–128 character idempotency key. A successful retry with the same key and payload is served from the connector-session receipt cache; reusing the key for different data is rejected.
+- `sheets.clear_values` requires `confirm_clear=true`, performs a read-only value preflight, clears the range, and reads it back.
+- Structural batches accept only documented request types. Delete/clear request types additionally require `confirm_destructive=true`; every structural batch captures metadata before and after the atomic provider update.
 - Runtime handshake installs a `CapabilityVerifier`.
 - Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime `invoke` requires `capability_token`, computes `google-sheets:spreadsheet:{spreadsheet_id}`, and verifies a bound token before provider execution.
@@ -81,10 +89,10 @@ The current Google Sheets README slice documents the existing runtime surface:
 - Allowed source zones: `z:owner` and `z:private`.
 - Allowed target zone: `z:private`.
 - Forbidden zones: `z:public` and `z:work`.
-- Runtime capability surface:
+- Runtime and manifest capability surface:
   - `sheets.read` gates spreadsheet metadata and value reads.
-  - `sheets.write` gates update, append, and clear.
-- Manifest capability surface uses `sheets.read` and `sheets.write` as optional capabilities.
+  - `sheets.values.write` gates update, batch update, append, and confirmed clear.
+  - `sheets.structure.write` gates spreadsheet creation, sheet copy, and validated structural batches.
 - The connector does not persist spreadsheet IDs, sheet names, cell values, formulas, access tokens, credential IDs, provider payloads, or provider error bodies beyond process memory.
 - Sheets data can contain private tab names, formulas, business metrics, customer data, and hidden structure. Treat all live reads and writes as private-zone data.
 
@@ -108,7 +116,8 @@ The current Google Sheets README slice documents the existing runtime surface:
 | Capability | Purpose |
 |-----------|---------|
 | `sheets.read` | Read spreadsheet metadata and cell ranges. |
-| `sheets.write` | Update, append, and clear cell values. |
+| `sheets.values.write` | Update, batch update, append, and confirmed clear of cell values. |
+| `sheets.structure.write` | Create spreadsheets, copy tabs, and apply validated structural updates. |
 
 ## Operation Inventory
 
@@ -116,9 +125,14 @@ The current Google Sheets README slice documents the existing runtime surface:
 |-----------|----------------|------------|------------|-----------|-------------|-----------|
 | `sheets.get_spreadsheet` | `GET /v4/spreadsheets/{spreadsheet_id}` | `sheets.read` | `Safe` | `Low` | `Strict` | Reads spreadsheet metadata and sheet list. |
 | `sheets.get_values` | `GET /v4/spreadsheets/{spreadsheet_id}/values/{range}` | `sheets.read` | `Safe` | `Low` | `Strict` | Reads cell values from an A1 notation range. |
-| `sheets.update_values` | `PUT /v4/spreadsheets/{spreadsheet_id}/values/{range}?valueInputOption=USER_ENTERED` | `sheets.write` | `Risky` | `Medium` | `BestEffort` | Writes a two-dimensional array to a range. |
-| `sheets.append_values` | `POST /v4/spreadsheets/{spreadsheet_id}/values/{range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS` | `sheets.write` | `Risky` | `Medium` | `None` | Appends rows to the detected table below a range. |
-| `sheets.clear_values` | `POST /v4/spreadsheets/{spreadsheet_id}/values/{range}:clear` | `sheets.write` | `Dangerous` | `High` | `Strict` | Clears values in a range while leaving formatting. |
+| `sheets.batch_get_values` | `GET /v4/spreadsheets/{spreadsheet_id}/values:batchGet` | `sheets.read` | `Safe` | `Low` | `Strict` | Reads up to 100 ranges with explicit render choices. |
+| `sheets.update_values` | `PUT /v4/spreadsheets/{spreadsheet_id}/values/{range}` | `sheets.values.write` | `Risky` | `Medium` | `BestEffort` | Writes a bounded two-dimensional array. |
+| `sheets.batch_update_values` | `POST /v4/spreadsheets/{spreadsheet_id}/values:batchUpdate` | `sheets.values.write` | `Risky` | `Medium` | `BestEffort` | Atomically writes values or formulas to up to 100 ranges. |
+| `sheets.append_values` | `POST /v4/spreadsheets/{spreadsheet_id}/values/{range}:append` | `sheets.values.write` | `Risky` | `Medium` | `BestEffort` | Appends once per connector-session idempotency key. |
+| `sheets.clear_values` | `GET`, `POST :clear`, `GET` | `sheets.values.write` | `Dangerous` | `High` | `Strict` | Requires confirmation and returns preflight plus readback. |
+| `sheets.create_spreadsheet` | `POST /v4/spreadsheets` | `sheets.structure.write` | `Risky` | `Medium` | `None` | Creates a spreadsheet with bounded initial tabs. |
+| `sheets.copy_sheet` | `POST /v4/spreadsheets/{id}/sheets/{sheet_id}:copyTo` | `sheets.structure.write` | `Risky` | `Medium` | `None` | Copies a tab to a bound destination spreadsheet. |
+| `sheets.batch_update_spreadsheet` | `GET`, `POST :batchUpdate`, `GET` | `sheets.structure.write` | `Dangerous` | `High` | `BestEffort` | Applies an atomic allowlisted batch with preflight and readback. |
 
 ## Resource URIs
 
@@ -132,9 +146,9 @@ Runtime capability-token verification binds all supported operations to this res
 
 The current implementation does not include:
 
-- spreadsheet creation, sheet creation/deletion, formatting, charts, filters, pivot tables, protected ranges, named ranges, or batchUpdate structural edits
+- raw HTTP requests, unrestricted discovery-method passthrough, or structural request types outside the allowlist
 - Drive file export, Drive placement, file permissions, sharing, or revision history
-- formula analysis, formula execution controls, CSV import/export, durable caches, sync-token storage, or connector-local credential vaulting
+- formula analysis, CSV import/export, durable cross-restart append receipts, sync-token storage, or connector-local credential vaulting
 - OAuth consent setup, Sheets API enablement, service-account/domain-wide delegation provisioning, or Google Workspace tenant onboarding
 
 These are excluded on purpose:
@@ -209,12 +223,12 @@ The verification surface captures:
 - If live checks fail with a credential reference, materialize host credentials before invoking provider operations.
 - If range operations fail, verify A1 notation and the spreadsheet ID, not the individual sheet ID.
 - If writes appear wrong, remember `USER_ENTERED` lets Google interpret values as formulas, dates, or numbers.
-- If `sheets.append_values` duplicates rows, the operation is intentionally not idempotent.
+- If an append call is retried during the same connector session, reuse the exact same idempotency key and payload. A new key intentionally creates a new append.
 
 **Rerun commands**:
 
 - `scripts/e2e/google_sheets_connector_verification.sh`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-sheets-readme cargo check -p fcp-google-sheets --all-targets`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-sheets-readme cargo test -p fcp-google-sheets --tests -- --nocapture`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-sheets-readme cargo clippy -p fcp-google-sheets --all-targets --no-deps -- -D warnings`
+- `CARGO_TARGET_DIR=/home/ubuntu/.cache/fcp-google-sheets cargo check -p fcp-google-sheets --all-targets`
+- `CARGO_TARGET_DIR=/home/ubuntu/.cache/fcp-google-sheets cargo test -p fcp-google-sheets --tests -- --nocapture`
+- `CARGO_TARGET_DIR=/home/ubuntu/.cache/fcp-google-sheets cargo clippy -p fcp-google-sheets --all-targets --no-deps -- -D warnings`
 - `ubs connectors/google-sheets/README.md`

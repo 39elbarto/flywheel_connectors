@@ -13,6 +13,10 @@ pub struct Spreadsheet {
     pub sheets: Vec<Sheet>,
     #[serde(default)]
     pub spreadsheet_url: String,
+    #[serde(default)]
+    pub named_ranges: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub developer_metadata: Vec<serde_json::Value>,
 }
 
 /// Spreadsheet-level properties.
@@ -32,6 +36,16 @@ pub struct SpreadsheetProperties {
 #[serde(rename_all = "camelCase")]
 pub struct Sheet {
     pub properties: SheetProperties,
+    #[serde(default)]
+    pub protected_ranges: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub basic_filter: Option<serde_json::Value>,
+    #[serde(default)]
+    pub filter_views: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub charts: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub data: Vec<serde_json::Value>,
 }
 
 /// Sheet-level properties.
@@ -88,6 +102,12 @@ pub struct AppendValuesResponse {
 pub struct BatchUpdateValuesRequest {
     pub value_input_option: String,
     pub data: Vec<ValueRange>,
+    #[serde(default)]
+    pub include_values_in_response: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_value_render_option: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_date_time_render_option: Option<String>,
 }
 
 /// Response from batch update.
@@ -103,6 +123,8 @@ pub struct BatchUpdateValuesResponse {
     pub total_updated_cells: u32,
     #[serde(default)]
     pub total_updated_sheets: u32,
+    #[serde(default)]
+    pub responses: Vec<UpdateValuesResponse>,
 }
 
 /// Google Sheets API error response.

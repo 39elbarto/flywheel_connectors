@@ -12,11 +12,12 @@ use tracing::{instrument, warn};
 
 use crate::error::{SheetsError, SheetsResult};
 use crate::types::{
-    ApiErrorDetail, ApiErrorResponse, AppendValuesResponse, Spreadsheet, UpdateValuesResponse,
-    ValueRange,
+    ApiErrorDetail, ApiErrorResponse, AppendValuesResponse, BatchUpdateValuesRequest,
+    BatchUpdateValuesResponse, Spreadsheet, UpdateValuesResponse, ValueRange,
 };
 
 const DEFAULT_BASE_URL: &str = "https://sheets.googleapis.com/v4";
+const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Google Sheets API client.
 pub struct SheetsClient {
@@ -91,21 +92,106 @@ impl SheetsClient {
     /// Get a spreadsheet by ID.
     #[instrument(skip(self), fields(spreadsheet_id))]
     pub async fn get_spreadsheet(&self, spreadsheet_id: &str) -> SheetsResult<Spreadsheet> {
+        self.get_spreadsheet_with_options(spreadsheet_id, &[], false, None)
+            .await
+    }
+
+    /// Get spreadsheet metadata with bounded field/range selection.
+    pub async fn get_spreadsheet_with_options(
+        &self,
+        spreadsheet_id: &str,
+        ranges: &[String],
+        include_grid_data: bool,
+        fields: Option<&str>,
+    ) -> SheetsResult<Spreadsheet> {
         let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
-        let url = format!("{}/spreadsheets/{spreadsheet_id}", self.base_url);
-        self.get_json(&url).await
+        let mut url =
+            reqwest::Url::parse(&format!("{}/spreadsheets/{spreadsheet_id}", self.base_url))
+                .map_err(|error| SheetsError::Api {
+                    status_code: 400,
+                    message: format!("invalid Sheets URL: {error}"),
+                })?;
+        {
+            let mut query = url.query_pairs_mut();
+            for range in ranges {
+                query.append_pair("ranges", range);
+            }
+            query.append_pair("includeGridData", &include_grid_data.to_string());
+            if let Some(fields) = fields {
+                query.append_pair("fields", fields);
+            }
+        }
+        self.get_json(url.as_str()).await
     }
 
     /// Read values from a range.
     #[instrument(skip(self), fields(spreadsheet_id, range))]
     pub async fn get_values(&self, spreadsheet_id: &str, range: &str) -> SheetsResult<ValueRange> {
+        self.get_values_with_options(
+            spreadsheet_id,
+            range,
+            "ROWS",
+            "FORMATTED_VALUE",
+            "SERIAL_NUMBER",
+        )
+        .await
+    }
+
+    /// Read values with explicit render choices.
+    pub async fn get_values_with_options(
+        &self,
+        spreadsheet_id: &str,
+        range: &str,
+        major_dimension: &str,
+        value_render_option: &str,
+        date_time_render_option: &str,
+    ) -> SheetsResult<ValueRange> {
         let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
         let encoded_range = encode_range(range);
-        let url = format!(
+        let mut url = reqwest::Url::parse(&format!(
             "{}/spreadsheets/{spreadsheet_id}/values/{encoded_range}",
             self.base_url
-        );
-        self.get_json(&url).await
+        ))
+        .map_err(|error| SheetsError::Api {
+            status_code: 400,
+            message: format!("invalid Sheets URL: {error}"),
+        })?;
+        url.query_pairs_mut()
+            .append_pair("majorDimension", major_dimension)
+            .append_pair("valueRenderOption", value_render_option)
+            .append_pair("dateTimeRenderOption", date_time_render_option);
+        self.get_json(url.as_str()).await
+    }
+
+    /// Read multiple ranges in one request.
+    pub async fn batch_get_values(
+        &self,
+        spreadsheet_id: &str,
+        ranges: &[String],
+        major_dimension: &str,
+        value_render_option: &str,
+        date_time_render_option: &str,
+    ) -> SheetsResult<serde_json::Value> {
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/spreadsheets/{spreadsheet_id}/values:batchGet",
+            self.base_url
+        ))
+        .map_err(|error| SheetsError::Api {
+            status_code: 400,
+            message: format!("invalid Sheets URL: {error}"),
+        })?;
+        {
+            let mut query = url.query_pairs_mut();
+            for range in ranges {
+                query.append_pair("ranges", range);
+            }
+            query
+                .append_pair("majorDimension", major_dimension)
+                .append_pair("valueRenderOption", value_render_option)
+                .append_pair("dateTimeRenderOption", date_time_render_option);
+        }
+        self.get_json(url.as_str()).await
     }
 
     /// Update values in a range.
@@ -128,6 +214,20 @@ impl SheetsClient {
             values,
         };
         self.put_json(&url, &body).await
+    }
+
+    /// Update multiple value ranges atomically.
+    pub async fn batch_update_values(
+        &self,
+        spreadsheet_id: &str,
+        request: &BatchUpdateValuesRequest,
+    ) -> SheetsResult<BatchUpdateValuesResponse> {
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
+        let url = format!(
+            "{}/spreadsheets/{spreadsheet_id}/values:batchUpdate",
+            self.base_url
+        );
+        self.post_json(&url, request).await
     }
 
     /// Append values to a sheet.
@@ -167,6 +267,47 @@ impl SheetsClient {
         );
         self.post_json::<serde_json::Value, serde_json::Value>(&url, &serde_json::json!({}))
             .await
+    }
+
+    /// Create a spreadsheet from a validated resource body.
+    pub async fn create_spreadsheet(&self, body: &serde_json::Value) -> SheetsResult<Spreadsheet> {
+        let url = format!("{}/spreadsheets", self.base_url);
+        self.post_json(&url, body).await
+    }
+
+    /// Copy one sheet into another spreadsheet.
+    pub async fn copy_sheet(
+        &self,
+        spreadsheet_id: &str,
+        sheet_id: u32,
+        destination_spreadsheet_id: &str,
+    ) -> SheetsResult<serde_json::Value> {
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
+        let destination_spreadsheet_id =
+            sanitize_path_segment(destination_spreadsheet_id, "destination_spreadsheet_id")?;
+        let url = format!(
+            "{}/spreadsheets/{spreadsheet_id}/sheets/{sheet_id}:copyTo",
+            self.base_url
+        );
+        self.post_json(
+            &url,
+            &serde_json::json!({ "destinationSpreadsheetId": destination_spreadsheet_id }),
+        )
+        .await
+    }
+
+    /// Apply a validated structural batch atomically.
+    pub async fn batch_update_spreadsheet(
+        &self,
+        spreadsheet_id: &str,
+        body: &serde_json::Value,
+    ) -> SheetsResult<serde_json::Value> {
+        let spreadsheet_id = sanitize_path_segment(spreadsheet_id, "spreadsheet_id")?;
+        let url = format!(
+            "{}/spreadsheets/{spreadsheet_id}:batchUpdate",
+            self.base_url
+        );
+        self.post_json(&url, body).await
     }
 
     /// Get total request count.
@@ -231,22 +372,41 @@ impl SheetsClient {
 
     async fn handle_response<T: DeserializeOwned>(
         &self,
-        resp: reqwest::Response,
+        mut resp: reqwest::Response,
     ) -> SheetsResult<T> {
         let status = resp.status();
+        if resp
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(SheetsError::Api {
+                status_code: 413,
+                message: format!("Sheets response exceeds {MAX_RESPONSE_BYTES} bytes"),
+            });
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(SheetsError::Http)? {
+            if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(SheetsError::Api {
+                    status_code: 413,
+                    message: format!("Sheets response exceeds {MAX_RESPONSE_BYTES} bytes"),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
         if status.is_success() {
-            return resp.json().await.map_err(SheetsError::Http);
+            return serde_json::from_slice(&body).map_err(SheetsError::Json);
         }
         let code = status.as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&body) {
+        if let Ok(api_err) = serde_json::from_slice::<ApiErrorResponse>(&body) {
             Err(map_api_error(api_err.error))
         } else {
+            let body = String::from_utf8_lossy(&body);
             let preview: String = body.chars().take(200).collect();
             warn!(status = code, body_preview = %preview, "Sheets API error");
             Err(SheetsError::Api {
                 status_code: code,
-                message: body,
+                message: body.into_owned(),
             })
         }
     }

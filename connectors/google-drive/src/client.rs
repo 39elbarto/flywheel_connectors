@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
@@ -46,6 +46,11 @@ pub struct DriveClient {
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
+    provider_total_us: AtomicU64,
+    retry_count: AtomicU64,
+    rate_limit_count: AtomicU64,
+    provider_request_bytes: AtomicU64,
+    provider_response_bytes: AtomicU64,
 }
 
 impl fmt::Debug for DriveClient {
@@ -85,6 +90,11 @@ impl DriveClient {
                 jitter_enabled: true,
             },
             total_requests: AtomicU64::new(0),
+            provider_total_us: AtomicU64::new(0),
+            retry_count: AtomicU64::new(0),
+            rate_limit_count: AtomicU64::new(0),
+            provider_request_bytes: AtomicU64::new(0),
+            provider_response_bytes: AtomicU64::new(0),
         })
     }
 
@@ -122,6 +132,36 @@ impl DriveClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// Total measured provider-attempt time in microseconds.
+    #[must_use]
+    pub fn provider_total_us(&self) -> u64 {
+        self.provider_total_us.load(Ordering::Relaxed)
+    }
+
+    /// Total retry attempts after the first provider attempt.
+    #[must_use]
+    pub fn retry_count(&self) -> u64 {
+        self.retry_count.load(Ordering::Relaxed)
+    }
+
+    /// Total provider rate-limit responses.
+    #[must_use]
+    pub fn rate_limit_count(&self) -> u64 {
+        self.rate_limit_count.load(Ordering::Relaxed)
+    }
+
+    /// Total serialized provider request-body bytes, excluding URLs and headers.
+    #[must_use]
+    pub fn provider_request_bytes(&self) -> u64 {
+        self.provider_request_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Total provider response-body bytes observed after decoding.
+    #[must_use]
+    pub fn provider_response_bytes(&self) -> u64 {
+        self.provider_response_bytes.load(Ordering::Relaxed)
     }
 
     /// Trigger graceful shutdown of request contexts.
@@ -718,17 +758,40 @@ impl DriveClient {
         response_mode: GoogleResponseMode,
         replay_safe: bool,
     ) -> DriveResult<GoogleExecuteResponse> {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
+        let request_bytes = body
+            .and_then(|value| serde_json::to_vec(value).ok())
+            .map_or(0, |encoded| {
+                u64::try_from(encoded.len()).unwrap_or(u64::MAX)
+            });
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
             debug!(attempt, method = http_method, "drive request");
-
-            match self
+            self.total_requests.fetch_add(1, Ordering::Relaxed);
+            self.provider_request_bytes
+                .fetch_add(request_bytes, Ordering::Relaxed);
+            if attempt > 0 {
+                self.retry_count.fetch_add(1, Ordering::Relaxed);
+            }
+            let started_at = Instant::now();
+            let result = self
                 .execute_once(http_method, url, body, response_mode)
-                .await
-            {
+                .await;
+            self.provider_total_us.fetch_add(
+                u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            if matches!(&result, Err(DriveError::RateLimited { .. })) {
+                self.rate_limit_count.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Ok(response) = &result {
+                self.provider_response_bytes.fetch_add(
+                    google_response_body_bytes(&response.body),
+                    Ordering::Relaxed,
+                );
+            }
+            match result {
                 Ok(response) => AttemptOutcome::Success(response),
                 Err(error) if error.is_retryable() => {
                     // A rate limit was refused WITHOUT performing the work, so
@@ -829,6 +892,14 @@ impl DriveClient {
         mode: DriveUploadMode,
     ) -> DriveResult<DriveFile> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let provider_started_at = Instant::now();
+        let upload_request_bytes = u64::try_from(bytes.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(serde_json::to_vec(&metadata).map_or(0, |encoded| {
+                u64::try_from(encoded.len()).unwrap_or(u64::MAX)
+            }));
+        self.provider_request_bytes
+            .fetch_add(upload_request_bytes, Ordering::Relaxed);
         let parsed_base = Url::parse(&self.base_url).map_err(|error| DriveError::Api {
             status_code: 400,
             message: format!("invalid Drive base URL: {error}"),
@@ -909,8 +980,31 @@ impl DriveClient {
             .executor
             .execute(&request)
             .await
-            .map_err(map_rest_error)?;
-        decode_json_response(response)
+            .map_err(map_rest_error);
+        self.provider_total_us.fetch_add(
+            u64::try_from(provider_started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        if matches!(&response, Err(DriveError::RateLimited { .. })) {
+            self.rate_limit_count.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Ok(response) = &response {
+            self.provider_response_bytes.fetch_add(
+                google_response_body_bytes(&response.body),
+                Ordering::Relaxed,
+            );
+        }
+        decode_json_response(response?)
+    }
+}
+
+fn google_response_body_bytes(body: &GoogleResponseBody) -> u64 {
+    match body {
+        GoogleResponseBody::Empty => 0,
+        GoogleResponseBody::Json(value) => serde_json::to_vec(value).map_or(0, |encoded| {
+            u64::try_from(encoded.len()).unwrap_or(u64::MAX)
+        }),
+        GoogleResponseBody::Binary(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
     }
 }
 

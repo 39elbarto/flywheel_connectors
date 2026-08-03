@@ -3983,13 +3983,14 @@ fn connector_transport_poisoned_error() -> std::io::Error {
 }
 
 fn log_connector_stderr_line(line: &[u8], truncated: bool) {
-    let trimmed = String::from_utf8_lossy(line);
-    let trimmed = trimmed.trim_end();
-    if !trimmed.is_empty() || truncated {
+    let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
+    if line_bytes > 0 || truncated {
         tracing::warn!(
-            connector_stderr = %trimmed,
+            event = "connector_stderr_redacted",
+            connector_stderr_present = line_bytes > 0,
+            connector_stderr_bytes = line_bytes,
             connector_stderr_truncated = truncated,
-            "connector log"
+            "connector stderr content suppressed"
         );
     }
 }
@@ -13207,6 +13208,18 @@ async fn perform_host_tcp_egress(
 ///     principal_id claim.
 ///   - Absent the header, behavior is unchanged: the token's claim
 ///     set drives the principal (br-flywheel_connectors-t623k).
+const fn normalized_host_error_class(error: &HostError) -> &'static str {
+    match error {
+        HostError::ConnectorNotFound(_) => "local.capability_denied",
+        HostError::InvalidFilter(_) => "local.validation",
+        HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => "local.policy_denied",
+        HostError::Unavailable(_) => "transport.host_connector",
+        HostError::RegistryError(_) | HostError::CacheError(_) | HostError::Internal(_) => {
+            "internal"
+        }
+    }
+}
+
 async fn invoke_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -13230,14 +13243,21 @@ async fn invoke_handler(
     let zone_id = request.zone_id.clone();
     let asserted_principal = extract_principal_header(&headers);
     let started_at = Instant::now();
+    let host_request_bytes = serde_json::to_vec(&request)
+        .map(|encoded| u64::try_from(encoded.len()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
 
     tracing::debug!(
         event = "invoke_request",
+        schema_version = "fwc.google_workspace.telemetry.v1",
+        event_type = "workspace.phase.host",
+        producer_layer = "host",
+        host_phase = "request",
         connector_id = %connector_id,
         operation = %operation,
         operation_id = %operation_id,
         correlation_id,
-        asserted_principal = asserted_principal.as_deref(),
+        host_request_bytes,
         "processing invoke request"
     );
 
@@ -13281,12 +13301,17 @@ async fn invoke_handler(
         }
         tracing::warn!(
             event = "invoke_error",
+            schema_version = "fwc.google_workspace.telemetry.v1",
+            event_type = "workspace.phase.host",
+            producer_layer = "host",
+            host_phase = "preflight_denied",
             connector_id = %connector_id,
             operation = %operation,
             operation_id = %operation_id,
             correlation_id,
-            reason = %reason,
+            error_class = "local.policy_denied",
             duration_ms = started_at.elapsed().as_millis() as u64,
+            host_total_us = u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
             "invoke request failed preflight"
         );
         return Err(map_host_error(HostError::PreflightFailed(reason)));
@@ -13367,12 +13392,20 @@ async fn invoke_handler(
             }
             tracing::info!(
                 event = "invoke_response",
+                schema_version = "fwc.google_workspace.telemetry.v1",
+                event_type = "workspace.phase.host",
+                producer_layer = "host",
+                host_phase = "response",
                 connector_id = %connector_id,
                 operation = %operation,
                 operation_id = %operation_id,
                 correlation_id,
                 status = ?response.status,
                 duration_ms,
+                host_total_us = u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+                host_response_bytes = serde_json::to_vec(&response)
+                    .map(|encoded| u64::try_from(encoded.len()).unwrap_or(u64::MAX))
+                    .unwrap_or(0),
                 "invoke request complete"
             );
             Ok(Json(response))
@@ -13405,12 +13438,17 @@ async fn invoke_handler(
             }
             tracing::warn!(
                 event = "invoke_error",
+                schema_version = "fwc.google_workspace.telemetry.v1",
+                event_type = "workspace.phase.host",
+                producer_layer = "host",
+                host_phase = "dispatch_error",
                 connector_id = %connector_id,
                 operation = %operation,
                 operation_id = %operation_id,
                 correlation_id,
-                error = %err,
+                error_class = normalized_host_error_class(&err),
                 duration_ms,
+                host_total_us = u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
                 "invoke request failed"
             );
             Err(map_host_error(err))
@@ -14679,6 +14717,26 @@ mod tests {
         maybe_compiled_test_connector_binary().unwrap_or_else(|| {
             panic!("expected compiled fcp-test-connector alongside the current test executable")
         })
+    }
+
+    #[test]
+    fn google_workspace_host_errors_have_content_free_classes() {
+        assert_eq!(
+            normalized_host_error_class(&HostError::PreflightFailed(
+                "PRIVATE-CONTENT-CANARY".to_string()
+            )),
+            "local.policy_denied"
+        );
+        assert_eq!(
+            normalized_host_error_class(&HostError::Unavailable(
+                "PRIVATE-CONTENT-CANARY".to_string()
+            )),
+            "transport.host_connector"
+        );
+        assert_eq!(
+            normalized_host_error_class(&HostError::Internal("PRIVATE-CONTENT-CANARY".to_string())),
+            "internal"
+        );
     }
 
     fn subprocess_test_connector_config(connector_id: &str) -> ConnectorConfig {

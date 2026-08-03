@@ -345,8 +345,8 @@ use fcp_migrate::{
     PreCopyOutcome, SoftDirtyProc, StaticSoftDirtyReader, Workload,
 };
 use fcp_prelude::{
-    ApprovalToken, CapabilityToken, ConnectorTarget, LeasePurpose as CoreLeasePurpose, ObjectId,
-    ZoneId,
+    ApprovalToken, CapabilityToken, ConnectorTarget, CorrelationId,
+    LeasePurpose as CoreLeasePurpose, ObjectId, ZoneId,
 };
 use fcp_registry::{
     AttestationEvidence as RegistryAttestationEvidence, ConnectorBundle,
@@ -2593,6 +2593,10 @@ struct InvokeArgs {
     #[arg(long)]
     deadline_ms: Option<u64>,
 
+    /// UUID used to correlate this request across wrapper, host, and connector telemetry.
+    #[arg(long, value_name = "UUID")]
+    correlation_id: Option<uuid::Uuid>,
+
     #[command(flatten)]
     auth: LiveAuthArgs,
 }
@@ -2647,6 +2651,7 @@ impl PreflightArgs {
             principal: self.principal.clone(),
             idempotency_key: None,
             deadline_ms: None,
+            correlation_id: None,
             auth: self.auth.clone(),
         }
     }
@@ -3537,6 +3542,7 @@ fn mcp_tool_invoke_args(
         principal: principal.map(str::to_owned),
         idempotency_key: None,
         deadline_ms: None,
+        correlation_id: None,
         auth: auth.clone(),
     }
 }
@@ -23591,7 +23597,7 @@ fn invoke_dispatch_host(
         idempotency_key: args.idempotency_key.clone(),
         lease_seq: None,
         deadline_ms: args.deadline_ms,
-        correlation_id: None,
+        correlation_id: args.correlation_id.map(CorrelationId),
         provenance: None,
         approval_tokens: auth.approval_tokens,
     };
@@ -31320,6 +31326,41 @@ mod tests {
         let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         let outcome = execute(&owned_args).expect("execution should not fail internally");
         (outcome.exit_code, outcome.text)
+    }
+
+    #[test]
+    fn invoke_accepts_bounded_uuid_correlation_id() {
+        let expected =
+            uuid::Uuid::parse_str("018f6f30-30d2-7f3a-9d9d-7f29188d14e1").expect("fixture UUID");
+        let cli = Cli::try_parse_from([
+            "fwc",
+            "invoke",
+            "google-drive",
+            "drive.about",
+            "--input",
+            "{}",
+            "--correlation-id",
+            &expected.to_string(),
+        ])
+        .expect("invoke correlation UUID should parse");
+        let Commands::Invoke(args) = cli.command else {
+            panic!("expected invoke command");
+        };
+        assert_eq!(args.correlation_id, Some(expected));
+
+        assert!(
+            Cli::try_parse_from([
+                "fwc",
+                "invoke",
+                "google-drive",
+                "drive.about",
+                "--input",
+                "{}",
+                "--correlation-id",
+                "not-a-uuid",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

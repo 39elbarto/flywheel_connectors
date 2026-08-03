@@ -418,6 +418,21 @@ pub struct DriveConnector {
 }
 
 impl DriveConnector {
+    /// Content-free cumulative provider counters for invocation telemetry.
+    #[must_use]
+    pub fn provider_telemetry(&self) -> (u64, u64, u64, u64, u64, u64) {
+        self.client.as_ref().map_or((0, 0, 0, 0, 0, 0), |client| {
+            (
+                client.total_requests(),
+                client.provider_total_us(),
+                client.retry_count(),
+                client.rate_limit_count(),
+                client.provider_request_bytes(),
+                client.provider_response_bytes(),
+            )
+        })
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {

@@ -28,7 +28,9 @@ use std::io::{BufRead, Write};
 
 use anyhow::Result;
 use fcp_async_core::runtime::Builder;
-use fcp_prelude::{FcpError, FcpResult, InvokeRequest, InvokeResponse};
+use fcp_prelude::{
+    FcpError, FcpResult, InvokeRequest, InvokeResponse, ResponseMetadata, UsageMetric,
+};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use fcp_google_drive::connector::DriveConnector;
@@ -140,10 +142,44 @@ async fn handle_invoke(
             code: 1003,
             message: format!("Invalid invoke request: {error}"),
         })?;
-    let output = connector.handle_invoke(params).await?;
-    serde_json::to_value(InvokeResponse::ok(request.id, output)).map_err(|error| {
-        FcpError::Internal {
-            message: format!("Failed to serialize invoke response: {error}"),
-        }
+    let before = connector.provider_telemetry();
+    let started_at = std::time::Instant::now();
+    let outcome = connector.handle_invoke(params).await;
+    let elapsed = started_at.elapsed();
+    let after = connector.provider_telemetry();
+    let mut response = match outcome {
+        Ok(output) => InvokeResponse::ok(request.id, output),
+        Err(error) => InvokeResponse::error(request.id, error),
+    };
+    response.response_metadata = Some(ResponseMetadata {
+        processing_time_ms: Some(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+        ..ResponseMetadata::default()
+    });
+    response.usage_metrics = Some(vec![
+        UsageMetric::custom(
+            "provider_attempt_count",
+            after.0.saturating_sub(before.0),
+            None,
+        ),
+        UsageMetric::custom(
+            "provider_total_us",
+            after.1.saturating_sub(before.1),
+            Some("microseconds".to_string()),
+        ),
+        UsageMetric::custom("retry_count", after.2.saturating_sub(before.2), None),
+        UsageMetric::custom("rate_limit_count", after.3.saturating_sub(before.3), None),
+        UsageMetric::custom(
+            "provider_request_bytes",
+            after.4.saturating_sub(before.4),
+            Some("bytes".to_string()),
+        ),
+        UsageMetric::custom(
+            "provider_response_bytes",
+            after.5.saturating_sub(before.5),
+            Some("bytes".to_string()),
+        ),
+    ]);
+    serde_json::to_value(response).map_err(|error| FcpError::Internal {
+        message: format!("Failed to serialize invoke response: {error}"),
     })
 }

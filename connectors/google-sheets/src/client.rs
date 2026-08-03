@@ -1,14 +1,14 @@
 //! Google Sheets API v4 client.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
 use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use crate::error::{SheetsError, SheetsResult};
 use crate::types::{
@@ -27,6 +27,10 @@ pub struct SheetsClient {
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
     total_requests: AtomicU64,
+    provider_total_us: AtomicU64,
+    rate_limit_count: AtomicU64,
+    provider_request_bytes: AtomicU64,
+    provider_response_bytes: AtomicU64,
 }
 
 impl std::fmt::Debug for SheetsClient {
@@ -62,6 +66,10 @@ impl SheetsClient {
                 jitter_enabled: true,
             },
             total_requests: AtomicU64::new(0),
+            provider_total_us: AtomicU64::new(0),
+            rate_limit_count: AtomicU64::new(0),
+            provider_request_bytes: AtomicU64::new(0),
+            provider_response_bytes: AtomicU64::new(0),
         })
     }
 
@@ -316,6 +324,30 @@ impl SheetsClient {
         self.total_requests.load(Ordering::Relaxed)
     }
 
+    /// Total measured provider-attempt time in microseconds.
+    #[must_use]
+    pub fn provider_total_us(&self) -> u64 {
+        self.provider_total_us.load(Ordering::Relaxed)
+    }
+
+    /// Total provider rate-limit responses.
+    #[must_use]
+    pub fn rate_limit_count(&self) -> u64 {
+        self.rate_limit_count.load(Ordering::Relaxed)
+    }
+
+    /// Total serialized provider request-body bytes, excluding URLs and headers.
+    #[must_use]
+    pub fn provider_request_bytes(&self) -> u64 {
+        self.provider_request_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Total provider response-body bytes read from the network.
+    #[must_use]
+    pub fn provider_response_bytes(&self) -> u64 {
+        self.provider_response_bytes.load(Ordering::Relaxed)
+    }
+
     /// Trigger graceful shutdown of request contexts.
     pub fn shutdown(&self) {
         self.runtime.shutdown();
@@ -332,12 +364,14 @@ impl SheetsClient {
 
     async fn get_json<T: DeserializeOwned>(&self, url: &str) -> SheetsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let resp = self
-            .apply_auth_headers(self.client.get(url))
-            .send()
-            .await
-            .map_err(SheetsError::Http)?;
-        self.handle_response(resp).await
+        let started_at = Instant::now();
+        let response = self.apply_auth_headers(self.client.get(url)).send().await;
+        let result = match response {
+            Ok(response) => self.handle_response(response).await,
+            Err(error) => Err(SheetsError::Http(error)),
+        };
+        self.record_provider_duration(started_at);
+        result
     }
 
     async fn put_json<T: DeserializeOwned, B: serde::Serialize>(
@@ -346,13 +380,24 @@ impl SheetsClient {
         body: &B,
     ) -> SheetsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let resp = self
+        self.provider_request_bytes.fetch_add(
+            serde_json::to_vec(body).map_or(0, |encoded| {
+                u64::try_from(encoded.len()).unwrap_or(u64::MAX)
+            }),
+            Ordering::Relaxed,
+        );
+        let started_at = Instant::now();
+        let response = self
             .apply_auth_headers(self.client.put(url))
             .json(body)
             .send()
-            .await
-            .map_err(SheetsError::Http)?;
-        self.handle_response(resp).await
+            .await;
+        let result = match response {
+            Ok(response) => self.handle_response(response).await,
+            Err(error) => Err(SheetsError::Http(error)),
+        };
+        self.record_provider_duration(started_at);
+        result
     }
 
     async fn post_json<T: DeserializeOwned, B: serde::Serialize>(
@@ -361,13 +406,31 @@ impl SheetsClient {
         body: &B,
     ) -> SheetsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let resp = self
+        self.provider_request_bytes.fetch_add(
+            serde_json::to_vec(body).map_or(0, |encoded| {
+                u64::try_from(encoded.len()).unwrap_or(u64::MAX)
+            }),
+            Ordering::Relaxed,
+        );
+        let started_at = Instant::now();
+        let response = self
             .apply_auth_headers(self.client.post(url))
             .json(body)
             .send()
-            .await
-            .map_err(SheetsError::Http)?;
-        self.handle_response(resp).await
+            .await;
+        let result = match response {
+            Ok(response) => self.handle_response(response).await,
+            Err(error) => Err(SheetsError::Http(error)),
+        };
+        self.record_provider_duration(started_at);
+        result
+    }
+
+    fn record_provider_duration(&self, started_at: Instant) {
+        self.provider_total_us.fetch_add(
+            u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
     }
 
     async fn handle_response<T: DeserializeOwned>(
@@ -394,19 +457,23 @@ impl SheetsClient {
             }
             body.extend_from_slice(&chunk);
         }
+        self.provider_response_bytes.fetch_add(
+            u64::try_from(body.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
         if status.is_success() {
             return serde_json::from_slice(&body).map_err(SheetsError::Json);
         }
         let code = status.as_u16();
+        if code == 429 {
+            self.rate_limit_count.fetch_add(1, Ordering::Relaxed);
+        }
         if let Ok(api_err) = serde_json::from_slice::<ApiErrorResponse>(&body) {
             Err(map_api_error(api_err.error))
         } else {
-            let body = String::from_utf8_lossy(&body);
-            let preview: String = body.chars().take(200).collect();
-            warn!(status = code, body_preview = %preview, "Sheets API error");
             Err(SheetsError::Api {
                 status_code: code,
-                message: body.into_owned(),
+                message: "Sheets API returned an unstructured error body".to_string(),
             })
         }
     }

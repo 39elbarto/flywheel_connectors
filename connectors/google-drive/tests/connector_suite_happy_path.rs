@@ -1056,7 +1056,20 @@ async fn shared_drive_original_move_requires_confirmation_and_stays_in_the_same_
 async fn restore_from_deletion_review_moves_and_renames_owned_file() {
     let server = MockServer::start().await;
     let review_name = "[FCP-DELETE-REVIEW 2026-08-02] report.txt";
-    let permissions = json!([{"id": "perm_owner", "role": "owner", "type": "user"}]);
+    let receipt_permissions = json!([{
+        "id": "perm_owner",
+        "role": "owner",
+        "type": "user",
+        "emailAddress": "Owner@Example.com",
+        "displayName": "Owner Full Name"
+    }]);
+    let provider_permissions = json!([{
+        "id": "perm_owner",
+        "role": "owner",
+        "type": "user",
+        "emailAddress": "owner@example.com",
+        "displayName": "owner-alias"
+    }]);
     Mock::given(method("GET"))
         .and(path("/drive/v3/files/file_owned"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1065,7 +1078,7 @@ async fn restore_from_deletion_review_moves_and_renames_owned_file() {
             "mimeType": "text/plain",
             "parents": ["folder_review"],
             "trashed": false,
-            "permissions": permissions.clone(),
+            "permissions": provider_permissions.clone(),
             "md5Checksum": "abc123"
         })))
         .expect(1)
@@ -1081,7 +1094,7 @@ async fn restore_from_deletion_review_moves_and_renames_owned_file() {
             "mimeType": "text/plain",
             "parents": ["folder_original"],
             "trashed": false,
-            "permissions": permissions.clone(),
+            "permissions": provider_permissions.clone(),
             "md5Checksum": "abc123"
         })))
         .expect(1)
@@ -1096,7 +1109,7 @@ async fn restore_from_deletion_review_moves_and_renames_owned_file() {
             "mimeType": "text/plain",
             "parents": ["folder_original"],
             "trashed": false,
-            "permissions": permissions.clone(),
+            "permissions": provider_permissions,
             "md5Checksum": "abc123"
         })))
         .expect(1)
@@ -1113,7 +1126,7 @@ async fn restore_from_deletion_review_moves_and_renames_owned_file() {
         "review_folder_id": "folder_review",
         "drive_id": null,
         "md5_checksum": "abc123",
-        "permissions": permissions,
+        "permissions": receipt_permissions,
         "shortcut_id": null,
         "resource_key": null
     });

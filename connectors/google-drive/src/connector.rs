@@ -1570,18 +1570,27 @@ impl DriveConnector {
                 return Err(error.to_fcp_error());
             }
         };
+        let receipt_permissions = receipt
+            .get("permissions")
+            .filter(|permissions| !permissions.is_null())
+            .map(|permissions| {
+                serde_json::from_value::<Vec<DrivePermission>>(permissions.clone()).map_err(|e| {
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("receipt permissions are invalid: {e}"),
+                    }
+                })
+            })
+            .transpose()?;
+        let restored_permissions = restored.permissions.clone().unwrap_or_default();
         if restored.id != moved.id
             || restored.trashed == Some(true)
             || restored.parents.as_deref() != Some(&[destination.to_owned()])
             || receipt.get("md5_checksum").is_some_and(|checksum| {
                 !checksum.is_null() && checksum.as_str() != restored.md5_checksum.as_deref()
             })
-            || receipt.get("permissions").is_some_and(|permissions| {
-                !permissions.is_null()
-                    && serde_json::to_value(restored.permissions.clone().unwrap_or_default())
-                        .ok()
-                        .as_ref()
-                        != Some(permissions)
+            || receipt_permissions.as_ref().is_some_and(|permissions| {
+                !permission_security_fields_match(permissions, &restored_permissions)
             })
         {
             return Err(FcpError::External {

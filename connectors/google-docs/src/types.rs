@@ -71,23 +71,23 @@ pub struct TextRun {
 
 /// Text styling properties.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextStyle {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bold: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub italic: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub underline: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<Dimension>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_color: Option<OptionalColor>,
 }
 
 /// A dimension value (used for font sizes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Dimension {
     pub magnitude: f64,
     pub unit: String,
@@ -95,14 +95,15 @@ pub struct Dimension {
 
 /// An optional color wrapper.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OptionalColor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<Color>,
 }
 
 /// An RGB color.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Color {
     #[serde(default)]
     pub red: f32,
@@ -114,17 +115,10 @@ pub struct Color {
 
 /// Paragraph style.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ParagraphStyle {
     #[serde(default)]
     pub named_style_type: String,
-}
-
-/// A batch update request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BatchUpdateRequest {
-    pub requests: Vec<Request>,
 }
 
 /// Response from batch update.
@@ -134,41 +128,202 @@ pub struct BatchUpdateResponse {
     pub document_id: String,
     #[serde(default)]
     pub replies: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_control: Option<WriteControl>,
 }
 
-/// A single request within a batch update.
+/// Revision guard sent to and returned by `documents.batchUpdate`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteControl {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_revision_id: Option<String>,
+}
+
+/// A deliberately small, typed allowlist of Google Docs mutations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Request {
-    /// Insert text at a location.
-    InsertText { location: Location, text: String },
-    /// Delete content within a range.
-    DeleteContentRange { range: Range },
-    /// Update text style within a range.
-    UpdateTextStyle {
-        range: Range,
-        text_style: TextStyle,
-        fields: String,
-    },
+    InsertText(InsertTextRequest),
+    UpdateTextStyle(UpdateTextStyleRequest),
+    UpdateParagraphStyle(UpdateParagraphStyleRequest),
+    CreateParagraphBullets(CreateParagraphBulletsRequest),
+    DeleteParagraphBullets(DeleteParagraphBulletsRequest),
+    InsertTable(InsertTableRequest),
+    CreateNamedRange(CreateNamedRangeRequest),
+    DeleteContentRange(DeleteContentRangeRequest),
+    ReplaceAllText(ReplaceAllTextRequest),
+    ReplaceNamedRangeContent(ReplaceNamedRangeContentRequest),
+    DeleteNamedRange(DeleteNamedRangeRequest),
+    ReplaceImage(ReplaceImageRequest),
+}
+
+impl Request {
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::InsertText(_) => "insertText",
+            Self::UpdateTextStyle(_) => "updateTextStyle",
+            Self::UpdateParagraphStyle(_) => "updateParagraphStyle",
+            Self::CreateParagraphBullets(_) => "createParagraphBullets",
+            Self::DeleteParagraphBullets(_) => "deleteParagraphBullets",
+            Self::InsertTable(_) => "insertTable",
+            Self::CreateNamedRange(_) => "createNamedRange",
+            Self::DeleteContentRange(_) => "deleteContentRange",
+            Self::ReplaceAllText(_) => "replaceAllText",
+            Self::ReplaceNamedRangeContent(_) => "replaceNamedRangeContent",
+            Self::DeleteNamedRange(_) => "deleteNamedRange",
+            Self::ReplaceImage(_) => "replaceImage",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_destructive(&self) -> bool {
+        matches!(
+            self,
+            Self::DeleteContentRange(_)
+                | Self::ReplaceAllText(_)
+                | Self::ReplaceNamedRangeContent(_)
+                | Self::DeleteNamedRange(_)
+                | Self::ReplaceImage(_)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InsertTextRequest {
+    pub location: Location,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteContentRangeRequest {
+    pub range: Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateTextStyleRequest {
+    pub range: Range,
+    pub text_style: TextStyle,
+    pub fields: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateParagraphStyleRequest {
+    pub range: Range,
+    pub paragraph_style: ParagraphStyle,
+    pub fields: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateParagraphBulletsRequest {
+    pub range: Range,
+    pub bullet_preset: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteParagraphBulletsRequest {
+    pub range: Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InsertTableRequest {
+    pub rows: u32,
+    pub columns: u32,
+    pub location: Location,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateNamedRangeRequest {
+    pub name: String,
+    pub range: Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReplaceAllTextRequest {
+    pub contains_text: SubstringMatchCriteria,
+    pub replace_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabs_criteria: Option<TabsCriteria>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubstringMatchCriteria {
+    pub text: String,
+    #[serde(default)]
+    pub match_case: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TabsCriteria {
+    pub tab_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReplaceNamedRangeContentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_range_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_range_name: Option<String>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabs_criteria: Option<TabsCriteria>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteNamedRangeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_range_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabs_criteria: Option<TabsCriteria>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReplaceImageRequest {
+    pub image_object_id: String,
+    pub uri: String,
+    pub image_replace_method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
 }
 
 /// A location in a document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Location {
     pub index: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
 }
 
 /// A range in a document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Range {
     pub start_index: u32,
     pub end_index: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
 }
 
 /// Google Docs API error response.
@@ -275,15 +430,14 @@ mod tests {
 
     #[test]
     fn batch_update_request_serde() {
-        let req = BatchUpdateRequest {
-            requests: vec![Request::InsertText {
-                location: Location {
-                    index: 1,
-                    segment_id: None,
-                },
-                text: "hi".into(),
-            }],
-        };
+        let req = vec![Request::InsertText(InsertTextRequest {
+            location: Location {
+                index: 1,
+                segment_id: None,
+                tab_id: None,
+            },
+            text: "hi".into(),
+        })];
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("insertText"));
     }
@@ -340,6 +494,7 @@ mod tests {
         let loc = Location {
             index: 5,
             segment_id: Some("header".into()),
+            tab_id: None,
         };
         let json = serde_json::to_string(&loc).unwrap();
         assert!(json.contains("\"index\":5"));
@@ -352,6 +507,7 @@ mod tests {
             start_index: 1,
             end_index: 10,
             segment_id: None,
+            tab_id: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("startIndex"));
@@ -360,13 +516,14 @@ mod tests {
 
     #[test]
     fn request_insert_text_serde() {
-        let req = Request::InsertText {
+        let req = Request::InsertText(InsertTextRequest {
             location: Location {
                 index: 1,
                 segment_id: None,
+                tab_id: None,
             },
             text: "Hello".into(),
-        };
+        });
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("insertText"));
         assert!(json.contains("Hello"));
@@ -374,31 +531,33 @@ mod tests {
 
     #[test]
     fn request_delete_content_serde() {
-        let req = Request::DeleteContentRange {
+        let req = Request::DeleteContentRange(DeleteContentRangeRequest {
             range: Range {
                 start_index: 1,
                 end_index: 5,
                 segment_id: None,
+                tab_id: None,
             },
-        };
+        });
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("deleteContentRange"));
     }
 
     #[test]
     fn request_update_text_style_serde() {
-        let req = Request::UpdateTextStyle {
+        let req = Request::UpdateTextStyle(UpdateTextStyleRequest {
             range: Range {
                 start_index: 1,
                 end_index: 10,
                 segment_id: None,
+                tab_id: None,
             },
             text_style: TextStyle {
                 bold: Some(true),
                 ..TextStyle::default()
             },
             fields: "bold".into(),
-        };
+        });
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("updateTextStyle"));
         assert!(json.contains("bold"));

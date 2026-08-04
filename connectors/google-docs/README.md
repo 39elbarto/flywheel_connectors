@@ -1,9 +1,7 @@
 # Google Docs Connector V3 Contract
 
-> **Status**: PROVEN runtime contract documented with manifest/runtime drift called out
-> **Promotion caveat**: the `fwc manifest fix --check --json` lane was `infra_blocked` when this promotion was authored; see "Drift Visible In This Checkout" below.
-> **Bead**: `flywheel_connectors-4kw5f.12`
-> **Parent**: `flywheel_connectors-4kw5f`
+> **Status**: INCUBATING until an explicitly approved live acceptance run
+> **Hardening bead**: `bd-2oc.12`
 > **Verification script**: `scripts/e2e/google_docs_connector_verification.sh`
 > **Docs API upstream**: https://developers.google.com/docs/api/reference/rest/v1/documents
 > **Documents create upstream**: https://developers.google.com/docs/api/reference/rest/v1/documents/create
@@ -12,7 +10,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.google_docs`. The connector exposes the Google Docs API surface implemented in this crate: document lookup, document creation, and batch document updates.
+This document fixes the operator-facing contract for `google-docs`. The connector exposes bounded document lookup, document creation, and typed revision-guarded batch updates.
 
 The connector is intentionally a bounded Docs bridge. It is not a full Google Drive client, export client, comment client, suggestion review client, permission manager, template system, Workspace provisioning tool, or long-running document warehouse.
 
@@ -36,28 +34,28 @@ Important runtime truths the contract preserves:
 - Public base URLs must use HTTPS, must target exact host `docs.googleapis.com`, and must not contain userinfo, query strings, or fragments.
 - `localhost`, `127.0.0.1`, and `::1` are accepted with HTTP or HTTPS for deterministic loopback tests.
 - Runtime request timeout is 30 seconds.
-- The client uses the shared retry loop with `max_retries = 2`, `initial_delay_ms = 500`, `max_delay_ms = 30000`, and jitter enabled.
+- Safe reads may retry through the shared retry loop. Create and batch writes are not replayed after a request may have reached Google.
 - Document IDs are inserted into URL path segments only after local path-segment validation.
 - Path-segment validation rejects empty strings, slashes, backslashes, `..`, query strings, fragments, encoded slash/backslash/query/fragment markers, and literal percent characters.
 - `docs.create` posts only a title field to the provider.
-- `docs.batch_update` requires a non-empty JSON array in `requests` and passes that array through to Google.
+- `docs.get` requests `includeTabsContent=true` and returns metadata plus a bounded text page of at most 48,000 bytes.
+- `docs.create` accepts only a bounded title and performs a direct metadata readback after creation.
+- `docs.batch_update` accepts 1..=100 requests from the explicit typed allowlist; arbitrary provider JSON is rejected.
+- Every batch write is preceded by a document read and uses `writeControl.requiredRevisionId`.
+- Destructive requests first return a payload-bound confirmation hash and exact structural impact. Execution requires the same revision, exact request batch, `confirm_destructive=true`, and that hash.
+- Every successful write is followed by a direct document metadata readback. Retryable or transport failures after dispatch return `outcome_uncertain` and are never declared safe to retry.
 - Runtime handshake installs a `CapabilityVerifier`.
 - `invoke` requires `capability_token`, validates input, computes resource URIs, and verifies a bound capability token before provider execution.
 - `simulate` validates operation inventory, input shape, configured/handshaken state, and bound capability token before returning an allowed result.
 - `health()`, `doctor()`, and `self_check()` are local configuration checks only. They do not probe the Google Docs API.
 
-## Drift Visible In This Checkout
+## Lifecycle And Promotion
 
-This README documents the runtime truth and keeps current drift visible:
-
-- Manifest connector ID is `fcp.google_docs`, while runtime `BaseConnector` ID is `google-docs`.
-- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
-- Runtime `handle_shutdown` shuts down the client runtime and sets `client = None`, but it leaves verifier, session, and other lifecycle state in place.
-- `doctor()` and `self_check()` report configured/local readiness only, not provider reachability or credential validity.
-- The dedicated tracked verification shell script is `scripts/e2e/google_docs_connector_verification.sh`.
-- A pre-promotion verifier run on `2026-06-06` passed the connector-specific `cargo_check`, `format_check`, `connector_suite`, `local_non_mock`, local non-mock JSONL/redaction, and `clippy` lanes through `rch`, but the `fwc manifest fix --check --json` lane was `infra_blocked` by `RCH-E104` after the remote `fwc` build hit the 1800 second SSH timeout. Do not mark this connector PROVEN until that manifest lane passes and the manifest status/hash are updated in the same change. **This bullet is RETAINED deliberately and is in tension with the PROVEN status above: the promotion it forbids was authored in a side clone at 19:21 on the same day, roughly an hour after this note landed on main at 18:15, and the promoting author never saw it. The manifest lane has still not been observed passing. Treat PROVEN as unverified on the manifest axis until it is.**
-
-A follow-up parity bead should align connector ID spelling, add provider-backed readiness when desired, reset lifecycle state consistently on shutdown, and decide whether Docs-specific Drive export, placement, permission, comment, or suggestion surfaces belong in this connector.
+- Manifest, runtime, connector-suite, and resource namespace all use `google-docs`.
+- Runtime handshake returns a SHA-256 hash of the bundled manifest.
+- Shutdown clears client, verifier, session, configured state, and handshaken state.
+- `doctor()` and `self_check()` remain local readiness checks; they do not contact Google.
+- Manifest status remains `incubating` until the separately authorized live acceptance bead passes.
 
 ## First-Slice Scope
 
@@ -96,7 +94,7 @@ The current Google Docs README slice documents the existing runtime surface:
 - Runtime loopback base URLs are test-only.
 - Runtime request timeout: `30 seconds`.
 - Manifest network constraints use `10_000 ms` connect timeout and `30_000 ms` total timeout.
-- Manifest maximum response bytes are `1_048_576` for create and `5_242_880` for get and batch update.
+- Manifest maximum response size is `60,000` bytes for every operation result. Provider responses may be larger internally, but document text is paged and write results are compact receipts.
 - Sandbox profile is `strict`, with `128 MB` memory, `25%` CPU, `30_000 ms` wall-clock timeout, no exec, and no ptrace.
 - The connector does not open inbound sockets.
 - The connector does not implement streaming events or replay.
@@ -112,9 +110,11 @@ The current Google Docs README slice documents the existing runtime surface:
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Rationale |
 |-----------|----------------|------------|------------|-----------|-------------|-----------|
-| `docs.get` | `GET /v1/documents/{document_id}` | `docs.read` | `Safe` | `Low` | `Strict` | Reads one Google Docs document by ID. |
-| `docs.create` | `POST /v1/documents` | `docs.write` | `Risky` | `Medium` | `None` | Creates a new document for the authenticated principal. |
-| `docs.batch_update` | `POST /v1/documents/{document_id}:batchUpdate` | `docs.write` | `Risky` | `High` | `BestEffort` | Applies ordered structural edits to an existing document. |
+| `docs.get` | `GET /v1/documents/{document_id}?includeTabsContent=true` | `docs.read` | `Safe` | `Low` | `Strict` | Returns metadata and one bounded text page. |
+| `docs.create` | `POST /v1/documents`, then `GET` | `docs.write` | `Risky` | `Medium` | `None` | Creates once and verifies metadata by readback. |
+| `docs.batch_update` | `GET`, `POST ...:batchUpdate`, `GET` | `docs.write` | `Dangerous` | `High` | `None` | Uses a typed allowlist, revision guard, conditional destructive confirmation, and readback. |
+
+The batch allowlist is: `insertText`, `updateTextStyle`, `updateParagraphStyle`, `createParagraphBullets`, `deleteParagraphBullets`, `insertTable`, `createNamedRange`, `deleteContentRange`, `replaceAllText`, `replaceNamedRangeContent`, `deleteNamedRange`, and `replaceImage`. The final five operations are classified as destructive.
 
 ## Resource URIs
 
@@ -131,7 +131,7 @@ Runtime capability-token verification binds operations to these resource URI sha
 The current implementation does not include:
 
 - Drive file export, media download, file placement, file metadata, or permission management
-- comments, replies, suggestion review, named range management, structural diffing, template filling, or document merge workflows
+- comments, replies, suggestion review, structural diffing, template filling, or document merge workflows beyond the explicit request allowlist
 - OAuth consent setup, Docs API enablement, service-account/domain-wide delegation provisioning, or Google Workspace tenant onboarding
 - durable document caches, revision history, audit export, long-running pagination jobs, or connector-local credential vaulting
 - streaming document changes, push notifications, or webhook receiving
@@ -172,23 +172,17 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-The dedicated tracked verification bundle is `scripts/e2e/google_docs_connector_verification.sh`. It writes a redaction-safe artifact tree under `artifacts/e2e/google-docs/<run-id>` by default and records the gauntlet output, manifest check, connector-local Cargo proof logs, extracted `local_non_mock` JSONL, environment metadata, replay command, and summary status. It is the closeout surface for this connector, alongside the crate-local test suite and direct `rch` proof commands.
+The tracked verifier is `scripts/e2e/google_docs_connector_verification.sh`. It uses one caller-selected Cargo target directory and performs only local deterministic checks; it does not access Google or write document content to artifacts.
 
 The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - deterministic WireMock coverage for Docs API paths
 - auth, endpoint policy, provider error, lifecycle, simulation, and introspection tests
-- formatting, check, test, and clippy proof through `rch`
+- formatting, check, test, and clippy proof
 - UBS on changed files before commit
 
-Latest pre-promotion evidence:
-
-- `scripts/e2e/google_docs_connector_verification.sh` wrote summary `/tmp/fcp-google-docs-e2e/maroon-google-docs-pre-20260606T023809Z/summary.json` (`sha256:f513a7c72ef517666a6b1c5002048d2384d2efffb534863d3493eb090a1595ff`) with `overall_status=infra_blocked`.
-- The same run passed `cargo_check`, `format_check`, `connector_suite`, `local_non_mock`, `local_non_mock_jsonl`, and `clippy`; `graduation_gauntlet` remained `pre_promotion_pending` because `readme_status_match` still requires a PROVEN README plus `status = "proven"` manifest update.
-- Local non-mock evidence is `/tmp/fcp-google-docs-e2e/maroon-google-docs-pre-20260606T023809Z/evidence/local_non_mock.jsonl` (`sha256:184e5978b953d1383a917cb374ab2a4c0d7090a3b5cd2f49414f3cd8670a95ee`), with three redaction-safe `loopback_http` records for `docs.get` authorization, wrong-capability pre-egress denial, and unauthorized provider mapping.
-- Gauntlet JSONL is `/tmp/fcp-google-docs-e2e/maroon-google-docs-pre-20260606T023809Z/evidence/graduation_gauntlet.jsonl` (`sha256:c3add566a863e664b5e2d879082834eba36ec232d99fc77afe109c7ce4bf7d5b`) and failed only `readme_status_match`.
-- Manifest check evidence is `/tmp/fcp-google-docs-e2e/maroon-google-docs-pre-20260606T023809Z/evidence/manifest_check.json` (`sha256:a5844849f7cc1dda2bc6a3660f572e6204b469ae92d9d25d153a6a38b8bf0584`) and records `manifest_check=infra_blocked`; the log shows `RCH-E104` after the remote `fwc` build timed out.
+The 2026-06-06 pre-promotion evidence predates `bd-2oc.12` and is historical only. Current closeout evidence must come from the tracked verifier after the typed allowlist and manifest hash are in place. Live Google acceptance is intentionally separate.
 
 ## Operator Guidance
 
@@ -214,13 +208,14 @@ Latest pre-promotion evidence:
 - If configuration fails, provide exactly one Google auth source.
 - If live checks fail with a credential reference, materialize host credentials before invoking provider operations.
 - If `docs.get` fails, verify the ID is a Google Docs document and the authenticated principal can read it.
-- If `docs.batch_update` fails validation, pass a non-empty `requests` array and avoid relying on stale document indexes.
+- If `docs.batch_update` returns `revision_required`, repeat the exact batch with the returned revision.
+- If it returns `confirmation_required`, review `impact`, obtain current-turn confirmation, and repeat the exact batch with the returned revision and confirmation hash.
+- If it returns `outcome_uncertain`, read the document before considering any further write. Do not retry blindly.
 - If provider returns 403, treat it as an auth/permission failure rather than a retryable transport error.
 
 **Rerun commands**:
 
-- `RUN_ID="google-docs-pre-$(date -u +%Y%m%dT%H%M%SZ)"; OUT_ROOT="/tmp/fcp-google-docs-e2e/${RUN_ID}"; CARGO_TARGET_PREFIX="/tmp/fcp-google-docs-${RUN_ID}"; export RUN_ID OUT_ROOT CARGO_TARGET_PREFIX; scripts/e2e/google_docs_connector_verification.sh`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo check -p fcp-google-docs --all-targets`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo test -p fcp-google-docs --tests -- --nocapture`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-docs-readme cargo clippy -p fcp-google-docs --all-targets --no-deps -- -D warnings`
+- `CARGO_TARGET_DIR=/home/ubuntu/.cache/fcp-google-docs-bd-2oc12 scripts/e2e/google_docs_connector_verification.sh`
+- `CARGO_TARGET_DIR=/home/ubuntu/.cache/fcp-google-docs-bd-2oc12 cargo test -p fcp-google-docs --lib --tests`
+- `CARGO_TARGET_DIR=/home/ubuntu/.cache/fcp-google-docs-bd-2oc12 cargo clippy -p fcp-google-docs --all-targets --no-deps -- -D warnings`
 - `ubs connectors/google-docs/README.md`

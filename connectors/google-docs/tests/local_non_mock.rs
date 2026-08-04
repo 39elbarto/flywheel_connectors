@@ -31,7 +31,7 @@ const OP_GET_DOCUMENT: &str = "docs.get";
 const READ_CAPABILITY: &str = "docs.read";
 const WRITE_CAPABILITY: &str = "docs.write";
 const DOCUMENT_ID: &str = "doc_test_123";
-const EXPECTED_PATH: &str = "/v1/documents/doc_test_123";
+const EXPECTED_PATH: &str = "/v1/documents/doc_test_123?includeTabsContent=true";
 
 const SUCCESS_RESPONSE: &str = r#"{
   "documentId": "doc_test_123",
@@ -61,7 +61,7 @@ const SUCCESS_RESPONSE: &str = r#"{
 const UNAUTHORIZED_RESPONSE: &str = r#"{
   "error": {
     "code": 401,
-    "message": "invalid credentials",
+    "message": "provider-private-message",
     "status": "UNAUTHENTICATED"
   }
 }"#;
@@ -184,12 +184,7 @@ fn assert_get_request_boundary(request_line: &str) {
     assert_eq!(parts.next(), Some("HTTP/1.1"));
     assert_eq!(parts.next(), None);
 
-    let target_without_empty_query = target.strip_suffix('?').unwrap_or(target);
-    assert_eq!(target_without_empty_query, EXPECTED_PATH);
-    assert!(
-        !target_without_empty_query.contains('?'),
-        "request target should not include query parameters"
-    );
+    assert_eq!(target, EXPECTED_PATH);
 }
 
 fn handshake_req(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
@@ -283,13 +278,14 @@ async fn local_non_mock_get_document_uses_docs_request_boundary() {
     assert!(observation.authorization_seen);
     assert!(observation.accept_seen);
     assert!(observation.user_agent_seen);
-    assert_eq!(result["document"]["documentId"], DOCUMENT_ID);
-    assert_eq!(result["document"]["title"], "Connector Suite Notes");
-    assert_eq!(result["document"]["revisionId"], "rev-1");
+    assert_eq!(result["document"]["metadata"]["document_id"], DOCUMENT_ID);
     assert_eq!(
-        result["document"]["body"]["content"][0]["paragraph"]["elements"][0]["textRun"]["content"],
-        "Hello from Docs"
+        result["document"]["metadata"]["title"],
+        "Connector Suite Notes"
     );
+    assert_eq!(result["document"]["metadata"]["revision_id"], "rev-1");
+    assert_eq!(result["document"]["text"], "Hello from Docs");
+    assert_eq!(result["document"]["text_complete"], true);
     assert!(!result.to_string().contains(LOOPBACK_AUTH_VALUE));
 
     let artifact = json!({
@@ -336,6 +332,7 @@ async fn local_non_mock_unauthorized_error_does_not_leak_auth_material() {
     assert!(observation.authorization_seen);
     assert!(matches!(error, FcpError::Unauthorized { .. }));
     assert!(!error.to_string().contains(LOOPBACK_AUTH_VALUE));
+    assert!(!error.to_string().contains("provider-private-message"));
 
     let artifact = json!({
         "connector": "google-docs",

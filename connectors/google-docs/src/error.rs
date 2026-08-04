@@ -76,26 +76,26 @@ impl DocsError {
         match self {
             Self::Http(e) => FcpError::External {
                 service: "google_docs".into(),
-                message: e.to_string(),
+                message: "Google Docs transport request failed".into(),
                 status_code: e.status().map(|s| s.as_u16()),
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
             },
-            Self::Json(e) => FcpError::Internal {
-                message: format!("JSON error: {e}"),
+            Self::Json(_) => FcpError::Internal {
+                message: "Google Docs response could not be decoded".into(),
             },
             Self::Api {
                 status_code: 401 | 403,
-                message,
+                message: _,
             } => FcpError::Unauthorized {
                 code: 2001,
-                message: format!("Docs auth failed: {message}"),
+                message: "Google Docs authorization failed".into(),
             },
             Self::Api {
                 status_code: 404,
-                message,
+                message: _,
             } => FcpError::ResourceNotFound {
-                resource: message.clone(),
+                resource: "google_docs_document".into(),
             },
             Self::Api {
                 status_code: 429, ..
@@ -105,10 +105,10 @@ impl DocsError {
             },
             Self::Api {
                 status_code,
-                message,
+                message: _,
             } => FcpError::External {
                 service: "google_docs".into(),
-                message: message.clone(),
+                message: "Google Docs provider rejected the request".into(),
                 status_code: Some(*status_code),
                 retryable: self.is_retryable(),
                 retry_after: None,
@@ -121,12 +121,12 @@ impl DocsError {
                 code: 2001,
                 message: "Invalid or expired Google Docs credentials".into(),
             },
-            Self::DocumentNotFound { document_id } => FcpError::ResourceNotFound {
-                resource: format!("document:{document_id}"),
+            Self::DocumentNotFound { .. } => FcpError::ResourceNotFound {
+                resource: "google_docs_document".into(),
             },
-            Self::Forbidden { message } => FcpError::Unauthorized {
+            Self::Forbidden { .. } => FcpError::Unauthorized {
                 code: 2001,
-                message: format!("Docs permission denied: {message}"),
+                message: "Google Docs permission denied".into(),
             },
         }
     }
@@ -223,10 +223,10 @@ mod tests {
 
     #[test]
     fn to_fcp_error_unauthorized() {
-        match DocsError::Unauthorized.to_fcp_error() {
-            FcpError::Unauthorized { code, .. } => assert_eq!(code, 2001),
-            other => panic!("expected Unauthorized, got {other:?}"),
-        }
+        assert!(matches!(
+            DocsError::Unauthorized.to_fcp_error(),
+            FcpError::Unauthorized { code: 2001, .. }
+        ));
     }
 
     #[test]
@@ -234,12 +234,10 @@ mod tests {
         let err = DocsError::DocumentNotFound {
             document_id: "abc".into(),
         };
-        match err.to_fcp_error() {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "document:abc");
-            }
-            other => panic!("expected ResourceNotFound, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::ResourceNotFound { resource } if resource == "google_docs_document"
+        ));
     }
 
     #[test]
@@ -254,10 +252,10 @@ mod tests {
     #[test]
     fn to_fcp_error_json() {
         let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
-        match DocsError::Json(json_err).to_fcp_error() {
-            FcpError::Internal { message } => assert!(message.starts_with("JSON error:")),
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(matches!(
+            DocsError::Json(json_err).to_fcp_error(),
+            FcpError::Internal { message } if message == "Google Docs response could not be decoded"
+        ));
     }
 
     #[test]
@@ -275,15 +273,14 @@ mod tests {
             status_code: 500,
             message: "internal".into(),
         };
-        match err.to_fcp_error() {
+        assert!(matches!(
+            err.to_fcp_error(),
             FcpError::External {
-                service, retryable, ..
-            } => {
-                assert_eq!(service, "google_docs");
-                assert!(retryable);
-            }
-            other => panic!("expected External, got {other:?}"),
-        }
+                service,
+                retryable: true,
+                ..
+            } if service == "google_docs"
+        ));
     }
 
     #[test]

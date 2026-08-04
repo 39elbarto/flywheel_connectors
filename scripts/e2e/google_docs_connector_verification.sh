@@ -4,10 +4,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
-OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/google-docs/${RUN_ID}}"
-RCH_BIN="${RCH_BIN:-rch}"
-REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
-TARGET_PREFIX="${CARGO_TARGET_PREFIX:-/tmp/fcp-google-docs-${RUN_ID}}"
+OUT_ROOT="${OUT_ROOT:-/tmp/fcp-google-docs-e2e/${RUN_ID}}"
+TARGET_DIR="${CARGO_TARGET_DIR:-/home/ubuntu/.cache/fcp-google-docs-bd-2oc12}"
 BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
@@ -68,12 +66,8 @@ observed_runner() {
 
   if [[ ! -f "${log_path}" ]]; then
     echo "unknown"
-  elif grep -Fq "[RCH] remote" "${log_path}"; then
-    echo "rch_remote"
-  elif grep -Fq "[RCH] local" "${log_path}"; then
-    echo "rch_local_fallback"
   else
-    echo "rch_unclassified"
+    echo "local_cargo"
   fi
 }
 
@@ -171,7 +165,7 @@ run_graduation_gauntlet() {
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 require_cmd jq
-require_cmd "${RCH_BIN}"
+require_cmd cargo
 
 graduation_gauntlet_status="$(run_graduation_gauntlet)"
 
@@ -179,7 +173,7 @@ manifest_stdout_path="${OUT_ROOT}/evidence/manifest_check.command.json"
 if run_capture_stdout \
   manifest_check \
   "${manifest_stdout_path}" \
-  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-fwc" cargo run -q -p fwc -- manifest fix connectors/google-docs/manifest.toml --check --json
+  env CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo run -q --locked -p fwc -- manifest fix connectors/google-docs/manifest.toml --check --json
 then
   manifest_status="passed"
   cp "${manifest_stdout_path}" "${OUT_ROOT}/evidence/manifest_check.json"
@@ -199,17 +193,17 @@ else
   fi
 fi
 
-run_step cargo_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-check" cargo check -p fcp-google-docs --all-targets
+run_step cargo_check env CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check --locked -p fcp-google-docs --all-targets
 cargo_check_status="${LAST_STEP_STATUS}"
 
 # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
-run_step format_check env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-fmt" cargo fmt -p fcp-google-docs -- --check
+run_step format_check cargo fmt -p fcp-google-docs -- --check
 format_check_status="${LAST_STEP_STATUS}"
 
-run_step connector_suite env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-suite" cargo test -p fcp-google-docs --test connector_suite_happy_path -- --nocapture
+run_step connector_suite env CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test --locked -p fcp-google-docs --test connector_suite_happy_path -- --nocapture
 connector_suite_status="${LAST_STEP_STATUS}"
 
-run_step local_non_mock env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-local" GIT_REVISION="${git_revision}" cargo test -p fcp-google-docs --test local_non_mock -- --nocapture
+run_step local_non_mock env CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_DIR}" GIT_REVISION="${git_revision}" cargo test --locked -p fcp-google-docs --test local_non_mock -- --nocapture
 local_non_mock_status="${LAST_STEP_STATUS}"
 
 if grep -a '"suite_class":"local_non_mock"' "${OUT_ROOT}/logs/local_non_mock.log" >"${OUT_ROOT}/evidence/local_non_mock.jsonl"; then
@@ -247,7 +241,7 @@ if grep -qE 'ya29\.|local-loopback-auth-value|Connector Suite Notes|Hello from D
   promote_overall_status failed
 fi
 
-run_step clippy env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_PREFIX}-clippy" cargo clippy -p fcp-google-docs --all-targets -- -D warnings
+run_step clippy env CARGO_BUILD_JOBS="${BUILD_JOBS}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy --locked -p fcp-google-docs --all-targets --no-deps -- -D warnings
 clippy_status="${LAST_STEP_STATUS}"
 
 cat >"${OUT_ROOT}/environment.json" <<EOF
@@ -258,10 +252,9 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "verification_script": "scripts/e2e/google_docs_connector_verification.sh",
   "artifact_root": "${OUT_ROOT}",
   "git_revision": "${git_revision}",
-  "target_prefix": "${TARGET_PREFIX}",
+  "target_dir": "${TARGET_DIR}",
   "build_jobs": "${BUILD_JOBS}",
-  "toolchain": "${REPO_TOOLCHAIN}",
-  "runner": "rch",
+  "runner": "local_cargo",
   "fixture_mode": "loopback_http",
   "redaction": "no Google Docs access token, loopback endpoint, document ID, document title/body text, live credential secret, provider payload, or provider error body is emitted in extracted evidence"
 }
@@ -271,18 +264,16 @@ cat >"${OUT_ROOT}/replay.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-RCH_BIN="\${RCH_BIN:-${RCH_BIN}}"
-REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
-TARGET_PREFIX="\${CARGO_TARGET_PREFIX:-${TARGET_PREFIX}}"
+TARGET_DIR="\${CARGO_TARGET_DIR:-${TARGET_DIR}}"
 BUILD_JOBS="\${CARGO_BUILD_JOBS:-${BUILD_JOBS}}"
 git_revision="\$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-fwc" cargo run -q -p fwc -- manifest fix connectors/google-docs/manifest.toml --check --json
-env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-check" cargo check -p fcp-google-docs --all-targets
-env -u RCH_FORCE_REMOTE -u RCH_REQUIRE_REMOTE RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-fmt" cargo fmt -p fcp-google-docs -- --check
-env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-suite" cargo test -p fcp-google-docs --test connector_suite_happy_path -- --nocapture
-env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-local" GIT_REVISION="\${git_revision}" cargo test -p fcp-google-docs --test local_non_mock -- --nocapture
-env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_PREFIX}-clippy" cargo clippy -p fcp-google-docs --all-targets -- -D warnings
+env CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q --locked -p fwc -- manifest fix connectors/google-docs/manifest.toml --check --json
+env CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check --locked -p fcp-google-docs --all-targets
+cargo fmt -p fcp-google-docs -- --check
+env CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo test --locked -p fcp-google-docs --test connector_suite_happy_path -- --nocapture
+env CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_DIR}" GIT_REVISION="\${git_revision}" cargo test --locked -p fcp-google-docs --test local_non_mock -- --nocapture
+env CARGO_BUILD_JOBS="\${BUILD_JOBS}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy --locked -p fcp-google-docs --all-targets --no-deps -- -D warnings
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 
@@ -292,7 +283,7 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "connector": "fcp-google-docs",
   "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
-  "runner": "rch",
+  "runner": "local_cargo",
   "observed_runners": {
     "manifest_check": "$(observed_runner "${OUT_ROOT}/logs/manifest_check.log")",
     "cargo_check": "$(observed_runner "${OUT_ROOT}/logs/cargo_check.log")",

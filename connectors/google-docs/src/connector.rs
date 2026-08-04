@@ -15,8 +15,16 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::DocsClient;
+use crate::error::DocsError;
+use crate::types::{Request, TextStyle};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const MAX_REQUESTS: usize = 100;
+const MAX_BATCH_BYTES: usize = 512 * 1024;
+const MAX_TEXT_BYTES: usize = 100 * 1024;
+const MAX_IDENTIFIER_BYTES: usize = 512;
+const MAX_DOCUMENT_INDEX: u32 = 10_000_000;
+const MAX_READ_TEXT_BYTES: usize = 48_000;
 
 fn is_local_test_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
@@ -115,27 +123,64 @@ fn docs_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
 }
 
 fn validate_docs_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    let allowed_fields: &[&str] = match operation {
+        "docs.get" => &["document_id", "text_offset", "text_limit"],
+        "docs.create" => &["title"],
+        "docs.batch_update" => &[
+            "document_id",
+            "requests",
+            "required_revision_id",
+            "confirm_destructive",
+            "confirmation_sha256",
+        ],
+        _ => &[],
+    };
+    let object = input
+        .as_object()
+        .ok_or_else(|| invalid("operation input must be an object"))?;
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed_fields.contains(&field.as_str()))
+    {
+        return Err(invalid(format!("unsupported input field '{field}'")));
+    }
     match operation {
         "docs.get" => {
-            require_str(input, "document_id")?;
+            validate_identifier(require_str(input, "document_id")?, "document_id")?;
+            optional_bounded_usize(input, "text_offset", 0, MAX_DOCUMENT_INDEX as usize)?;
+            optional_bounded_usize(input, "text_limit", 1, MAX_READ_TEXT_BYTES)?;
         }
         "docs.create" => {
-            require_str(input, "title")?;
+            validate_title(require_str(input, "title")?)?;
         }
         "docs.batch_update" => {
-            require_str(input, "document_id")?;
-            let requests = input
-                .get("requests")
-                .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v.clone()).ok())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1001,
-                    message: "Missing or invalid 'requests' (must be array)".into(),
-                })?;
-            if requests.is_empty() {
-                return Err(FcpError::InvalidRequest {
-                    code: 1001,
-                    message: "'requests' must not be empty".into(),
-                });
+            validate_identifier(require_str(input, "document_id")?, "document_id")?;
+            validated_requests(input)?;
+            if let Some(revision) = input.get("required_revision_id") {
+                validate_identifier(
+                    revision
+                        .as_str()
+                        .ok_or_else(|| invalid("'required_revision_id' must be a string"))?,
+                    "required_revision_id",
+                )?;
+            }
+            if let Some(hash) = input.get("confirmation_sha256") {
+                let hash = hash
+                    .as_str()
+                    .ok_or_else(|| invalid("'confirmation_sha256' must be a string"))?;
+                if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(invalid(
+                        "'confirmation_sha256' must be 64 hexadecimal characters",
+                    ));
+                }
+            }
+            if input.get("confirm_destructive").is_some()
+                && input
+                    .get("confirm_destructive")
+                    .and_then(serde_json::Value::as_bool)
+                    .is_none()
+            {
+                return Err(invalid("'confirm_destructive' must be a boolean"));
             }
         }
         _ => {
@@ -145,6 +190,443 @@ fn validate_docs_input(operation: &str, input: &serde_json::Value) -> FcpResult<
         }
     }
     Ok(())
+}
+
+fn invalid(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1001,
+        message: message.into(),
+    }
+}
+
+fn validate_title(value: &str) -> FcpResult<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(invalid(
+            "title must be 1..=256 bytes without control characters",
+        ));
+    }
+    Ok(value)
+}
+
+fn validate_identifier<'a>(value: &'a str, field: &str) -> FcpResult<&'a str> {
+    if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES || value.chars().any(char::is_control)
+    {
+        return Err(invalid(format!(
+            "'{field}' must be 1..={MAX_IDENTIFIER_BYTES} bytes without control characters"
+        )));
+    }
+    Ok(value)
+}
+
+fn optional_bounded_usize(
+    input: &serde_json::Value,
+    field: &str,
+    minimum: usize,
+    maximum: usize,
+) -> FcpResult<Option<usize>> {
+    input
+        .get(field)
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| (*value >= minimum) && (*value <= maximum))
+                .ok_or_else(|| invalid(format!("'{field}' must be {minimum}..={maximum}")))
+        })
+        .transpose()
+}
+
+fn validate_location(location: &crate::types::Location) -> FcpResult<()> {
+    if location.index == 0 || location.index > MAX_DOCUMENT_INDEX {
+        return Err(invalid(format!(
+            "location.index must be 1..={MAX_DOCUMENT_INDEX}"
+        )));
+    }
+    if let Some(segment_id) = &location.segment_id {
+        validate_identifier(segment_id, "segmentId")?;
+    }
+    if let Some(tab_id) = &location.tab_id {
+        validate_identifier(tab_id, "tabId")?;
+    }
+    Ok(())
+}
+
+fn validate_range(range: &crate::types::Range) -> FcpResult<()> {
+    if range.start_index == 0
+        || range.start_index >= range.end_index
+        || range.end_index > MAX_DOCUMENT_INDEX
+    {
+        return Err(invalid(format!(
+            "range must satisfy 1 <= startIndex < endIndex <= {MAX_DOCUMENT_INDEX}"
+        )));
+    }
+    if let Some(segment_id) = &range.segment_id {
+        validate_identifier(segment_id, "segmentId")?;
+    }
+    if let Some(tab_id) = &range.tab_id {
+        validate_identifier(tab_id, "tabId")?;
+    }
+    Ok(())
+}
+
+fn validate_text(value: &str, field: &str, allow_empty: bool) -> FcpResult<()> {
+    if (!allow_empty && value.is_empty()) || value.len() > MAX_TEXT_BYTES {
+        return Err(invalid(format!(
+            "'{field}' must be {}..={MAX_TEXT_BYTES} bytes",
+            usize::from(!allow_empty)
+        )));
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(invalid(format!(
+            "'{field}' contains unsupported control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_text_style(style: &TextStyle, fields: &str) -> FcpResult<()> {
+    let mut provided = Vec::new();
+    if style.bold.is_some() {
+        provided.push("bold");
+    }
+    if style.italic.is_some() {
+        provided.push("italic");
+    }
+    if style.underline.is_some() {
+        provided.push("underline");
+    }
+    if style.font_size.is_some() {
+        provided.push("fontSize");
+    }
+    if style.foreground_color.is_some() {
+        provided.push("foregroundColor");
+    }
+    let requested = fields.split(',').map(str::trim).collect::<Vec<_>>();
+    if requested.is_empty()
+        || requested.iter().any(|field| field.is_empty())
+        || requested != provided
+    {
+        return Err(invalid(
+            "updateTextStyle fields must list exactly the provided allowlisted style fields in canonical order",
+        ));
+    }
+    if let Some(font_size) = &style.font_size {
+        if font_size.unit != "PT" || !(1.0..=400.0).contains(&font_size.magnitude) {
+            return Err(invalid("fontSize must use PT with magnitude 1..=400"));
+        }
+    }
+    if let Some(color) = &style.foreground_color {
+        let color = color
+            .color
+            .as_ref()
+            .ok_or_else(|| invalid("foregroundColor.color is required"))?;
+        if ![color.red, color.green, color.blue]
+            .into_iter()
+            .all(|component| (0.0..=1.0).contains(&component))
+        {
+            return Err(invalid("foregroundColor components must be 0..=1"));
+        }
+    }
+    Ok(())
+}
+
+fn validated_requests(input: &serde_json::Value) -> FcpResult<Vec<Request>> {
+    let value = input
+        .get("requests")
+        .ok_or_else(|| invalid("Missing 'requests'"))?;
+    let serialized = serde_json::to_vec(value)
+        .map_err(|error| invalid(format!("invalid requests JSON: {error}")))?;
+    if serialized.len() > MAX_BATCH_BYTES {
+        return Err(invalid(format!(
+            "'requests' exceeds the {MAX_BATCH_BYTES}-byte batch limit"
+        )));
+    }
+    let requests: Vec<Request> = serde_json::from_value(value.clone()).map_err(|_| {
+        invalid("'requests' must contain only supported typed Google Docs requests")
+    })?;
+    if requests.is_empty() || requests.len() > MAX_REQUESTS {
+        return Err(invalid(format!(
+            "'requests' must contain 1..={MAX_REQUESTS} entries"
+        )));
+    }
+    for request in &requests {
+        match request {
+            Request::InsertText(request) => {
+                validate_location(&request.location)?;
+                validate_text(&request.text, "insertText.text", false)?;
+            }
+            Request::UpdateTextStyle(request) => {
+                validate_range(&request.range)?;
+                validate_text_style(&request.text_style, &request.fields)?;
+            }
+            Request::UpdateParagraphStyle(request) => {
+                validate_range(&request.range)?;
+                if request.fields != "namedStyleType"
+                    || !matches!(
+                        request.paragraph_style.named_style_type.as_str(),
+                        "NORMAL_TEXT"
+                            | "TITLE"
+                            | "SUBTITLE"
+                            | "HEADING_1"
+                            | "HEADING_2"
+                            | "HEADING_3"
+                            | "HEADING_4"
+                            | "HEADING_5"
+                            | "HEADING_6"
+                    )
+                {
+                    return Err(invalid(
+                        "updateParagraphStyle supports only a provided namedStyleType",
+                    ));
+                }
+            }
+            Request::CreateParagraphBullets(request) => {
+                validate_range(&request.range)?;
+                if !matches!(
+                    request.bullet_preset.as_str(),
+                    "BULLET_DISC_CIRCLE_SQUARE"
+                        | "BULLET_DIAMONDX_ARROW3D_SQUARE"
+                        | "BULLET_CHECKBOX"
+                        | "NUMBERED_DECIMAL_ALPHA_ROMAN"
+                        | "NUMBERED_DECIMAL_ALPHA_ROMAN_PARENS"
+                        | "NUMBERED_DECIMAL_NESTED"
+                ) {
+                    return Err(invalid("unsupported bulletPreset"));
+                }
+            }
+            Request::DeleteParagraphBullets(request) => validate_range(&request.range)?,
+            Request::InsertTable(request) => {
+                validate_location(&request.location)?;
+                if !(1..=20).contains(&request.rows) || !(1..=20).contains(&request.columns) {
+                    return Err(invalid("insertTable rows and columns must each be 1..=20"));
+                }
+            }
+            Request::CreateNamedRange(request) => {
+                validate_identifier(&request.name, "createNamedRange.name")?;
+                validate_range(&request.range)?;
+            }
+            Request::DeleteContentRange(request) => validate_range(&request.range)?,
+            Request::ReplaceAllText(request) => {
+                validate_text(&request.contains_text.text, "containsText.text", false)?;
+                validate_text(&request.replace_text, "replaceText", true)?;
+                validate_tabs_criteria(request.tabs_criteria.as_ref())?;
+            }
+            Request::ReplaceNamedRangeContent(request) => {
+                validate_exactly_one_identifier(
+                    request.named_range_id.as_deref(),
+                    request.named_range_name.as_deref(),
+                    "namedRangeId",
+                    "namedRangeName",
+                )?;
+                validate_text(&request.text, "replaceNamedRangeContent.text", true)?;
+                validate_tabs_criteria(request.tabs_criteria.as_ref())?;
+            }
+            Request::DeleteNamedRange(request) => {
+                validate_exactly_one_identifier(
+                    request.named_range_id.as_deref(),
+                    request.name.as_deref(),
+                    "namedRangeId",
+                    "name",
+                )?;
+                validate_tabs_criteria(request.tabs_criteria.as_ref())?;
+            }
+            Request::ReplaceImage(request) => {
+                validate_identifier(&request.image_object_id, "imageObjectId")?;
+                let uri = Url::parse(&request.uri)
+                    .map_err(|_| invalid("replaceImage.uri must be a valid HTTPS URL"))?;
+                if uri.scheme() != "https" || request.uri.len() > 2048 {
+                    return Err(invalid(
+                        "replaceImage.uri must be an HTTPS URL up to 2048 bytes",
+                    ));
+                }
+                if request.image_replace_method != "CENTER_CROP" {
+                    return Err(invalid("imageReplaceMethod must be CENTER_CROP"));
+                }
+                if let Some(tab_id) = request.tab_id.as_deref() {
+                    validate_identifier(tab_id, "tabId")?;
+                }
+            }
+        }
+    }
+    Ok(requests)
+}
+
+fn validate_tabs_criteria(criteria: Option<&crate::types::TabsCriteria>) -> FcpResult<()> {
+    let Some(criteria) = criteria else {
+        return Ok(());
+    };
+    if criteria.tab_ids.is_empty() || criteria.tab_ids.len() > 100 {
+        return Err(invalid("tabsCriteria.tabIds must contain 1..=100 entries"));
+    }
+    for tab_id in &criteria.tab_ids {
+        validate_identifier(tab_id, "tabId")?;
+    }
+    Ok(())
+}
+
+fn validate_exactly_one_identifier(
+    first: Option<&str>,
+    second: Option<&str>,
+    first_name: &str,
+    second_name: &str,
+) -> FcpResult<()> {
+    match (first, second) {
+        (Some(value), None) => {
+            validate_identifier(value, first_name)?;
+            Ok(())
+        }
+        (None, Some(value)) => {
+            validate_identifier(value, second_name)?;
+            Ok(())
+        }
+        _ => Err(invalid(format!(
+            "exactly one of '{first_name}' or '{second_name}' is required"
+        ))),
+    }
+}
+
+fn document_revision(document: &serde_json::Value) -> FcpResult<&str> {
+    document
+        .get("revisionId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid("document revision is unavailable; edit access is required"))
+}
+
+fn document_receipt(document: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "document_id": document.get("documentId").and_then(serde_json::Value::as_str),
+        "title": document.get("title").and_then(serde_json::Value::as_str),
+        "revision_id": document.get("revisionId").and_then(serde_json::Value::as_str),
+        "tab_count": document.get("tabs").and_then(serde_json::Value::as_array).map_or(0, Vec::len),
+    })
+}
+
+fn collect_document_text(value: &serde_json::Value, output: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(content) = map
+                .get("textRun")
+                .and_then(|run| run.get("content"))
+                .and_then(serde_json::Value::as_str)
+            {
+                output.push_str(content);
+            }
+            for (key, nested) in map {
+                if key != "textRun" {
+                    collect_document_text(nested, output);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                collect_document_text(nested, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn bounded_text_slice(value: &str, offset: usize, limit: usize) -> (&str, usize, usize) {
+    let start = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|index| *index >= offset)
+        .unwrap_or(value.len());
+    let candidate_end = start.saturating_add(limit).min(value.len());
+    let end = if candidate_end == value.len() {
+        value.len()
+    } else {
+        value
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= candidate_end)
+            .last()
+            .unwrap_or(start)
+    };
+    (&value[start..end], start, end)
+}
+
+fn compact_document(
+    document: &serde_json::Value,
+    offset: usize,
+    limit: usize,
+) -> serde_json::Value {
+    let mut text = String::new();
+    collect_document_text(document, &mut text);
+    let (page, actual_offset, next_offset) = bounded_text_slice(&text, offset, limit);
+    json!({
+        "metadata": document_receipt(document),
+        "text": page,
+        "text_offset": actual_offset,
+        "text_next_offset": next_offset,
+        "text_complete": next_offset >= text.len(),
+        "text_total_bytes": text.len(),
+    })
+}
+
+fn request_impact(request: &Request) -> serde_json::Value {
+    let kind = request.kind();
+    match request {
+        Request::DeleteContentRange(request) => json!({
+            "kind": kind,
+            "start_index": request.range.start_index,
+            "end_index": request.range.end_index,
+            "utf16_units": request.range.end_index.saturating_sub(request.range.start_index),
+            "segment_id_sha256": request.range.segment_id.as_ref().map(|value| hex::encode(Sha256::digest(value.as_bytes()))),
+            "tab_id_sha256": request.range.tab_id.as_ref().map(|value| hex::encode(Sha256::digest(value.as_bytes()))),
+        }),
+        Request::ReplaceAllText(request) => json!({
+            "kind": kind,
+            "match_case": request.contains_text.match_case,
+            "search_sha256": hex::encode(Sha256::digest(request.contains_text.text.as_bytes())),
+            "search_bytes": request.contains_text.text.len(),
+            "replacement_bytes": request.replace_text.len(),
+            "tab_count": request.tabs_criteria.as_ref().map_or(0, |criteria| criteria.tab_ids.len()),
+            "tabs_sha256": request.tabs_criteria.as_ref().map(|criteria| hash_serializable(&criteria.tab_ids)),
+        }),
+        Request::ReplaceNamedRangeContent(request) => json!({
+            "kind": kind,
+            "named_range_id_sha256": request.named_range_id.as_ref().map(|value| hex::encode(Sha256::digest(value.as_bytes()))),
+            "named_range_name_sha256": request.named_range_name.as_ref().map(|value| hex::encode(Sha256::digest(value.as_bytes()))),
+            "replacement_bytes": request.text.len(),
+            "tab_count": request.tabs_criteria.as_ref().map_or(0, |criteria| criteria.tab_ids.len()),
+            "tabs_sha256": request.tabs_criteria.as_ref().map(|criteria| hash_serializable(&criteria.tab_ids)),
+        }),
+        Request::DeleteNamedRange(request) => json!({
+            "kind": kind,
+            "named_range_id_sha256": request.named_range_id.as_ref().map(|value| hex::encode(Sha256::digest(value.as_bytes()))),
+            "name_sha256": request.name.as_ref().map(|value| hex::encode(Sha256::digest(value.as_bytes()))),
+            "tab_count": request.tabs_criteria.as_ref().map_or(0, |criteria| criteria.tab_ids.len()),
+            "tabs_sha256": request.tabs_criteria.as_ref().map(|criteria| hash_serializable(&criteria.tab_ids)),
+        }),
+        Request::ReplaceImage(request) => json!({
+            "kind": kind,
+            "image_object_id_sha256": hex::encode(Sha256::digest(request.image_object_id.as_bytes())),
+            "uri_sha256": hex::encode(Sha256::digest(request.uri.as_bytes())),
+            "tab_id_sha256": request.tab_id.as_ref().map(|value| hex::encode(Sha256::digest(value.as_bytes()))),
+        }),
+        _ => json!({ "kind": kind, "destructive": false }),
+    }
+}
+
+fn hash_serializable(value: &impl serde::Serialize) -> String {
+    let encoded = serde_json::to_vec(value).unwrap_or_default();
+    hex::encode(Sha256::digest(encoded))
+}
+
+fn confirmation_sha256(
+    document_id: &str,
+    revision_id: &str,
+    requests: &[Request],
+) -> FcpResult<String> {
+    let encoded = serde_json::to_vec(&(document_id, revision_id, requests))
+        .map_err(|error| invalid(format!("could not bind confirmation payload: {error}")))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
 }
 
 /// FCP Google Docs Connector.
@@ -356,13 +838,19 @@ impl DocsConnector {
                         "type": "object",
                         "required": ["document_id"],
                         "properties": {
-                            "document_id": { "type": "string" }
-                        }
+                            "document_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                            "text_offset": { "type": "integer", "minimum": 0, "maximum": 10000000 },
+                            "text_limit": { "type": "integer", "minimum": 1, "maximum": 48000 }
+                        },
+                        "additionalProperties": false
                     }),
                     json!({
                         "type": "object",
                         "properties": {
-                            "document": { "type": "object" }
+                            "status": { "type": "string" },
+                            "document": { "type": "object" },
+                            "readback": { "type": "object" },
+                            "retry_safe": { "type": "boolean" }
                         }
                     }),
                     "docs.read",
@@ -391,8 +879,9 @@ impl DocsConnector {
                         "type": "object",
                         "required": ["title"],
                         "properties": {
-                            "title": { "type": "string" }
-                        }
+                            "title": { "type": "string", "minLength": 1, "maxLength": 256 }
+                        },
+                        "additionalProperties": false
                     }),
                     json!({
                         "type": "object",
@@ -425,29 +914,36 @@ impl DocsConnector {
                         "type": "object",
                         "required": ["document_id", "requests"],
                         "properties": {
-                            "document_id": { "type": "string" },
-                            "requests": { "type": "array" }
-                        }
+                            "document_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                            "requests": { "type": "array", "minItems": 1, "maxItems": 100 },
+                            "required_revision_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                            "confirm_destructive": { "type": "boolean" },
+                            "confirmation_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                        },
+                        "additionalProperties": false
                     }),
                     json!({
                         "type": "object",
                         "properties": {
+                            "status": { "type": "string" },
                             "document_id": { "type": "string" },
-                            "replies": { "type": "array" }
+                            "preflight": { "type": "object" },
+                            "readback": { "type": "object" }
                         }
                     }),
                     "docs.write",
                     RiskLevel::High,
-                    SafetyTier::Risky,
-                    IdempotencyClass::BestEffort,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
                     AgentHint {
                         when_to_use:
-                            "Insert text, delete content, or update text styling in an existing document."
+                            "Apply a bounded typed batch guarded by a current document revision. Destructive requests first return a confirmation receipt."
                                 .into(),
                         common_mistakes: vec![
                             "Requests are applied in order — indices shift after inserts/deletes"
                                 .into(),
                             "Apply changes in reverse index order to avoid index drift".into(),
+                            "Never retry an uncertain write before reading the document again".into(),
                         ],
                         examples: vec![
                             r#"{"document_id": "abc123", "requests": [{"insertText": {"location": {"index": 1}, "text": "Hello"}}]}"#.into(),
@@ -516,32 +1012,171 @@ impl DocsConnector {
                     .get_document(document_id)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                Ok(json!({ "document": doc }))
+                let offset =
+                    optional_bounded_usize(&input, "text_offset", 0, MAX_DOCUMENT_INDEX as usize)?
+                        .unwrap_or(0);
+                let limit = optional_bounded_usize(&input, "text_limit", 1, MAX_READ_TEXT_BYTES)?
+                    .unwrap_or(MAX_READ_TEXT_BYTES);
+                Ok(json!({ "document": compact_document(&doc, offset, limit) }))
             }
             "docs.create" => {
-                let title = require_str(&input, "title")?;
-                let doc = client
-                    .create_document(title)
-                    .await
-                    .map_err(|e| e.to_fcp_error())?;
-                Ok(json!({ "document": doc }))
+                let title = validate_title(require_str(&input, "title")?)?;
+                let created = match client.create_document(title).await {
+                    Ok(created) => created,
+                    Err(error) if error.is_retryable() => {
+                        return Ok(json!({
+                            "status": "outcome_uncertain",
+                            "retry_safe": false,
+                            "readback": { "available": false },
+                        }));
+                    }
+                    Err(error) => return Err(error.to_fcp_error()),
+                };
+                let Some(document_id) = created
+                    .get("documentId")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    return Ok(json!({
+                        "status": "outcome_uncertain",
+                        "retry_safe": false,
+                        "readback": { "available": false },
+                    }));
+                };
+                match client.get_document(document_id).await {
+                    Ok(readback) => Ok(json!({
+                        "status": "created_and_verified",
+                        "document": document_receipt(&created),
+                        "readback": document_receipt(&readback),
+                        "retry_safe": false,
+                    })),
+                    Err(_) => Ok(json!({
+                        "status": "created_unverified",
+                        "document": document_receipt(&created),
+                        "readback": { "available": false },
+                        "retry_safe": false,
+                    })),
+                }
             }
             "docs.batch_update" => {
                 let document_id = require_str(&input, "document_id")?;
-                let requests = input
-                    .get("requests")
-                    .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v.clone()).ok())
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1001,
-                        message: "Missing or invalid 'requests' (must be array)".into(),
-                    })?;
-                let batch_result = client
-                    .batch_update(document_id, requests)
+                let requests = validated_requests(&input)?;
+                let preflight_document = client
+                    .get_document(document_id)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
+                let revision_before = document_revision(&preflight_document)?.to_string();
+                let destructive = requests.iter().any(Request::is_destructive);
+                let impacts = requests.iter().map(request_impact).collect::<Vec<_>>();
+                let expected_confirmation =
+                    confirmation_sha256(document_id, &revision_before, &requests)?;
+
+                if destructive
+                    && input
+                        .get("confirm_destructive")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+                {
+                    return Ok(json!({
+                        "status": "confirmation_required",
+                        "document_id": document_id,
+                        "destructive": true,
+                        "preflight": document_receipt(&preflight_document),
+                        "impact": impacts,
+                        "confirmation_sha256": expected_confirmation,
+                        "next_call_requires": [
+                            "required_revision_id",
+                            "confirm_destructive=true",
+                            "confirmation_sha256"
+                        ],
+                    }));
+                }
+
+                let Some(required_revision_id) = input
+                    .get("required_revision_id")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    return Ok(json!({
+                        "status": "revision_required",
+                        "document_id": document_id,
+                        "destructive": destructive,
+                        "preflight": document_receipt(&preflight_document),
+                        "impact": impacts,
+                        "required_revision_id": revision_before,
+                        "confirmation_sha256": destructive.then_some(expected_confirmation),
+                    }));
+                };
+                if required_revision_id != revision_before {
+                    return Err(invalid(
+                        "required_revision_id does not match the current document revision",
+                    ));
+                }
+                if destructive {
+                    let supplied_confirmation = input
+                        .get("confirmation_sha256")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            invalid("confirmation_sha256 is required for destructive requests")
+                        })?;
+                    if supplied_confirmation != expected_confirmation {
+                        return Err(invalid(
+                            "confirmation_sha256 does not match the document revision and exact request batch",
+                        ));
+                    }
+                }
+
+                let batch_result = match client
+                    .batch_update(document_id, &requests, required_revision_id)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(DocsError::Api {
+                        status_code: 400, ..
+                    }) => {
+                        let readback = client.get_document(document_id).await.ok();
+                        return Ok(json!({
+                            "status": "revision_conflict_or_provider_rejected",
+                            "document_id": document_id,
+                            "destructive": destructive,
+                            "revision_before": revision_before,
+                            "readback": readback.as_ref().map_or_else(|| json!({ "available": false }), document_receipt),
+                            "retry_safe": false,
+                        }));
+                    }
+                    Err(DocsError::Json(_)) => {
+                        let readback = client.get_document(document_id).await.ok();
+                        return Ok(json!({
+                            "status": "outcome_uncertain",
+                            "document_id": document_id,
+                            "destructive": destructive,
+                            "revision_before": revision_before,
+                            "readback": readback.as_ref().map_or_else(|| json!({ "available": false }), document_receipt),
+                            "retry_safe": false,
+                        }));
+                    }
+                    Err(error) if error.is_retryable() => {
+                        let readback = client.get_document(document_id).await.ok();
+                        return Ok(json!({
+                            "status": "outcome_uncertain",
+                            "document_id": document_id,
+                            "destructive": destructive,
+                            "revision_before": revision_before,
+                            "readback": readback.as_ref().map_or_else(|| json!({ "available": false }), document_receipt),
+                            "retry_safe": false,
+                        }));
+                    }
+                    Err(error) => return Err(error.to_fcp_error()),
+                };
+                let readback_document = client.get_document(document_id).await.ok();
                 Ok(json!({
+                    "status": if readback_document.is_some() { "applied_and_verified" } else { "applied_unverified" },
                     "document_id": batch_result.document_id,
-                    "replies": batch_result.replies,
+                    "destructive": destructive,
+                    "request_count": requests.len(),
+                    "request_kinds": requests.iter().map(Request::kind).collect::<Vec<_>>(),
+                    "reply_count": batch_result.replies.len(),
+                    "preflight": document_receipt(&preflight_document),
+                    "readback": readback_document.as_ref().map_or_else(|| json!({ "available": false }), document_receipt),
+                    "retry_safe": false,
                 }))
             }
             _ => Err(FcpError::InvalidRequest {
@@ -618,6 +1253,10 @@ impl DocsConnector {
             client.shutdown();
         }
         self.client = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
         info!("Google Docs connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -1297,5 +1936,110 @@ mod tests {
         let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["metrics"]["requests_total"], 0);
         assert_eq!(result["metrics"]["requests_error"], 0);
+    }
+
+    #[test]
+    fn typed_request_allowlist_rejects_raw_escape_and_unknown_nested_fields() {
+        let raw_escape = json!({
+            "requests": [{ "deleteTab": { "tabId": "tab-1" } }]
+        });
+        assert!(validated_requests(&raw_escape).is_err());
+
+        let unknown_nested = json!({
+            "requests": [{
+                "insertText": {
+                    "location": { "index": 1, "unexpected": true },
+                    "text": "hello"
+                }
+            }]
+        });
+        assert!(validated_requests(&unknown_nested).is_err());
+    }
+
+    #[test]
+    fn typed_request_allowlist_classifies_and_bounds_requests() {
+        let input = json!({
+            "requests": [
+                { "insertText": { "location": { "index": 1 }, "text": "hello" } },
+                { "deleteContentRange": { "range": { "startIndex": 2, "endIndex": 5 } } }
+            ]
+        });
+        let requests = validated_requests(&input).unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].is_destructive());
+        assert!(requests[1].is_destructive());
+
+        let too_many = json!({
+            "requests": (0..=MAX_REQUESTS)
+                .map(|_| json!({ "insertText": { "location": { "index": 1 }, "text": "x" } }))
+                .collect::<Vec<_>>()
+        });
+        assert!(validated_requests(&too_many).is_err());
+    }
+
+    #[test]
+    fn destructive_confirmation_is_bound_to_revision_and_exact_payload() {
+        let first = validated_requests(&json!({
+            "requests": [{
+                "replaceAllText": {
+                    "containsText": { "text": "old", "matchCase": true },
+                    "replaceText": "new"
+                }
+            }]
+        }))
+        .unwrap();
+        let second = validated_requests(&json!({
+            "requests": [{
+                "replaceAllText": {
+                    "containsText": { "text": "old", "matchCase": true },
+                    "replaceText": "different"
+                }
+            }]
+        }))
+        .unwrap();
+        let hash = confirmation_sha256("doc", "rev-1", &first).unwrap();
+        assert_ne!(hash, confirmation_sha256("doc", "rev-2", &first).unwrap());
+        assert_ne!(hash, confirmation_sha256("doc", "rev-1", &second).unwrap());
+    }
+
+    #[test]
+    fn compact_document_pages_utf8_without_splitting_codepoints() {
+        let document = json!({
+            "documentId": "doc",
+            "title": "test",
+            "revisionId": "rev",
+            "body": { "content": [{ "paragraph": { "elements": [
+                { "textRun": { "content": "a😀b" } }
+            ] } }] }
+        });
+        let compact = compact_document(&document, 1, 4);
+        assert_eq!(compact["text"], "😀");
+        assert_eq!(compact["text_next_offset"], 5);
+        assert_eq!(compact["text_complete"], false);
+    }
+
+    #[test]
+    fn compact_document_result_stays_below_manifest_budget() {
+        let document = json!({
+            "documentId": "doc",
+            "title": "bounded",
+            "revisionId": "rev",
+            "body": { "content": [{ "paragraph": { "elements": [
+                { "textRun": { "content": "x".repeat(200_000) } }
+            ] } }] }
+        });
+        let compact = compact_document(&document, 0, MAX_READ_TEXT_BYTES);
+        assert!(serde_json::to_vec(&compact).unwrap().len() < 60_000);
+        assert_eq!(compact["text_complete"], false);
+    }
+
+    #[test]
+    fn operation_input_rejects_unknown_top_level_fields() {
+        let error = validate_docs_input(
+            "docs.get",
+            &json!({ "document_id": "doc", "provider_escape": {} }),
+        )
+        .unwrap_err();
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
 }

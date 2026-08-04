@@ -5,16 +5,16 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:dae5df99cb8da7003d13538814b78ac90b4f94f3b3c5420183486bfb6682e806"
+interface_hash = "blake3-256:fcp.interface.v2:48849887e5fb65e149ee6c3c0e2d43fc187eb943a57559714ce86d8fa5f35c92"
 
 [connector]
-id = "fcp.google_docs"
+id = "google-docs"
 name = "Google Docs Connector"
 version = "0.1.0"
 description = "FCP connector for Google Docs (get, create, and batch update documents)"
 archetypes = ["operational", "knowledge"]
 format = "wasi"
-status = "proven"
+status = "incubating"
 
 [connector.state]
 model = "singleton_writer"
@@ -48,8 +48,19 @@ idempotency = "strict"
 [provides.operations."docs.get".input_schema]
 required = ["document_id"]
 type = "object"
+additionalProperties = false
 [provides.operations."docs.get".input_schema.properties.document_id]
 type = "string"
+minLength = 1
+maxLength = 512
+[provides.operations."docs.get".input_schema.properties.text_offset]
+type = "integer"
+minimum = 0
+maximum = 10000000
+[provides.operations."docs.get".input_schema.properties.text_limit]
+type = "integer"
+minimum = 1
+maximum = 48000
 
 [provides.operations."docs.get".output_schema]
 required = ["document"]
@@ -70,7 +81,7 @@ dns_max_ips = 16
 max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
-max_response_bytes = 5242880
+max_response_bytes = 60000
 
 [provides.operations."docs.get".ai_hints]
 when_to_use = "Retrieve a Google Docs document including title, body content, and structure."
@@ -91,14 +102,23 @@ idempotency = "none"
 [provides.operations."docs.create".input_schema]
 required = ["title"]
 type = "object"
+additionalProperties = false
 [provides.operations."docs.create".input_schema.properties.title]
 type = "string"
+minLength = 1
+maxLength = 256
 
 [provides.operations."docs.create".output_schema]
-required = ["document"]
+required = ["status"]
 type = "object"
+[provides.operations."docs.create".output_schema.properties.status]
+type = "string"
 [provides.operations."docs.create".output_schema.properties.document]
 type = "object"
+[provides.operations."docs.create".output_schema.properties.readback]
+type = "object"
+[provides.operations."docs.create".output_schema.properties.retry_safe]
+type = "boolean"
 
 [provides.operations."docs.create".network_constraints]
 host_allow = ["docs.googleapis.com"]
@@ -113,7 +133,7 @@ dns_max_ips = 16
 max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
-max_response_bytes = 1048576
+max_response_bytes = 60000
 
 [provides.operations."docs.create".ai_hints]
 when_to_use = "Create a brand new Google Docs document with a given title."
@@ -124,28 +144,46 @@ related = ["docs.get", "docs.batch_update"]
 # ────────────────────────────────────────────────────────────────
 
 [provides.operations."docs.batch_update"]
-description = "Apply batch updates to a Google Docs document"
+description = "Apply an allowlisted revision-guarded batch to a Google Docs document"
 capability = "docs.write"
 risk_level = "high"
-safety_tier = "risky"
-requires_approval = "policy"
-idempotency = "best_effort"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
 
 [provides.operations."docs.batch_update".input_schema]
 required = ["document_id", "requests"]
 type = "object"
+additionalProperties = false
 [provides.operations."docs.batch_update".input_schema.properties.document_id]
 type = "string"
+minLength = 1
+maxLength = 512
 [provides.operations."docs.batch_update".input_schema.properties.requests]
 type = "array"
+minItems = 1
+maxItems = 100
+[provides.operations."docs.batch_update".input_schema.properties.required_revision_id]
+type = "string"
+minLength = 1
+maxLength = 512
+[provides.operations."docs.batch_update".input_schema.properties.confirm_destructive]
+type = "boolean"
+[provides.operations."docs.batch_update".input_schema.properties.confirmation_sha256]
+type = "string"
+pattern = "^[0-9a-f]{64}$"
 
 [provides.operations."docs.batch_update".output_schema]
-required = ["document_id", "replies"]
+required = ["status", "document_id"]
 type = "object"
+[provides.operations."docs.batch_update".output_schema.properties.status]
+type = "string"
 [provides.operations."docs.batch_update".output_schema.properties.document_id]
 type = "string"
-[provides.operations."docs.batch_update".output_schema.properties.replies]
-type = "array"
+[provides.operations."docs.batch_update".output_schema.properties.preflight]
+type = "object"
+[provides.operations."docs.batch_update".output_schema.properties.readback]
+type = "object"
 
 [provides.operations."docs.batch_update".network_constraints]
 host_allow = ["docs.googleapis.com"]
@@ -160,12 +198,12 @@ dns_max_ips = 16
 max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
-max_response_bytes = 5242880
+max_response_bytes = 60000
 
 [provides.operations."docs.batch_update".ai_hints]
-when_to_use = "Insert text, delete content, or update text styling in an existing document."
-common_mistakes = ["Requests are applied in order — indices shift after inserts/deletes", "Apply changes in reverse index order to avoid index drift"]
-examples = ['{"document_id": "abc123", "requests": [{"insertText": {"location": {"index": 1}, "text": "Hello"}}]}']
+when_to_use = "Apply a bounded typed edit batch after reading the current revision; destructive batches first return an exact confirmation receipt."
+common_mistakes = ["Requests are applied in order — indices shift after inserts/deletes", "Retrying an uncertain write before a direct readback", "Reusing a confirmation hash after the revision or request payload changes"]
+examples = ['{"document_id":"abc123","required_revision_id":"rev1","requests":[{"insertText":{"location":{"index":1},"text":"Hello"}}]}']
 related = ["docs.get"]
 
 # ── Events ──────────────────────────────────────────────────────

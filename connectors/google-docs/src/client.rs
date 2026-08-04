@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use tracing::{debug, instrument};
 
 use crate::error::{DocsError, DocsResult};
-use crate::types::{BatchUpdateResponse, Document};
+use crate::types::{BatchUpdateResponse, Request};
 
 const DEFAULT_BASE_URL: &str = "https://docs.googleapis.com/v1";
 
@@ -47,7 +47,10 @@ impl DocsClient {
     /// Create a new Docs client with the shared Google auth.
     pub fn new_with_auth(auth: GoogleMaterializedAuth) -> DocsResult<Self> {
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::ACCEPT, "application/json".parse().unwrap());
+        headers.insert(
+            header::ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
 
         let client = Client::builder()
             .default_headers(headers)
@@ -91,38 +94,46 @@ impl DocsClient {
     pub fn auth_redacted_label(&self) -> String {
         match &self.auth {
             GoogleMaterializedAuth::BearerToken { source, .. } => source.to_string(),
-            GoogleMaterializedAuth::CredentialReference { credential_id, .. } => {
-                format!("credential_id:{credential_id}")
-            }
+            GoogleMaterializedAuth::CredentialReference { .. } => "credential_reference".into(),
         }
     }
 
     /// Get a document by ID.
-    #[instrument(skip(self), fields(document_id))]
-    pub async fn get_document(&self, document_id: &str) -> DocsResult<Document> {
+    #[instrument(skip(self, document_id), fields(operation = "docs.get"))]
+    pub async fn get_document(&self, document_id: &str) -> DocsResult<serde_json::Value> {
         let document_id = sanitize_path_segment(document_id, "document_id")?;
-        let url = format!("{}/documents/{document_id}", self.base_url);
+        let url = format!(
+            "{}/documents/{document_id}?includeTabsContent=true",
+            self.base_url
+        );
         self.get_json(&url).await
     }
 
     /// Create a new document.
-    #[instrument(skip(self), fields(title))]
-    pub async fn create_document(&self, title: &str) -> DocsResult<Document> {
+    #[instrument(skip(self, title), fields(operation = "docs.create"))]
+    pub async fn create_document(&self, title: &str) -> DocsResult<serde_json::Value> {
         let url = format!("{}/documents", self.base_url);
         let body = serde_json::json!({ "title": title });
         self.post_json(&url, &body).await
     }
 
     /// Apply batch updates to a document.
-    #[instrument(skip(self, requests), fields(document_id))]
+    #[instrument(
+        skip(self, document_id, requests, required_revision_id),
+        fields(operation = "docs.batch_update")
+    )]
     pub async fn batch_update(
         &self,
         document_id: &str,
-        requests: Vec<serde_json::Value>,
+        requests: &[Request],
+        required_revision_id: &str,
     ) -> DocsResult<BatchUpdateResponse> {
         let document_id = sanitize_path_segment(document_id, "document_id")?;
         let url = format!("{}/documents/{document_id}:batchUpdate", self.base_url);
-        let body = serde_json::json!({ "requests": requests });
+        let body = serde_json::json!({
+            "requests": requests,
+            "writeControl": { "requiredRevisionId": required_revision_id },
+        });
         self.post_json(&url, &body).await
     }
 
@@ -337,29 +348,29 @@ fn map_rest_error(error: GoogleRestError) -> DocsError {
     match error {
         GoogleRestError::Http { source } => DocsError::Http(source),
         GoogleRestError::JsonDecode { source } => DocsError::Json(source),
-        GoogleRestError::Api { error, .. } => map_google_api_error(error),
-        other => DocsError::Api {
+        GoogleRestError::Api { error, .. } => map_google_api_error(&error),
+        _ => DocsError::Api {
             status_code: 500,
-            message: other.to_string(),
+            message: "provider transport failure".into(),
         },
     }
 }
 
-fn map_google_api_error(error: GoogleApiError) -> DocsError {
+fn map_google_api_error(error: &GoogleApiError) -> DocsError {
     match error.status_code {
         401 => DocsError::Unauthorized,
         403 => DocsError::Forbidden {
-            message: error.message,
+            message: "provider denied access".into(),
         },
         404 => DocsError::DocumentNotFound {
-            document_id: error.message,
+            document_id: "[REDACTED]".into(),
         },
         429 => DocsError::RateLimited {
             retry_after_ms: error.retry_after_ms.unwrap_or(60_000),
         },
         code => DocsError::Api {
             status_code: code,
-            message: error.message,
+            message: "provider rejected request".into(),
         },
     }
 }
@@ -370,7 +381,7 @@ mod tests {
 
     #[test]
     fn map_google_api_error_401() {
-        let err = map_google_api_error(GoogleApiError {
+        let err = map_google_api_error(&GoogleApiError {
             status_code: 401,
             message: "bad token".into(),
             status: None,
@@ -384,7 +395,7 @@ mod tests {
 
     #[test]
     fn map_google_api_error_403() {
-        let err = map_google_api_error(GoogleApiError {
+        let err = map_google_api_error(&GoogleApiError {
             status_code: 403,
             message: "forbidden".into(),
             status: None,
@@ -398,7 +409,7 @@ mod tests {
 
     #[test]
     fn map_google_api_error_404() {
-        let err = map_google_api_error(GoogleApiError {
+        let err = map_google_api_error(&GoogleApiError {
             status_code: 404,
             message: "not found".into(),
             status: None,
@@ -412,7 +423,7 @@ mod tests {
 
     #[test]
     fn map_google_api_error_429() {
-        let err = map_google_api_error(GoogleApiError {
+        let err = map_google_api_error(&GoogleApiError {
             status_code: 429,
             message: "rate limited".into(),
             status: None,
@@ -426,7 +437,7 @@ mod tests {
 
     #[test]
     fn map_google_api_error_500() {
-        let err = map_google_api_error(GoogleApiError {
+        let err = map_google_api_error(&GoogleApiError {
             status_code: 500,
             message: "internal".into(),
             status: None,
@@ -436,24 +447,24 @@ mod tests {
             retry_after_ms: None,
         });
         assert!(matches!(
-            err,
+            &err,
             DocsError::Api {
                 status_code: 500,
                 ..
             }
         ));
+        assert!(!err.to_fcp_error().to_string().contains("internal"));
     }
 
     #[test]
     fn auth_redacted_label_credential_ref() {
         let cred_id = fcp_core::CredentialId::new();
-        let label = format!("credential_id:{cred_id}");
         let client = DocsClient::new_with_auth(GoogleMaterializedAuth::CredentialReference {
             credential_id: cred_id,
             quota_project_id: None,
         })
         .unwrap();
-        assert_eq!(client.auth_redacted_label(), label);
+        assert_eq!(client.auth_redacted_label(), "credential_reference");
     }
 
     #[test]

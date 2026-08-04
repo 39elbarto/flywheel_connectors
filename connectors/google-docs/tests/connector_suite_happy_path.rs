@@ -19,6 +19,7 @@ use wiremock::{
 const CONNECTOR_ID: &str = "google-docs";
 const OP_GET_DOCUMENT: &str = "docs.get";
 const CAP_READ: &str = "docs.read";
+const CAP_WRITE: &str = "docs.write";
 const DOCUMENT_ID: &str = "doc_test_123";
 
 struct GoogleDocsAdapter {
@@ -156,7 +157,10 @@ fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> Hand
         zone_dir: None,
         host_public_key,
         nonce: [23u8; 32],
-        capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
+        capabilities_requested: vec![
+            CapabilityId::from_static(CAP_READ),
+            CapabilityId::from_static(CAP_WRITE),
+        ],
         host: None,
         transport_caps: None,
         requested_instance_id: Some(instance_id),
@@ -180,6 +184,57 @@ fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> Cap
         .issuer("node:test")
         .audience("z:work")
         .token_id(b"google-docs-connector-suite")
+        .validity(now, now + Duration::hours(1))
+        .try_constraints_cbor(&cbor)
+        .expect("valid constraints cbor")
+        .target_instance(instance_id.as_str())
+        .sign(signing_key)
+        .expect("capability token");
+    CapabilityToken::from_raw(raw)
+}
+
+fn build_write_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
+    let now = Utc::now();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec![format!("google-docs:document:{DOCUMENT_ID}")],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+    let raw = CapabilityTokenBuilder::new()
+        .capability_id(CAP_WRITE)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(&["docs.batch_update"])
+        .issuer("node:test")
+        .audience("z:work")
+        .validity(now, now + Duration::hours(1))
+        .try_constraints_cbor(&cbor)
+        .expect("valid constraints cbor")
+        .target_instance(instance_id.as_str())
+        .sign(signing_key)
+        .expect("capability token");
+    CapabilityToken::from_raw(raw)
+}
+
+fn build_create_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
+    let now = Utc::now();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["google-docs:documents".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+    let raw = CapabilityTokenBuilder::new()
+        .capability_id(CAP_WRITE)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(&["docs.create"])
+        .issuer("node:test")
+        .audience("z:work")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("valid constraints cbor")
@@ -267,4 +322,176 @@ async fn connector_suite_happy_path_gets_document() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_document_performs_metadata_readback_without_retry_receipt() {
+    use wiremock::matchers::body_json;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/documents"))
+        .and(body_json(json!({ "title": "Created once" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "documentId": DOCUMENT_ID,
+            "title": "Created once"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{DOCUMENT_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "documentId": DOCUMENT_ID,
+            "title": "Created once",
+            "revisionId": "rev-created",
+            "body": { "content": [] }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    let mut connector = DocsConnector::new();
+    connector
+        .handle_configure(json!({
+            "access_token": "ya29_test_docs",
+            "base_url": format!("{}/v1", server.uri()),
+        }))
+        .await
+        .expect("configure connector");
+    connector
+        .handle_handshake(
+            serde_json::to_value(handshake_request(
+                signing_key.verifying_key().to_bytes(),
+                instance_id.clone(),
+            ))
+            .expect("serialize handshake"),
+        )
+        .await
+        .expect("handshake connector");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "docs.create",
+            "input": { "title": "Created once" },
+            "capability_token": build_create_token(&signing_key, &instance_id),
+        }))
+        .await
+        .expect("create and read back document");
+    assert_eq!(result["status"], "created_and_verified");
+    assert_eq!(result["document"]["document_id"], DOCUMENT_ID);
+    assert_eq!(result["readback"]["revision_id"], "rev-created");
+    assert_eq!(result["retry_safe"], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn destructive_batch_requires_bound_confirmation_revision_and_readback() {
+    use wiremock::matchers::body_json;
+
+    let server = MockServer::start().await;
+    let document = json!({
+        "documentId": DOCUMENT_ID,
+        "title": "Bounded edit",
+        "revisionId": "rev-1",
+        "body": { "content": [] }
+    });
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{DOCUMENT_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(document))
+        .expect(4)
+        .mount(&server)
+        .await;
+
+    let requests = json!([{
+        "deleteContentRange": {
+            "range": { "startIndex": 2, "endIndex": 5 }
+        }
+    }]);
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/documents/{DOCUMENT_ID}:batchUpdate")))
+        .and(body_json(json!({
+            "requests": requests,
+            "writeControl": { "requiredRevisionId": "rev-1" }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "documentId": DOCUMENT_ID,
+            "replies": [{}],
+            "writeControl": { "requiredRevisionId": "rev-2" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    let mut connector = DocsConnector::new();
+    connector
+        .handle_configure(json!({
+            "access_token": "ya29_test_docs",
+            "base_url": format!("{}/v1", server.uri()),
+        }))
+        .await
+        .expect("configure connector");
+    connector
+        .handle_handshake(
+            serde_json::to_value(handshake_request(
+                signing_key.verifying_key().to_bytes(),
+                instance_id.clone(),
+            ))
+            .expect("serialize handshake"),
+        )
+        .await
+        .expect("handshake connector");
+
+    let token = build_write_token(&signing_key, &instance_id);
+    let preflight = connector
+        .handle_invoke(json!({
+            "operation": "docs.batch_update",
+            "input": { "document_id": DOCUMENT_ID, "requests": requests },
+            "capability_token": token,
+        }))
+        .await
+        .expect("destructive preflight");
+    assert_eq!(preflight["status"], "confirmation_required");
+    assert_eq!(preflight["impact"][0]["utf16_units"], 3);
+    let confirmation = preflight["confirmation_sha256"]
+        .as_str()
+        .expect("confirmation hash");
+
+    let stale_revision = connector
+        .handle_invoke(json!({
+            "operation": "docs.batch_update",
+            "input": {
+                "document_id": DOCUMENT_ID,
+                "requests": requests,
+                "required_revision_id": "stale-revision",
+                "confirm_destructive": true,
+                "confirmation_sha256": confirmation,
+            },
+            "capability_token": build_write_token(&signing_key, &instance_id),
+        }))
+        .await
+        .expect_err("stale revision must fail before provider write");
+    assert!(matches!(stale_revision, FcpError::InvalidRequest { .. }));
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "docs.batch_update",
+            "input": {
+                "document_id": DOCUMENT_ID,
+                "requests": requests,
+                "required_revision_id": "rev-1",
+                "confirm_destructive": true,
+                "confirmation_sha256": confirmation,
+            },
+            "capability_token": build_write_token(&signing_key, &instance_id),
+        }))
+        .await
+        .expect("confirmed destructive update");
+    assert_eq!(result["status"], "applied_and_verified");
+    assert_eq!(result["destructive"], true);
+    assert_eq!(result["reply_count"], 1);
+    assert_eq!(result["readback"]["revision_id"], "rev-1");
 }

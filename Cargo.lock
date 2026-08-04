@@ -4465,6 +4465,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-google-apps-script"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-manifest",
+ "fcp-prelude",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-google-calendar"
 version = "0.2.0"
 dependencies = [

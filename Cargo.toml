@@ -83,6 +83,7 @@ members = [
     "connectors/google-admin-reports",
     "connectors/google-chat",
     "connectors/google-docs",
+    "connectors/google-apps-script",
     "connectors/google-drive",
     "connectors/google-places",
     "connectors/google-people",

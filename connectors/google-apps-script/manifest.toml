@@ -1,0 +1,227 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:18c67ae63663c6e5cc487d59be7867c0b70384c31e289b30ecc075974b18561a"
+
+[connector]
+id = "google-apps-script"
+name = "Google Apps Script Connector"
+version = "0.1.0"
+description = "Bounded project, source, version, deployment, metrics, and process operations for Apps Script v1"
+archetypes = ["operational", "knowledge"]
+format = "wasi"
+status = "incubating"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["script.read", "script.source.write", "script.deployment.write"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."script.projects.get"]
+description = "Get Apps Script project metadata"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["script_id"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 60000 }
+
+[provides.operations."script.projects.get_content"]
+description = "Get a bounded source inventory or one source file"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["script_id"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, version_number = { type = "integer", minimum = 1 }, file_name = { type = "string", minLength = 1, maxLength = 512 }, source_offset = { type = "integer", minimum = 0 }, source_limit = { type = "integer", minimum = 1, maximum = 48000 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 5242880 }
+
+[provides.operations."script.projects.create"]
+description = "Create an Apps Script project"
+capability = "script.source.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["title"], properties = { title = { type = "string", minLength = 1, maxLength = 256 }, parent_id = { type = "string", minLength = 1, maxLength = 512 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."script.projects.update_content"]
+description = "Replace complete Apps Script project source after inventory confirmation"
+capability = "script.source.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["script_id", "files", "expected_current_inventory_sha256", "expected_removed_files", "confirm_replace_all_files"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, files = { type = "array", minItems = 1, maxItems = 200, items = { type = "object", required = ["name", "type", "source"], properties = { name = { type = "string", minLength = 1, maxLength = 128 }, type = { type = "string", enum = ["SERVER_JS", "HTML", "JSON"] }, source = { type = "string" } }, additionalProperties = false } }, expected_current_inventory_sha256 = { type = "string", pattern = "^[0-9a-f]{64}$" }, expected_removed_files = { type = "array", items = { type = "string", minLength = 1, maxLength = 128 }, uniqueItems = true }, confirm_replace_all_files = { const = true } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 5242880 }
+
+[provides.operations."script.projects.get_metrics"]
+description = "Read Apps Script project metrics"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["script_id", "granularity"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, granularity = { type = "string", enum = ["DAILY", "WEEKLY"] }, deployment_id = { type = "string", minLength = 1, maxLength = 512 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."script.versions.create"]
+description = "Create an immutable Apps Script version"
+capability = "script.source.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["script_id"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, description = { type = "string", maxLength = 512 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."script.versions.get"]
+description = "Get an Apps Script version"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["script_id", "version_number"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, version_number = { type = "integer", minimum = 1 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 60000 }
+
+[provides.operations."script.versions.list"]
+description = "List Apps Script versions"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["script_id"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, page_size = { type = "integer", minimum = 1, maximum = 50 }, page_token = { type = "string", minLength = 1, maxLength = 4096 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."script.deployments.get"]
+description = "Get an Apps Script deployment"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["script_id", "deployment_id"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, deployment_id = { type = "string", minLength = 1, maxLength = 512 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 60000 }
+
+[provides.operations."script.deployments.list"]
+description = "List Apps Script deployments"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["script_id"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, page_size = { type = "integer", minimum = 1, maximum = 50 }, page_token = { type = "string", minLength = 1, maxLength = 4096 } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."script.deployments.create"]
+description = "Create an Apps Script deployment after confirmation"
+capability = "script.deployment.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["script_id", "deployment_config", "confirm_deployment_change"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, deployment_config = { type = "object", required = ["script_id", "version_number", "manifest_file_name"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, version_number = { type = "integer", minimum = 1 }, manifest_file_name = { type = "string", minLength = 1, maxLength = 128 }, description = { type = "string", maxLength = 512 } }, additionalProperties = false }, confirm_deployment_change = { const = true } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."script.deployments.update"]
+description = "Update an Apps Script deployment after preflight and confirmation"
+capability = "script.deployment.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["script_id", "deployment_id", "deployment_config", "confirm_deployment_change"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, deployment_id = { type = "string", minLength = 1, maxLength = 512 }, deployment_config = { type = "object", required = ["script_id", "version_number", "manifest_file_name"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, version_number = { type = "integer", minimum = 1 }, manifest_file_name = { type = "string", minLength = 1, maxLength = 128 }, description = { type = "string", maxLength = 512 } }, additionalProperties = false }, confirm_deployment_change = { const = true } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."script.processes.list"]
+description = "List Apps Script process history"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { page_size = { type = "integer", minimum = 1, maximum = 50 }, page_token = { type = "string", minLength = 1, maxLength = 4096 }, function_name = { type = "string", minLength = 1, maxLength = 512 }, deployment_id = { type = "string", minLength = 1, maxLength = 512 }, start_time = { type = "string", format = "date-time" }, end_time = { type = "string", format = "date-time" }, types = { type = "array", maxItems = 10, uniqueItems = true, items = { type = "string", enum = ["ADD_ON", "EXECUTION_API", "TIME_DRIVEN", "TRIGGER", "WEBAPP", "EDITOR", "SIMPLE_TRIGGER", "MENU", "BATCH_TASK"] } }, statuses = { type = "array", maxItems = 10, uniqueItems = true, items = { type = "string", enum = ["RUNNING", "PAUSED", "COMPLETED", "CANCELED", "FAILED", "TIMED_OUT", "UNKNOWN", "DELAYED", "EXECUTION_DISABLED"] } }, user_access_levels = { type = "array", maxItems = 10, uniqueItems = true, items = { type = "string", enum = ["NONE", "READ", "WRITE", "OWNER"] } } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."script.processes.list_for_project"]
+description = "List Apps Script process history for one project"
+capability = "script.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["script_id"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, page_size = { type = "integer", minimum = 1, maximum = 50 }, page_token = { type = "string", minLength = 1, maxLength = 4096 }, function_name = { type = "string", minLength = 1, maxLength = 512 }, deployment_id = { type = "string", minLength = 1, maxLength = 512 }, start_time = { type = "string", format = "date-time" }, end_time = { type = "string", format = "date-time" }, types = { type = "array", maxItems = 10, uniqueItems = true, items = { type = "string", enum = ["ADD_ON", "EXECUTION_API", "TIME_DRIVEN", "TRIGGER", "WEBAPP", "EDITOR", "SIMPLE_TRIGGER", "MENU", "BATCH_TASK"] } }, statuses = { type = "array", maxItems = 10, uniqueItems = true, items = { type = "string", enum = ["RUNNING", "PAUSED", "COMPLETED", "CANCELED", "FAILED", "TIMED_OUT", "UNKNOWN", "DELAYED", "EXECUTION_DISABLED"] } }, user_access_levels = { type = "array", maxItems = 10, uniqueItems = true, items = { type = "string", enum = ["NONE", "READ", "WRITE", "OWNER"] } } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/etc/ssl/certs", "/usr/share/zoneinfo", "/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "script.read"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "script.write"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"script.projects.get" = ["script.read"]
+"script.projects.get_content" = ["script.read"]
+"script.projects.create" = ["script.write"]
+"script.projects.update_content" = ["script.write"]
+"script.projects.get_metrics" = ["script.read"]
+"script.versions.create" = ["script.write"]
+"script.versions.get" = ["script.read"]
+"script.versions.list" = ["script.read"]
+"script.deployments.get" = ["script.read"]
+"script.deployments.list" = ["script.read"]
+"script.deployments.create" = ["script.write"]
+"script.deployments.update" = ["script.write"]
+"script.processes.list" = ["script.read"]
+"script.processes.list_for_project" = ["script.read"]

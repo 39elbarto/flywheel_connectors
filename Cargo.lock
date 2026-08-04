@@ -4470,6 +4470,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",

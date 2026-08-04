@@ -930,7 +930,10 @@ fn internal_json(error: serde_json::Error) -> FcpError {
 mod tests {
     use super::*;
     use crate::{client::AppsScriptClient, types::FileType};
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
+    use fcp_prelude::CapabilityConstraints;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -1071,5 +1074,73 @@ mod tests {
         .await
         .expect_err("omitted file must require exact removal acknowledgement");
         assert!(error.to_string().contains("expected_removed_files"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn wrong_capability_is_denied_before_provider_io() {
+        let server = MockServer::start().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let instance_id = fcp_core::InstanceId::new();
+        let mut connector = AppsScriptConnector::new();
+        connector
+            .handle_configure(json!({
+                "access_token": (["test", "token"].join("-")),
+                "base_url": format!("{}/v1", server.uri())
+            }))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:private",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0_u8; 32],
+                "capabilities_requested": ["script.read", "script.source.write"],
+                "requested_instance_id": instance_id
+            }))
+            .await
+            .expect("handshake");
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..CapabilityConstraints::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize constraints");
+        let now = Utc::now();
+        let token = CapabilityTokenBuilder::new()
+            .capability_id("script.source.write")
+            .zone_id("z:private")
+            .principal("user:test")
+            .operations(&["script.projects.get"])
+            .issuer("node:test")
+            .audience("*")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("attach constraints")
+            .target_instance(instance_id.as_str())
+            .sign(&signing_key)
+            .expect("sign capability token");
+        let error = connector
+            .handle_invoke(json!({
+                "operation": "script.projects.get",
+                "input": {"script_id": "script_123"},
+                "capability_token": CapabilityToken::from_raw(token)
+            }))
+            .await
+            .expect_err("wrong capability must be denied");
+        assert!(
+            matches!(
+                error,
+                FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("received requests")
+                .is_empty()
+        );
     }
 }

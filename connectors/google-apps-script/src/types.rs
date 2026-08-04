@@ -12,13 +12,50 @@ pub enum FileType {
 }
 
 /// One complete source file in an Apps Script project.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScriptFile {
     pub name: String,
     #[serde(rename = "type")]
     pub file_type: FileType,
     pub source: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ScriptFileResponse {
+    name: String,
+    #[serde(rename = "type")]
+    file_type: FileType,
+    source: String,
+    #[serde(default)]
+    last_modify_user: Option<serde_json::Value>,
+    #[serde(default)]
+    create_time: Option<String>,
+    #[serde(default)]
+    update_time: Option<String>,
+    #[serde(default)]
+    function_set: Option<serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for ScriptFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let response = ScriptFileResponse::deserialize(deserializer)?;
+        drop((
+            response.last_modify_user,
+            response.create_time,
+            response.update_time,
+            response.function_set,
+        ));
+        Ok(Self {
+            name: response.name,
+            file_type: response.file_type,
+            source: response.source,
+        })
+    }
 }
 
 /// Apps Script project metadata.
@@ -238,6 +275,29 @@ mod tests {
             "extra": true
         });
         assert!(serde_json::from_value::<ScriptFile>(value).is_err());
+    }
+
+    #[test]
+    fn script_file_accepts_and_drops_provider_output_metadata() {
+        let value = serde_json::json!({
+            "name": "Code",
+            "type": "SERVER_JS",
+            "source": "function f() {}",
+            "lastModifyUser": {"name": "Example"},
+            "createTime": "2026-08-04T00:00:00Z",
+            "updateTime": "2026-08-04T00:01:00Z",
+            "functionSet": {"values": [{"name": "f", "parameters": []}]}
+        });
+        let file = serde_json::from_value::<ScriptFile>(value).unwrap();
+        assert_eq!(file.name, "Code");
+        assert_eq!(
+            serde_json::to_value(file).unwrap(),
+            serde_json::json!({
+                "name": "Code",
+                "type": "SERVER_JS",
+                "source": "function f() {}"
+            })
+        );
     }
 
     #[test]

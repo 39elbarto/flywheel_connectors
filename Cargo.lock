@@ -4627,6 +4627,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-google-drive-activity"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-prelude",
+ "fcp-sdk",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-google-forms"
 version = "0.2.0"
 dependencies = [

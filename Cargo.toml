@@ -87,6 +87,7 @@ members = [
     "connectors/google-slides",
     "connectors/google-forms",
     "connectors/google-drive",
+    "connectors/google-drive-activity",
     "connectors/google-places",
     "connectors/google-people",
     "connectors/google-sheets",

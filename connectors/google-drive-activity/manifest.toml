@@ -1,0 +1,164 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:a9003887221fa5633a6e4fb2e49861c3b863061ac1ae87f37a704db4c9f04d20"
+
+[connector]
+id = "google-drive-activity"
+name = "Google Drive Activity Connector"
+version = "0.1.0"
+description = "Strictly read-only, bounded Google Drive Activity history queries"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+status = "incubating"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+]
+allowed_targets = ["z:private"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["drive.activity.readonly"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."drive_activity.query"]
+description = "Query one bounded page of historical Drive activity"
+capability = "drive.activity.readonly"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."drive_activity.query".input_schema]
+additionalProperties = false
+required = ["consolidation"]
+type = "object"
+
+[[provides.operations."drive_activity.query".input_schema.oneOf]]
+required = ["item_name"]
+
+[[provides.operations."drive_activity.query".input_schema.oneOf]]
+required = ["ancestor_name"]
+
+[provides.operations."drive_activity.query".input_schema.properties.ancestor_name]
+pattern = "^items/[^/]+$"
+type = "string"
+
+[provides.operations."drive_activity.query".input_schema.properties.consolidation]
+enum = [
+    "none",
+    "legacy",
+]
+type = "string"
+
+[provides.operations."drive_activity.query".input_schema.properties.cursor_binding_sha256]
+pattern = "^[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."drive_activity.query".input_schema.properties.filter]
+maxLength = 512
+type = "string"
+
+[provides.operations."drive_activity.query".input_schema.properties.item_name]
+pattern = "^items/[^/]+$"
+type = "string"
+
+[provides.operations."drive_activity.query".input_schema.properties.page_size]
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."drive_activity.query".input_schema.properties.page_token]
+maxLength = 2048
+type = "string"
+
+[provides.operations."drive_activity.query".input_schema.properties.root_scope_ack]
+type = "boolean"
+
+[provides.operations."drive_activity.query".output_schema]
+required = [
+    "activities",
+    "untrusted_content",
+]
+type = "object"
+
+[provides.operations."drive_activity.query".network_constraints]
+host_allow = ["driveactivity.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."drive_activity.query".ai_hints]
+when_to_use = "Inspect who changed what in Drive during a bounded period."
+common_mistakes = [
+    "Using items/root without explicit acknowledgement and a <=31 day time window.",
+    "Treating historical activity as authority for a follow-up write.",
+]
+examples = ['{"item_name":"items/FILE_ID","consolidation":"none","page_size":25}']
+related = []
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "drive.activity.readonly"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"drive_activity.query" = ["drive.activity.readonly"]

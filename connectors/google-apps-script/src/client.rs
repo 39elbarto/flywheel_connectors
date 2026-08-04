@@ -22,8 +22,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     error::{ScriptError, ScriptResult},
     types::{
-        Content, Deployment, DeploymentConfig, DeploymentsPage, FileInventoryEntry, Metrics,
-        ProcessFilter, ProcessesPage, Project, ScriptFile, Version, VersionsPage,
+        Content, Deployment, DeploymentConfig, DeploymentsPage, ExecutionOperation,
+        ExecutionRequest, FileInventoryEntry, Metrics, ProcessFilter, ProcessesPage, Project,
+        ScriptFile, Version, VersionsPage,
     },
 };
 
@@ -325,6 +326,30 @@ impl AppsScriptClient {
         }
         let url = query_url_owned(&base, &pairs)?;
         self.get(&url).await
+    }
+
+    pub async fn run_script(
+        &self,
+        deployment_id: &str,
+        function: &str,
+        parameters: &[serde_json::Value],
+    ) -> ScriptResult<ExecutionOperation> {
+        let body = serde_json::to_value(ExecutionRequest {
+            function,
+            parameters,
+            dev_mode: false,
+        })?;
+        self.send(
+            "POST",
+            &format!(
+                "{}/scripts/{}:run",
+                self.base_url,
+                segment(deployment_id, "deployment_id")?
+            ),
+            Some(&body),
+            false,
+        )
+        .await
     }
 
     pub fn shutdown(&self) {

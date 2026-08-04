@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use fcp_crypto::cose::cwt_claims;
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
@@ -30,6 +31,7 @@ pub struct AppsScriptConnector {
     client: Option<AppsScriptClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<fcp_core::SessionId>,
+    script_execution_enabled: bool,
 }
 
 #[allow(clippy::unused_async)]
@@ -43,6 +45,7 @@ impl AppsScriptConnector {
             client: None,
             verifier: None,
             session_id: None,
+            script_execution_enabled: false,
         }
     }
     fn manifest_hash() -> String {
@@ -53,6 +56,11 @@ impl AppsScriptConnector {
     }
 
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
+        let script_execution_enabled = match params.get("enable_script_execution") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return Err(invalid("enable_script_execution must be a boolean")),
+        };
         let selection =
             GoogleAuthSelection::from_connector_config(params.get("auth").unwrap_or(&params))
                 .map_err(|e| invalid(format!("invalid Google auth config: {e}")))?;
@@ -80,9 +88,10 @@ impl AppsScriptConnector {
         }
         let auth = client.auth_redacted_label();
         self.client = Some(client);
+        self.script_execution_enabled = script_execution_enabled;
         self.base.set_configured(true);
         info!(auth = %auth, status, "Google Apps Script connector configured");
-        Ok(json!({"status": status}))
+        Ok(json!({"status": status, "script_execution_enabled": script_execution_enabled}))
     }
 
     pub async fn handle_handshake(&mut self, params: Value) -> FcpResult<Value> {
@@ -169,6 +178,7 @@ impl AppsScriptConnector {
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
         let spec = operation_specs()
             .into_iter()
+            // ubs:ignore -- operation IDs are public routing labels, not secrets.
             .find(|spec| spec.id == operation)
             .ok_or_else(|| FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -184,7 +194,8 @@ impl AppsScriptConnector {
         )
         .map_err(|e| invalid(format!("invalid capability_token: {e}")))?;
         let resources = resources(operation, &input)?;
-        self.verifier
+        let verified = self
+            .verifier
             .as_ref()
             .ok_or(FcpError::NotHandshaken)?
             .verify_bound(
@@ -193,8 +204,19 @@ impl AppsScriptConnector {
                 &op_id,
                 &resources,
             )?;
+        // ubs:ignore -- operation IDs are public routing labels, not secrets.
+        if operation == "script.scripts.run" {
+            let issued_at = verified
+                .claims()
+                .get(cwt_claims::IAT)
+                .and_then(|value| match value {
+                    ciborium::Value::Integer(timestamp) => i64::try_from(*timestamp).ok(),
+                    _ => None,
+                });
+            require_fresh_execution_token(issued_at, chrono::Utc::now().timestamp())?;
+        }
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        dispatch(client, operation, &input).await
+        dispatch(client, operation, &input, self.script_execution_enabled).await
     }
 
     pub async fn handle_simulate(&self, params: Value) -> FcpResult<Value> {
@@ -203,6 +225,7 @@ impl AppsScriptConnector {
         let operation = req.operation.as_str();
         let Some(spec) = operation_specs()
             .into_iter()
+            // ubs:ignore -- operation IDs are public routing labels, not secrets.
             .find(|spec| spec.id == operation)
         else {
             return serde_json::to_value(SimulateResponse::denied(
@@ -215,7 +238,17 @@ impl AppsScriptConnector {
             ))
             .map_err(internal_json);
         };
-        let response = if self.client.is_none() {
+        // ubs:ignore -- operation IDs are public routing labels, not secrets.
+        let response = if operation == "script.scripts.run" && !self.script_execution_enabled {
+            SimulateResponse::denied(
+                req.id,
+                "script.execute is disabled by connector configuration",
+                FcpError::OperationNotGranted {
+                    operation: operation.into(),
+                }
+                .error_code(),
+            )
+        } else if self.client.is_none() {
             SimulateResponse::denied(
                 req.id,
                 "connector not configured",
@@ -253,6 +286,7 @@ impl AppsScriptConnector {
         self.client = None;
         self.verifier = None;
         self.session_id = None;
+        self.script_execution_enabled = false;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({"status":"shutdown"}))
@@ -266,8 +300,13 @@ impl Default for AppsScriptConnector {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn dispatch(client: &AppsScriptClient, operation: &str, input: &Value) -> FcpResult<Value> {
-    bounded(dispatch_inner(client, operation, input).await?)
+async fn dispatch(
+    client: &AppsScriptClient,
+    operation: &str,
+    input: &Value,
+    script_execution_enabled: bool,
+) -> FcpResult<Value> {
+    bounded(dispatch_inner(client, operation, input, script_execution_enabled).await?)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -275,6 +314,7 @@ async fn dispatch_inner(
     client: &AppsScriptClient,
     operation: &str,
     input: &Value,
+    script_execution_enabled: bool,
 ) -> FcpResult<Value> {
     match operation {
         "script.projects.get" => Ok(
@@ -394,6 +434,7 @@ async fn dispatch_inner(
         "script.processes.list_for_project" => Ok(
             json!({"page": client.list_processes(Some(require_str(input, "script_id")?), &process_filter(input)?, page_size(input)?, optional_str(input, "page_token")?).await.map_err(|e| e.to_fcp_error())?}),
         ),
+        "script.scripts.run" => run_script(client, input, script_execution_enabled).await,
         _ => Err(FcpError::OperationNotGranted {
             operation: operation.into(),
         }),
@@ -480,6 +521,234 @@ async fn update_content(client: &AppsScriptClient, input: &Value) -> FcpResult<V
     )
 }
 
+async fn run_script(
+    client: &AppsScriptClient,
+    input: &Value,
+    script_execution_enabled: bool,
+) -> FcpResult<Value> {
+    if !script_execution_enabled {
+        return Err(invalid(
+            "script.execute is disabled; configure enable_script_execution=true explicitly",
+        ));
+    }
+    let script_id = require_str(input, "script_id")?;
+    let deployment_id = require_str(input, "deployment_id")?;
+    let function = validate_function_name(require_str(input, "function")?)?;
+    let parameters: Vec<Value> = value_as(input, "parameters")?;
+    let (parameter_shape, parameters_sha256) = parameter_summary(&parameters)?;
+    let deployment = client
+        .get_deployment(script_id, deployment_id)
+        .await
+        .map_err(|error| error.to_fcp_error())?;
+    require_matching_script_id(script_id, &deployment.deployment_config)?;
+    if !deployment
+        .entry_points
+        .iter()
+        .any(|entry| entry.entry_point_type == "EXECUTION_API")
+    {
+        return Err(invalid(
+            "deployment does not expose an Apps Script API executable entry point",
+        ));
+    }
+    let content = client
+        .get_content(script_id, Some(deployment.deployment_config.version_number))
+        .await
+        .map_err(|error| error.to_fcp_error())?;
+    let scopes = manifest_scopes(&content.files)?;
+    let scopes_sha256 = digest_json(&scopes)?;
+    let preflight = json!({
+        "deployment": deployment_receipt(&deployment),
+        "function": function,
+        "parameter_shape": parameter_shape,
+        "parameters_sha256": parameters_sha256,
+        "oauth_scopes": scopes,
+        "oauth_scopes_sha256": scopes_sha256,
+        "dev_mode": false,
+        "timeout_ms": 30_000,
+        "no_file_delete_guarantee": false
+    });
+    if !require_bool(input, "confirm_execute")? {
+        return bounded(json!({"executed": false, "preflight": preflight}));
+    }
+    // ubs:ignore -- these digests bind reviewed non-secret request state.
+    if require_str(input, "expected_parameters_sha256")? != parameters_sha256 {
+        return Err(invalid(
+            "parameters changed since preflight; repeat scope and parameter review",
+        ));
+    }
+    // ubs:ignore -- these digests bind reviewed non-secret scope state.
+    if require_str(input, "expected_oauth_scopes_sha256")? != scopes_sha256 {
+        return Err(invalid(
+            "Apps Script OAuth scopes changed since preflight; repeat review",
+        ));
+    }
+    let operation = client
+        .run_script(deployment_id, function, &parameters)
+        .await
+        .map_err(|error| error.to_fcp_error())?;
+    let execution = execution_receipt(operation);
+    bounded(json!({"executed": true, "preflight": preflight, "execution": execution}))
+}
+
+fn validate_function_name(value: &str) -> FcpResult<&str> {
+    if value.is_empty() || value.len() > 256 {
+        return Err(invalid("function must contain 1..=256 bytes"));
+    }
+    let valid = value.split('.').all(|segment| {
+        let mut chars = segment.chars();
+        chars
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || matches!(ch, '_' | '$'))
+            && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$'))
+    });
+    if valid {
+        Ok(value)
+    } else {
+        Err(invalid(
+            "function must be an ASCII identifier or dot-separated library identifier",
+        ))
+    }
+}
+
+fn manifest_scopes(files: &[ScriptFile]) -> FcpResult<Vec<String>> {
+    source_inventory(files).map_err(|error| error.to_fcp_error())?;
+    let manifest = files
+        .iter()
+        .find(|file| file.file_type == crate::types::FileType::Json)
+        .ok_or_else(|| invalid("appsscript manifest is missing"))?;
+    let parsed: Value = serde_json::from_str(&manifest.source)
+        .map_err(|_| invalid("appsscript manifest is not valid JSON"))?;
+    let Some(raw_scopes) = parsed.get("oauthScopes") else {
+        return Err(invalid(
+            "script.execute requires explicit oauthScopes in the deployed appsscript manifest",
+        ));
+    };
+    let values = raw_scopes
+        .as_array()
+        .ok_or_else(|| invalid("appsscript oauthScopes must be an array"))?;
+    if values.len() > 100 {
+        return Err(invalid("appsscript oauthScopes exceeds 100 entries"));
+    }
+    let mut scopes = values
+        .iter()
+        .map(|value| {
+            let scope = value
+                .as_str()
+                .ok_or_else(|| invalid("appsscript oauthScopes entries must be strings"))?;
+            if scope.is_empty() || scope.len() > 512 || scope.chars().any(char::is_control) {
+                return Err(invalid("appsscript OAuth scope is invalid or too long"));
+            }
+            Ok(scope.to_owned())
+        })
+        .collect::<FcpResult<Vec<_>>>()?;
+    scopes.sort();
+    scopes.dedup();
+    Ok(scopes)
+}
+
+fn parameter_summary(parameters: &[Value]) -> FcpResult<(Value, String)> {
+    if parameters.len() > 100 {
+        return Err(invalid(
+            "parameters must contain at most 100 top-level values",
+        ));
+    }
+    let encoded = serde_json::to_vec(parameters).map_err(internal_json)?;
+    if encoded.len() > 32 * 1024 {
+        return Err(invalid("serialized parameters exceed 32768 bytes"));
+    }
+    let mut nodes = 0_usize;
+    let mut max_depth = 0_usize;
+    let mut top_level_kinds = Vec::with_capacity(parameters.len());
+    for parameter in parameters {
+        top_level_kinds.push(json_kind(parameter)?.to_owned());
+        inspect_parameter(parameter, 1, &mut nodes, &mut max_depth)?;
+    }
+    Ok((
+        json!({
+            "count": parameters.len(),
+            "serialized_bytes": encoded.len(),
+            "nodes": nodes,
+            "max_depth": max_depth,
+            "top_level_kinds": top_level_kinds
+        }),
+        hex::encode(Sha256::digest(&encoded)),
+    ))
+}
+
+fn inspect_parameter(
+    value: &Value,
+    depth: usize,
+    nodes: &mut usize,
+    max_depth: &mut usize,
+) -> FcpResult<()> {
+    if depth > 8 {
+        return Err(invalid("parameters exceed maximum nesting depth 8"));
+    }
+    *nodes = nodes
+        .checked_add(1)
+        .ok_or_else(|| invalid("parameter node count overflow"))?;
+    if *nodes > 1_000 {
+        return Err(invalid("parameters exceed 1000 JSON nodes"));
+    }
+    *max_depth = (*max_depth).max(depth);
+    match value {
+        Value::Null => Err(invalid("null is not an allowed Apps Script parameter")),
+        Value::Array(values) => {
+            for value in values {
+                inspect_parameter(value, depth + 1, nodes, max_depth)?;
+            }
+            Ok(())
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                if key.is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
+                    return Err(invalid("parameter object key is invalid or too long"));
+                }
+                inspect_parameter(value, depth + 1, nodes, max_depth)?;
+            }
+            Ok(())
+        }
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => Ok(()),
+    }
+}
+
+fn json_kind(value: &Value) -> FcpResult<&'static str> {
+    match value {
+        Value::Null => Err(invalid("null is not an allowed Apps Script parameter")),
+        Value::Bool(_) => Ok("boolean"),
+        Value::Number(_) => Ok("number"),
+        Value::String(_) => Ok("string"),
+        Value::Array(_) => Ok("array"),
+        Value::Object(_) => Ok("object"),
+    }
+}
+
+fn digest_json(value: &impl serde::Serialize) -> FcpResult<String> {
+    let encoded = serde_json::to_vec(value).map_err(internal_json)?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+fn require_fresh_execution_token(issued_at: Option<i64>, now: i64) -> FcpResult<()> {
+    let age_seconds = issued_at
+        .map(|timestamp| now.saturating_sub(timestamp))
+        .ok_or_else(|| invalid("script.execute requires an issued-at capability claim"))?;
+    if (-30..=300).contains(&age_seconds) {
+        Ok(())
+    } else {
+        Err(invalid(
+            "script.execute requires a capability token issued within the last 5 minutes",
+        ))
+    }
+}
+
+fn execution_receipt(operation: crate::types::ExecutionOperation) -> Value {
+    if let Some(error) = operation.error {
+        json!({"done": operation.done, "error": {"code": error.code, "status": error.status}})
+    } else {
+        json!({"done": operation.done, "result": operation.response.and_then(|response| response.result)})
+    }
+}
+
 #[derive(Clone, Copy)]
 struct OperationSpec {
     id: &'static str,
@@ -562,6 +831,22 @@ fn input_schema(operation: &str) -> Value {
         }
         "script.processes.list_for_project" => {
             json!({"type":"object","required":["script_id"],"properties":process_filter_schema(true),"additionalProperties":false})
+        }
+        "script.scripts.run" => {
+            json!({
+                "type":"object",
+                "required":["script_id","deployment_id","function","parameters","confirm_execute"],
+                "properties":{
+                    "script_id":string(),
+                    "deployment_id":string(),
+                    "function":{"type":"string","minLength":1,"maxLength":256},
+                    "parameters":{"type":"array","maxItems":100},
+                    "confirm_execute":{"type":"boolean"},
+                    "expected_parameters_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                    "expected_oauth_scopes_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}
+                },
+                "additionalProperties":false
+            })
         }
         _ => json!({"type":"object","additionalProperties":false}),
     }
@@ -749,14 +1034,24 @@ fn operation_specs() -> Vec<OperationSpec> {
             safety: Safe,
             idempotency: Strict,
         },
+        OperationSpec {
+            id: "script.scripts.run",
+            summary: "Preflight or execute one deployed Apps Script function",
+            capability: "script.execute",
+            risk: High,
+            safety: Dangerous,
+            idempotency: No,
+        },
     ]
 }
 
 fn resources(operation: &str, input: &Value) -> FcpResult<Vec<String>> {
+    // ubs:ignore -- operation IDs are public routing labels, not secrets.
     let root = if operation == "script.projects.create" {
         "google-apps-script:projects".into()
     } else if let Ok(id) = require_str(input, "script_id") {
         format!("google-apps-script:project:{id}")
+    // ubs:ignore -- operation IDs are public routing labels, not secrets.
     } else if operation == "script.processes.list" {
         "google-apps-script:processes".into()
     } else {
@@ -765,7 +1060,7 @@ fn resources(operation: &str, input: &Value) -> FcpResult<Vec<String>> {
     let mut resources = vec![root];
     if matches!(
         operation,
-        "script.deployments.get" | "script.deployments.update"
+        "script.deployments.get" | "script.deployments.update" | "script.scripts.run"
     ) {
         resources.push(format!(
             "google-apps-script:deployment:{}",
@@ -846,6 +1141,12 @@ fn require_true(value: &Value, field: &str) -> FcpResult<()> {
             "'{field}' must be true after preflight review"
         )))
     }
+}
+fn require_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| invalid(format!("missing or non-boolean '{field}'")))
 }
 fn value_as<T: DeserializeOwned>(value: &Value, field: &str) -> FcpResult<T> {
     serde_json::from_value(
@@ -929,14 +1230,17 @@ fn internal_json(error: serde_json::Error) -> FcpError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{client::AppsScriptClient, types::FileType};
+    use crate::{
+        client::AppsScriptClient,
+        types::{ExecutionOperation, FileType},
+    };
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
     use fcp_prelude::CapabilityConstraints;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{method, path, query_param},
     };
 
     fn auth() -> GoogleMaterializedAuth {
@@ -977,6 +1281,129 @@ mod tests {
         assert_eq!(second["source"], "вгд");
         assert!(second["next_source_offset"].is_null());
         assert!(source_chunk(&file, 1, 10).is_err());
+    }
+
+    #[test]
+    fn execution_inputs_are_typed_bounded_and_fresh() {
+        assert!(validate_function_name("Library.safeFunction").is_ok());
+        assert!(validate_function_name("unsafe()").is_err());
+        assert!(parameter_summary(&[json!({"enabled": true, "values": [1, 2, 3]})]).is_ok());
+        assert!(parameter_summary(&[Value::Null]).is_err());
+        assert!(require_fresh_execution_token(Some(1_000), 1_300).is_ok());
+        assert!(require_fresh_execution_token(Some(1_000), 1_301).is_err());
+        assert!(require_fresh_execution_token(None, 1_000).is_err());
+    }
+
+    #[test]
+    fn execution_error_receipt_drops_provider_message_and_details() {
+        let raw = json!({
+            "done": true,
+            "error": {
+                "code": 3,
+                "status": "INVALID_ARGUMENT",
+                "message": "private provider body",
+                "details": [{"private": "stack trace"}]
+            }
+        });
+        let operation: ExecutionOperation = serde_json::from_value(raw).expect("operation");
+        let receipt = execution_receipt(operation);
+        let encoded = receipt.to_string();
+        assert!(encoded.contains("INVALID_ARGUMENT"));
+        assert!(!encoded.contains("private provider body"));
+        assert!(!encoded.contains("stack trace"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn run_requires_enablement_then_exact_preflight_digests() {
+        let server = MockServer::start().await;
+        let source = vec![
+            ScriptFile {
+                name: "appsscript".into(),
+                file_type: FileType::Json,
+                source: json!({
+                    "timeZone": "Etc/UTC",
+                    "oauthScopes": [
+                        "https://www.googleapis.com/auth/spreadsheets",
+                        "https://www.googleapis.com/auth/drive"
+                    ]
+                })
+                .to_string(),
+            },
+            files()[1].clone(),
+        ];
+        Mock::given(method("GET"))
+            .and(path("/v1/projects/script_123/deployments/deploy_123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "deploymentId": "deploy_123",
+                "deploymentConfig": {
+                    "scriptId": "script_123",
+                    "versionNumber": 7,
+                    "manifestFileName": "appsscript"
+                },
+                "entryPoints": [{"entryPointType": "EXECUTION_API"}]
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/projects/script_123/content"))
+            .and(query_param("versionNumber", "7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "scriptId": "script_123",
+                "files": source
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scripts/deploy_123:run"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "done": true,
+                "response": {"result": {"ok": true}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = AppsScriptClient::new_with_auth(auth())
+            .expect("client")
+            .with_base_url(format!("{}/v1", server.uri()));
+        let base_input = json!({
+            "script_id": "script_123",
+            "deployment_id": "deploy_123",
+            "function": "fixture",
+            "parameters": [{"value": 42}],
+            "confirm_execute": false
+        });
+        let disabled = run_script(&client, &base_input, false)
+            .await
+            .expect_err("execution must be disabled by default");
+        assert!(disabled.to_string().contains("disabled"));
+        let preflight = run_script(&client, &base_input, true)
+            .await
+            .expect("preflight");
+        assert_eq!(preflight["executed"], false);
+        assert_eq!(preflight["preflight"]["no_file_delete_guarantee"], false);
+        assert_eq!(
+            preflight["preflight"]["oauth_scopes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let confirmed_input = json!({
+            "script_id": "script_123",
+            "deployment_id": "deploy_123",
+            "function": "fixture",
+            "parameters": [{"value": 42}],
+            "confirm_execute": true,
+            "expected_parameters_sha256": preflight["preflight"]["parameters_sha256"],
+            "expected_oauth_scopes_sha256": preflight["preflight"]["oauth_scopes_sha256"]
+        });
+        let executed = run_script(&client, &confirmed_input, true)
+            .await
+            .expect("confirmed execution");
+        assert_eq!(executed["executed"], true);
+        assert_eq!(executed["execution"]["result"]["ok"], true);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1135,6 +1562,75 @@ mod tests {
             ),
             "unexpected error: {error:?}"
         );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("received requests")
+                .is_empty()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn execution_token_without_issued_at_is_denied_before_provider_io() {
+        let server = MockServer::start().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let instance_id = fcp_core::InstanceId::new();
+        let mut connector = AppsScriptConnector::new();
+        connector
+            .handle_configure(json!({
+                "access_token": (["test", "token"].join("-")),
+                "base_url": format!("{}/v1", server.uri()),
+                "enable_script_execution": true
+            }))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:private",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0_u8; 32],
+                "capabilities_requested": ["script.execute"],
+                "requested_instance_id": instance_id
+            }))
+            .await
+            .expect("handshake");
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..CapabilityConstraints::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize constraints");
+        let now = Utc::now();
+        let token = CapabilityTokenBuilder::new()
+            .capability_id("script.execute")
+            .zone_id("z:private")
+            .principal("user:test")
+            .operations(&["script.scripts.run"])
+            .issuer("node:test")
+            .audience("*")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("attach constraints")
+            .target_instance(instance_id.as_str())
+            .sign(&signing_key)
+            .expect("sign capability token");
+        let error = connector
+            .handle_invoke(json!({
+                "operation": "script.scripts.run",
+                "input": {
+                    "script_id": "script_123",
+                    "deployment_id": "deploy_123",
+                    "function": "fixture",
+                    "parameters": [],
+                    "confirm_execute": false
+                },
+                "capability_token": CapabilityToken::from_raw(token)
+            }))
+            .await
+            .expect_err("issued-at is mandatory for execution");
+        assert!(error.to_string().contains("issued-at"));
         assert!(
             server
                 .received_requests()

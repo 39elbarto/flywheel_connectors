@@ -51,14 +51,14 @@ fn manifest_validates_and_contains_only_typed_non_delete_operations() {
         .keys()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 14);
+    assert_eq!(ids.len(), 15);
     assert!(ids.iter().all(|id| !id.contains("delete")));
-    assert!(!ids.contains("scripts.run"));
+    assert!(ids.contains("script.scripts.run"));
     assert!(!ids.iter().any(|id| id.contains("raw")));
 }
 
 #[fcp_async_core::runtime::test]
-async fn runtime_introspection_matches_manifest_and_excludes_execution() {
+async fn runtime_introspection_matches_manifest_and_includes_gated_execution() {
     let connector = AppsScriptConnector::new();
     let introspection = connector.handle_introspect().await.expect("introspection");
     let operations = introspection["operations"].as_array().expect("operations");
@@ -68,8 +68,8 @@ async fn runtime_introspection_matches_manifest_and_excludes_execution() {
         .iter()
         .map(|operation| operation["id"].as_str().expect("operation id"))
         .collect::<BTreeSet<_>>();
-    assert_eq!(ids.len(), 14);
-    assert!(!ids.contains("scripts.run"));
+    assert_eq!(ids.len(), 15);
+    assert!(ids.contains("script.scripts.run"));
     assert!(
         ids.iter()
             .all(|id| !id.contains("delete") && !id.contains("raw"))
@@ -175,6 +175,33 @@ async fn configure_rejects_non_google_remote_host() {
         .await
         .expect_err("remote host must be rejected");
     assert!(error.to_string().contains("script.googleapis.com"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn script_execution_is_disabled_by_default_and_requires_boolean_opt_in() {
+    let mut connector = AppsScriptConnector::new();
+    let default = connector
+        .handle_configure(json!({"access_token": test_token()}))
+        .await
+        .expect("default configure");
+    assert_eq!(default["script_execution_enabled"], false);
+    let enabled = connector
+        .handle_configure(json!({
+            "access_token": test_token(),
+            "enable_script_execution": true
+        }))
+        .await
+        .expect("explicit configure");
+    assert_eq!(enabled["script_execution_enabled"], true);
+    assert!(
+        connector
+            .handle_configure(json!({
+                "access_token": test_token(),
+                "enable_script_execution": "yes"
+            }))
+            .await
+            .is_err()
+    );
 }
 
 #[fcp_async_core::runtime::test]

@@ -1,14 +1,25 @@
 # Google Apps Script connector
 
 Bounded FCP connector for Apps Script API v1 project metadata, source,
-versions, deployments, metrics, and process history.
+versions, deployments, metrics, process history, and optional remote execution.
 
 ## Safety boundary
 
-- The connector exposes 14 typed operations. It does not expose raw HTTP,
-  deletion, or `scripts.run`.
-- `script.read`, `script.source.write`, and `script.deployment.write` are
+- The connector exposes 15 typed operations. It does not expose raw HTTP or
+  direct deletion. `script.scripts.run` is present but disabled by default.
+- `script.read`, `script.source.write`, `script.deployment.write`, and
+  `script.execute` are
   separate resource-bound capabilities.
+- Remote execution requires `enable_script_execution=true`, a fresh capability
+  token (at most five minutes old), policy approval, and a two-step preflight.
+  The preflight reads the exact deployment and current manifest, displays the
+  script OAuth scopes and parameter shape, and returns digests that must match
+  the confirmed invocation. The deployed manifest must declare `oauthScopes`
+  explicitly; inferred scopes are rejected. Development mode is always false.
+- Executed code runs with its own Apps Script permissions. It can therefore
+  modify or delete Drive files, send mail, or call external services despite
+  this connector having no direct delete route. Static inspection cannot prove
+  otherwise.
 - Full source replacement is Dangerous. It requires an exact current inventory
   digest, explicit removed-file inventory, confirmation, a snapshot version,
   and post-write inventory readback.
@@ -32,6 +43,7 @@ versions, deployments, metrics, and process history.
 | Versions | `script.versions.create`, `script.versions.get`, `script.versions.list` |
 | Deployments | `script.deployments.get`, `script.deployments.list`, `script.deployments.create`, `script.deployments.update` |
 | Processes | `script.processes.list`, `script.processes.list_for_project` |
+| Execution | `script.scripts.run` (preflight or confirmed execution) |
 
 List operations accept `page_size` from 1 to 50 and an opaque `page_token`.
 All path identifiers are validated as one path segment before provider I/O.
@@ -55,7 +67,8 @@ scripts/e2e/google_apps_script_connector_verification.sh
 
 The verifier checks formatting, compilation, tests, Clippy, manifest validity,
 operation parity, replacement safety, provider path/auth fixtures, error
-classification, source chunking, and the absence of run/delete/raw routes.
+classification, source chunking, and execution enablement, preflight, digest,
+parameter, token-freshness, redaction, and no-delete/raw-route gates.
 
 Live reversible acceptance is performed separately after OAuth integration and
 uses only disposable test artifacts. No live script is edited by this crate's
@@ -68,6 +81,13 @@ version and returns its version number. Recovery is explicit: read that version
 with `script.projects.get_content`, review its complete inventory, then submit
 it through the same confirmed `script.projects.update_content` path. Deployment
 deletion and source rollback shortcuts are deliberately absent.
+
+Remote execution has no generic rollback because arbitrary script side effects
+may be irreversible. Its connector rollback is to omit or set
+`enable_script_execution=false`; that blocks all future `script.scripts.run`
+requests before provider execution. A timed-out run has an unknown outcome and
+must never be retried automatically; reconcile through process history and the
+affected service before considering another invocation.
 
 Official API references:
 

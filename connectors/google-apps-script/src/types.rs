@@ -86,6 +86,44 @@ pub struct Deployment {
     pub update_time: Option<String>,
 }
 
+/// Bounded request body accepted by the Apps Script Execution API.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionRequest<'a> {
+    pub function: &'a str,
+    pub parameters: &'a [serde_json::Value],
+    pub dev_mode: bool,
+}
+
+/// Successful Execution API response envelope. Provider error messages and
+/// details are deliberately not modeled so they cannot escape into receipts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionOperation {
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub response: Option<ExecutionResponse>,
+    #[serde(default)]
+    pub error: Option<ExecutionStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionResponse {
+    #[serde(default)]
+    pub result: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionStatus {
+    #[serde(default)]
+    pub code: Option<i64>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
 /// One Apps Script process-history record. Names and IDs stay in the response,
 /// never in telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]

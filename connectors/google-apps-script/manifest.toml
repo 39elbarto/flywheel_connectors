@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:18c67ae63663c6e5cc487d59be7867c0b70384c31e289b30ecc075974b18561a"
+interface_hash = "blake3-256:fcp.interface.v2:bdb4b276a83d15f99b5e3146153ca37373d2673c5cf1195eb65b31c38ff101c5"
 
 [connector]
 id = "google-apps-script"
@@ -29,7 +29,7 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = ["script.read", "script.source.write", "script.deployment.write"]
+optional = ["script.read", "script.source.write", "script.deployment.write", "script.execute"]
 forbidden = ["system.exec", "network.listen"]
 
 [provides.operations."script.projects.get"]
@@ -186,6 +186,17 @@ input_schema = { type = "object", required = ["script_id"], properties = { scrip
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations."script.scripts.run"]
+description = "Preflight or execute one deployed Apps Script function after exact confirmation"
+capability = "script.execute"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["script_id", "deployment_id", "function", "parameters", "confirm_execute"], properties = { script_id = { type = "string", minLength = 1, maxLength = 512 }, deployment_id = { type = "string", minLength = 1, maxLength = 512 }, function = { type = "string", minLength = 1, maxLength = 256 }, parameters = { type = "array", maxItems = 100 }, confirm_execute = { type = "boolean" }, expected_parameters_sha256 = { type = "string", pattern = "^[0-9a-f]{64}$" }, expected_oauth_scopes_sha256 = { type = "string", pattern = "^[0-9a-f]{64}$" } }, additionalProperties = false }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["script.googleapis.com"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 60000 }
+
 [sandbox]
 profile = "strict"
 memory_mb = 128
@@ -225,3 +236,4 @@ scope = "instance"
 "script.deployments.update" = ["script.write"]
 "script.processes.list" = ["script.read"]
 "script.processes.list_for_project" = ["script.read"]
+"script.scripts.run" = ["script.write"]

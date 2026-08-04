@@ -548,9 +548,7 @@ impl SubprocessConnector {
                             "connector dispatcher stopped before replying".to_string(),
                         )
                     })?;
-                let response = response.map_err(|err| {
-                    HostError::RegistryError(format!("connector IO error: {err}"))
-                })?;
+                let response = response.map_err(connector_io_host_error)?;
                 if let Some(error) = response.get("error") {
                     return Err(HostError::RegistryError(format!(
                         "{CONNECTOR_JSON_RPC_ERROR_PREFIX}{error}"
@@ -692,9 +690,58 @@ impl SubprocessConnector {
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
         let params = serde_json::to_value(&request)
             .map_err(|err| HostError::RegistryError(format!("invoke encode error: {err}")))?;
-        let result = self
+        let result = match self
             .rpc_in_handshaken_zone(&request.zone_id, "invoke", params)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(HostError::ConnectorFrameLimit {
+                direction,
+                observed_bytes,
+                limit_bytes,
+                request_may_have_reached_connector,
+            }) => {
+                let (service, metric_id) = if direction == "stdin" {
+                    ("connector_request_frame", "connector_request_frame_bytes")
+                } else {
+                    ("connector_response_frame", "connector_response_frame_bytes")
+                };
+                tracing::warn!(
+                    event = "connector_rpc_frame_limit",
+                    schema_version = "fwc.google_workspace.telemetry.v1",
+                    event_type = "workspace.phase.host",
+                    producer_layer = "host",
+                    host_phase = "connector_frame_rejected",
+                    connector_id = %request.connector_id,
+                    operation = %request.operation,
+                    correlation_id = request.correlation_id.as_ref().map(ToString::to_string),
+                    frame_direction = direction,
+                    observed_bytes,
+                    limit_bytes,
+                    request_may_have_reached_connector,
+                    error_class = "transport.frame_limit",
+                    "bounded connector RPC frame rejected"
+                );
+                return Ok(InvokeResponse::error(
+                    request.id,
+                    fcp_core::FcpError::External {
+                        service: service.to_string(),
+                        message: format!(
+                            "bounded connector {direction} frame exceeded {limit_bytes} bytes"
+                        ),
+                        status_code: None,
+                        retryable: false,
+                        retry_after: None,
+                    },
+                )
+                .with_usage_metrics(vec![fcp_core::UsageMetric::custom(
+                    metric_id,
+                    observed_bytes,
+                    Some("bytes".to_string()),
+                )]));
+            }
+            Err(error) => return Err(error),
+        };
         serde_json::from_value(result)
             .map_err(|err| HostError::RegistryError(format!("invoke parse error: {err}")))
     }
@@ -3892,7 +3939,7 @@ fn connector_config_declares_singleton_writer(config: &ConnectorConfig) -> bool 
 }
 
 struct ConnectorProcessRunner {
-    _child: Child,
+    child: Option<Child>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     _stderr_task: JoinHandle<()>,
@@ -3914,8 +3961,68 @@ const CONNECTOR_RPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Single-sourced so the warm-pool retention classifier and the constructor can
 /// never drift apart. See [`warm_entry_survives_error`].
 const CONNECTOR_JSON_RPC_ERROR_PREFIX: &str = "connector error: ";
-const CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES: usize = 64 * 1024;
+/// Maximum serialized JSON bytes in either direction, excluding the newline
+/// delimiter. Larger results must use a bounded connector-level page or compact
+/// receipt instead of widening this transport frame.
+const CONNECTOR_RPC_MAX_FRAME_BYTES: usize = 64 * 1024;
 const CONNECTOR_RPC_MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
+
+#[derive(Debug)]
+struct ConnectorFrameLimitError {
+    direction: &'static str,
+    observed_bytes: u64,
+    limit_bytes: u64,
+    request_may_have_reached_connector: bool,
+}
+
+impl std::fmt::Display for ConnectorFrameLimitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "connector frame limit exceeded: direction={} observed_bytes={} limit_bytes={} request_may_have_reached_connector={}",
+            self.direction,
+            self.observed_bytes,
+            self.limit_bytes,
+            self.request_may_have_reached_connector
+        )
+    }
+}
+
+impl std::error::Error for ConnectorFrameLimitError {}
+
+fn connector_frame_limit_error(
+    direction: &'static str,
+    observed_bytes: usize,
+    request_may_have_reached_connector: bool,
+) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        ConnectorFrameLimitError {
+            direction,
+            observed_bytes: u64::try_from(observed_bytes).unwrap_or(u64::MAX),
+            limit_bytes: u64::try_from(CONNECTOR_RPC_MAX_FRAME_BYTES).unwrap_or(u64::MAX),
+            request_may_have_reached_connector,
+        },
+    )
+}
+
+fn connector_frame_limit_metadata(error: &std::io::Error) -> Option<&ConnectorFrameLimitError> {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<ConnectorFrameLimitError>())
+}
+
+fn connector_io_host_error(error: std::io::Error) -> HostError {
+    if let Some(limit) = connector_frame_limit_metadata(&error) {
+        return HostError::ConnectorFrameLimit {
+            direction: limit.direction.to_string(),
+            observed_bytes: limit.observed_bytes,
+            limit_bytes: limit.limit_bytes,
+            request_may_have_reached_connector: limit.request_may_have_reached_connector,
+        };
+    }
+    HostError::RegistryError(format!("connector IO error: {error}"))
+}
 
 /// Threshold above which `rpc_in_handshaken_zone` emits a warn-level
 /// log when releasing the per-connector handshaken-zone Mutex
@@ -4057,7 +4164,7 @@ impl ConnectorProcessRunner {
         });
 
         Ok(Self {
-            _child: child,
+            child: Some(child),
             stdin,
             stdout: BufReader::new(stdout),
             _stderr_task: stderr_task,
@@ -4077,9 +4184,13 @@ impl ConnectorProcessRunner {
         &mut self,
         value: &serde_json::Value,
         io_timeout: Duration,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<u64> {
         let line = serde_json::to_string(value)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        if line.len() > CONNECTOR_RPC_MAX_FRAME_BYTES {
+            return Err(connector_frame_limit_error("stdin", line.len(), false));
+        }
+        let frame_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
         fcp_async_core::time::timeout(io_timeout, async {
             self.stdin.write_all(line.as_bytes()).await?;
             self.stdin.write_all(b"\n").await?;
@@ -4087,22 +4198,29 @@ impl ConnectorProcessRunner {
         })
         .await
         .map_err(|_| connector_io_timeout_error("stdin write", io_timeout))??;
-        Ok(())
+        Ok(frame_bytes)
     }
 
-    async fn read_json(&mut self, io_timeout: Duration) -> std::io::Result<serde_json::Value> {
+    async fn read_json(
+        &mut self,
+        io_timeout: Duration,
+    ) -> std::io::Result<(serde_json::Value, u64)> {
         let mut line = Vec::with_capacity(1024);
         let bytes = fcp_async_core::time::timeout(io_timeout, async {
             loop {
-                if line.len() > CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES {
-                    return Ok(line.len());
-                }
                 match self.stdout.read_u8().await {
                     Ok(byte) => {
-                        line.push(byte);
                         if byte == b'\n' {
                             return Ok(line.len());
                         }
+                        if line.len() == CONNECTOR_RPC_MAX_FRAME_BYTES {
+                            return Err(connector_frame_limit_error(
+                                "stdout",
+                                line.len().saturating_add(1),
+                                true,
+                            ));
+                        }
+                        line.push(byte);
                     }
                     Err(err)
                         if err.kind() == std::io::ErrorKind::UnexpectedEof && line.is_empty() =>
@@ -4110,7 +4228,10 @@ impl ConnectorProcessRunner {
                         return Ok(0);
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        return Ok(line.len());
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "connector stdout frame ended before newline delimiter",
+                        ));
                     }
                     Err(err) => return Err(err),
                 }
@@ -4124,15 +4245,16 @@ impl ConnectorProcessRunner {
                 "connector closed stdout",
             ));
         }
-        if line.len() > CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES {
-            return Err(connector_transport_desynchronized_error(format!(
-                "stdout frame exceeded {CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES} bytes"
-            )));
-        }
         let line = std::str::from_utf8(&line)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        serde_json::from_str::<serde_json::Value>(line.trim())
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+        let value = serde_json::from_str::<serde_json::Value>(line.trim())
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        Ok((value, u64::try_from(bytes).unwrap_or(u64::MAX)))
+    }
+
+    fn poison_transport(&mut self) {
+        self.poisoned = true;
+        drop(self.child.take());
     }
 
     fn validate_response_id(
@@ -4183,6 +4305,14 @@ impl ConnectorProcessRunner {
 
         let request_epoch = self.epoch;
         let expected_id = self.next_request_id();
+        let correlation_id = params
+            .get("correlation_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let operation = params
+            .get("operation")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
         let request = json!({
             "jsonrpc": "2.0",
             "id": expected_id,
@@ -4190,10 +4320,27 @@ impl ConnectorProcessRunner {
             "params": params,
         });
 
-        if let Err(err) = self.send_json(&request, io_timeout).await {
-            self.poisoned = true;
-            return Err(err);
-        }
+        let request_frame_bytes = match self.send_json(&request, io_timeout).await {
+            Ok(frame_bytes) => frame_bytes,
+            Err(err) => {
+                if connector_frame_limit_metadata(&err).is_none() {
+                    self.poison_transport();
+                }
+                return Err(err);
+            }
+        };
+        tracing::debug!(
+            event = "connector_rpc_frame",
+            schema_version = "fwc.google_workspace.telemetry.v1",
+            event_type = "workspace.phase.host",
+            producer_layer = "host",
+            host_phase = "connector_request_frame",
+            correlation_id,
+            operation,
+            connector_request_frame_bytes = request_frame_bytes,
+            connector_frame_limit_bytes = CONNECTOR_RPC_MAX_FRAME_BYTES,
+            "connector request frame accepted"
+        );
 
         let started_at = std::time::Instant::now();
         loop {
@@ -4203,17 +4350,29 @@ impl ConnectorProcessRunner {
                 return Err(connector_io_timeout_error("stdout read", io_timeout));
             }
 
-            let response = match self.read_json(remaining).await {
+            let (response, response_frame_bytes) = match self.read_json(remaining).await {
                 Ok(response) => response,
                 Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
                     self.epoch = self.epoch.saturating_add(1);
                     return Err(connector_io_timeout_error("stdout read", io_timeout));
                 }
                 Err(err) => {
-                    self.poisoned = true;
+                    self.poison_transport();
                     return Err(err);
                 }
             };
+            tracing::debug!(
+                event = "connector_rpc_frame",
+                schema_version = "fwc.google_workspace.telemetry.v1",
+                event_type = "workspace.phase.host",
+                producer_layer = "host",
+                host_phase = "connector_response_frame",
+                correlation_id,
+                operation,
+                connector_response_frame_bytes = response_frame_bytes,
+                connector_frame_limit_bytes = CONNECTOR_RPC_MAX_FRAME_BYTES,
+                "connector response frame accepted"
+            );
 
             match Self::validate_response_id(&expected_id, request_epoch, &response) {
                 Ok(ResponseIdDisposition::Matched) => return Ok(response),
@@ -4226,7 +4385,7 @@ impl ConnectorProcessRunner {
                     );
                 }
                 Err(err) => {
-                    self.poisoned = true;
+                    self.poison_transport();
                     return Err(err);
                 }
             }
@@ -13219,6 +13378,7 @@ const fn normalized_host_error_class(error: &HostError) -> &'static str {
         HostError::InvalidFilter(_) => "local.validation",
         HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => "local.policy_denied",
         HostError::Unavailable(_) => "transport.host_connector",
+        HostError::ConnectorFrameLimit { .. } => "transport.frame_limit",
         HostError::RegistryError(_) | HostError::CacheError(_) | HostError::Internal(_) => {
             "internal"
         }
@@ -13557,6 +13717,7 @@ fn batch_error_from_host_error(err: HostError) -> BatchOperationError {
         HostError::ZoneEnvelopeRequired(_) => "ZONE_ENVELOPE_REQUIRED",
         HostError::CacheError(_) => "CACHE_ERROR",
         HostError::Unavailable(_) => "UNAVAILABLE",
+        HostError::ConnectorFrameLimit { .. } => "CONNECTOR_FRAME_LIMIT",
         HostError::Internal(_) => "INTERNAL_ERROR",
     };
 
@@ -14626,6 +14787,7 @@ fn warm_entry_survives_error(error: &HostError) -> bool {
         HostError::RegistryError(message) => {
             message.starts_with(CONNECTOR_JSON_RPC_ERROR_PREFIX)
         }
+        HostError::ConnectorFrameLimit { .. } => false,
         // Unexpected internal/protocol state: assume the subprocess is broken.
         HostError::Internal(_) => false,
     }
@@ -14650,6 +14812,7 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
         HostError::CacheError(_) | HostError::Unavailable(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, err.to_string())
         }
+        HostError::ConnectorFrameLimit { .. } => (StatusCode::BAD_GATEWAY, err.to_string()),
         HostError::RegistryError(_) | HostError::Internal(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
         }
@@ -14750,6 +14913,26 @@ mod tests {
         let metadata = connector_stderr_metadata(canary, true);
         assert_eq!(metadata, (true, canary.len() as u64, true));
         assert_eq!(connector_stderr_metadata(b"", false), (false, 0, false));
+
+        let exact = vec![b'x'; CONNECTOR_RPC_MAX_STDERR_LINE_BYTES];
+        assert_eq!(
+            connector_stderr_metadata(&exact, false),
+            (
+                true,
+                u64::try_from(CONNECTOR_RPC_MAX_STDERR_LINE_BYTES).unwrap_or(u64::MAX),
+                false,
+            )
+        );
+        // The stderr reader retains exactly the bounded prefix and marks the
+        // first additional byte as truncated without buffering its content.
+        assert_eq!(
+            connector_stderr_metadata(&exact, true),
+            (
+                true,
+                u64::try_from(CONNECTOR_RPC_MAX_STDERR_LINE_BYTES).unwrap_or(u64::MAX),
+                true,
+            )
+        );
     }
 
     fn subprocess_test_connector_config(connector_id: &str) -> ConnectorConfig {
@@ -23286,6 +23469,84 @@ deny_ptrace = true
 
     #[cfg(unix)]
     #[fcp_async_core::runtime::test]
+    async fn connector_process_runner_accepts_exact_request_frame_and_rejects_plus_one_before_write()
+     {
+        let args = vec![
+            "-c".to_string(),
+            "while IFS= read -r _line; do :; done".to_string(),
+        ];
+        let mut runner = ConnectorProcessRunner::spawn("sh", &args, &BTreeMap::new())
+            .await
+            .expect("spawn request-frame sink");
+        let empty = json!({ "pad": "" });
+        let overhead = serde_json::to_string(&empty)
+            .expect("serialize empty request frame")
+            .len();
+        let exact = json!({ "pad": "x".repeat(CONNECTOR_RPC_MAX_FRAME_BYTES - overhead) });
+        let exact_bytes = runner
+            .send_json(&exact, Duration::from_secs(2))
+            .await
+            .expect("exact-limit request frame should be accepted");
+        assert_eq!(
+            exact_bytes,
+            u64::try_from(CONNECTOR_RPC_MAX_FRAME_BYTES).unwrap_or(u64::MAX)
+        );
+
+        let oversized = json!({
+            "pad": "x".repeat(CONNECTOR_RPC_MAX_FRAME_BYTES - overhead + 1)
+        });
+        let error = runner
+            .send_json(&oversized, Duration::from_secs(2))
+            .await
+            .expect_err("limit-plus-one request frame must be rejected");
+        let metadata = connector_frame_limit_metadata(&error)
+            .expect("request limit error should retain typed metadata");
+        assert_eq!(metadata.direction, "stdin");
+        assert_eq!(
+            metadata.observed_bytes,
+            u64::try_from(CONNECTOR_RPC_MAX_FRAME_BYTES + 1).unwrap_or(u64::MAX)
+        );
+        assert!(!metadata.request_may_have_reached_connector);
+        assert!(
+            runner.child.is_some(),
+            "pre-write rejection keeps transport usable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
+    async fn connector_process_runner_accepts_exact_stdout_frame() {
+        let prefix = r#"{"jsonrpc":"2.0","id":"0:0","result":{"pad":""#;
+        let suffix = r#""}}"#;
+        let pad_bytes = CONNECTOR_RPC_MAX_FRAME_BYTES - prefix.len() - suffix.len();
+        let script = format!(
+            r#"IFS= read -r _line
+printf '%s' '{prefix}'
+i=0
+while [ "$i" -lt {pad_bytes} ]; do
+  printf x
+  i=$((i + 1))
+done
+printf '%s\n' '{suffix}'"#
+        );
+        let args = vec!["-c".to_string(), script];
+        let mut runner = ConnectorProcessRunner::spawn("sh", &args, &BTreeMap::new())
+            .await
+            .expect("spawn exact-limit connector");
+
+        let response = runner
+            .request("health", json!({}))
+            .await
+            .expect("exact-limit stdout frame should be accepted");
+        assert_eq!(
+            response["result"]["pad"].as_str().map(str::len),
+            Some(pad_bytes)
+        );
+        assert!(!runner.poisoned);
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
     async fn connector_process_runner_rejects_mismatched_response_id_and_poisoned_transport() {
         let script = r#"while IFS= read -r _line; do printf '%s\n' '{"jsonrpc":"2.0","id":"stale","result":{"status":"wrong"}}'; done"#;
         let args = vec!["-c".to_string(), script.to_string()];
@@ -23320,7 +23581,7 @@ deny_ptrace = true
     #[cfg(unix)]
     #[fcp_async_core::runtime::test]
     async fn connector_process_runner_rejects_oversized_stdout_line_and_poisoned_transport() {
-        let overlong_bytes = CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES + 1;
+        let overlong_bytes = CONNECTOR_RPC_MAX_FRAME_BYTES + 1;
         let script = format!(
             r#"while IFS= read -r _line; do
   i=0
@@ -23343,8 +23604,15 @@ done"#
         assert!(
             error
                 .to_string()
-                .contains("stdout frame exceeded 65536 bytes"),
+                .contains("direction=stdout observed_bytes=65537 limit_bytes=65536"),
             "unexpected error: {error}"
+        );
+        let metadata = connector_frame_limit_metadata(&error)
+            .expect("response limit error should retain typed metadata");
+        assert!(metadata.request_may_have_reached_connector);
+        assert!(
+            runner.child.is_none(),
+            "oversized response terminates connector"
         );
 
         let retry_error = runner
@@ -23356,13 +23624,113 @@ done"#
 
     #[cfg(unix)]
     #[fcp_async_core::runtime::test]
+    async fn connector_process_runner_poisoned_after_malformed_or_truncated_frame() {
+        for script in [
+            r#"IFS= read -r _line; printf '%s\n' '{not-json}'"#,
+            r#"IFS= read -r _line; printf '%s' '{"jsonrpc":"2.0","id":"0:0","result":{"status":"complete-but-undelimited"}}'"#,
+        ] {
+            let args = vec!["-c".to_string(), script.to_string()];
+            let mut runner = ConnectorProcessRunner::spawn("sh", &args, &BTreeMap::new())
+                .await
+                .expect("spawn malformed connector");
+            let error = runner
+                .request("health", json!({}))
+                .await
+                .expect_err("malformed or truncated frame must fail");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(runner.poisoned);
+            assert!(runner.child.is_none());
+            let retry_error = runner
+                .request("health", json!({}))
+                .await
+                .expect_err("poisoned transport must reject later requests");
+            assert_eq!(retry_error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn subprocess_invoke_returns_compact_non_retryable_frame_limit_response() {
+        for (direction, may_have_reached, service, metric_id) in [
+            (
+                "stdin",
+                false,
+                "connector_request_frame",
+                "connector_request_frame_bytes",
+            ),
+            (
+                "stdout",
+                true,
+                "connector_response_frame",
+                "connector_response_frame_bytes",
+            ),
+        ] {
+            let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+            let runner_task = task::spawn(async move {
+                if let Some(request) = runner_rx.recv().await {
+                    let _ = request.response_tx.send(Err(connector_frame_limit_error(
+                        direction,
+                        CONNECTOR_RPC_MAX_FRAME_BYTES + 1,
+                        may_have_reached,
+                    )));
+                }
+            });
+            let connector = dispatcher_test_connector(
+                "fcp.test.frame-limit:utility:1.0.0",
+                runner_tx,
+                runner_task,
+            );
+            let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+            let response = connector
+                .invoke(warm_pool_test_invoke_request(
+                    connector.summary.id.as_str(),
+                    &signing_key,
+                    "bounded",
+                ))
+                .await
+                .expect("frame limit should be returned as a compact invoke response");
+            assert_eq!(response.status, InvokeStatus::Error);
+            match response
+                .error
+                .expect("frame-limit response should carry an error")
+            {
+                fcp_core::FcpError::External {
+                    service: actual_service,
+                    retryable,
+                    status_code,
+                    retry_after,
+                    ..
+                } => {
+                    assert_eq!(actual_service, service);
+                    assert!(!retryable);
+                    assert!(status_code.is_none());
+                    assert!(retry_after.is_none());
+                }
+                error => panic!("unexpected frame-limit error: {error:?}"),
+            }
+            let metrics = response
+                .usage_metrics
+                .expect("frame-limit response should include byte metrics");
+            assert!(metrics.iter().any(|metric| {
+                metric.custom_id.as_deref() == Some(metric_id)
+                    && metric.amount
+                        == u64::try_from(CONNECTOR_RPC_MAX_FRAME_BYTES + 1).unwrap_or(u64::MAX)
+            }));
+        }
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
     async fn connector_process_runner_drop_reaps_long_running_process() {
         let pid = {
             let args = vec!["-c".to_string(), "while :; do sleep 1; done".to_string()];
             let runner = ConnectorProcessRunner::spawn("sh", &args, &BTreeMap::new())
                 .await
                 .expect("spawn long-running process");
-            runner._child.id().expect("child pid should be available")
+            runner
+                .child
+                .as_ref()
+                .and_then(Child::id)
+                .expect("child pid should be available")
         };
 
         let mut reaped = false;

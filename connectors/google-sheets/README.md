@@ -107,6 +107,13 @@ The current Google Sheets README slice documents the existing runtime surface:
 - Runtime request timeout: `30 seconds`.
 - Manifest network constraints use `10_000 ms` connect timeout and `30_000 ms` total timeout.
 - Manifest maximum response bytes are `1_048_576`, `5_242_880`, or `10_485_760` depending on operation size.
+- Native `fcp-host` request and response frames are separately bounded at
+  `65_536` bytes of serialized JSON, excluding the trailing newline. The
+  manifest's `65_000`-byte protocol datagram ceiling leaves envelope headroom;
+  the larger per-operation values above cap Google HTTP responses and do not
+  enlarge the host frame. Results that do not fit must be rejected before
+  provider I/O or served through a bounded paging/compact-receipt operation;
+  the paging implementation is tracked separately from this transport rule.
 - Sandbox profile is `strict`, with `128 MB` memory, `25%` CPU, `30_000 ms` wall-clock timeout, no exec, and no ptrace.
 - The connector does not open inbound sockets.
 - Runtime handshake event caps report no streaming and no replay.

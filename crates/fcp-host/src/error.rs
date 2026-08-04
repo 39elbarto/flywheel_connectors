@@ -33,6 +33,20 @@ pub enum HostError {
     #[error("unavailable: {0}")]
     Unavailable(String),
 
+    /// A bounded newline-delimited connector RPC frame exceeded the host contract.
+    ///
+    /// The fields are deliberately content-free so callers can classify and
+    /// report the failure without retaining any part of the frame itself.
+    #[error(
+        "connector frame limit exceeded: direction={direction} observed_bytes={observed_bytes} limit_bytes={limit_bytes} request_may_have_reached_connector={request_may_have_reached_connector}"
+    )]
+    ConnectorFrameLimit {
+        direction: String,
+        observed_bytes: u64,
+        limit_bytes: u64,
+        request_may_have_reached_connector: bool,
+    },
+
     /// Internal error.
     #[error("internal error: {0}")]
     Internal(String),
@@ -92,6 +106,20 @@ mod tests {
         let err = HostError::Unavailable("circuit breaker open".into());
         assert!(err.to_string().contains("unavailable"));
         assert!(err.to_string().contains("circuit breaker open"));
+    }
+
+    #[test]
+    fn connector_frame_limit_display_is_content_free() {
+        let err = HostError::ConnectorFrameLimit {
+            direction: "stdout".into(),
+            observed_bytes: 65_537,
+            limit_bytes: 65_536,
+            request_may_have_reached_connector: true,
+        };
+        assert_eq!(
+            err.to_string(),
+            "connector frame limit exceeded: direction=stdout observed_bytes=65537 limit_bytes=65536 request_may_have_reached_connector=true"
+        );
     }
 
     #[test]

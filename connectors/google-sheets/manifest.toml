@@ -4,6 +4,10 @@ schema_version = "2.1"
 min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
+# Native fcp-host JSONL transport accepts at most 65_536 bytes of serialized
+# JSON per request or response frame, excluding the trailing newline. Keep the
+# protocol datagram below that ceiling; provider HTTP response caps below are
+# separate safeguards and do not authorize a larger host frame.
 max_datagram_bytes = 65000
 interface_hash = "blake3-256:fcp.interface.v2:4992dd4f611efcb6a0349d3c73237237262df8456b77f1ae26df579ef98b5aca"
 

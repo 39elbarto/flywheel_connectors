@@ -2,7 +2,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
@@ -13,20 +16,69 @@ use fcp_prelude::{
     RiskLevel, SafetyTier,
 };
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::SheetsClient;
-use crate::types::{BatchUpdateValuesRequest, ValueRange};
+use crate::types::{BatchUpdateValuesRequest, Spreadsheet, ValueRange};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const MAX_RANGES: usize = 100;
 const MAX_BATCH_REQUESTS: usize = 100;
 const MAX_CELLS: usize = 50_000;
-const MAX_PAYLOAD_BYTES: usize = 1_048_576;
+/// Provider-bound JSON bodies must fit below the shared transport frame after
+/// the invoke and capability envelopes are added.
+const MAX_PAYLOAD_BYTES: usize = 48 * 1024;
 const MAX_RANGE_QUERY_BYTES: usize = 16_384;
-const METADATA_FIELDS: &str = "spreadsheetId,properties,sheets(properties,protectedRanges,basicFilter,filterViews,charts,data),namedRanges,spreadsheetUrl,developerMetadata";
+/// Leaves headroom for the JSON-RPC and InvokeResponse envelopes inside the
+/// shared 65,536-byte native host frame.
+const MAX_OPERATION_RESULT_BYTES: usize = 48 * 1024;
+const DEFAULT_PAGE_ROWS: u32 = 64;
+const MAX_PAGE_ROWS: u32 = 1_000;
+const DEFAULT_CHUNK_RANGES: usize = 10;
+const MAX_CHUNK_RANGES: usize = 25;
+const METADATA_FIELDS: &str = "spreadsheetId,properties,sheets(properties),namedRanges(namedRangeId,name,range),spreadsheetUrl,developerMetadata(metadataId,location,visibility)";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ValuesPageCursor {
+    version: u8,
+    target_hash: String,
+    next_row: u32,
+    end_row: u32,
+    page_index: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ValuesChunkCursor {
+    version: u8,
+    target_hash: String,
+    next_chunk: usize,
+    total_chunks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExplicitRowRange {
+    sheet_prefix: String,
+    start_column: String,
+    start_row: u32,
+    end_column: String,
+    end_row: u32,
+}
+
+impl ExplicitRowRange {
+    fn page_range(&self, start_row: u32, row_count: u32) -> FcpResult<String> {
+        let end_row = start_row
+            .checked_add(row_count.saturating_sub(1))
+            .ok_or_else(|| invalid("paged row boundary overflow"))?
+            .min(self.end_row);
+        Ok(format!(
+            "{}{}{}:{}{}",
+            self.sheet_prefix, self.start_column, start_row, self.end_column, end_row
+        ))
+    }
+}
 
 #[derive(Clone)]
 struct AppendReceipt {
@@ -113,9 +165,11 @@ fn resource_uris_for_operation(
     match operation {
         "sheets.get_spreadsheet"
         | "sheets.get_values"
+        | "sheets.get_values_page"
         | "sheets.batch_get_values"
         | "sheets.update_values"
         | "sheets.batch_update_values"
+        | "sheets.batch_update_values_chunked"
         | "sheets.append_values"
         | "sheets.clear_values"
         | "sheets.batch_update_spreadsheet" => {
@@ -141,22 +195,28 @@ pub struct SheetsConnector {
     verifier: Option<CapabilityVerifier>,
     session_id: Option<fcp_core::SessionId>,
     append_receipts: Mutex<HashMap<String, AppendReceipt>>,
+    page_count: AtomicU64,
+    chunk_count: AtomicU64,
 }
 
 impl SheetsConnector {
     /// Content-free cumulative provider counters for invocation telemetry.
     #[must_use]
-    pub fn provider_telemetry(&self) -> (u64, u64, u64, u64, u64, u64) {
-        self.client.as_ref().map_or((0, 0, 0, 0, 0, 0), |client| {
-            (
-                client.total_requests(),
-                client.provider_total_us(),
-                0,
-                client.rate_limit_count(),
-                client.provider_request_bytes(),
-                client.provider_response_bytes(),
-            )
-        })
+    pub fn provider_telemetry(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+        self.client
+            .as_ref()
+            .map_or((0, 0, 0, 0, 0, 0, 0, 0), |client| {
+                (
+                    client.total_requests(),
+                    client.provider_total_us(),
+                    0,
+                    client.rate_limit_count(),
+                    client.provider_request_bytes(),
+                    client.provider_response_bytes(),
+                    self.page_count.load(Ordering::Relaxed),
+                    self.chunk_count.load(Ordering::Relaxed),
+                )
+            })
     }
 
     #[must_use]
@@ -169,6 +229,8 @@ impl SheetsConnector {
             verifier: None,
             session_id: None,
             append_receipts: Mutex::new(HashMap::new()),
+            page_count: AtomicU64::new(0),
+            chunk_count: AtomicU64::new(0),
         }
     }
 
@@ -381,6 +443,19 @@ impl SheetsConnector {
                     ),
                 ),
                 op_info(
+                    "sheets.get_values_page",
+                    "Read one explicit row-bounded A1 range through deterministic bounded pages",
+                    object_schema(&["spreadsheet_id", "range"]),
+                    object_schema(&["values", "page"]),
+                    "sheets.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    hint(
+                        "Use for ranges that may not fit one FCP frame; pass the returned page_token unchanged.",
+                    ),
+                ),
+                op_info(
                     "sheets.batch_get_values",
                     "Read up to 100 ranges with explicit render choices",
                     object_schema(&["spreadsheet_id", "ranges"]),
@@ -412,6 +487,19 @@ impl SheetsConnector {
                     SafetyTier::Risky,
                     IdempotencyClass::BestEffort,
                     hint("Apply related value and formula changes atomically."),
+                ),
+                op_info(
+                    "sheets.batch_update_values_chunked",
+                    "Update independent value ranges in explicit verified chunks with partial-progress receipts",
+                    object_schema(&["spreadsheet_id", "data", "confirm_independent_chunks"]),
+                    object_schema(&["status", "completed_chunks", "readback"]),
+                    "sheets.values.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::BestEffort,
+                    hint(
+                        "Use only when each range is independently applicable and partial progress is acceptable.",
+                    ),
                 ),
                 op_info(
                     "sheets.append_values",
@@ -545,6 +633,11 @@ impl SheetsConnector {
                     .get("include_grid_data")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
+                if include_grid_data {
+                    return Err(invalid(
+                        "metadata reads never include grid data; use sheets.get_values_page with an explicit row-bounded A1 range",
+                    ));
+                }
                 let ss = client
                     .get_spreadsheet_with_options(
                         spreadsheet_id,
@@ -554,7 +647,10 @@ impl SheetsConnector {
                     )
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                Ok(json!({ "spreadsheet": ss }))
+                bounded_result(
+                    json!({ "spreadsheet": ss }),
+                    "metadata result is too large; request fewer metadata ranges or fields",
+                )
             }
             "sheets.get_values" => {
                 let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
@@ -564,7 +660,126 @@ impl SheetsConnector {
                     .get_values_with_options(spreadsheet_id, range, major, render, date_time)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                Ok(json!({ "range": vr.range, "values": vr.values }))
+                bounded_result(
+                    json!({ "range": vr.range, "values": vr.values }),
+                    "value result is too large; use sheets.get_values_page",
+                )
+            }
+            "sheets.get_values_page" => {
+                let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
+                let requested_range = validate_range(require_str(&input, "range")?)?;
+                let parsed_range = parse_explicit_row_range(requested_range)?;
+                let (major, render, date_time) = read_options(&input)?;
+                let requested_page_rows = input
+                    .get("page_size_rows")
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .filter(|value| (1..=MAX_PAGE_ROWS).contains(value))
+                            .ok_or_else(|| {
+                                invalid(format!("'page_size_rows' must be 1..={MAX_PAGE_ROWS}"))
+                            })
+                    })
+                    .transpose()?
+                    .unwrap_or(DEFAULT_PAGE_ROWS);
+                let target_hash = values_page_target_hash(
+                    spreadsheet_id,
+                    requested_range,
+                    major,
+                    render,
+                    date_time,
+                    requested_page_rows,
+                );
+                let cursor = input
+                    .get("page_token")
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .ok_or_else(|| invalid("'page_token' must be a string"))
+                            .and_then(decode_values_page_cursor)
+                    })
+                    .transpose()?;
+                let (start_row, page_index) = if let Some(cursor) = cursor {
+                    if cursor.version != 1
+                        || cursor.target_hash != target_hash
+                        || cursor.end_row != parsed_range.end_row
+                        || cursor.next_row < parsed_range.start_row
+                        || cursor.next_row > parsed_range.end_row
+                    {
+                        return Err(invalid(
+                            "page_token does not match the requested spreadsheet, range, or render options",
+                        ));
+                    }
+                    (cursor.next_row, cursor.page_index)
+                } else {
+                    (parsed_range.start_row, 0)
+                };
+                let remaining_rows = parsed_range
+                    .end_row
+                    .saturating_sub(start_row)
+                    .saturating_add(1);
+                let mut page_rows = requested_page_rows.min(remaining_rows);
+                let (output, consumed_rows) = loop {
+                    let provider_range = parsed_range.page_range(start_row, page_rows)?;
+                    let vr = match client
+                        .get_values_with_options(
+                            spreadsheet_id,
+                            &provider_range,
+                            major,
+                            render,
+                            date_time,
+                        )
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(crate::error::SheetsError::Api {
+                            status_code: 413, ..
+                        }) if page_rows > 1 => {
+                            page_rows = (page_rows / 2).max(1);
+                            continue;
+                        }
+                        Err(error) => return Err(error.to_fcp_error()),
+                    };
+                    let next_row = start_row.saturating_add(page_rows);
+                    let next_page_token = if next_row <= parsed_range.end_row {
+                        Some(encode_values_page_cursor(&ValuesPageCursor {
+                            version: 1,
+                            target_hash: target_hash.clone(),
+                            next_row,
+                            end_row: parsed_range.end_row,
+                            page_index: page_index.saturating_add(1),
+                        })?)
+                    } else {
+                        None
+                    };
+                    let candidate = json!({
+                        "requested_range": requested_range,
+                        "range": vr.range,
+                        "major_dimension": major,
+                        "values": vr.values,
+                        "page": {
+                            "page_index": page_index,
+                            "start_row": start_row,
+                            "end_row": start_row.saturating_add(page_rows).saturating_sub(1),
+                            "row_span": page_rows,
+                            "complete": next_page_token.is_none(),
+                            "page_token": next_page_token,
+                        }
+                    });
+                    if serialized_len(&candidate)? <= MAX_OPERATION_RESULT_BYTES {
+                        break (candidate, page_rows);
+                    }
+                    if page_rows == 1 {
+                        return Err(invalid(format!(
+                            "one requested row exceeds the {MAX_OPERATION_RESULT_BYTES}-byte connector result budget"
+                        )));
+                    }
+                    page_rows = (page_rows / 2).max(1);
+                };
+                debug_assert_eq!(consumed_rows, page_rows);
+                self.page_count.fetch_add(1, Ordering::Relaxed);
+                Ok(output)
             }
             "sheets.batch_get_values" => {
                 let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
@@ -574,10 +789,13 @@ impl SheetsConnector {
                     .batch_get_values(spreadsheet_id, &ranges, major, render, date_time)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                Ok(json!({
-                    "spreadsheet_id": response.get("spreadsheetId").cloned().unwrap_or(json!(spreadsheet_id)),
-                    "value_ranges": response.get("valueRanges").cloned().unwrap_or_else(|| json!([])),
-                }))
+                bounded_result(
+                    json!({
+                        "spreadsheet_id": response.get("spreadsheetId").cloned().unwrap_or(json!(spreadsheet_id)),
+                        "value_ranges": response.get("valueRanges").cloned().unwrap_or_else(|| json!([])),
+                    }),
+                    "batch value result is too large; use sheets.get_values_page for each explicit range",
+                )
             }
             "sheets.update_values" => {
                 let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
@@ -626,8 +844,174 @@ impl SheetsConnector {
                     "total_updated_columns": response.total_updated_columns,
                     "total_updated_cells": response.total_updated_cells,
                     "total_updated_sheets": response.total_updated_sheets,
-                    "responses": response.responses,
                 }))
+            }
+            "sheets.batch_update_values_chunked" => {
+                let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
+                require_confirmation(&input, "confirm_independent_chunks")?;
+                let data = validated_value_ranges(&input)?;
+                if data.iter().any(|range| range.major_dimension != "ROWS") {
+                    return Err(invalid(
+                        "chunked value writes require major_dimension=ROWS for deterministic batch readback",
+                    ));
+                }
+                let chunk_size = input
+                    .get("chunk_size_ranges")
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .and_then(|value| usize::try_from(value).ok())
+                            .filter(|value| (1..=MAX_CHUNK_RANGES).contains(value))
+                            .ok_or_else(|| {
+                                invalid(format!(
+                                    "'chunk_size_ranges' must be 1..={MAX_CHUNK_RANGES}"
+                                ))
+                            })
+                    })
+                    .transpose()?
+                    .unwrap_or(DEFAULT_CHUNK_RANGES);
+                let value_input_option = value_input_option(&input)?.to_string();
+                let target_hash = values_chunk_target_hash(
+                    spreadsheet_id,
+                    &data,
+                    &value_input_option,
+                    chunk_size,
+                )?;
+                let total_chunks = data.len().div_ceil(chunk_size);
+                let cursor = input
+                    .get("resume_token")
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .ok_or_else(|| invalid("'resume_token' must be a string"))
+                            .and_then(decode_values_chunk_cursor)
+                    })
+                    .transpose()?;
+                let start_chunk = if let Some(cursor) = cursor {
+                    if cursor.version != 1
+                        || cursor.target_hash != target_hash
+                        || cursor.total_chunks != total_chunks
+                        || cursor.next_chunk >= total_chunks
+                    {
+                        return Err(invalid(
+                            "resume_token does not match the spreadsheet, data, options, or chunk plan",
+                        ));
+                    }
+                    cursor.next_chunk
+                } else {
+                    0
+                };
+                let mut completed_chunks = Vec::new();
+                let mut completed_range_count = 0_usize;
+                let mut total_updated_cells = 0_u64;
+                for chunk_index in start_chunk..total_chunks {
+                    let start = chunk_index.saturating_mul(chunk_size);
+                    let end = start.saturating_add(chunk_size).min(data.len());
+                    let chunk = data[start..end].to_vec();
+                    self.chunk_count.fetch_add(1, Ordering::Relaxed);
+                    let request = BatchUpdateValuesRequest {
+                        value_input_option: value_input_option.clone(),
+                        data: chunk.clone(),
+                        include_values_in_response: false,
+                        response_value_render_option: None,
+                        response_date_time_render_option: None,
+                    };
+                    let response = match client.batch_update_values(spreadsheet_id, &request).await
+                    {
+                        Ok(response) => response,
+                        Err(error) => {
+                            let uncertain = error.is_retryable();
+                            let resume_token = if uncertain {
+                                None
+                            } else {
+                                Some(encode_values_chunk_cursor(&ValuesChunkCursor {
+                                    version: 1,
+                                    target_hash: target_hash.clone(),
+                                    next_chunk: chunk_index,
+                                    total_chunks,
+                                })?)
+                            };
+                            return Ok(json!({
+                                "status": if uncertain { "outcome_uncertain" } else { "provider_rejected" },
+                                "completed_chunks": completed_chunks,
+                                "completed_range_count": completed_range_count,
+                                "failed_chunk": chunk_index,
+                                "failed_range_indexes": (start..end).collect::<Vec<_>>(),
+                                "readback": {
+                                    "required": uncertain,
+                                    "range_indexes": (start..end).collect::<Vec<_>>(),
+                                },
+                                "resume_safe": !uncertain,
+                                "resume_token": resume_token,
+                                "provider_error_class": if uncertain { "transport_or_retryable" } else { "rejected" },
+                            }));
+                        }
+                    };
+                    total_updated_cells =
+                        total_updated_cells.saturating_add(u64::from(response.total_updated_cells));
+                    let ranges = chunk
+                        .iter()
+                        .map(|entry| entry.range.clone())
+                        .collect::<Vec<_>>();
+                    let Ok(readback) = client
+                        .batch_get_values(
+                            spreadsheet_id,
+                            &ranges,
+                            "ROWS",
+                            "FORMULA",
+                            "SERIAL_NUMBER",
+                        )
+                        .await
+                    else {
+                        return Ok(json!({
+                            "status": "applied_unverified",
+                            "completed_chunks": completed_chunks,
+                            "completed_range_count": completed_range_count,
+                            "unverified_chunk": chunk_index,
+                            "readback": {
+                                "required": true,
+                                "range_indexes": (start..end).collect::<Vec<_>>(),
+                            },
+                            "resume_safe": false,
+                            "resume_token": null,
+                        }));
+                    };
+                    let verified_range_count = verify_chunk_readback(&chunk, &readback);
+                    if verified_range_count != chunk.len() {
+                        return Ok(json!({
+                            "status": "applied_unverified",
+                            "completed_chunks": completed_chunks,
+                            "completed_range_count": completed_range_count,
+                            "unverified_chunk": chunk_index,
+                            "readback": {
+                                "required": true,
+                                "verified_range_count": verified_range_count,
+                                "range_count": chunk.len(),
+                                "range_indexes": (start..end).collect::<Vec<_>>(),
+                            },
+                            "resume_safe": false,
+                            "resume_token": null,
+                        }));
+                    }
+                    completed_chunks.push(chunk_index);
+                    completed_range_count = completed_range_count.saturating_add(chunk.len());
+                }
+                let output = json!({
+                    "status": "applied_and_verified",
+                    "completed_chunks": completed_chunks,
+                    "completed_range_count": completed_range_count,
+                    "total_updated_cells": total_updated_cells,
+                    "readback": {
+                        "required": false,
+                        "verified_range_count": completed_range_count,
+                    },
+                    "resume_safe": false,
+                    "resume_token": null,
+                });
+                if serialized_len(&output)? > MAX_OPERATION_RESULT_BYTES {
+                    return Err(invalid("chunk receipt exceeds connector result budget"));
+                }
+                Ok(output)
             }
             "sheets.append_values" => {
                 let spreadsheet_id = require_str(&input, "spreadsheet_id")?;
@@ -691,6 +1075,11 @@ impl SheetsConnector {
                     .get_values(spreadsheet_id, range)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
+                if serialized_len(&json!({ "preflight": &before }))? > MAX_OPERATION_RESULT_BYTES {
+                    return Err(invalid(
+                        "clear preflight is too large; narrow the range before clearing",
+                    ));
+                }
                 let clear_result = client
                     .clear_values(spreadsheet_id, range)
                     .await
@@ -750,6 +1139,7 @@ impl SheetsConnector {
                     .get_spreadsheet_with_options(spreadsheet_id, &[], false, Some(METADATA_FIELDS))
                     .await
                     .map_err(|e| e.to_fcp_error())?;
+                let preflight = spreadsheet_receipt(&preflight);
                 let response = client
                     .batch_update_spreadsheet(
                         spreadsheet_id,
@@ -764,12 +1154,16 @@ impl SheetsConnector {
                     .get_spreadsheet_with_options(spreadsheet_id, &[], false, Some(METADATA_FIELDS))
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                Ok(json!({
-                    "destructive": destructive,
-                    "preflight": preflight,
-                    "response": response,
-                    "readback": readback,
-                }))
+                let readback = spreadsheet_receipt(&readback);
+                bounded_result(
+                    json!({
+                        "destructive": destructive,
+                        "preflight": preflight,
+                        "response": response,
+                        "readback": readback,
+                    }),
+                    "structural write receipt exceeds the connector result budget",
+                )
             }
             _ => Err(FcpError::InvalidRequest {
                 code: 1002,
@@ -842,6 +1236,211 @@ fn validate_range(range: &str) -> FcpResult<&str> {
         ));
     }
     Ok(trimmed)
+}
+
+fn parse_explicit_row_range(range: &str) -> FcpResult<ExplicitRowRange> {
+    let (sheet_prefix, cells) = range.rfind('!').map_or_else(
+        || (String::new(), range),
+        |index| (range[..=index].to_string(), &range[index + 1..]),
+    );
+    let (start, end) = cells.split_once(':').ok_or_else(|| {
+        invalid("paged range must be an explicit A1 interval such as 'Sheet1!A1:D500'")
+    })?;
+    let (start_column, start_row) = parse_explicit_cell_reference(start)?;
+    let (end_column, end_row) = parse_explicit_cell_reference(end)?;
+    if start_row > end_row {
+        return Err(invalid("paged range start row must not exceed end row"));
+    }
+    Ok(ExplicitRowRange {
+        sheet_prefix,
+        start_column,
+        start_row,
+        end_column,
+        end_row,
+    })
+}
+
+fn parse_explicit_cell_reference(value: &str) -> FcpResult<(String, u32)> {
+    let value = value.trim();
+    let column_end = value
+        .char_indices()
+        .take_while(|(_, character)| character.is_ascii_alphabetic() || *character == '$')
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0);
+    let column = value[..column_end].replace('$', "");
+    let row = value[column_end..].trim_start_matches('$');
+    if column.is_empty()
+        || column.len() > 4
+        || !column
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+        || row.is_empty()
+        || !row.chars().all(|character| character.is_ascii_digit())
+    {
+        return Err(invalid(
+            "paged range endpoints must contain explicit columns and positive row numbers",
+        ));
+    }
+    let row = row
+        .parse::<u32>()
+        .ok()
+        .filter(|row| *row > 0)
+        .ok_or_else(|| invalid("paged range row numbers must fit u32 and be positive"))?;
+    Ok((column.to_ascii_uppercase(), row))
+}
+
+fn values_page_target_hash(
+    spreadsheet_id: &str,
+    range: &str,
+    major_dimension: &str,
+    value_render_option: &str,
+    date_time_render_option: &str,
+    page_size_rows: u32,
+) -> String {
+    let mut hasher = Sha256::new();
+    for value in [
+        spreadsheet_id,
+        range,
+        major_dimension,
+        value_render_option,
+        date_time_render_option,
+    ] {
+        hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.update(page_size_rows.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn encode_values_page_cursor(cursor: &ValuesPageCursor) -> FcpResult<String> {
+    let payload = serde_json::to_vec(cursor)
+        .map_err(|error| invalid(format!("failed to encode page token: {error}")))?;
+    let checksum = hex::encode(Sha256::digest(&payload));
+    Ok(format!("{}.{}", hex::encode(payload), checksum))
+}
+
+fn decode_values_page_cursor(token: &str) -> FcpResult<ValuesPageCursor> {
+    if token.len() > 4_096 {
+        return Err(invalid("page_token exceeds 4096 characters"));
+    }
+    let (payload_hex, supplied_checksum) = token
+        .split_once('.')
+        .ok_or_else(|| invalid("page_token is malformed"))?;
+    let payload = hex::decode(payload_hex).map_err(|_| invalid("page_token is malformed"))?;
+    let expected_checksum = hex::encode(Sha256::digest(&payload));
+    if supplied_checksum.len() != expected_checksum.len() || supplied_checksum != expected_checksum
+    {
+        return Err(invalid("page_token checksum is invalid"));
+    }
+    serde_json::from_slice(&payload).map_err(|_| invalid("page_token payload is invalid"))
+}
+
+fn values_chunk_target_hash(
+    spreadsheet_id: &str,
+    data: &[ValueRange],
+    value_input_option: &str,
+    chunk_size: usize,
+) -> FcpResult<String> {
+    let payload = serde_json::to_vec(&(spreadsheet_id, data, value_input_option, chunk_size))
+        .map_err(|error| invalid(format!("failed to bind chunk plan: {error}")))?;
+    Ok(hex::encode(Sha256::digest(payload)))
+}
+
+fn encode_values_chunk_cursor(cursor: &ValuesChunkCursor) -> FcpResult<String> {
+    let payload = serde_json::to_vec(cursor)
+        .map_err(|error| invalid(format!("failed to encode resume token: {error}")))?;
+    let checksum = hex::encode(Sha256::digest(&payload));
+    Ok(format!("{}.{}", hex::encode(payload), checksum))
+}
+
+fn decode_values_chunk_cursor(token: &str) -> FcpResult<ValuesChunkCursor> {
+    if token.len() > 4_096 {
+        return Err(invalid("resume_token exceeds 4096 characters"));
+    }
+    let (payload_hex, supplied_checksum) = token
+        .split_once('.')
+        .ok_or_else(|| invalid("resume_token is malformed"))?;
+    let payload = hex::decode(payload_hex).map_err(|_| invalid("resume_token is malformed"))?;
+    let expected_checksum = hex::encode(Sha256::digest(&payload));
+    if supplied_checksum.len() != expected_checksum.len() || supplied_checksum != expected_checksum
+    {
+        return Err(invalid("resume_token checksum is invalid"));
+    }
+    serde_json::from_slice(&payload).map_err(|_| invalid("resume_token payload is invalid"))
+}
+
+fn verify_chunk_readback(chunk: &[ValueRange], response: &serde_json::Value) -> usize {
+    let Some(readbacks) = response
+        .get("valueRanges")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return 0;
+    };
+    chunk
+        .iter()
+        .zip(readbacks)
+        .filter(|(expected, actual)| {
+            let actual_values = actual
+                .get("values")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            normalized_values(expected.values.clone()) == normalized_values_json(actual_values)
+        })
+        .count()
+}
+
+fn normalized_values(mut rows: Vec<Vec<serde_json::Value>>) -> Vec<Vec<serde_json::Value>> {
+    for row in &mut rows {
+        while row.last().is_some_and(serde_json::Value::is_null) {
+            row.pop();
+        }
+    }
+    while rows.last().is_some_and(Vec::is_empty) {
+        rows.pop();
+    }
+    rows
+}
+
+fn normalized_values_json(rows: Vec<serde_json::Value>) -> Vec<Vec<serde_json::Value>> {
+    normalized_values(
+        rows.into_iter()
+            .map(|row| row.as_array().cloned().unwrap_or_default())
+            .collect(),
+    )
+}
+
+fn serialized_len(value: &serde_json::Value) -> FcpResult<usize> {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .map_err(|error| invalid(format!("failed to measure connector result: {error}")))
+}
+
+fn bounded_result(
+    value: serde_json::Value,
+    oversized_message: &'static str,
+) -> FcpResult<serde_json::Value> {
+    if serialized_len(&value)? > MAX_OPERATION_RESULT_BYTES {
+        return Err(invalid(oversized_message));
+    }
+    Ok(value)
+}
+
+fn spreadsheet_receipt(spreadsheet: &Spreadsheet) -> serde_json::Value {
+    json!({
+        "spreadsheet_id": spreadsheet.spreadsheet_id,
+        "title": spreadsheet.properties.title,
+        "sheet_count": spreadsheet.sheets.len(),
+        "sheets": spreadsheet.sheets.iter().map(|sheet| json!({
+            "sheet_id": sheet.properties.sheet_id,
+            "title": sheet.properties.title,
+            "index": sheet.properties.index,
+            "sheet_type": sheet.properties.sheet_type,
+        })).collect::<Vec<_>>(),
+        "named_range_count": spreadsheet.named_ranges.len(),
+        "developer_metadata_count": spreadsheet.developer_metadata.len(),
+    })
 }
 
 fn optional_ranges(input: &serde_json::Value, field: &str) -> FcpResult<Vec<String>> {
@@ -966,7 +1565,9 @@ fn validated_values(
         .len()
         > MAX_PAYLOAD_BYTES
     {
-        return Err(invalid("values payload exceeds 1 MiB"));
+        return Err(invalid(format!(
+            "values payload exceeds the {MAX_PAYLOAD_BYTES}-byte connector request budget"
+        )));
     }
     Ok(output)
 }
@@ -979,6 +1580,15 @@ fn validated_value_ranges(input: &serde_json::Value) -> FcpResult<Vec<ValueRange
     if data.is_empty() || data.len() > MAX_RANGES {
         return Err(invalid(format!(
             "'data' must contain 1..={MAX_RANGES} ranges"
+        )));
+    }
+    if serde_json::to_vec(data)
+        .map_err(|error| invalid(format!("invalid batch values payload: {error}")))?
+        .len()
+        > MAX_PAYLOAD_BYTES
+    {
+        return Err(invalid(format!(
+            "batch values payload exceeds the {MAX_PAYLOAD_BYTES}-byte connector request budget"
         )));
     }
     let mut total_cells = 0_usize;
@@ -1159,7 +1769,9 @@ fn validated_structural_requests(
         .len()
         > MAX_PAYLOAD_BYTES
     {
-        return Err(invalid("structural batch payload exceeds 1 MiB"));
+        return Err(invalid(format!(
+            "structural batch payload exceeds the {MAX_PAYLOAD_BYTES}-byte atomic request budget; atomic batches are never split"
+        )));
     }
     let mut destructive = false;
     for request in requests {
@@ -1480,14 +2092,16 @@ mod tests {
         let connector = SheetsConnector::new();
         let result = run_async_test(connector.handle_introspect()).unwrap();
         let ops = result["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 12);
 
         let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
         assert!(op_ids.contains(&"sheets.get_spreadsheet"));
         assert!(op_ids.contains(&"sheets.get_values"));
+        assert!(op_ids.contains(&"sheets.get_values_page"));
         assert!(op_ids.contains(&"sheets.batch_get_values"));
         assert!(op_ids.contains(&"sheets.update_values"));
         assert!(op_ids.contains(&"sheets.batch_update_values"));
+        assert!(op_ids.contains(&"sheets.batch_update_values_chunked"));
         assert!(op_ids.contains(&"sheets.append_values"));
         assert!(op_ids.contains(&"sheets.clear_values"));
         assert!(op_ids.contains(&"sheets.create_spreadsheet"));
@@ -1591,6 +2205,67 @@ mod tests {
         assert!(validated_values(&json!({"values": rows}), "values").is_err());
         let too_many_ranges = vec!["A1"; MAX_RANGES + 1];
         assert!(required_ranges(&json!({"ranges": too_many_ranges}), "ranges").is_err());
+    }
+
+    #[test]
+    fn metadata_fields_exclude_grid_data() {
+        assert!(!METADATA_FIELDS.contains("charts,data"));
+        assert!(!METADATA_FIELDS.contains("sheets(data"));
+        assert!(METADATA_FIELDS.contains("sheets(properties)"));
+    }
+
+    #[test]
+    fn chunk_readback_normalization_and_target_hashes_are_deterministic() {
+        let chunk = vec![ValueRange {
+            range: "Sheet1!A1:B2".into(),
+            major_dimension: "ROWS".into(),
+            values: vec![vec![json!(1), json!(null)], vec![json!(null)]],
+        }];
+        let response = json!({
+            "valueRanges": [{"range": "Sheet1!A1:B2", "values": [[1]]}]
+        });
+        assert_eq!(verify_chunk_readback(&chunk, &response), 1);
+        let first = values_chunk_target_hash("sheet123", &chunk, "USER_ENTERED", 10).unwrap();
+        let second = values_chunk_target_hash("sheet123", &chunk, "USER_ENTERED", 10).unwrap();
+        assert_eq!(first, second);
+        assert_ne!(
+            first,
+            values_chunk_target_hash("sheet123", &chunk, "RAW", 10).unwrap()
+        );
+    }
+
+    #[test]
+    fn explicit_row_ranges_and_page_tokens_are_bounded_and_target_bound() {
+        let parsed = parse_explicit_row_range("'Revenue ! 2026'!$A$7:D120").unwrap();
+        assert_eq!(parsed.sheet_prefix, "'Revenue ! 2026'!");
+        assert_eq!(parsed.start_column, "A");
+        assert_eq!(parsed.start_row, 7);
+        assert_eq!(parsed.end_column, "D");
+        assert_eq!(parsed.end_row, 120);
+        assert_eq!(parsed.page_range(7, 10).unwrap(), "'Revenue ! 2026'!A7:D16");
+        assert!(parse_explicit_row_range("Sheet1!A:D").is_err());
+        assert!(parse_explicit_row_range("named_range").is_err());
+
+        let cursor = ValuesPageCursor {
+            version: 1,
+            target_hash: values_page_target_hash(
+                "sheet123",
+                "Sheet1!A1:D120",
+                "ROWS",
+                "FORMATTED_VALUE",
+                "SERIAL_NUMBER",
+                64,
+            ),
+            next_row: 65,
+            end_row: 120,
+            page_index: 1,
+        };
+        let token = encode_values_page_cursor(&cursor).unwrap();
+        assert!(token.len() < 4_096);
+        assert_eq!(decode_values_page_cursor(&token).unwrap(), cursor);
+        let mut tampered = token.into_bytes();
+        tampered[0] = if tampered[0] == b'a' { b'b' } else { b'a' };
+        assert!(decode_values_page_cursor(std::str::from_utf8(&tampered).unwrap()).is_err());
     }
 
     #[test]

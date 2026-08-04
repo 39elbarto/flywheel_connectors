@@ -21,9 +21,11 @@ The current crate exposes these operations:
 
 - `sheets.get_spreadsheet`
 - `sheets.get_values`
+- `sheets.get_values_page`
 - `sheets.batch_get_values`
 - `sheets.update_values`
 - `sheets.batch_update_values`
+- `sheets.batch_update_values_chunked`
 - `sheets.append_values`
 - `sheets.clear_values`
 - `sheets.create_spreadsheet`
@@ -45,9 +47,26 @@ Important runtime truths the contract preserves:
 - Spreadsheet IDs are inserted into URL path segments only after local path-segment validation.
 - Path-segment validation rejects empty strings, slashes, backslashes, `..`, query strings, fragments, encoded slash/backslash/query/fragment markers, and literal percent characters.
 - Range expressions are percent-encoded with `percent_encoding::NON_ALPHANUMERIC` before being placed in the URL path.
+- Default spreadsheet metadata selects workbook and tab structure but never
+  grid `data`; `include_grid_data=true` is rejected with guidance to an explicit
+  value-range operation.
+- `sheets.get_values_page` requires an explicit row-bounded A1 interval. It
+  returns at most a `48 KiB` operation result, automatically halves a provider
+  range after either the `10 MiB` HTTP cap or the result budget is reached, and
+  binds its continuation token to the spreadsheet, range, render options, and
+  requested page size.
 - `sheets.update_values` writes with `valueInputOption=USER_ENTERED`.
 - `sheets.append_values` writes with `valueInputOption=USER_ENTERED` and `insertDataOption=INSERT_ROWS`.
 - Value writes require a bounded two-dimensional `values` array; batch reads and writes accept at most 100 ranges and 50,000 cells.
+- Provider-bound value and structural JSON bodies are capped at `48 KiB` so an
+  atomic request is rejected before provider I/O rather than being split or
+  lost at the shared host frame.
+- `sheets.batch_update_values_chunked` is opt-in through
+  `confirm_independent_chunks=true`, processes at most 25 ranges per provider
+  chunk, requires row-oriented ranges, and reads every acknowledged chunk back
+  with formula rendering. An
+  uncertain provider failure stops without a safe resume token; an explicit
+  provider rejection returns a data-bound token for the same failed chunk.
 - `sheets.append_values` requires an 8–128 character idempotency key. A successful retry with the same key and payload is served from the connector-session receipt cache; reusing the key for different data is rejected.
 - `sheets.clear_values` requires `confirm_clear=true`, performs a read-only value preflight, clears the range, and reads it back.
 - Structural batches accept only documented request types. Delete/clear request types additionally require `confirm_destructive=true`; every structural batch captures metadata before and after the atomic provider update.
@@ -111,9 +130,9 @@ The current Google Sheets README slice documents the existing runtime surface:
   `65_536` bytes of serialized JSON, excluding the trailing newline. The
   manifest's `65_000`-byte protocol datagram ceiling leaves envelope headroom;
   the larger per-operation values above cap Google HTTP responses and do not
-  enlarge the host frame. Results that do not fit must be rejected before
-  provider I/O or served through a bounded paging/compact-receipt operation;
-  the paging implementation is tracked separately from this transport rule.
+  enlarge the host frame. Results that do not fit must be rejected or served
+  through `sheets.get_values_page`; writes return bounded receipts rather than
+  raw provider bodies.
 - Sandbox profile is `strict`, with `128 MB` memory, `25%` CPU, `30_000 ms` wall-clock timeout, no exec, and no ptrace.
 - The connector does not open inbound sockets.
 - Runtime handshake event caps report no streaming and no replay.
@@ -132,9 +151,11 @@ The current Google Sheets README slice documents the existing runtime surface:
 |-----------|----------------|------------|------------|-----------|-------------|-----------|
 | `sheets.get_spreadsheet` | `GET /v4/spreadsheets/{spreadsheet_id}` | `sheets.read` | `Safe` | `Low` | `Strict` | Reads spreadsheet metadata and sheet list. |
 | `sheets.get_values` | `GET /v4/spreadsheets/{spreadsheet_id}/values/{range}` | `sheets.read` | `Safe` | `Low` | `Strict` | Reads cell values from an A1 notation range. |
+| `sheets.get_values_page` | `GET /v4/spreadsheets/{spreadsheet_id}/values/{derived_page_range}` | `sheets.read` | `Safe` | `Low` | `Strict` | Reads an explicit row-bounded range through target-bound continuation pages. |
 | `sheets.batch_get_values` | `GET /v4/spreadsheets/{spreadsheet_id}/values:batchGet` | `sheets.read` | `Safe` | `Low` | `Strict` | Reads up to 100 ranges with explicit render choices. |
 | `sheets.update_values` | `PUT /v4/spreadsheets/{spreadsheet_id}/values/{range}` | `sheets.values.write` | `Risky` | `Medium` | `BestEffort` | Writes a bounded two-dimensional array. |
 | `sheets.batch_update_values` | `POST /v4/spreadsheets/{spreadsheet_id}/values:batchUpdate` | `sheets.values.write` | `Risky` | `Medium` | `BestEffort` | Atomically writes values or formulas to up to 100 ranges. |
+| `sheets.batch_update_values_chunked` | repeated `POST values:batchUpdate` plus `GET values:batchGet` readback | `sheets.values.write` | `Risky` | `Medium` | `BestEffort` | Writes explicitly independent ranges in verified chunks with partial-progress receipts. |
 | `sheets.append_values` | `POST /v4/spreadsheets/{spreadsheet_id}/values/{range}:append` | `sheets.values.write` | `Risky` | `Medium` | `BestEffort` | Appends once per connector-session idempotency key. |
 | `sheets.clear_values` | `GET`, `POST :clear`, `GET` | `sheets.values.write` | `Dangerous` | `High` | `Strict` | Requires confirmation and returns preflight plus readback. |
 | `sheets.create_spreadsheet` | `POST /v4/spreadsheets` | `sheets.structure.write` | `Risky` | `Medium` | `None` | Creates a spreadsheet with bounded initial tabs. |

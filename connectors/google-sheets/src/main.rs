@@ -178,6 +178,8 @@ async fn handle_invoke(
             after.5.saturating_sub(before.5),
             Some("bytes".to_string()),
         ),
+        UsageMetric::custom("page_count", after.6.saturating_sub(before.6), None),
+        UsageMetric::custom("chunk_count", after.7.saturating_sub(before.7), None),
     ]);
     serde_json::to_value(response).map_err(|error| FcpError::Internal {
         message: format!("Failed to serialize invoke response: {error}"),

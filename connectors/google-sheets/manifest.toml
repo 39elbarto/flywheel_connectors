@@ -9,7 +9,7 @@ protocol_features = []
 # protocol datagram below that ceiling; provider HTTP response caps below are
 # separate safeguards and do not authorize a larger host frame.
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4992dd4f611efcb6a0349d3c73237237262df8456b77f1ae26df579ef98b5aca"
+interface_hash = "blake3-256:fcp.interface.v2:6e7828f4f49ad2ecc87aca5d538bb768bc376891ed08fc141028a6fb4be0da72"
 
 [connector]
 id = "fcp.google_sheets"
@@ -127,6 +127,57 @@ when_to_use = "Read data from a spreadsheet range like 'Sheet1!A1:C10'."
 common_mistakes = ["Range must use A1 notation (e.g. 'Sheet1!A1:B5')", "Not handling empty cells which may be omitted from the response"]
 examples = ['{"spreadsheet_id": "abc123", "range": "Sheet1!A1:C10"}']
 related = ["sheets.update_values", "sheets.get_spreadsheet"]
+
+# -----------------------------------------------------------------------
+
+[provides.operations."sheets.get_values_page"]
+description = "Read an explicit row-bounded A1 range through deterministic bounded pages"
+capability = "sheets.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sheets.get_values_page".input_schema]
+required = ["spreadsheet_id", "range"]
+type = "object"
+[provides.operations."sheets.get_values_page".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.get_values_page".input_schema.properties.range]
+type = "string"
+[provides.operations."sheets.get_values_page".input_schema.properties.page_size_rows]
+type = "integer"
+[provides.operations."sheets.get_values_page".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."sheets.get_values_page".output_schema]
+required = ["values", "page"]
+type = "object"
+[provides.operations."sheets.get_values_page".output_schema.properties.values]
+type = "array"
+[provides.operations."sheets.get_values_page".output_schema.properties.page]
+type = "object"
+
+[provides.operations."sheets.get_values_page".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sheets.get_values_page".ai_hints]
+when_to_use = "Read a potentially large explicit range without manually splitting A1 ranges."
+common_mistakes = ["Changing the range or render options while reusing a page token", "Editing the opaque page token"]
+examples = ['{"spreadsheet_id":"abc123","range":"Sheet1!A1:D5000","page_size_rows":64}']
+related = ["sheets.get_values", "sheets.batch_get_values"]
 
 # -----------------------------------------------------------------------
 
@@ -342,6 +393,56 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 5242880
 
+[provides.operations."sheets.batch_update_values_chunked"]
+description = "Update explicitly independent value ranges in verified chunks with partial-progress receipts"
+capability = "sheets.values.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+[provides.operations."sheets.batch_update_values_chunked".input_schema]
+type = "object"
+required = ["spreadsheet_id", "data", "confirm_independent_chunks"]
+[provides.operations."sheets.batch_update_values_chunked".input_schema.properties.spreadsheet_id]
+type = "string"
+[provides.operations."sheets.batch_update_values_chunked".input_schema.properties.data]
+type = "array"
+maxItems = 100
+[provides.operations."sheets.batch_update_values_chunked".input_schema.properties.confirm_independent_chunks]
+type = "boolean"
+[provides.operations."sheets.batch_update_values_chunked".input_schema.properties.chunk_size_ranges]
+type = "integer"
+[provides.operations."sheets.batch_update_values_chunked".input_schema.properties.resume_token]
+type = "string"
+[provides.operations."sheets.batch_update_values_chunked".output_schema]
+type = "object"
+required = ["status", "completed_chunks", "readback"]
+[provides.operations."sheets.batch_update_values_chunked".output_schema.properties.status]
+type = "string"
+[provides.operations."sheets.batch_update_values_chunked".output_schema.properties.completed_chunks]
+type = "array"
+[provides.operations."sheets.batch_update_values_chunked".output_schema.properties.readback]
+type = "object"
+[provides.operations."sheets.batch_update_values_chunked".network_constraints]
+host_allow = ["sheets.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+[provides.operations."sheets.batch_update_values_chunked".ai_hints]
+when_to_use = "Write several independent ranges when partial progress is acceptable and each chunk must be read back."
+common_mistakes = ["Using chunked mode for an atomic multi-range change", "Retrying an outcome_uncertain chunk before targeted readback"]
+examples = ['{"spreadsheet_id":"abc123","data":[{"range":"Sheet1!A1:B1","values":[["ready",1]]}],"confirm_independent_chunks":true}']
+related = ["sheets.batch_update_values", "sheets.get_values_page"]
+
 [provides.operations."sheets.create_spreadsheet"]
 description = "Create a spreadsheet with bounded initial tabs"
 capability = "sheets.structure.write"
@@ -498,9 +599,11 @@ scope = "instance"
 [rate_limits.operation_pools]
 "sheets.get_spreadsheet" = ["sheets.read"]
 "sheets.get_values" = ["sheets.read"]
+"sheets.get_values_page" = ["sheets.read"]
 "sheets.batch_get_values" = ["sheets.read"]
 "sheets.update_values" = ["sheets.values.write"]
 "sheets.batch_update_values" = ["sheets.values.write"]
+"sheets.batch_update_values_chunked" = ["sheets.values.write"]
 "sheets.append_values" = ["sheets.values.write"]
 "sheets.clear_values" = ["sheets.values.write"]
 "sheets.create_spreadsheet" = ["sheets.structure.write"]

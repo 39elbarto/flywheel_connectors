@@ -194,6 +194,455 @@ async fn batch_values_preserves_formulas_and_atomic_payload() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn paged_values_cover_explicit_range_once_and_reject_tampered_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values/Sheet1%21A1%3AB2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "range": "Sheet1!A1:B2",
+            "majorDimension": "ROWS",
+            "values": [["r1", 1], ["r2", 2]]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values/Sheet1%21A3%3AB4"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "range": "Sheet1!A3:B4",
+            "majorDimension": "ROWS",
+            "values": [["r3", 3], ["r4", 4]]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (mut connector, token) =
+        configured_connector_token(&server, "sheets.read", &["sheets.get_values_page"]).await;
+    let first = connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_values_page",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:B4",
+                "page_size_rows": 2
+            },
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect("first bounded page");
+    assert_eq!(first["values"], json!([["r1", 1], ["r2", 2]]));
+    assert_eq!(first["page"]["complete"], false);
+    let page_token = first["page"]["page_token"]
+        .as_str()
+        .expect("continuation token")
+        .to_string();
+
+    let second = connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_values_page",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:B4",
+                "page_size_rows": 2,
+                "page_token": page_token
+            },
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect("second bounded page");
+    assert_eq!(second["values"], json!([["r3", 3], ["r4", 4]]));
+    assert_eq!(second["page"]["complete"], true);
+    assert!(second["page"]["page_token"].is_null());
+
+    let mismatch = connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_values_page",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:B4",
+                "page_size_rows": 1,
+                "page_token": first["page"]["page_token"]
+            },
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect_err("page token must reject mismatched paging options");
+    assert!(matches!(mismatch, FcpError::InvalidRequest { .. }));
+
+    let mut tampered = first["page"]["page_token"]
+        .as_str()
+        .expect("token")
+        .as_bytes()
+        .to_vec();
+    tampered[0] = if tampered[0] == b'a' { b'b' } else { b'a' };
+    let error = connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_values_page",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:B4",
+                "page_token": std::str::from_utf8(&tampered).unwrap()
+            },
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect_err("tampered page token must fail before provider I/O");
+    assert!(matches!(error, FcpError::InvalidRequest { .. }));
+}
+
+#[fcp_async_core::runtime::test]
+async fn default_metadata_request_never_selects_grid_data() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "spreadsheetId": "sheet123",
+            "properties": {"title": "Metadata only"},
+            "sheets": [{"properties": {"sheetId": 0, "title": "Sheet1"}}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (mut connector, token) =
+        configured_connector_token(&server, "sheets.read", &["sheets.get_spreadsheet"]).await;
+    connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_spreadsheet",
+            "input": {"spreadsheet_id": "sheet123"},
+            "capability_token": token
+        }))
+        .await
+        .expect("metadata-only request");
+    let requests = server.received_requests().await.unwrap();
+    let fields = requests[0]
+        .url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "fields").then(|| value.into_owned()))
+        .expect("explicit metadata field mask");
+    assert!(!fields.contains("charts,data"));
+    assert!(!fields.contains("sheets(data"));
+    assert_eq!(
+        requests[0]
+            .url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "includeGridData").then(|| value.into_owned())),
+        Some("false".to_string())
+    );
+    let error = connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_spreadsheet",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "ranges": ["Sheet1!A1:B2"],
+                "include_grid_data": true
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("grid data must use an explicit values operation");
+    assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn paged_values_shrink_provider_and_connector_results_to_bounded_pages() {
+    let server = MockServer::start().await;
+    let large_cell = "x".repeat(14_000);
+    Mock::given(method("GET"))
+        .and(path(
+            "/v4/spreadsheets/sheet123/values/Sheet1%21A1%3AA4",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "range": "Sheet1!A1:A4",
+            "majorDimension": "ROWS",
+            "values": [[large_cell.clone()], [large_cell.clone()], [large_cell.clone()], [large_cell.clone()]]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values/Sheet1%21A1%3AA2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "range": "Sheet1!A1:A2",
+            "majorDimension": "ROWS",
+            "values": [[large_cell.clone()], [large_cell]]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (mut connector, token) =
+        configured_connector_token(&server, "sheets.read", &["sheets.get_values_page"]).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_values_page",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:A4",
+                "page_size_rows": 4
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("connector should halve an oversized result page");
+    assert_eq!(result["page"]["row_span"], 2);
+    assert_eq!(result["values"].as_array().unwrap().len(), 2);
+    assert!(serde_json::to_vec(&result).unwrap().len() <= 48 * 1024);
+}
+
+#[fcp_async_core::runtime::test]
+async fn paged_values_retry_a_smaller_provider_range_after_ten_mib_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values/Sheet1%21A1%3AA2"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 10 * 1024 * 1024 + 1]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values/Sheet1%21A1%3AA1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "range": "Sheet1!A1:A1",
+            "majorDimension": "ROWS",
+            "values": [["bounded"]]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values/Sheet1%21A2%3AA2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "range": "Sheet1!A2:A2",
+            "majorDimension": "ROWS",
+            "values": [["complete"]]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (mut connector, token) =
+        configured_connector_token(&server, "sheets.read", &["sheets.get_values_page"]).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_values_page",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:A2",
+                "page_size_rows": 2
+            },
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect("provider overflow should retry one smaller range");
+    assert_eq!(result["page"]["row_span"], 1);
+    assert_eq!(result["values"], json!([["bounded"]]));
+    let continuation = result["page"]["page_token"]
+        .as_str()
+        .expect("continuation after adaptive shrink");
+    let final_page = connector
+        .handle_invoke(json!({
+            "operation": "sheets.get_values_page",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "range": "Sheet1!A1:A2",
+                "page_size_rows": 2,
+                "page_token": continuation
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("adaptive continuation completes the original range");
+    assert_eq!(final_page["values"], json!([["complete"]]));
+    assert_eq!(final_page["page"]["complete"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn oversized_structural_batch_is_rejected_before_atomic_provider_io() {
+    let server = MockServer::start().await;
+    let (mut connector, token) = configured_connector_token(
+        &server,
+        "sheets.structure.write",
+        &["sheets.batch_update_spreadsheet"],
+    )
+    .await;
+    let error = connector
+        .handle_invoke(json!({
+            "operation": "sheets.batch_update_spreadsheet",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "requests": [{
+                    "repeatCell": {
+                        "range": {"sheetId": 0},
+                        "cell": {"note": "x".repeat(50_000)},
+                        "fields": "note"
+                    }
+                }]
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("oversized atomic request must fail locally");
+    assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn chunked_values_verify_each_chunk_and_stop_on_uncertain_provider_failure() {
+    let server = MockServer::start().await;
+    let writes = Arc::new(AtomicUsize::new(0));
+    let writes_for_response = Arc::clone(&writes);
+    Mock::given(method("POST"))
+        .and(path("/v4/spreadsheets/sheet123/values:batchUpdate"))
+        .respond_with(move |_request: &wiremock::Request| {
+            if writes_for_response.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "spreadsheetId": "sheet123",
+                    "totalUpdatedRows": 1,
+                    "totalUpdatedColumns": 1,
+                    "totalUpdatedCells": 1,
+                    "totalUpdatedSheets": 1,
+                    "responses": []
+                }))
+            } else {
+                ResponseTemplate::new(500).set_body_json(json!({
+                    "error": {"code": 500, "message": "synthetic uncertain write"}
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values:batchGet"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "spreadsheetId": "sheet123",
+            "valueRanges": [{
+                "range": "Sheet1!A1:A1",
+                "majorDimension": "ROWS",
+                "values": [["one"]]
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (mut connector, token) = configured_connector_token(
+        &server,
+        "sheets.values.write",
+        &["sheets.batch_update_values_chunked"],
+    )
+    .await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "sheets.batch_update_values_chunked",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "data": [
+                    {"range": "Sheet1!A1:A1", "values": [["one"]]},
+                    {"range": "Sheet1!A2:A2", "values": [["two"]]}
+                ],
+                "chunk_size_ranges": 1,
+                "confirm_independent_chunks": true
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("uncertain chunk returns a non-retryable reconciliation receipt");
+    assert_eq!(result["status"], "outcome_uncertain");
+    assert_eq!(result["completed_chunks"], json!([0]));
+    assert_eq!(result["failed_chunk"], 1);
+    assert_eq!(result["readback"]["required"], true);
+    assert_eq!(result["resume_safe"], false);
+    assert!(result["resume_token"].is_null());
+    assert_eq!(writes.load(Ordering::SeqCst), 2);
+    assert_eq!(connector.provider_telemetry().7, 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn chunked_values_provider_rejection_returns_target_bound_resume_token() {
+    let server = MockServer::start().await;
+    let writes = Arc::new(AtomicUsize::new(0));
+    let writes_for_response = Arc::clone(&writes);
+    Mock::given(method("POST"))
+        .and(path("/v4/spreadsheets/sheet123/values:batchUpdate"))
+        .respond_with(move |_request: &wiremock::Request| {
+            if writes_for_response.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(400).set_body_json(json!({
+                    "error": {"code": 400, "message": "synthetic invalid range"}
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "spreadsheetId": "sheet123",
+                    "totalUpdatedRows": 1,
+                    "totalUpdatedColumns": 1,
+                    "totalUpdatedCells": 1,
+                    "totalUpdatedSheets": 1,
+                    "responses": []
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4/spreadsheets/sheet123/values:batchGet"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "spreadsheetId": "sheet123",
+            "valueRanges": [{
+                "range": "Sheet1!A1:A1",
+                "majorDimension": "ROWS",
+                "values": [["one"]]
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (mut connector, token) = configured_connector_token(
+        &server,
+        "sheets.values.write",
+        &["sheets.batch_update_values_chunked"],
+    )
+    .await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "sheets.batch_update_values_chunked",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "data": [{"range": "Sheet1!A1:A1", "values": [["one"]]}],
+                "chunk_size_ranges": 1,
+                "confirm_independent_chunks": true
+            },
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect("provider rejection returns resumable progress receipt");
+    assert_eq!(result["status"], "provider_rejected");
+    assert_eq!(result["resume_safe"], true);
+    let resume_token = result["resume_token"]
+        .as_str()
+        .expect("safe resume token")
+        .to_string();
+    assert_eq!(result["readback"]["required"], false);
+
+    let resumed = connector
+        .handle_invoke(json!({
+            "operation": "sheets.batch_update_values_chunked",
+            "input": {
+                "spreadsheet_id": "sheet123",
+                "data": [{"range": "Sheet1!A1:A1", "values": [["one"]]}],
+                "chunk_size_ranges": 1,
+                "confirm_independent_chunks": true,
+                "resume_token": resume_token
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("same bound chunk plan resumes after explicit rejection");
+    assert_eq!(resumed["status"], "applied_and_verified");
+    assert_eq!(resumed["completed_chunks"], json!([0]));
+    assert_eq!(writes.load(Ordering::SeqCst), 2);
+}
+
+#[fcp_async_core::runtime::test]
 async fn structural_batch_and_copy_use_only_fixed_sheets_endpoints() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

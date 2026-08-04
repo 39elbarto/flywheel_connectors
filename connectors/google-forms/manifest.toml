@@ -1,0 +1,487 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:2591f1201bcb702c1dadb61d7f8e8646f5067aebb6a5b215d681748b62504437"
+
+[connector]
+id = "google-forms"
+name = "Google Forms Connector"
+version = "0.1.0"
+description = "Typed FCP connector for form structure, responses, and publishing"
+archetypes = [
+    "operational",
+    "knowledge",
+]
+format = "wasi"
+status = "incubating"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+]
+allowed_targets = ["z:private"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = [
+    "forms.read",
+    "form.structure.write",
+    "form.publish.write",
+    "forms.responses.read",
+]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."forms.batch_update"]
+description = "Apply an allowlisted revision-guarded Forms batch"
+capability = "form.structure.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."forms.batch_update".input_schema]
+additionalProperties = false
+required = [
+    "form_id",
+    "requests",
+]
+type = "object"
+
+[provides.operations."forms.batch_update".input_schema.properties.confirm_destructive]
+type = "boolean"
+
+[provides.operations."forms.batch_update".input_schema.properties.confirmation_sha256]
+pattern = "^[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."forms.batch_update".input_schema.properties.form_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."forms.batch_update".input_schema.properties.requests]
+maxItems = 100
+minItems = 1
+type = "array"
+
+[provides.operations."forms.batch_update".input_schema.properties.required_revision_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."forms.batch_update".output_schema]
+type = "object"
+
+[provides.operations."forms.batch_update".output_schema.properties.status]
+type = "string"
+
+[provides.operations."forms.batch_update".network_constraints]
+host_allow = ["forms.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."forms.batch_update".ai_hints]
+when_to_use = "Apply an allowlisted structural batch after reading the current revision."
+common_mistakes = [
+    "Using stale item indexes",
+    "Retrying an uncertain write without readback",
+]
+examples = ['{"form_id":"abc123","required_revision_id":"rev1","requests":[{"deleteItem":{"location":{"index":0}}}]}']
+related = ["forms.get"]
+
+[provides.operations."forms.create"]
+description = "Create a new form and read it back"
+capability = "form.structure.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."forms.create".input_schema]
+additionalProperties = false
+required = ["title"]
+type = "object"
+
+[provides.operations."forms.create".input_schema.properties.title]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."forms.create".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."forms.create".output_schema.properties.status]
+type = "string"
+
+[provides.operations."forms.create".network_constraints]
+host_allow = ["forms.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."forms.create".ai_hints]
+when_to_use = "Create one new form; use Drive afterward for filename, sharing, and placement."
+common_mistakes = ["Retrying an uncertain create and producing duplicates"]
+examples = ['{"title":"Customer survey"}']
+related = ["forms.get"]
+
+[provides.operations."forms.get"]
+description = "Read a bounded page of form structure"
+capability = "forms.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."forms.get".input_schema]
+additionalProperties = false
+required = ["form_id"]
+type = "object"
+
+[provides.operations."forms.get".input_schema.properties.form_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."forms.get".input_schema.properties.item_limit]
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."forms.get".input_schema.properties.item_offset]
+maximum = 1000000
+minimum = 0
+type = "integer"
+
+[provides.operations."forms.get".output_schema]
+required = ["form"]
+type = "object"
+
+[provides.operations."forms.get".output_schema.properties.form]
+type = "object"
+
+[provides.operations."forms.get".network_constraints]
+host_allow = ["forms.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."forms.get".ai_hints]
+when_to_use = "Read form structure before planning a change."
+common_mistakes = ["Reading all items when a bounded item page is enough"]
+examples = ['{"form_id":"abc123","item_limit":50}']
+related = ["forms.batch_update"]
+
+[provides.operations."forms.responses.get"]
+description = "Read one private form response"
+capability = "forms.responses.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."forms.responses.get".input_schema]
+additionalProperties = false
+required = [
+    "form_id",
+    "response_id",
+]
+type = "object"
+
+[provides.operations."forms.responses.get".input_schema.properties.form_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."forms.responses.get".input_schema.properties.response_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."forms.responses.get".output_schema]
+required = ["response"]
+type = "object"
+
+[provides.operations."forms.responses.get".output_schema.properties.response]
+type = "object"
+
+[provides.operations."forms.responses.get".network_constraints]
+host_allow = ["forms.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."forms.responses.get".ai_hints]
+when_to_use = "Read one known response; keep answers and respondent identity caller-only."
+common_mistakes = ["Persisting respondent email or uploaded-file references in logs"]
+examples = ['{"form_id":"abc123","response_id":"resp123"}']
+related = ["forms.responses.list"]
+
+[provides.operations."forms.responses.list"]
+description = "List a bounded response page with an optional RFC3339 UTC timestamp filter"
+capability = "forms.responses.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."forms.responses.list".input_schema]
+additionalProperties = false
+required = ["form_id"]
+type = "object"
+
+[provides.operations."forms.responses.list".input_schema.properties.cursor_binding_sha256]
+pattern = "^[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."forms.responses.list".input_schema.properties.filter]
+maxLength = 80
+type = "string"
+
+[provides.operations."forms.responses.list".input_schema.properties.form_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."forms.responses.list".input_schema.properties.page_size]
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."forms.responses.list".input_schema.properties.page_token]
+maxLength = 2048
+minLength = 1
+type = "string"
+
+[provides.operations."forms.responses.list".output_schema]
+required = ["responses"]
+type = "object"
+
+[provides.operations."forms.responses.list".output_schema.properties.next_cursor]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."forms.responses.list".output_schema.properties.responses]
+type = "array"
+
+[provides.operations."forms.responses.list".network_constraints]
+host_allow = ["forms.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."forms.responses.list".ai_hints]
+when_to_use = "Read a bounded response page, optionally after an RFC3339 UTC timestamp."
+common_mistakes = [
+    "Reusing a page token with another form or filter",
+    "Requesting a page too large for the payload budget",
+]
+examples = ['{"form_id":"abc123","filter":"timestamp >= 2026-08-04T00:00:00Z","page_size":50}']
+related = ["forms.responses.get"]
+
+[provides.operations."forms.set_publish_settings"]
+description = "Explicitly publish/unpublish and accept/stop responses"
+capability = "form.publish.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."forms.set_publish_settings".input_schema]
+additionalProperties = false
+required = [
+    "form_id",
+    "is_published",
+    "is_accepting_responses",
+]
+type = "object"
+
+[provides.operations."forms.set_publish_settings".input_schema.properties.confirm]
+type = "boolean"
+
+[provides.operations."forms.set_publish_settings".input_schema.properties.confirmation_sha256]
+pattern = "^[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."forms.set_publish_settings".input_schema.properties.form_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."forms.set_publish_settings".input_schema.properties.is_accepting_responses]
+type = "boolean"
+
+[provides.operations."forms.set_publish_settings".input_schema.properties.is_published]
+type = "boolean"
+
+[provides.operations."forms.set_publish_settings".input_schema.properties.required_revision_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."forms.set_publish_settings".input_schema.properties.required_state_sha256]
+pattern = "^[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."forms.set_publish_settings".output_schema]
+type = "object"
+
+[provides.operations."forms.set_publish_settings".output_schema.properties.status]
+type = "string"
+
+[provides.operations."forms.set_publish_settings".network_constraints]
+host_allow = ["forms.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."forms.set_publish_settings".ai_hints]
+when_to_use = "Explicitly publish/unpublish or accept/stop responses after exact preflight."
+common_mistakes = [
+    "Assuming legacy forms support publish settings",
+    "Stopping responses without confirming impact",
+]
+examples = ['{"form_id":"abc123","is_published":true,"is_accepting_responses":true}']
+related = ["forms.get"]
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "forms.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "forms.write"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"forms.batch_update" = ["forms.write"]
+"forms.get" = ["forms.read"]
+"forms.responses.get" = ["forms.read"]
+"forms.responses.list" = ["forms.read"]
+"forms.create" = ["forms.write"]
+"forms.set_publish_settings" = ["forms.write"]

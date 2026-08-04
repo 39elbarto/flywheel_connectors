@@ -3982,12 +3982,17 @@ fn connector_transport_poisoned_error() -> std::io::Error {
     )
 }
 
-fn log_connector_stderr_line(line: &[u8], truncated: bool) {
+fn connector_stderr_metadata(line: &[u8], truncated: bool) -> (bool, u64, bool) {
     let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
-    if line_bytes > 0 || truncated {
+    (line_bytes > 0, line_bytes, truncated)
+}
+
+fn log_connector_stderr_line(line: &[u8], truncated: bool) {
+    let (present, line_bytes, truncated) = connector_stderr_metadata(line, truncated);
+    if present || truncated {
         tracing::warn!(
             event = "connector_stderr_redacted",
-            connector_stderr_present = line_bytes > 0,
+            connector_stderr_present = present,
             connector_stderr_bytes = line_bytes,
             connector_stderr_truncated = truncated,
             "connector stderr content suppressed"
@@ -14737,6 +14742,14 @@ mod tests {
             normalized_host_error_class(&HostError::Internal("PRIVATE-CONTENT-CANARY".to_string())),
             "internal"
         );
+    }
+
+    #[test]
+    fn connector_stderr_metadata_retains_only_size_and_flags() {
+        let canary = b"OAUTH-TOKEN-AND-PRIVATE-CONTENT-CANARY";
+        let metadata = connector_stderr_metadata(canary, true);
+        assert_eq!(metadata, (true, canary.len() as u64, true));
+        assert_eq!(connector_stderr_metadata(b"", false), (false, 0, false));
     }
 
     fn subprocess_test_connector_config(connector_id: &str) -> ConnectorConfig {

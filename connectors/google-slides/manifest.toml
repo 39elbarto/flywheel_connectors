@@ -1,0 +1,427 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:703c84a22d0f4564acfe2e5290d08066e1550de767f0e37dac035645142107fd"
+
+[connector]
+id = "google-slides"
+name = "Google Slides Connector"
+version = "0.1.0"
+description = "FCP connector for Google Slides (get, create, and batch update presentations)"
+archetypes = [
+    "operational",
+    "knowledge",
+]
+format = "wasi"
+status = "incubating"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+]
+allowed_targets = ["z:private"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = [
+    "slides.read",
+    "slides.write",
+]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."slides.batch_update"]
+description = "Apply an allowlisted revision-guarded batch to a Google Slides presentation"
+capability = "slides.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."slides.batch_update".input_schema]
+additionalProperties = false
+required = [
+    "presentation_id",
+    "requests",
+]
+type = "object"
+
+[provides.operations."slides.batch_update".input_schema.properties.confirm_destructive]
+type = "boolean"
+
+[provides.operations."slides.batch_update".input_schema.properties.confirmation_sha256]
+pattern = "^[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."slides.batch_update".input_schema.properties.presentation_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."slides.batch_update".input_schema.properties.requests]
+maxItems = 100
+minItems = 1
+type = "array"
+
+[provides.operations."slides.batch_update".input_schema.properties.required_revision_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."slides.batch_update".output_schema]
+required = [
+    "status",
+    "presentation_id",
+]
+type = "object"
+
+[provides.operations."slides.batch_update".output_schema.properties.preflight]
+type = "object"
+
+[provides.operations."slides.batch_update".output_schema.properties.presentation_id]
+type = "string"
+
+[provides.operations."slides.batch_update".output_schema.properties.readback]
+type = "object"
+
+[provides.operations."slides.batch_update".output_schema.properties.status]
+type = "string"
+
+[provides.operations."slides.batch_update".network_constraints]
+host_allow = ["slides.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."slides.batch_update".ai_hints]
+when_to_use = "Apply a bounded typed edit batch after reading the current revision; destructive batches first return an exact confirmation receipt."
+common_mistakes = [
+    "Requests are applied in order — indices shift after inserts/deletes",
+    "Retrying an uncertain write before a direct readback",
+    "Reusing a confirmation hash after the revision or request payload changes",
+]
+examples = ['{"presentation_id":"abc123","required_revision_id":"rev1","requests":[{"insertText":{"objectId":"shape_001","insertionIndex":0,"text":"Hello"}}]}']
+related = ["slides.get"]
+
+[provides.operations."slides.create"]
+description = "Create a new Google Slides presentation"
+capability = "slides.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."slides.create".input_schema]
+additionalProperties = false
+required = ["title"]
+type = "object"
+
+[provides.operations."slides.create".input_schema.properties.title]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."slides.create".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."slides.create".output_schema.properties.presentation]
+type = "object"
+
+[provides.operations."slides.create".output_schema.properties.readback]
+type = "object"
+
+[provides.operations."slides.create".output_schema.properties.retry_safe]
+type = "boolean"
+
+[provides.operations."slides.create".output_schema.properties.status]
+type = "string"
+
+[provides.operations."slides.create".network_constraints]
+host_allow = ["slides.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."slides.create".ai_hints]
+when_to_use = "Create a brand new Google Slides presentation with a given title."
+common_mistakes = ["Each call creates a new presentation — do not call repeatedly for the same title"]
+examples = ['{"title": "Meeting Notes 2026-03-14"}']
+related = [
+    "slides.get",
+    "slides.batch_update",
+]
+
+[provides.operations."slides.get"]
+description = "Get a Google Slides presentation by ID"
+capability = "slides.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."slides.get".input_schema]
+additionalProperties = false
+required = ["presentation_id"]
+type = "object"
+
+[provides.operations."slides.get".input_schema.properties.presentation_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."slides.get".input_schema.properties.text_limit]
+maximum = 48000
+minimum = 1
+type = "integer"
+
+[provides.operations."slides.get".input_schema.properties.text_offset]
+maximum = 10000000
+minimum = 0
+type = "integer"
+
+[provides.operations."slides.get".output_schema]
+required = ["presentation"]
+type = "object"
+
+[provides.operations."slides.get".output_schema.properties.presentation]
+type = "object"
+
+[provides.operations."slides.get".network_constraints]
+host_allow = ["slides.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."slides.get".ai_hints]
+when_to_use = "Retrieve a Google Slides presentation including title, body content, and structure."
+common_mistakes = ["Using a file ID from Drive that is not a Slides presentation will fail"]
+examples = ['{"presentation_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"}']
+related = [
+    "slides.create",
+    "slides.batch_update",
+]
+
+[provides.operations."slides.pages.get"]
+description = "Get one bounded page, including a slide notes page"
+capability = "slides.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."slides.pages.get".input_schema]
+additionalProperties = false
+required = [
+    "presentation_id",
+    "page_object_id",
+]
+type = "object"
+
+[provides.operations."slides.pages.get".input_schema.properties.page_object_id]
+maxLength = 50
+minLength = 5
+type = "string"
+
+[provides.operations."slides.pages.get".input_schema.properties.presentation_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."slides.pages.get".output_schema]
+required = ["page"]
+type = "object"
+
+[provides.operations."slides.pages.get".output_schema.properties.page]
+type = "object"
+
+[provides.operations."slides.pages.get".network_constraints]
+host_allow = ["slides.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."slides.pages.get".ai_hints]
+when_to_use = "Read one slide, notes page, master, or layout by object ID."
+common_mistakes = ["Speaker notes require the notes page object ID, not the slide object ID"]
+examples = ['{"presentation_id":"presentation123","page_object_id":"slide_001"}']
+related = [
+    "slides.get",
+    "slides.pages.get_thumbnail",
+]
+
+[provides.operations."slides.pages.get_thumbnail"]
+description = "Generate bounded PNG thumbnail metadata for a page"
+capability = "slides.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."slides.pages.get_thumbnail".input_schema]
+additionalProperties = false
+required = [
+    "presentation_id",
+    "page_object_id",
+]
+type = "object"
+
+[provides.operations."slides.pages.get_thumbnail".input_schema.properties.page_object_id]
+maxLength = 50
+minLength = 5
+type = "string"
+
+[provides.operations."slides.pages.get_thumbnail".input_schema.properties.presentation_id]
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."slides.pages.get_thumbnail".input_schema.properties.size]
+enum = [
+    "SMALL",
+    "MEDIUM",
+    "LARGE",
+]
+type = "string"
+
+[provides.operations."slides.pages.get_thumbnail".output_schema]
+required = ["thumbnail"]
+type = "object"
+
+[provides.operations."slides.pages.get_thumbnail".output_schema.properties.thumbnail]
+type = "object"
+
+[provides.operations."slides.pages.get_thumbnail".network_constraints]
+host_allow = ["slides.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 60000
+
+[provides.operations."slides.pages.get_thumbnail".ai_hints]
+when_to_use = "Generate a short-lived authenticated PNG thumbnail URL for one page."
+common_mistakes = ["Persisting or logging the temporary content URL"]
+examples = ['{"presentation_id":"presentation123","page_object_id":"slide_001","size":"MEDIUM"}']
+related = ["slides.pages.get"]
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "slides.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "slides.write"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"slides.get" = ["slides.read"]
+"slides.pages.get" = ["slides.read"]
+"slides.pages.get_thumbnail" = ["slides.read"]
+"slides.batch_update" = ["slides.write"]
+"slides.create" = ["slides.write"]

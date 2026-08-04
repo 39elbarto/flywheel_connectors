@@ -11,10 +11,41 @@ use fcp_prelude::{
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use serde_json::json;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Request, Respond, ResponseTemplate,
     matchers::{header, method, path, query_param},
 };
+
+struct TwoPageResponder {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for TwoPageResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let token = request
+            .url
+            .query_pairs()
+            .find(|(name, _)| name == "pageToken")
+            .map(|(_, value)| value.into_owned());
+        match (call, token.as_deref()) {
+            (0, None) => ResponseTemplate::new(200).set_body_json(json!({
+                "responses": [{"responseId": "response-page-1"}],
+                "nextPageToken": "opaque/token+page=2"
+            })),
+            (1, Some("opaque/token+page=2")) => ResponseTemplate::new(200).set_body_json(json!({
+                "responses": [{"responseId": "response-page-2"}]
+            })),
+            _ => ResponseTemplate::new(400).set_body_json(json!({
+                "error": {"code":400,"message":"unexpected page sequence"}
+            })),
+        }
+    }
+}
 
 const FORM_ID: &str = "form_test_123";
 const OPERATION: &str = "forms.get";
@@ -375,6 +406,59 @@ async fn response_list_binds_private_continuation_token() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn response_pagination_returns_two_pages_without_gap_or_duplicate() {
+    let server = MockServer::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/forms/{FORM_ID}/responses")))
+        .and(query_param("pageSize", "1"))
+        .respond_with(TwoPageResponder {
+            calls: Arc::clone(&calls),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let (mut connector, signing_key, instance_id) = direct_connector(&server).await;
+    let capability = || {
+        token_for(
+            &signing_key,
+            &instance_id,
+            "forms.responses.read",
+            "forms.responses.list",
+            format!("google-forms:responses:{FORM_ID}"),
+        )
+    };
+    let first = connector
+        .handle_invoke(json!({
+            "operation": "forms.responses.list",
+            "input": {"form_id": FORM_ID, "page_size": 1},
+            "capability_token": capability()
+        }))
+        .await
+        .expect("first page");
+    let second = connector
+        .handle_invoke(json!({
+            "operation": "forms.responses.list",
+            "input": {
+                "form_id": FORM_ID,
+                "page_size": 1,
+                "page_token": first["next_cursor"]["page_token"],
+                "cursor_binding_sha256": first["next_cursor"]["cursor_binding_sha256"]
+            },
+            "capability_token": capability()
+        }))
+        .await
+        .expect("second page");
+    let ids = [
+        first["responses"][0]["responseId"].as_str(),
+        second["responses"][0]["responseId"].as_str(),
+    ];
+    assert_eq!(ids, [Some("response-page-1"), Some("response-page-2")]);
+    assert!(second["next_cursor"].is_null());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[fcp_async_core::runtime::test]
 async fn publish_change_requires_revision_state_and_confirmation() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -419,4 +503,39 @@ async fn publish_change_requires_revision_state_and_confirmation() {
         result["confirmation_sha256"].as_str().map(str::len),
         Some(64)
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn legacy_form_publish_settings_fail_before_write() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/forms/{FORM_ID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "formId": FORM_ID,
+            "revisionId": "legacy-revision",
+            "info": {"title": "Legacy form"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (mut connector, signing_key, instance_id) = direct_connector(&server).await;
+    let error = connector
+        .handle_invoke(json!({
+            "operation": "forms.set_publish_settings",
+            "input": {
+                "form_id": FORM_ID,
+                "is_published": false,
+                "is_accepting_responses": false
+            },
+            "capability_token": token_for(
+                &signing_key,
+                &instance_id,
+                "form.publish.write",
+                "forms.set_publish_settings",
+                format!("google-forms:form:{FORM_ID}")
+            )
+        }))
+        .await
+        .expect_err("legacy form must reject publishing");
+    assert!(error.to_string().contains("legacy form"));
 }

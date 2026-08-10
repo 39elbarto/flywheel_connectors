@@ -18,7 +18,7 @@ format = "wasi"
 [connector.state]
 model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "Stores n8n API key and instance URL."
+migration_hint = "Stores a host-managed n8n credential reference and instance URL; provider secret material remains outside the connector."
 
 [zones]
 home = "z:work"
@@ -36,10 +36,11 @@ forbidden = [
 [capabilities]
 required = [
     "network.dns",
+    "network.egress",
+    "network.tls.sni",
     "storage.state",
 ]
 optional = [
-    "network.egress",
     "n8n.executions.read",
     "n8n.workflows.write",
     "n8n.workflows.read",
@@ -51,6 +52,11 @@ forbidden = [
     "media.download",
 ]
 
+# The concrete n8n API host is operator-configured and substituted by the
+# host/egress layer. These network constraints are declarative host policy;
+# direct connector HTTP is test-only and production provider traffic fails
+# closed until a mediated egress path is available.
+
 [provides.operations."n8n.executions.get"]
 description = "Get details of a specific execution"
 capability = "n8n.executions.read"
@@ -60,11 +66,15 @@ requires_approval = "none"
 idempotency = "strict"
 
 [provides.operations."n8n.executions.get".input_schema]
-required = ["id"]
+required = ["workflow_id", "id"]
 type = "object"
 
 [provides.operations."n8n.executions.get".input_schema.properties.id]
 description = "Execution identifier"
+type = "string"
+
+[provides.operations."n8n.executions.get".input_schema.properties.workflow_id]
+description = "Workflow identifier containing the execution"
 type = "string"
 
 [provides.operations."n8n.executions.get".output_schema]
@@ -81,14 +91,14 @@ type = "boolean"
 type = "string"
 
 [provides.operations."n8n.executions.get".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [5678]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -104,7 +114,7 @@ common_mistakes = [
     "Using the workflow ID instead of the execution ID.",
     "Querying an execution before it has finished — check the 'finished' field in the response.",
 ]
-examples = ['{"id": "50001"}']
+examples = ['{"workflow_id": "1001", "id": "50001"}']
 related = [
     "n8n.executions.list",
     "n8n.workflows.get",
@@ -130,14 +140,14 @@ type = "object"
 type = "array"
 
 [provides.operations."n8n.executions.list".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [5678]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -160,7 +170,7 @@ related = [
 ]
 
 [provides.operations."n8n.workflows.activate"]
-description = "Activate or deactivate an n8n workflow"
+description = "Capability- and approval-gated activation boundary; packet 1 fails closed and defers provider lifecycle I/O"
 capability = "n8n.workflows.write"
 risk_level = "medium"
 safety_tier = "risky"
@@ -190,14 +200,14 @@ type = "object"
 type = "string"
 
 [provides.operations."n8n.workflows.activate".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [5678]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -208,10 +218,10 @@ total_timeout_ms = 15000
 max_response_bytes = 1048576
 
 [provides.operations."n8n.workflows.activate".ai_hints]
-when_to_use = "Activate or deactivate an n8n workflow."
+when_to_use = "Request activation or deactivation only when the host has the mediated lifecycle path; packet 1 verifies capability and approval, then fails closed before provider I/O."
 common_mistakes = [
-    "Activating a workflow that has webhook or cron triggers without verifying its trigger configuration first.",
-    "Passing the workflow name instead of the numeric workflow ID.",
+    "Expecting packet 1 to change provider lifecycle state; activation is deferred until the mediated write path is available.",
+    "Passing the workflow name instead of the numeric workflow ID, or omitting the matching execution approval.",
 ]
 examples = ['{"id": "1001", "active": true}']
 related = [
@@ -249,14 +259,14 @@ type = "string"
 type = "string"
 
 [provides.operations."n8n.workflows.get".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [5678]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -297,14 +307,14 @@ type = "object"
 type = "array"
 
 [provides.operations."n8n.workflows.list".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [5678]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true

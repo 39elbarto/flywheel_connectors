@@ -47,6 +47,25 @@ pub enum N8nError {
 }
 
 impl N8nError {
+    /// Return a diagnostic summary that never includes provider response data.
+    #[must_use]
+    pub fn safe_summary(&self) -> String {
+        match self {
+            Self::Http(_) => "HTTP transport error".into(),
+            Self::Json(_) => "Provider returned invalid JSON".into(),
+            Self::Api { status_code, .. } => {
+                format!("n8n provider returned HTTP {status_code}")
+            }
+            Self::RateLimited { retry_after_ms } => {
+                format!("n8n provider rate limited the request; retry after {retry_after_ms}ms")
+            }
+            Self::Unauthorized => "n8n authentication failed".into(),
+            Self::Forbidden => "n8n authorization failed".into(),
+            Self::NotFound { .. } => "n8n resource was not found".into(),
+            Self::InvalidInput(message) => format!("invalid n8n input: {message}"),
+        }
+    }
+
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         match self {

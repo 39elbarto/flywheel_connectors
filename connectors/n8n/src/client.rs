@@ -2,25 +2,23 @@
 
 use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, Response, StatusCode, Url};
 use tracing::{debug, instrument};
 
-use crate::{
-    error::{N8nError, N8nResult},
-    types::ApiErrorResponse,
-};
+use crate::error::{N8nError, N8nResult};
 
 /// Authentication mode for the n8n API.
 #[derive(Clone)]
 pub enum N8nAuth {
     /// API key (passed as `X-N8N-API-KEY: <key>` header).
     ApiKey(String),
-    /// Secretless credential reference (egress proxy injection).
+    /// Host-managed credential reference. The direct client never injects or
+    /// transmits the referenced secret.
     CredentialId(CredentialId),
 }
 
@@ -52,16 +50,15 @@ impl fmt::Debug for N8nAuth {
 pub struct N8nClient {
     client: Client,
     auth: N8nAuth,
-    base_url: String,
+    base_url: Url,
     runtime: ConnectorRuntime,
-    retry_config: HttpRetryConfig,
 }
 
 impl fmt::Debug for N8nClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("N8nClient")
             .field("auth", &self.auth)
-            .field("base_url", &self.base_url)
+            .field("base_url", &self.base_url.as_str())
             .finish()
     }
 }
@@ -73,21 +70,86 @@ impl N8nClient {
     pub fn new(auth: N8nAuth, base_url: &str) -> N8nResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent("fcp-n8n/0.1.0 (FCP connector)")
             .build()?;
+        let base_url = Self::canonicalize_base_url(base_url)?;
+        let base_url = Url::parse(&format!("{base_url}/")).map_err(|error| {
+            N8nError::InvalidInput(format!("base_url could not be canonicalized: {error}"))
+        })?;
 
         Ok(Self {
             client,
             auth,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url,
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
-            retry_config: HttpRetryConfig {
-                max_retries: 2,
-                ..HttpRetryConfig::default()
-            },
         })
+    }
+
+    /// Canonicalize and validate the operator-approved n8n API root.
+    pub fn canonicalize_base_url(base_url: &str) -> N8nResult<String> {
+        let parsed = Url::parse(base_url.trim())
+            .map_err(|_| N8nError::InvalidInput("base_url must be an absolute URL".into()))?;
+        if parsed.username() != "" || parsed.password().is_some() {
+            return Err(N8nError::InvalidInput(
+                "base_url must not contain userinfo".into(),
+            ));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(N8nError::InvalidInput(
+                "base_url must not contain query or fragment".into(),
+            ));
+        }
+        let Some(host) = parsed.host_str() else {
+            return Err(N8nError::InvalidInput(
+                "base_url must include a host".into(),
+            ));
+        };
+        let local = is_loopback_host(host);
+        let is_https = parsed.scheme() == "https";
+        if !(is_https || (local && parsed.scheme() == "http")) {
+            return Err(N8nError::InvalidInput(
+                "base_url must use HTTPS; HTTP is allowed only for loopback tests".into(),
+            ));
+        }
+        if !local && is_ip_literal(host) {
+            return Err(N8nError::InvalidInput(
+                "base_url must not use a non-loopback IP literal".into(),
+            ));
+        }
+        let expected_port = if local { None } else { Some(443) };
+        if let Some(port) = parsed.port()
+            && Some(port) != expected_port
+            && !local
+        {
+            return Err(N8nError::InvalidInput(
+                "base_url must use port 443 for production HTTPS".into(),
+            ));
+        }
+        let path = parsed.path().trim_end_matches('/');
+        if path != "/api/v1" {
+            return Err(N8nError::InvalidInput(
+                "base_url path must be exactly /api/v1".into(),
+            ));
+        }
+        if parsed.path().contains('%') {
+            return Err(N8nError::InvalidInput(
+                "base_url path must not contain percent-encoded ambiguity".into(),
+            ));
+        }
+
+        let mut canonical = parsed;
+        canonical.set_path("/api/v1");
+        canonical.set_query(None);
+        canonical.set_fragment(None);
+        if canonical.port() == Some(443) {
+            canonical.set_port(None).map_err(|()| {
+                N8nError::InvalidInput("base_url port could not be canonicalized".into())
+            })?;
+        }
+        Ok(canonical.to_string().trim_end_matches('/').to_string())
     }
 
     /// Trigger graceful shutdown.
@@ -98,8 +160,27 @@ impl N8nClient {
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
             N8nAuth::ApiKey(key) => req.header("X-N8N-API-KEY", key),
-            N8nAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
+            // The host-mediated egress path owns credential resolution. This
+            // direct client refuses CredentialId requests before this helper
+            // is reached, and never forwards the reference to the provider.
+            N8nAuth::CredentialId(_) => req,
         }
+    }
+
+    fn ensure_provider_egress_allowed(&self) -> N8nResult<()> {
+        if matches!(self.auth, N8nAuth::CredentialId(_)) {
+            return Err(N8nError::InvalidInput(
+                "credential_id requires host-mediated secret injection; direct provider egress is unavailable".into(),
+            ));
+        }
+
+        let is_loopback = self.base_url.host_str().is_some_and(is_loopback_host);
+        if !is_loopback {
+            return Err(N8nError::InvalidInput(
+                "production n8n provider egress requires host-mediated network enforcement".into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn handle_response(&self, resp: Response) -> N8nResult<serde_json::Value> {
@@ -123,24 +204,15 @@ impl N8nClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
 
-        let body = resp.text().await.unwrap_or_default();
-
-        // n8n returns {"message": "error description"} on errors.
-        let detail = serde_json::from_str::<ApiErrorResponse>(&body)
-            .ok()
-            .and_then(|e| e.message)
-            .unwrap_or_else(|| {
-                if body.is_empty() {
-                    format!("HTTP {}", status.as_u16())
-                } else {
-                    body.clone()
-                }
-            });
+        let _body = resp.text().await.unwrap_or_default();
+        let detail = format!("n8n provider returned HTTP {}", status.as_u16());
 
         match status.as_u16() {
             401 => Err(N8nError::Unauthorized),
             403 => Err(N8nError::Forbidden),
-            404 => Err(N8nError::NotFound { resource: detail }),
+            404 => Err(N8nError::NotFound {
+                resource: "n8n resource".into(),
+            }),
             429 => Err(N8nError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
@@ -153,25 +225,25 @@ impl N8nClient {
 
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> N8nResult<serde_json::Value> {
-        let url = format!("{}{path}", self.base_url);
-        debug!(url = %redact_url(&url), "GET request");
+        self.ensure_provider_egress_allowed()?;
+        let url = self.resolve_path(path)?;
+        debug!(url = %redact_url(url.as_str()), "GET request");
         let req = self
-            .add_auth(self.client.get(&url))
+            .add_auth(self.client.get(url))
             .header("Accept", "application/json");
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
 
-    #[instrument(skip(self, body), fields(url))]
-    async fn patch(&self, path: &str, body: &serde_json::Value) -> N8nResult<serde_json::Value> {
-        let url = format!("{}{path}", self.base_url);
-        debug!(url = %redact_url(&url), "PATCH request");
-        let req = self
-            .add_auth(self.client.patch(&url))
-            .header("Accept", "application/json")
-            .json(body);
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+    fn resolve_path(&self, path: &str) -> N8nResult<Url> {
+        if !path.starts_with('/') || path.contains("..") || path.contains('\\') {
+            return Err(N8nError::InvalidInput(
+                "provider path is not a safe connector-owned path".into(),
+            ));
+        }
+        self.base_url
+            .join(path.trim_start_matches('/'))
+            .map_err(|_| N8nError::InvalidInput("provider path could not be resolved".into()))
     }
 
     // -- Workflows --
@@ -181,17 +253,17 @@ impl N8nClient {
         self.get("/workflows").await
     }
 
+    /// Perform a bounded read-only readiness probe and discard provider data.
+    pub async fn self_check(&self) -> N8nResult<()> {
+        let response = self.get("/workflows?limit=1").await?;
+        let _ = response;
+        Ok(())
+    }
+
     /// Get a specific workflow by ID.
     pub async fn get_workflow(&self, id: &str) -> N8nResult<serde_json::Value> {
         let id = sanitize_path_segment(id, "workflow id")?;
         self.get(&format!("/workflows/{id}")).await
-    }
-
-    /// Activate or deactivate a workflow.
-    pub async fn activate_workflow(&self, id: &str, active: bool) -> N8nResult<serde_json::Value> {
-        let id = sanitize_path_segment(id, "workflow id")?;
-        let body = serde_json::json!({ "active": active });
-        self.patch(&format!("/workflows/{id}"), &body).await
     }
 
     // -- Executions --
@@ -208,7 +280,7 @@ impl N8nClient {
     }
 }
 
-fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> N8nResult<&'a str> {
+pub(crate) fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> N8nResult<&'a str> {
     if value.trim().is_empty() || value != value.trim() {
         return Err(N8nError::InvalidInput(format!(
             "{field} must be a non-empty single path segment"
@@ -234,6 +306,14 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> N8nResult<&'a str> 
     }
 
     Ok(value)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+fn is_ip_literal(host: &str) -> bool {
+    host.trim_matches(['[', ']']).parse::<IpAddr>().is_ok()
 }
 
 fn decode_success_body(status: StatusCode, body: &str) -> N8nResult<serde_json::Value> {
@@ -321,7 +401,7 @@ mod tests {
             "https://n8n.example.com/api/v1/",
         )
         .unwrap();
-        assert_eq!(client.base_url, "https://n8n.example.com/api/v1");
+        assert_eq!(client.base_url.as_str(), "https://n8n.example.com/api/v1/");
     }
 
     #[test]
@@ -331,7 +411,7 @@ mod tests {
             "https://n8n.example.com/api/v1",
         )
         .unwrap();
-        assert_eq!(client.base_url, "https://n8n.example.com/api/v1");
+        assert_eq!(client.base_url.as_str(), "https://n8n.example.com/api/v1/");
     }
 
     #[test]
@@ -368,7 +448,7 @@ mod tests {
             "http://localhost:5678/api/v1",
         )
         .unwrap();
-        assert_eq!(client.base_url, "http://localhost:5678/api/v1");
+        assert_eq!(client.base_url.as_str(), "http://localhost:5678/api/v1/");
     }
 
     #[test]
@@ -378,8 +458,7 @@ mod tests {
             "https://n8n.example.com/api/v1///",
         )
         .unwrap();
-        // trim_end_matches removes all trailing slashes
-        assert!(!client.base_url.ends_with('/'));
+        assert_eq!(client.base_url.as_str(), "https://n8n.example.com/api/v1/");
     }
 
     #[test]
@@ -466,17 +545,17 @@ mod tests {
             "http://127.0.0.1:5678/api/v1",
         )
         .unwrap();
-        assert_eq!(client.base_url, "http://127.0.0.1:5678/api/v1");
+        assert_eq!(client.base_url.as_str(), "http://127.0.0.1:5678/api/v1/");
     }
 
     #[test]
     fn client_new_with_port() {
         let client = N8nClient::new(
             N8nAuth::ApiKey("key".into()),
-            "https://n8n.example.com:8443/api/v1",
+            "http://localhost:8443/api/v1",
         )
         .unwrap();
-        assert!(client.base_url.contains("8443"));
+        assert!(client.base_url.as_str().contains("8443"));
     }
 
     #[test]
@@ -488,8 +567,7 @@ mod tests {
 
     #[test]
     fn client_new_empty_url() {
-        let client = N8nClient::new(N8nAuth::ApiKey("key".into()), "").unwrap();
-        assert_eq!(client.base_url, "");
+        assert!(N8nClient::new(N8nAuth::ApiKey("key".into()), "").is_err());
     }
 
     #[test]
@@ -511,5 +589,34 @@ mod tests {
         assert!(!dbg.contains("xyzzy-super-secret-key-99"));
         assert!(dbg.contains("N8nClient"));
         assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn canonical_base_url_rejects_unsafe_components() {
+        for value in [
+            "https://user:pass@n8n.example.com/api/v1",
+            "https://n8n.example.com/api/v1?token=secret",
+            "https://n8n.example.com/api/v1#fragment",
+            "https://n8n.example.com/admin",
+            "https://192.0.2.1/api/v1",
+            "http://n8n.example.com/api/v1",
+        ] {
+            assert!(
+                N8nClient::canonicalize_base_url(value).is_err(),
+                "unsafe base URL accepted: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_base_url_allows_loopback_http_only_for_tests() {
+        assert_eq!(
+            N8nClient::canonicalize_base_url("http://127.0.0.1:5678/api/v1/").unwrap(),
+            "http://127.0.0.1:5678/api/v1"
+        );
+        assert_eq!(
+            N8nClient::canonicalize_base_url("https://n8n.example.com:443/api/v1").unwrap(),
+            "https://n8n.example.com/api/v1"
+        );
     }
 }

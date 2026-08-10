@@ -1,15 +1,14 @@
-# n8n Connector V3 Contract
+# n8n Connector Security Contract
 
-> **Status**: runtime contract documented; manifest/runtime drift documented
-> **Bead**: `flywheel_connectors-4kw5f.12`
-> **Parent**: `flywheel_connectors-4kw5f`
+> **Status**: packet 1 security gates implemented; production provider egress and workflow lifecycle remain fail-closed
+> **Bead**: `flywheel_connectors-nqm81.2`
 > **Verification script**: none tracked; use the commands below
 > **n8n public REST API**: https://docs.n8n.io/api/
 > **n8n API reference**: https://docs.n8n.io/api/api-reference/
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.n8n`. The connector currently targets the n8n public REST API surface implemented in this crate: workflow listing, workflow lookup, workflow activation state changes, execution listing, and execution lookup.
+This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes workflow and execution reads, plus a capability- and approval-gated workflow lifecycle operation that is intentionally unavailable until a mediated write path is delivered.
 
 The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client, credential manager, project manager, variable manager, audit client, webhook trigger runtime, event subscription client, n8n CLI replacement, or general HTTP proxy.
 
@@ -23,73 +22,64 @@ The current crate exposes these operations:
 - `n8n.executions.list`
 - `n8n.executions.get`
 
-Important runtime truths the contract preserves:
+Important runtime truths:
 
 - Package and binary name are `fcp-n8n`.
 - Runtime `BaseConnector` ID is `n8n`.
 - Manifest and reported connector ID are `fcp.n8n`.
 - Manifest interface hash is `blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000`.
 - Configuration requires exactly one auth source: direct `api_key` or `credential_id`.
-- Direct API-key mode sends `X-N8N-API-KEY`.
-- `credential_id` mode sends `X-FCP-Credential-Id` and expects host egress policy to inject real secret material.
+- Direct API-key mode is usable only against loopback test fixtures. Production provider egress fails before DNS or HTTP until host-mediated enforcement is available.
+- `credential_id` is only a host-managed reference. The direct client neither injects the secret nor sends the reference as a provider header; every provider call fails closed until host mediation is available.
 - `credential_id` must be a valid UUID.
-- `base_url` is required because n8n is self-hosted.
-- `base_url` is trimmed but not otherwise validated by `configure`.
-- The client trims trailing slashes from `base_url`.
+- `base_url` is required and canonicalized to the `/api/v1` root.
 - Runtime endpoint shape is `{base_url}/workflows`, `{base_url}/workflows/{id}`, `{base_url}/executions`, and `{base_url}/executions/{id}`.
-- Runtime request timeout is 30 seconds.
-- The client uses the shared retry loop with `max_retries = 2`.
-- Runtime `invoke` uses `operation_id`, not `operation`.
-- Runtime does not install a `CapabilityVerifier` and does not verify `capability_token`.
-- Runtime does not verify approval tokens for `n8n.workflows.activate`.
-- `simulate` only checks whether `operation_id` is present in the local operation inventory.
-- `handle_configure()` does not clear a prior session ID and does not reset the base handshaken flag.
-- `handle_handshake()` accepts an optional `session_id`, sets the base handshaken flag, and returns capability IDs.
-- `health()` and `doctor()` consider a handshake complete only when `session_id` is present.
-- `handle_shutdown()` shuts down the client runtime and clears config/client/base flags, but leaves `session_id` in memory.
-- `self_check()` is a local readiness check only; it does not issue a live n8n API probe.
+- Runtime request timeout is 30 seconds; each direct client provider call is single-attempt and has no automatic retry.
+- Runtime `invoke` requires the canonical `operation` field.
+- A host-key-backed `CapabilityVerifier` validates the bound capability token before provider dispatch.
+- Activation additionally requires exactly one semantically matching execution approval; malformed entries fail closed. The host remains authoritative for approval signature verification.
+- Reconfigure and shutdown clear client, verifier, zone, session, configured, and handshaken state.
+- `self_check()` performs its read-only probe only on the loopback test path; production direct egress fails before provider traffic.
 
-## Drift Visible In This Checkout
+## Declarative Versus Mechanical Enforcement
 
-This README documents the runtime truth and keeps current drift visible:
+The manifest declares DNS, TLS SNI, host/port, private-range, redirect, timeout,
+and response-size policy for the host egress layer. The direct `reqwest` path does
+not mechanically enforce DNS resolution, private-range checks, or response-size
+limits. It is therefore unavailable for non-loopback provider traffic. No local
+proxy or substitute network policy is installed in this packet.
 
-- Manifest marks `n8n.workflows.activate` as `requires_approval = "policy"`, while runtime operation metadata sets `requires_approval = None` and invoke checks no approval token.
-- Manifest network constraints allow `localhost.localdomain:5678`; runtime readiness accepts any HTTPS host and loopback HTTP for local tests.
-- Runtime configure does not enforce the URL readiness policy, so a bad `base_url` can configure and fail later in `self_check` or invoke.
-- Runtime readiness rejects non-loopback HTTP and missing hosts, but does not reject userinfo, query strings, fragments, redirects, or path shapes that are not n8n API roots.
-- Manifest says API key and instance URL are stored under singleton-writer state. Runtime keeps config in process memory and does not persist connector state itself.
-- Manifest format is `wasi`; this crate is a Rust package with `fcp-n8n` binary and library surfaces.
-- Runtime `introspect()` returns only `connector_id`, `version`, and operations, not the full `Introspection` shape with events, resource types, auth caps, or event caps.
-- `handle_handshake()` can set the base handshaken flag even when no `session_id` was provided, while health/doctor still report not handshaken.
-- `handle_shutdown()` can leave `session_id` present, so health/doctor semantics can be misleading after shutdown.
-- Manifest rate-limit pools are documented intent only; runtime does not enforce connector-local rate limits.
-- There is no dedicated tracked verification shell script for this connector.
+The connector does mechanically enforce configuration shape, canonical API-root
+validation, capability-token binding, approval semantic matching, safe path
+segments, and lifecycle/session reset. These checks do not replace host egress
+mediation.
 
-A follow-up parity bead should add capability-token and approval-token verification, align manifest/runtime approval and network policy, reset session and handshake state on reconfigure and shutdown, harden URL validation, decide whether to support more n8n public API resources, and add a tracked verification bundle.
+## Scope
 
-## First-Slice Scope
-
-The current n8n README slice documents the existing runtime surface:
+This packet documents and verifies:
 
 - direct n8n API key and host credential-reference configuration
 - required self-hosted API base URL behavior
-- local URL readiness, timeout, retry, and provider error mapping
-- workflow read and activation operations
+- local URL readiness, timeout, single-attempt provider calls, and error mapping
+- workflow reads and the activation approval boundary
 - execution read operations
-- simplified handshake, self-check, introspection, and simulation behavior
+- handshake, self-check, introspection, simulation, and reset behavior
 - deterministic WireMock tests and direct proof commands
 
-## Auth And Scope Boundary
+## Auth, Capabilities, And Approvals
 
-- Authentication mechanisms: n8n API key or host credential reference.
+- Authentication configuration accepts exactly one of an API key or a host credential reference.
+- Provisioning asks for the instance URL and credential reference only. It does not prompt for, store, or serialize a raw API key.
 - Home zone: `z:work`.
 - Allowed source zones: `z:owner`, `z:private`, and `z:work`.
 - Allowed target zone: `z:work`.
 - Forbidden zones: `z:public` and `z:community`.
 - Runtime capability surface:
-  - `n8n.workflows.read` gates workflow list/get metadata, but runtime does not enforce capability tokens.
-  - `n8n.workflows.write` gates workflow activation metadata, but runtime does not enforce capability or approval tokens.
-  - `n8n.executions.read` gates execution list/get metadata, but runtime does not enforce capability tokens.
+  - `n8n.workflows.read` gates workflow list/get provider calls.
+  - `n8n.workflows.write` gates the activation approval boundary; a valid request is then denied before provider traffic in this packet.
+  - `n8n.executions.read` gates execution list/get provider calls.
+- Capability tokens must bind to the current connector instance and exact resource URI. The host verifier checks the token signature; the connector performs the bound semantic check.
+- Activation approval must be an exact single execution approval for connector, canonical `operation`, zone, resource, workflow state, and normalized constraints. A host-bound `input_hash` is compatible; a `request_object_id` is not. Malformed approval entries fail closed.
 - The connector does not persist API keys, credential secret material, workflow definitions, execution payloads, provider error bodies, or API responses outside process memory.
 - Workflow and execution data can contain secrets, credentials metadata, prompts, private business data, or tool output. Treat live output as work-zone data unless a stricter zone policy is implemented.
 
@@ -98,21 +88,20 @@ The current n8n README slice documents the existing runtime surface:
 - Runtime endpoint shape:
   - `GET {base_url}/workflows`
   - `GET {base_url}/workflows/{id}`
-  - `PATCH {base_url}/workflows/{id}` with JSON body `{ "active": bool }`
   - `GET {base_url}/executions`
   - `GET {base_url}/executions/{id}`
+- `n8n.workflows.activate` emits no provider request in this packet. Its capability and approval checks run first, then the operation fails closed with a deferred-lifecycle error. The mediated write path is owned by the lifecycle/egress follow-up beads.
 - Runtime sends `Accept: application/json`.
-- Runtime sends `X-N8N-API-KEY` in direct API-key mode.
-- Runtime sends `X-FCP-Credential-Id` in credential-reference mode.
+- Loopback test requests with API-key mode send `X-N8N-API-KEY`.
+- Credential-reference mode sends no credential header from this client.
 - Runtime user agent is `fcp-n8n/0.1.0 (FCP connector)`.
-- Runtime host policy accepts any HTTPS host and loopback HTTP/HTTPS for `localhost`, `127.0.0.1`, `::1`, and `[::1]`.
-- Runtime readiness policy rejects non-loopback HTTP, unparsable URLs, and URLs without a host.
-- Runtime configure does not enforce the readiness policy.
+- Direct provider I/O is allowed only for loopback test hosts (`localhost`, `127.0.0.1`, or IPv6 loopback) with API-key mode. Production HTTPS configurations fail before DNS or HTTP and require host-mediated egress enforcement.
+- Credential references fail before any provider traffic until a host-mediated secret-injection contract is present.
 - Runtime request timeout: `30 seconds`.
-- Runtime retry policy: `max_retries = 2` using the shared retry loop.
+- Direct client calls are single-attempt; no automatic retry loop is installed.
 - Provider HTTP 401, 403, 404, 429, and other API errors map to typed connector/FCP errors.
-- `Retry-After` on 429 is converted to milliseconds; missing values default to 60000 ms.
-- Manifest connect timeout is `5000 ms`, operation total timeout is `15000 ms`, and maximum response bytes are `1048576` or `10485760` by operation.
+- `Retry-After` on 429 is surfaced as a delay hint in the typed error; it does not trigger an automatic retry.
+- Manifest connect timeout, total timeout, DNS, private-range, redirect, SNI, and response-size entries are host-policy declarations, not claims about the direct client path.
 - Sandbox profile is `strict`, with `256 MB` memory, `50%` CPU, no exec, and no inbound listener capability.
 - The connector does not open inbound sockets, receive n8n webhooks, run workflows locally, or connect to n8n's internal database.
 
@@ -122,9 +111,9 @@ The current n8n README slice documents the existing runtime surface:
 |-----------|--------------|------------|------------|-----------|-------------|----------------|
 | `n8n.workflows.list` | `GET /workflows` | `n8n.workflows.read` | `Safe` | `Low` | `Strict` | none |
 | `n8n.workflows.get` | `GET /workflows/{id}` | `n8n.workflows.read` | `Safe` | `Low` | `Strict` | `id` string |
-| `n8n.workflows.activate` | `PATCH /workflows/{id}` | `n8n.workflows.write` | `Risky` | `Medium` | `None` | `id` string and `active` bool |
+| `n8n.workflows.activate` | no provider request; lifecycle deferred | `n8n.workflows.write` | `Risky` | `Medium` | `None` | `id` string and `active` bool plus one matching approval |
 | `n8n.executions.list` | `GET /executions` | `n8n.executions.read` | `Safe` | `Low` | `Strict` | none |
-| `n8n.executions.get` | `GET /executions/{id}` | `n8n.executions.read` | `Safe` | `Low` | `Strict` | `id` string |
+| `n8n.executions.get` | `GET /executions/{id}` | `n8n.executions.read` | `Safe` | `Low` | `Strict` | `workflow_id` and `id` strings |
 
 ## Explicit Non-Goals
 
@@ -132,15 +121,15 @@ The current implementation does not include:
 
 - workflow create, update, delete, import, export, clone, test-run, tag, project, variable, credential, user, audit, or source-control operations
 - pagination, filtering, sorting, or query parameter support for workflow or execution list calls
-- activation approval-token verification despite the manifest policy marker
+- activation provider lifecycle; capability and approval gates are present, but the provider write path is deferred
 - execution retry, stop, delete, log streaming, custom-data filtering, or execution-data redaction management
-- API-key provisioning automation beyond the local provisioning recipe prompts
+- API-key provisioning, secret injection, or host egress enforcement
 - OAuth installation, API-key rotation, credential validation beyond local configuration shape, or live self-check probe
 - n8n CLI behavior, server CLI behavior, embedded n8n runtime, webhook receiver, scheduler, or trigger execution
 
 These are excluded on purpose:
 
-- Activating a workflow can start cron, webhook, polling, or other production triggers and needs explicit approval/runtime verification before broader mutation is safe.
+- Activating a workflow can start cron, webhook, polling, or other production triggers. This packet therefore denies the operation even after its capability and approval checks pass.
 - Workflow and execution payloads may contain sensitive data and need a clearer read policy before adding broad export or debugging surfaces.
 - n8n has a large public API; this connector should grow only through manifest-aligned, capability-gated slices.
 
@@ -149,25 +138,25 @@ These are excluded on purpose:
 `doctor()`, `health()`, `self_check()`, `simulate()`, and `introspect()` are part of the public closeout contract. They surface:
 
 - local configuration, client, session ID, request, and error counter state
-- local URL readiness and credential-injection warning state
-- degraded self-check for unconfigured and `credential_id` modes
+- local URL readiness and host-mediation warning state
+- failed self-check for production direct egress and credential-reference modes, without provider traffic
 - operation metadata with capability, risk, safety tier, idempotency, schemas, and hints
-- simulation allow/deny for known versus unknown operation IDs only
+- simulation allow/deny for known versus unknown `operation` values
 - typed provider/FCP error mapping
 
 The deterministic integration evidence is anchored on connector-local tests covering:
 
 - lifecycle, configuration, health, doctor, self-check, introspection, simulation, shutdown, and counters
-- all five n8n API operations through deterministic HTTP fixtures
+- all read operations through deterministic HTTP fixtures, plus activation zero-traffic denial
 - invoke rejection for unknown operation and missing required inputs
 - provider 401, 403, 404, 429, and 500 classes
-- API-key and credential-ID auth modes, auth redaction, default/custom URL behavior, provisioning readiness, and base URL policy
+- API-key and credential-reference modes, auth redaction, zero-traffic egress denial, provisioning readiness, and base URL policy
 - reconfigure behavior and request/error counter behavior
 
 ## Source Notes
 
 - `connectors/n8n/src/connector.rs` defines configuration parsing, lifecycle handlers, URL readiness policy, provisioning recipe, introspection, simulation, and invoke dispatch.
-- `connectors/n8n/src/client.rs` defines auth headers, endpoint paths, timeout, retry config, URL trimming, and provider error mapping.
+- `connectors/n8n/src/client.rs` defines auth headers, endpoint paths, timeout, URL trimming, and provider error mapping.
 - `connectors/n8n/src/types.rs` defines API error response shapes.
 - `connectors/n8n/src/error.rs` defines connector error classes and FCP error conversion.
 - `connectors/n8n/manifest.toml` defines the manifest operation catalog, network constraints, sandbox boundary, zone policy, and rate-limit intent.
@@ -184,20 +173,20 @@ LC_ALL=C rg -n '[^ -~]' connectors/n8n/README.md
 rg -n '\bmaster\b' connectors/n8n/README.md
 ```
 
-For source or behavior changes, also run the connector proof lane through `rch`:
+For source or behavior changes, run the connector proof lane:
 
 ```bash
-rch exec -- cargo test -p fcp-n8n
-rch exec -- cargo check -p fcp-n8n --all-targets
-rch exec -- cargo clippy -p fcp-n8n --all-targets -- -D warnings
-rch exec -- cargo fmt --check
+cargo test -p fcp-n8n --all-targets
+cargo check -p fcp-n8n --all-targets
+cargo clippy -p fcp-n8n --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
 ## Operator Guidance
 
-- Configure a real n8n public API root, commonly shaped like `https://n8n.example.com/api/v1`.
-- Use a host credential reference when possible; direct API-key mode keeps the key in process memory.
-- Treat workflow activation as a high-review operation until approval-token verification is implemented.
-- Do not rely on capability-token enforcement until runtime verification is implemented.
-- Use `self_check()` to catch obvious URL policy problems, but do not treat it as a live n8n health probe.
+- Configure an n8n public API root, commonly shaped like `https://n8n.example.com/api/v1`.
+- Use a host credential reference for the eventual mediated path; this connector cannot inject it and fails closed until that path exists.
+- Direct API-key mode is for loopback fixtures only in this packet; production egress requires host mediation.
+- Treat workflow activation as deferred: capability and approval checks are enforced, but no provider lifecycle request is emitted.
+- Use `self_check()` as a safe readiness/probe report. Production and credential-reference modes report failure before provider traffic.
 - Expect list operations to return the provider's default page, not a complete synchronized inventory.

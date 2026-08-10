@@ -2,20 +2,26 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    AgentHint, ApprovalMode, ApprovalScope, ApprovalToken, BaseConnector, CapabilityGrant,
+    CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps,
+    FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, OperationId,
+    OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, StepId, ZoneId,
 };
-use reqwest::Url;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
 use crate::{
-    client::{N8nAuth, N8nClient},
-    error::N8nError,
+    client::{N8nAuth, N8nClient, sanitize_path_segment},
+    error::{N8nError, N8nResult},
 };
 
 /// Parsed and validated n8n connector configuration.
@@ -23,10 +29,20 @@ use crate::{
 struct N8nConfig {
     auth: N8nAuth,
     base_url: String,
+    server_id: String,
 }
 
 impl N8nConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let server_id = params
+            .get("server_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required server_id (eec, hetzner, or legacy)".into(),
+            })?;
+        validate_server_id(server_id)?;
+
         let api_key = params
             .get("api_key")
             .and_then(serde_json::Value::as_str)
@@ -76,10 +92,15 @@ impl N8nConfig {
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1003,
                 message: "Missing required base_url (n8n is self-hosted)".into(),
-            })?
-            .to_string();
+            })?;
+        let base_url =
+            N8nClient::canonicalize_base_url(base_url).map_err(|error| error.to_fcp_error())?;
 
-        Ok(Self { auth, base_url })
+        Ok(Self {
+            auth,
+            base_url,
+            server_id: server_id.to_string(),
+        })
     }
 
     fn provisioning_readiness(&self) -> ProvisioningReadiness {
@@ -96,6 +117,7 @@ impl N8nConfig {
             network_ok,
             network_message,
             base_url: self.base_url.clone(),
+            server_id: self.server_id.clone(),
         }
     }
 }
@@ -110,6 +132,7 @@ struct ProvisioningReadiness {
     network_ok: bool,
     network_message: String,
     base_url: String,
+    server_id: String,
 }
 
 /// Doctor check result.
@@ -152,12 +175,22 @@ impl DoctorResult {
     }
 }
 
+const SERVER_IDS: [&str; 3] = ["eec", "hetzner", "legacy"];
+
+#[derive(Debug, Clone)]
+struct ActivationTarget {
+    resource_uri: String,
+    normalized_input: serde_json::Value,
+}
+
 /// FCP n8n Connector.
 pub struct N8nConnector {
     base: Arc<BaseConnector>,
     config: Option<N8nConfig>,
     client: Option<Arc<N8nClient>>,
-    session_id: Option<String>,
+    verifier: Option<CapabilityVerifier>,
+    zone_id: Option<ZoneId>,
+    session_id: Option<SessionId>,
     request_count: AtomicU64,
     error_count: AtomicU64,
 }
@@ -169,6 +202,8 @@ impl N8nConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("n8n"))),
             config: None,
             client: None,
+            verifier: None,
+            zone_id: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -194,10 +229,20 @@ impl N8nConnector {
         let client =
             N8nClient::new(config.auth.clone(), &config.base_url).map_err(|e| e.to_fcp_error())?;
 
+        if let Some(old_client) = self.client.take() {
+            old_client.shutdown();
+        }
+        self.verifier = None;
+        self.zone_id = None;
+        self.session_id = None;
+        self.base.set_handshaken(false);
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({
+            "configured": true,
+            "server_id": self.config.as_ref().map(|value| value.server_id.as_str()),
+        }))
     }
 
     /// Handle the `handshake` method.
@@ -212,30 +257,60 @@ impl N8nConnector {
             });
         }
 
-        let session_id = params
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-
-        self.session_id = session_id;
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid handshake request: {error}"),
+            })?;
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
+        self.zone_id = Some(req.zone);
+        let session_id = SessionId::new();
+        self.session_id = Some(session_id.clone());
         self.base.set_handshaken(true);
 
-        Ok(json!({
-            "protocol_version": "2.0",
-            "connector_id": "fcp.n8n",
-            "connector_version": "0.1.0",
-            "capabilities": [
-                "n8n.workflows.read",
-                "n8n.workflows.write",
-                "n8n.executions.read"
-            ]
-        }))
+        let capabilities_granted = req
+            .capabilities_requested
+            .into_iter()
+            .map(|capability| CapabilityGrant {
+                capability,
+                operation: None,
+            })
+            .collect();
+        serde_json::to_value(HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted,
+            session_id,
+            manifest_hash: manifest_hash(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: false,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        })
+        .map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize handshake response: {error}"),
+        })
     }
 
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.session_id.is_some() && self.verifier.is_some();
 
         let status = if configured && handshaken {
             "healthy"
@@ -280,7 +355,7 @@ impl N8nConnector {
             critical: true,
         });
 
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.session_id.is_some() && self.verifier.is_some();
         checks.push(DoctorCheck {
             name: "handshake".into(),
             passed: handshaken,
@@ -313,7 +388,7 @@ impl N8nConnector {
             return Self::serialize_self_check_report(report);
         }
 
-        let Some(_client) = &self.client else {
+        let Some(client) = &self.client else {
             let mut report = SelfCheckReport::failed(
                 "client_missing",
                 "API client not initialized; re-run configure",
@@ -322,18 +397,26 @@ impl N8nConnector {
             return Self::serialize_self_check_report(report);
         };
 
-        if readiness.requires_credential_injection {
-            let mut report = SelfCheckReport::degraded(
-                "credential_injection_required",
-                "credential_id mode requires egress proxy injection; skipping live probe",
-            );
-            report.details = Some(json!({ "provisioning": readiness }));
-            return Self::serialize_self_check_report(report);
-        }
-
-        let mut report = SelfCheckReport::ok();
-        report.details = Some(json!({ "provisioning": readiness }));
-        Self::serialize_self_check_report(report)
+        let probe = match client.self_check().await {
+            Ok(()) => {
+                let mut report = SelfCheckReport::ok();
+                report.details = Some(json!({
+                    "provisioning": readiness,
+                    "probe": "GET /workflows?limit=1",
+                }));
+                report
+            }
+            Err(error) => {
+                let mut report =
+                    SelfCheckReport::failed("provider_probe_failed", error.safe_summary());
+                report.details = Some(json!({
+                    "provisioning": readiness,
+                    "probe": "GET /workflows?limit=1",
+                }));
+                report
+            }
+        };
+        Self::serialize_self_check_report(probe)
     }
 
     /// Handle the `introspect` method.
@@ -354,14 +437,54 @@ impl N8nConnector {
         self.base.check_ready()?;
 
         let operation = params
-            .get("operation_id")
+            .get("operation")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1003,
-                message: "Missing operation_id".into(),
+                message: "Missing operation".into(),
             })?;
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+
+        let operation_id: OperationId =
+            operation.parse().map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid operation ID format".into(),
+            })?;
+        let capability = required_capability(operation)?;
+        let resources = self.resource_uris_for_operation(operation, &input)?;
+        let token_value =
+            params
+                .get("capability_token")
+                .cloned()
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing capability_token".into(),
+                })?;
+        let token: CapabilityToken =
+            serde_json::from_value(token_value).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token: {error}"),
+            })?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(token, &capability, &operation_id, &resources)?;
+
+        let activation_target = if operation == "n8n.workflows.activate" {
+            Some(self.activation_target(&input, &resources)?)
+        } else {
+            None
+        };
+        if let Some(target) = &activation_target {
+            self.require_execution_approval(operation, target, &params)?;
+        }
+
+        if operation == "n8n.workflows.activate" {
+            return Err(FcpError::CapabilityDenied {
+                capability: "n8n.workflows.write".into(),
+                reason: "workflow activation lifecycle is deferred to the mediated n8n write path"
+                    .into(),
+            });
+        }
 
         self.request_count.fetch_add(1, Ordering::Relaxed);
 
@@ -372,7 +495,6 @@ impl N8nConnector {
         let result = match operation {
             "n8n.workflows.list" => self.invoke_workflows_list(client).await,
             "n8n.workflows.get" => self.invoke_workflows_get(client, &input).await,
-            "n8n.workflows.activate" => self.invoke_workflows_activate(client, &input).await,
             "n8n.executions.list" => self.invoke_executions_list(client).await,
             "n8n.executions.get" => self.invoke_executions_get(client, &input).await,
             _ => {
@@ -392,7 +514,7 @@ impl N8nConnector {
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
-            .get("operation_id")
+            .get("operation")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
@@ -415,6 +537,9 @@ impl N8nConnector {
         }
         self.client = None;
         self.config = None;
+        self.verifier = None;
+        self.zone_id = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -453,22 +578,6 @@ impl N8nConnector {
         client.get_workflow(id).await
     }
 
-    async fn invoke_workflows_activate(
-        &self,
-        client: &N8nClient,
-        input: &serde_json::Value,
-    ) -> Result<serde_json::Value, N8nError> {
-        let id = require_str(input, "id")?;
-        let active = input
-            .get("active")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| N8nError::Api {
-                status_code: 400,
-                message: "Missing required field: active (boolean)".into(),
-            })?;
-        client.activate_workflow(id, active).await
-    }
-
     async fn invoke_executions_list(
         &self,
         client: &N8nClient,
@@ -486,14 +595,148 @@ impl N8nConnector {
         let id = require_str(input, "id")?;
         client.get_execution(id).await
     }
+
+    fn resource_uris_for_operation(
+        &self,
+        operation: &str,
+        input: &serde_json::Value,
+    ) -> FcpResult<Vec<String>> {
+        let server_id = self
+            .config
+            .as_ref()
+            .ok_or(FcpError::NotConfigured)?
+            .server_id
+            .as_str();
+        let resource = match operation {
+            "n8n.workflows.list" | "n8n.executions.list" => instance_resource_uri(server_id),
+            "n8n.workflows.get" | "n8n.workflows.activate" => {
+                let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
+                workflow_resource_uri(server_id, workflow_id)
+                    .map_err(|error| error.to_fcp_error())?
+            }
+            "n8n.executions.get" => {
+                let workflow_id =
+                    require_str(input, "workflow_id").map_err(|error| error.to_fcp_error())?;
+                let execution_id =
+                    require_str(input, "id").map_err(|error| error.to_fcp_error())?;
+                execution_resource_uri(server_id, workflow_id, execution_id)
+                    .map_err(|error| error.to_fcp_error())?
+            }
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1002,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+        Ok(vec![resource])
+    }
+
+    fn activation_target(
+        &self,
+        input: &serde_json::Value,
+        resources: &[String],
+    ) -> FcpResult<ActivationTarget> {
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
+        let active = input
+            .get("active")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "Invalid input: Missing required field: active (boolean)".into(),
+            })?;
+        let resource_uri = resources
+            .first()
+            .cloned()
+            .ok_or_else(|| FcpError::Internal {
+                message: "Activation resource URI was not constructed".into(),
+            })?;
+        Ok(ActivationTarget {
+            resource_uri: resource_uri.clone(),
+            normalized_input: json!({
+                "server_id": config.server_id,
+                "resource_uri": resource_uri,
+                "workflow_id": workflow_id,
+                "active": active,
+                "provider": "rest",
+            }),
+        })
+    }
+
+    fn require_execution_approval(
+        &self,
+        operation: &str,
+        target: &ActivationTarget,
+        params: &serde_json::Value,
+    ) -> FcpResult<()> {
+        let approval_values = params
+            .get("approval_tokens")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| FcpError::CapabilityDenied {
+                capability: "n8n.workflows.write".into(),
+                reason: "activation requires a non-empty approval_tokens collection".into(),
+            })?;
+        let approvals: Vec<ApprovalToken> = approval_values
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid approval token: {error}"),
+            })?;
+        let now_ms = current_time_ms();
+        let matching = approvals
+            .iter()
+            .filter(|approval| {
+                is_matching_execution_approval(
+                    approval,
+                    operation,
+                    self.zone_id.as_ref(),
+                    target,
+                    now_ms,
+                )
+            })
+            .count();
+        if matching != 1 {
+            return Err(FcpError::CapabilityDenied {
+                capability: "n8n.workflows.write".into(),
+                reason: "activation requires exactly one matching execution approval token".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn is_matching_execution_approval(
+    approval: &ApprovalToken,
+    operation: &str,
+    zone_id: Option<&ZoneId>,
+    target: &ActivationTarget,
+    now_ms: u64,
+) -> bool {
+    if approval.signature.as_ref().is_none_or(Vec::is_empty)
+        || !approval.is_valid(now_ms)
+        || zone_id != Some(&approval.zone_id)
+    {
+        return false;
+    }
+
+    let ApprovalScope::Execution(scope) = &approval.scope else {
+        return false;
+    };
+    scope.connector_id == "fcp.n8n"
+        && scope.method_pattern == operation
+        && scope.request_object_id.is_none()
+        && has_exact_activation_constraints(&scope.input_constraints, &target.normalized_input)
 }
 
 /// Build the provisioning recipe for the `n8n` connector.
 pub fn provisioning_recipe() -> ProvisioningRecipe {
     ProvisioningRecipe::new(
-        RecipeId::new("n8n.api_key"),
+        RecipeId::new("n8n.credential_reference"),
         "1",
-        "Provision n8n connector with an API key",
+        "Provision n8n connector with a host-managed credential reference",
     )
     .with_step(ProvisioningStep::new(
         StepId::new("enter_instance_url"),
@@ -503,23 +746,12 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     ))
     .with_step(
         ProvisioningStep::new(
-            StepId::new("enter_api_key"),
-            ProvisioningStepType::PromptSecret {
-                message: "Paste your n8n API key".into(),
+            StepId::new("enter_credential_id"),
+            ProvisioningStepType::PromptUser {
+                message: "Enter the host-managed n8n credential reference (UUID); do not paste an API key".into(),
             },
         )
         .depends_on(StepId::new("enter_instance_url")),
-    )
-    .with_step(
-        ProvisioningStep::new(
-            StepId::new("store_api_key"),
-            ProvisioningStepType::StoreSecret {
-                key: "api_key".into(),
-                value_from: StepId::new("enter_api_key"),
-                scope: "connector:fcp.n8n".into(),
-            },
-        )
-        .depends_on(StepId::new("enter_api_key")),
     )
 }
 
@@ -528,37 +760,94 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
 /// `n8n` is self-hosted, so any hostname is accepted as long as HTTPS is used
 /// for non-local endpoints.
 fn base_url_policy(base_url: &str) -> (bool, String) {
-    let parsed = match Url::parse(base_url) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return (false, format!("base_url could not be parsed: {error}"));
-        }
-    };
-
-    let Some(host) = parsed.host_str() else {
-        return (false, "base_url must include a host".into());
-    };
-
-    let local = is_local_test_host(host);
-    let secure_or_local = parsed.scheme() == "https" || local;
-
-    if secure_or_local {
-        (
-            true,
-            format!("Endpoint accepted by policy checks: {base_url}"),
-        )
-    } else {
-        (
-            false,
-            format!(
-                "Endpoint must use HTTPS for non-local hosts (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
-            ),
-        )
+    match N8nClient::canonicalize_base_url(base_url) {
+        Ok(canonical) => (true, format!("Endpoint accepted: {canonical}")),
+        Err(error) => (false, error.safe_summary()),
     }
 }
 
 fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn validate_server_id(server_id: &str) -> FcpResult<()> {
+    if SERVER_IDS.contains(&server_id) {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "server_id must be exactly one of eec, hetzner, or legacy".into(),
+        })
+    }
+}
+
+fn instance_resource_uri(server_id: &str) -> String {
+    format!("fwc-n8n://{server_id}")
+}
+
+fn workflow_resource_uri(server_id: &str, workflow_id: &str) -> N8nResult<String> {
+    let id = sanitize_path_segment(workflow_id, "workflow id")?;
+    let encoded = utf8_percent_encode(id, NON_ALPHANUMERIC);
+    Ok(format!("fwc-n8n://{server_id}/workflows/{encoded}"))
+}
+
+fn execution_resource_uri(
+    server_id: &str,
+    workflow_id: &str,
+    execution_id: &str,
+) -> N8nResult<String> {
+    let workflow_id = sanitize_path_segment(workflow_id, "workflow id")?;
+    let execution_id = sanitize_path_segment(execution_id, "execution id")?;
+    let workflow_id = utf8_percent_encode(workflow_id, NON_ALPHANUMERIC);
+    let execution_id = utf8_percent_encode(execution_id, NON_ALPHANUMERIC);
+    Ok(format!(
+        "fwc-n8n://{server_id}/workflows/{workflow_id}/executions/{execution_id}"
+    ))
+}
+
+fn has_exact_activation_constraints(
+    constraints: &[fcp_prelude::InputConstraint],
+    normalized_input: &serde_json::Value,
+) -> bool {
+    const REQUIRED_POINTERS: [&str; 5] = [
+        "/server_id",
+        "/resource_uri",
+        "/workflow_id",
+        "/active",
+        "/provider",
+    ];
+    constraints.len() == REQUIRED_POINTERS.len()
+        && REQUIRED_POINTERS.iter().all(|pointer| {
+            constraints.iter().any(|constraint| {
+                constraint.pointer == *pointer
+                    && normalized_input.pointer(pointer) == Some(&constraint.expected)
+            })
+        })
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        })
+}
+
+fn manifest_hash() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(MANIFEST_TOML.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    operations_info()
+        .into_iter()
+        .find(|info| info.id.as_ref() == operation)
+        .map(|info| info.capability)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1002,
+            message: format!("Unknown operation: {operation}"),
+        })
 }
 
 /// Extract a required string field from input.
@@ -592,7 +881,7 @@ fn op_info(
         risk_level,
         description: None,
         rate_limit: None,
-        requires_approval: None,
+        requires_approval: (id == "n8n.workflows.activate").then_some(ApprovalMode::Policy),
         safety_tier,
         idempotency,
         ai_hints,
@@ -646,7 +935,7 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.activate",
-            "Activate or deactivate an n8n workflow",
+            "Activation boundary; provider lifecycle is deferred and fail-closed in packet 1",
             json!({"type": "object", "required": ["id", "active"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}, "active": {"type": "boolean", "description": "Whether to activate (true) or deactivate (false)"}}}),
             json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}),
             "n8n.workflows.write",
@@ -654,10 +943,10 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::None,
             AgentHint {
-                when_to_use: "Activate or deactivate an n8n workflow.".into(),
+                when_to_use: "Request activation or deactivation only as a deferred lifecycle intent; packet 1 verifies capability and approval, then fails closed before provider I/O.".into(),
                 common_mistakes: vec![
-                    "Activating a workflow that has webhook or cron triggers without verifying its trigger configuration first.".into(),
-                    "Passing the workflow name instead of the numeric workflow ID.".into(),
+                    "Expecting packet 1 to change provider lifecycle state; the operation is deferred and always fails closed here.".into(),
+                    "Treating a matching approval as sufficient for provider I/O; the mediated lifecycle path is still required.".into(),
                 ],
                 examples: vec![r#"{"id": "1001", "active": true}"#.into()],
                 related: vec![
@@ -691,7 +980,7 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "n8n.executions.get",
             "Get details of a specific execution",
-            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string", "description": "Execution identifier"}}}),
+            json!({"type": "object", "required": ["workflow_id", "id"], "properties": {"workflow_id": {"type": "string", "description": "Workflow identifier containing the execution"}, "id": {"type": "string", "description": "Execution identifier"}}}),
             json!({"type": "object", "required": ["id", "finished"], "properties": {"id": {"type": "string"}, "finished": {"type": "boolean"}}}),
             "n8n.executions.read",
             RiskLevel::Low,
@@ -703,7 +992,7 @@ fn operations_info() -> Vec<OperationInfo> {
                     "Using the workflow ID instead of the execution ID.".into(),
                     "Querying an execution before it has finished — check the 'finished' field in the response.".into(),
                 ],
-                examples: vec![r#"{"id": "50001"}"#.into()],
+                examples: vec![r#"{"workflow_id": "1001", "id": "50001"}"#.into()],
                 related: vec![
                     CapabilityId::from_static("n8n.executions.list"),
                     CapabilityId::from_static("n8n.workflows.get"),
@@ -720,6 +1009,7 @@ mod tests {
     #[test]
     fn config_from_api_key() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "test-api-key",
             "base_url": "https://n8n.example.com/api/v1",
         }))
@@ -731,6 +1021,7 @@ mod tests {
     #[test]
     fn config_from_credential_id() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://n8n.example.com/api/v1",
         }))
@@ -741,6 +1032,7 @@ mod tests {
     #[test]
     fn config_custom_base_url() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "key",
             "base_url": "http://localhost:5678/api/v1",
         }))
@@ -749,8 +1041,28 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_missing_server_id() {
+        let result = N8nConfig::from_params(&json!({
+            "api_key": "key",
+            "base_url": "https://n8n.example.com/api/v1",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_invalid_server_id() {
+        let result = N8nConfig::from_params(&json!({
+            "server_id": "other",
+            "api_key": "key",
+            "base_url": "https://n8n.example.com/api/v1",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn config_rejects_both_auth_methods() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "key",
             "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://n8n.example.com/api/v1",
@@ -761,6 +1073,7 @@ mod tests {
     #[test]
     fn config_rejects_no_auth() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "base_url": "https://n8n.example.com/api/v1",
         }));
         assert!(result.is_err());
@@ -769,6 +1082,7 @@ mod tests {
     #[test]
     fn config_rejects_empty_api_key() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "",
             "base_url": "https://n8n.example.com/api/v1",
         }));
@@ -778,6 +1092,7 @@ mod tests {
     #[test]
     fn config_rejects_whitespace_api_key() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "   ",
             "base_url": "https://n8n.example.com/api/v1",
         }));
@@ -787,6 +1102,7 @@ mod tests {
     #[test]
     fn config_rejects_non_string_credential_id() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "credential_id": 12345,
             "base_url": "https://n8n.example.com/api/v1",
         }));
@@ -796,6 +1112,7 @@ mod tests {
     #[test]
     fn config_rejects_invalid_uuid_credential_id() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "credential_id": "not-a-uuid",
             "base_url": "https://n8n.example.com/api/v1",
         }));
@@ -805,6 +1122,7 @@ mod tests {
     #[test]
     fn config_rejects_missing_base_url() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "key",
         }));
         assert!(result.is_err());
@@ -813,6 +1131,7 @@ mod tests {
     #[test]
     fn config_rejects_empty_base_url() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "key",
             "base_url": "",
         }));
@@ -822,6 +1141,7 @@ mod tests {
     #[test]
     fn config_rejects_whitespace_base_url() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "key",
             "base_url": "   ",
         }));
@@ -868,6 +1188,24 @@ mod tests {
     fn operations_info_has_5_operations() {
         let ops = operations_info();
         assert_eq!(ops.len(), 5);
+    }
+
+    #[test]
+    fn activation_introspection_describes_deferred_lifecycle() {
+        let activation = operations_info()
+            .into_iter()
+            .find(|op| op.id.as_ref() == "n8n.workflows.activate")
+            .expect("activation operation should be catalogued");
+        assert!(activation.summary.contains("deferred"));
+        assert!(activation.summary.contains("fail-closed"));
+        assert!(activation.ai_hints.when_to_use.contains("fails closed"));
+        assert!(
+            activation
+                .ai_hints
+                .common_mistakes
+                .iter()
+                .any(|mistake| mistake.contains("deferred"))
+        );
     }
 
     #[test]
@@ -1037,6 +1375,7 @@ mod tests {
     #[test]
     fn config_trims_api_key() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "  key_test  ",
             "base_url": "https://n8n.example.com/api/v1",
         }))
@@ -1143,6 +1482,7 @@ mod tests {
     #[test]
     fn config_base_url_trimmed() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "key",
             "base_url": "  https://n8n.example.com/api/v1  ",
         }))
@@ -1247,6 +1587,7 @@ mod tests {
     #[test]
     fn config_rejects_boolean_base_url() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "key",
             "base_url": true,
         }));
@@ -1256,6 +1597,7 @@ mod tests {
     #[test]
     fn config_rejects_null_api_key() {
         let result = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": null,
             "base_url": "https://n8n.example.com/api/v1",
         }));
@@ -1330,6 +1672,7 @@ mod tests {
     #[test]
     fn provisioning_readiness_api_key_mode() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "test-key",
             "base_url": "https://n8n.example.com/api/v1",
         }))
@@ -1346,6 +1689,7 @@ mod tests {
     #[test]
     fn provisioning_readiness_credential_id_mode() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://n8n.example.com/api/v1",
         }))
@@ -1361,6 +1705,7 @@ mod tests {
     #[test]
     fn provisioning_readiness_serializes() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "tok",
             "base_url": "https://n8n.example.com/api/v1",
         }))
@@ -1374,19 +1719,15 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_http_non_local_rejected() {
-        let config = N8nConfig::from_params(&json!({
-            "api_key": "tok",
-            "base_url": "http://n8n.example.com/api/v1",
-        }))
-        .unwrap();
-        let readiness = config.provisioning_readiness();
-        assert!(!readiness.network_ok);
-        assert!(readiness.network_message.contains("HTTPS"));
+        let (network_ok, network_message) = base_url_policy("http://n8n.example.com/api/v1");
+        assert!(!network_ok);
+        assert!(network_message.contains("HTTPS"));
     }
 
     #[test]
     fn provisioning_readiness_localhost_http_accepted() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "tok",
             "base_url": "http://localhost:5678/api/v1",
         }))
@@ -1396,19 +1737,18 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_recipe_has_3_steps() {
+    fn provisioning_recipe_has_2_steps() {
         let recipe = provisioning_recipe();
-        assert_eq!(recipe.id.as_str(), "n8n.api_key");
+        assert_eq!(recipe.id.as_str(), "n8n.credential_reference");
         assert_eq!(recipe.version, "1");
-        assert_eq!(recipe.steps.len(), 3);
+        assert_eq!(recipe.steps.len(), 2);
     }
 
     #[test]
     fn provisioning_recipe_step_order() {
         let recipe = provisioning_recipe();
         assert_eq!(recipe.steps[0].id.as_str(), "enter_instance_url");
-        assert_eq!(recipe.steps[1].id.as_str(), "enter_api_key");
-        assert_eq!(recipe.steps[2].id.as_str(), "store_api_key");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_credential_id");
     }
 
     #[test]
@@ -1417,16 +1757,15 @@ mod tests {
         assert!(recipe.steps[0].depends_on.is_empty());
         assert_eq!(recipe.steps[1].depends_on.len(), 1);
         assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_instance_url");
-        assert_eq!(recipe.steps[2].depends_on.len(), 1);
-        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_api_key");
     }
 
     #[test]
     fn provisioning_recipe_serializes() {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
-        assert_eq!(v["id"], "n8n.api_key");
-        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
+        assert_eq!(v["id"], "n8n.credential_reference");
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
+        assert!(!v.to_string().contains("api_key"));
     }
 
     #[test]
@@ -1439,21 +1778,12 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_recipe_second_step_is_prompt_secret() {
+    fn provisioning_recipe_second_step_is_credential_reference_prompt() {
         let recipe = provisioning_recipe();
         assert!(matches!(
             &recipe.steps[1].kind,
-            ProvisioningStepType::PromptSecret { message } if message.contains("API key")
-        ));
-    }
-
-    #[test]
-    fn provisioning_recipe_third_step_is_store_secret() {
-        let recipe = provisioning_recipe();
-        assert!(matches!(
-            &recipe.steps[2].kind,
-            ProvisioningStepType::StoreSecret { key, scope, .. }
-                if key == "api_key" && scope == "connector:fcp.n8n"
+            ProvisioningStepType::PromptUser { message }
+                if message.contains("credential reference") && message.contains("do not paste")
         ));
     }
 
@@ -1466,19 +1796,19 @@ mod tests {
 
     #[test]
     fn base_url_policy_accepts_localhost() {
-        let (ok, _) = base_url_policy("http://localhost:5678");
+        let (ok, _) = base_url_policy("http://localhost:5678/api/v1");
         assert!(ok);
     }
 
     #[test]
     fn base_url_policy_accepts_127_0_0_1() {
-        let (ok, _) = base_url_policy("http://127.0.0.1:5678");
+        let (ok, _) = base_url_policy("http://127.0.0.1:5678/api/v1");
         assert!(ok);
     }
 
     #[test]
     fn base_url_policy_accepts_ipv6_loopback() {
-        let (ok, _) = base_url_policy("http://[::1]:5678");
+        let (ok, _) = base_url_policy("http://[::1]:5678/api/v1");
         assert!(ok);
     }
 
@@ -1493,7 +1823,7 @@ mod tests {
     fn base_url_policy_rejects_invalid_url() {
         let (ok, message) = base_url_policy("not a url");
         assert!(!ok);
-        assert!(message.contains("could not be parsed"));
+        assert!(message.contains("absolute URL"));
     }
 
     #[test]
@@ -1506,6 +1836,7 @@ mod tests {
     #[test]
     fn provisioning_readiness_debug() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "tok",
             "base_url": "https://n8n.example.com/api/v1",
         }))
@@ -1518,6 +1849,7 @@ mod tests {
     #[test]
     fn provisioning_readiness_clone() {
         let config = N8nConfig::from_params(&json!({
+            "server_id": "eec",
             "api_key": "tok",
             "base_url": "https://n8n.example.com/api/v1",
         }))
@@ -1532,7 +1864,7 @@ mod tests {
     #[test]
     fn base_url_policy_accepts_https_custom_port() {
         let (ok, _) = base_url_policy("https://n8n.example.com:8443/api/v1");
-        assert!(ok);
+        assert!(!ok);
     }
 
     #[test]

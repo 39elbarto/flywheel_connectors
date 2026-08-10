@@ -17,14 +17,23 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{Duration as ChronoDuration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_mcp_bridge::connector::McpBridgeConnector;
+use fcp_prelude::{
+    ApprovalScope, ApprovalToken, CapabilityToken, ExecutionScope, FcpResult, InputConstraint,
+    InstanceId, ZoneId,
+};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
 const BEAD_ID: &str = "flywheel_connectors-bky21.3.7.3";
 const CONNECTOR_ID: &str = "mcp-bridge";
 const LOOPBACK_CREDENTIAL: &str = "mcp-bridge-local-loopback-credential";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const SERVER_ID: &str = "mcp-local";
 
 #[derive(Debug)]
 struct CapturedRequest {
@@ -75,7 +84,7 @@ impl LoopbackServer {
         });
 
         Self {
-            base_url: format!("http://{address}"),
+            base_url: format!("http://{address}/mcp"),
             handle: Some(handle),
         }
     }
@@ -108,7 +117,7 @@ impl NoEgressProbe {
             .local_addr()
             .expect("read no-egress listener address");
         Self {
-            base_url: format!("http://{address}"),
+            base_url: format!("http://{address}/mcp"),
             listener,
         }
     }
@@ -265,12 +274,204 @@ fn assert_rpc_request(request: &CapturedRequest, expected_method: &str) -> Value
     body
 }
 
-async fn configured_connector(base_url: &str) -> McpBridgeConnector {
+fn signing_key() -> Ed25519SigningKey {
+    Ed25519SigningKey::from_bytes(&[43_u8; 32]).expect("deterministic local signing key")
+}
+
+fn resource_for(operation: &str, input: &Value) -> String {
+    match operation {
+        "mcp.tools.call" => format!(
+            "fwc-mcp-bridge://{SERVER_ID}/tools/{}",
+            utf8_percent_encode(input["name"].as_str().unwrap_or_default(), NON_ALPHANUMERIC)
+        ),
+        "mcp.resources.read" => format!(
+            "fwc-mcp-bridge://{SERVER_ID}/resources/{}",
+            utf8_percent_encode(input["uri"].as_str().unwrap_or_default(), NON_ALPHANUMERIC)
+        ),
+        _ => format!("fwc-mcp-bridge://{SERVER_ID}"),
+    }
+}
+
+fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            serde_json::to_vec(value).expect("serialize scalar")
+        }
+        Value::Array(values) => {
+            let mut output = vec![b'['];
+            for (index, item) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend(canonical_json_bytes(item));
+            }
+            output.push(b']');
+            output
+        }
+        Value::Object(values) => {
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            let mut output = vec![b'{'];
+            for (index, (key, item)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend(serde_json::to_vec(key).expect("serialize key"));
+                output.push(b':');
+                output.extend(canonical_json_bytes(item));
+            }
+            output.push(b'}');
+            output
+        }
+    }
+}
+
+fn payload_digest(operation: &str, input: &Value) -> [u8; 32] {
+    let payload = if operation == "mcp.tools.call" {
+        json!({
+            "name": input["name"],
+            "arguments": input.get("arguments").cloned().unwrap_or_else(|| json!({})),
+        })
+    } else {
+        let candidate = input.get("request").unwrap_or(input);
+        let params = candidate
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| candidate.clone());
+        json!({"method": "sampling/createMessage", "params": params})
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"FCP/MCP-Bridge/approval-payload/v1\0");
+    hasher.update(canonical_json_bytes(&payload));
+    hasher.finalize().into()
+}
+
+fn approval_for(operation: &str, input: &Value) -> ApprovalToken {
+    let digest = payload_digest(operation, input);
+    let resource_uri = resource_for(operation, input);
+    let mut values = vec![
+        ("server_id", json!(SERVER_ID)),
+        ("resource_uri", json!(resource_uri)),
+        ("operation", json!(operation)),
+        (
+            "provider",
+            json!(if operation == "mcp.sampling.handle" {
+                "local"
+            } else {
+                "mcp"
+            }),
+        ),
+        ("payload_sha256", json!(hex::encode(digest))),
+    ];
+    if operation == "mcp.tools.call" {
+        values.push(("tool_name", input["name"].clone()));
+    } else {
+        values.push(("sampling_method", json!("sampling/createMessage")));
+    }
+    let constraints = values
+        .into_iter()
+        .map(|(field, expected)| InputConstraint {
+            pointer: format!("/{field}"),
+            expected,
+        })
+        .collect();
+    let now = Utc::now();
+    ApprovalToken::approved(
+        "local-approval",
+        u64::try_from(now.timestamp_millis()).expect("timestamp"),
+        u64::try_from((now + ChronoDuration::hours(1)).timestamp_millis()).expect("timestamp"),
+        "operator:local",
+        ApprovalScope::Execution(ExecutionScope {
+            connector_id: "fcp.mcp-bridge".into(),
+            method_pattern: operation.into(),
+            request_object_id: None,
+            input_hash: Some(digest),
+            input_constraints: constraints,
+        }),
+        ZoneId::work(),
+        Some(vec![1]),
+    )
+}
+
+fn capability_for(operation: &str) -> &'static str {
+    match operation {
+        "mcp.tools.call" => "mcp.tools.write",
+        "mcp.tools.list" => "mcp.tools.read",
+        "mcp.resources.list" | "mcp.resources.read" => "mcp.resources.read",
+        "mcp.prompts.list" => "mcp.prompts.read",
+        "mcp.sampling.handle" => "mcp.sampling.handle",
+        "mcp.server.metrics" => "mcp.server.metrics",
+        _ => "mcp.unknown",
+    }
+}
+
+fn capability_token(operation: &str, input: &Value, instance_id: &str) -> CapabilityToken {
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec![resource_for(operation, input)],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize constraints");
+    let now = Utc::now();
+    let raw = CapabilityTokenBuilder::new()
+        .capability_id(capability_for(operation))
+        .zone_id("z:work")
+        .principal("user:local")
+        .operations(&[operation])
+        .issuer("node:local")
+        .validity(now, now + ChronoDuration::hours(1))
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints")
+        .target_instance(instance_id)
+        .sign(&signing_key())
+        .expect("sign capability token");
+    CapabilityToken::from_raw(raw)
+}
+
+struct TestConnector {
+    inner: McpBridgeConnector,
+    instance_id: String,
+}
+
+impl TestConnector {
+    async fn handle_invoke(&self, mut params: Value) -> FcpResult<Value> {
+        if let Some(operation) = params.get("operation_id").cloned() {
+            params["operation"] = operation;
+        }
+        let operation = params
+            .get("operation")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(operation) = operation.as_deref() {
+            let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+            if capability_for(operation) != "mcp.unknown"
+                && params.get("capability_token").is_none()
+                && !(operation == "mcp.tools.call"
+                    && input.get("name").and_then(Value::as_str).is_none())
+            {
+                params["capability_token"] =
+                    serde_json::to_value(capability_token(operation, &input, &self.instance_id))
+                        .expect("serialize capability token");
+            }
+            if matches!(operation, "mcp.tools.call" | "mcp.sampling.handle")
+                && params.get("approval_tokens").is_none()
+                && (operation != "mcp.tools.call"
+                    || input.get("name").and_then(Value::as_str).is_some())
+            {
+                params["approval_tokens"] = json!([approval_for(operation, &input)]);
+            }
+        }
+        self.inner.handle_invoke(params).await
+    }
+}
+
+async fn configured_connector(base_url: &str) -> TestConnector {
     configured_connector_with(base_url, json!({})).await
 }
 
-async fn configured_connector_with(base_url: &str, extra: Value) -> McpBridgeConnector {
+async fn configured_connector_with(base_url: &str, extra: Value) -> TestConnector {
     let mut params = json!({
+        "server_id": SERVER_ID,
         "mcp_url": base_url,
         "api_key": LOOPBACK_CREDENTIAL,
     });
@@ -285,15 +486,32 @@ async fn configured_connector_with(base_url: &str, extra: Value) -> McpBridgeCon
     }
 
     let mut connector = McpBridgeConnector::new();
+    let instance_id = InstanceId::new().to_string();
     connector
         .handle_configure(params)
         .await
         .expect("configure MCP Bridge connector");
     connector
-        .handle_handshake(json!({"session_id": "mcp-bridge-local-acceptance"}))
+        .handle_handshake({
+            let key = signing_key();
+            json!({
+                "protocol_version": "2.0",
+                "zone": "z:work",
+                "host_public_key": key.verifying_key().to_bytes(),
+                "nonce": vec![8_u8; 32],
+                "capabilities_requested": [
+                    "mcp.tools.read", "mcp.tools.write", "mcp.resources.read",
+                    "mcp.prompts.read", "mcp.sampling.handle", "mcp.server.metrics"
+                ],
+                "requested_instance_id": instance_id,
+            })
+        })
         .await
         .expect("handshake MCP Bridge connector");
-    connector
+    TestConnector {
+        inner: connector,
+        instance_id,
+    }
 }
 
 fn emit_acceptance_evidence(operation: &str, result: &str, detail: &Value) {
@@ -387,23 +605,11 @@ async fn local_non_mock_tools_list_posts_streamable_http_boundary_and_scans_cata
 }
 
 #[fcp_async_core::runtime::test]
-async fn local_non_mock_tools_call_posts_arguments_boundary() {
-    let server = LoopbackServer::start(vec![Exchange::json(
-        "200 OK",
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "content": [
-                    {"type": "text", "text": "release note result"}
-                ],
-                "isError": false
-            }
-        }),
-    )]);
-    let connector = configured_connector(server.base_url()).await;
+async fn local_non_mock_tools_call_is_deferred_before_http_effect() {
+    let probe = NoEgressProbe::start();
+    let connector = configured_connector(probe.base_url()).await;
 
-    let result = connector
+    let error = connector
         .handle_invoke(json!({
             "operation_id": "mcp.tools.call",
             "input": {
@@ -415,21 +621,16 @@ async fn local_non_mock_tools_call_posts_arguments_boundary() {
             }
         }))
         .await
-        .expect("call MCP tool");
-    let requests = server.join();
-    let body = assert_rpc_request(&requests[0], "tools/call");
-
-    assert_eq!(body["params"]["name"], "search_workspace");
-    assert_eq!(body["params"]["arguments"]["query"], "release");
-    assert_eq!(body["params"]["arguments"]["limit"], 3);
-    assert_eq!(result["content"][0]["text"], "release note result");
+        .expect_err("tools.call must remain deferred");
+    assert!(format!("{error:?}").contains("deferred"));
+    probe.assert_no_connection();
 
     emit_acceptance_evidence(
         "mcp.tools.call",
         "pass",
         &json!({
-            "requests_observed": requests.len(),
-            "arguments_forwarded": body["params"]["arguments"].is_object(),
+            "requests_observed": 0,
+            "arguments_forwarded": false,
         }),
     );
 }
@@ -550,7 +751,11 @@ async fn local_non_mock_block_mode_rejects_suspicious_provider_descriptions() {
     let requests = server.join();
     assert_rpc_request(&requests[0], "tools/list");
     let error_text = format!("{error:?}");
-    assert!(error_text.contains("blocked by description scanner"));
+    assert!(
+        error_text.contains("LOCAL_POLICY: catalog description blocked by local scanner policy")
+    );
+    assert!(!error_text.contains("eval(user_input)"));
+    assert!(!error_text.contains("unsafe_runner"));
 
     emit_acceptance_evidence(
         "mcp.tools.list.security",
@@ -563,21 +768,13 @@ async fn local_non_mock_block_mode_rejects_suspicious_provider_descriptions() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn local_non_mock_provider_unauthorized_redacts_auth_material_and_counts_retry() {
-    let server = LoopbackServer::start(vec![
-        Exchange::json(
-            "401 Unauthorized",
-            &json!({
-                "error": format!("provider saw {LOOPBACK_CREDENTIAL}")
-            }),
-        ),
-        Exchange::json(
-            "401 Unauthorized",
-            &json!({
-                "error": format!("provider still saw {LOOPBACK_CREDENTIAL}")
-            }),
-        ),
-    ]);
+async fn local_non_mock_provider_unauthorized_is_single_attempt_and_redacted() {
+    let server = LoopbackServer::start(vec![Exchange::json(
+        "401 Unauthorized",
+        &json!({
+            "error": format!("provider saw {LOOPBACK_CREDENTIAL}")
+        }),
+    )]);
     let connector = configured_connector(server.base_url()).await;
 
     let error = connector
@@ -588,7 +785,7 @@ async fn local_non_mock_provider_unauthorized_redacts_auth_material_and_counts_r
         .await
         .expect_err("provider auth failure should propagate as redacted FCP error");
     let requests = server.join();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     for request in &requests {
         assert_rpc_request(request, "tools/list");
         assert_eq!(
@@ -608,7 +805,7 @@ async fn local_non_mock_provider_unauthorized_redacts_auth_material_and_counts_r
         .expect("read retry metrics");
     assert_eq!(metrics["requests"], 2);
     assert_eq!(metrics["errors"], 1);
-    assert_eq!(metrics["auth_retries"], 1);
+    assert_eq!(metrics["auth_retries"], 0);
 
     emit_acceptance_evidence(
         "mcp.tools.list.auth_failure",

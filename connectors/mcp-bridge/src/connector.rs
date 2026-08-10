@@ -3,23 +3,27 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
-    ApprovalMode, BaseConnector, ConnectorId, FcpError, FcpResult, OperationId, OperationInfo,
-    ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, SelfCheckReport, StepId,
-    log_redaction::redact_url,
+    ApprovalMode, ApprovalScope, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId,
+    CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, InputConstraint, OperationId, OperationInfo,
+    ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, SelfCheckReport,
+    SessionId, StepId, ZoneId, log_redaction::redact_url,
 };
-use reqwest::Url;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
-    client::{McpAuth, McpClient},
-    error::McpBridgeError,
+    client::{McpAuth, McpClient, McpClientMetrics},
+    error::{McpBridgeError, McpBridgeResult},
     security::{
-        DescriptionScanMode, Severity, finding_log_payload, scan_description,
+        DescriptionScanMode, Severity, catalog_item_sha256, finding_log_payload, scan_description,
         tool_name_collides_with_builtin,
     },
 };
@@ -46,6 +50,7 @@ const OPERATION_ORDER: [&str; 7] = [
 /// Parsed and validated MCP Bridge connector configuration.
 #[derive(Debug, Clone)]
 struct McpBridgeConfig {
+    server_id: String,
     mcp_url: String,
     auth: McpAuth,
     description_scan: DescriptionScanMode,
@@ -62,6 +67,13 @@ struct SamplingConfig {
     max_tool_rounds: u32,
     model_override: Option<String>,
     allowed_models: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ApprovalTarget {
+    resource_uri: String,
+    normalized_input: serde_json::Value,
+    payload_digest: [u8; 32],
 }
 
 impl Default for SamplingConfig {
@@ -128,6 +140,43 @@ impl SamplingConfig {
 
 impl McpBridgeConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let server_id = params
+            .get("server_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required server_id".into(),
+            })?;
+        validate_server_id(server_id)?;
+
+        let api_key = params
+            .get("api_key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+        if api_key.is_some() && credential_id.is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Provide exactly one of api_key or credential_id".into(),
+            });
+        }
+
         let mcp_url = params
             .get("mcp_url")
             .and_then(serde_json::Value::as_str)
@@ -138,17 +187,17 @@ impl McpBridgeConfig {
                 message: "Missing or empty mcp_url in configuration".into(),
             })?
             .to_string();
-
-        let api_key = params
-            .get("api_key")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string);
+        let mcp_url = McpClient::canonicalize_base_url(&mcp_url)
+            .map_err(|error| error.to_fcp_error())?
+            .to_string();
 
         Ok(Self {
+            server_id: server_id.to_string(),
             mcp_url,
-            auth: McpAuth { api_key },
+            auth: McpAuth {
+                api_key,
+                credential_id,
+            },
             description_scan: description_scan_mode_from_params(params)?,
             sampling: SamplingConfig::from_params(params)?,
         })
@@ -160,13 +209,18 @@ impl McpBridgeConfig {
         ProvisioningReadiness {
             auth_mode: if self.auth.api_key.is_some() {
                 "api_key"
+            } else if self.auth.credential_id.is_some() {
+                "credential_id"
             } else {
                 "none"
             },
-            token_configured: self.auth.api_key.is_some(),
+            api_key_configured: self.auth.api_key.is_some(),
+            credential_id_configured: self.auth.credential_id.is_some(),
+            requires_credential_injection: self.auth.credential_id.is_some(),
             network_ok,
             network_message,
             mcp_url: self.mcp_url.clone(),
+            server_id: self.server_id.clone(),
             description_scan: self.description_scan,
             sampling_enabled: self.sampling.enabled,
         }
@@ -174,12 +228,16 @@ impl McpBridgeConfig {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct ProvisioningReadiness {
     auth_mode: &'static str,
-    token_configured: bool,
+    api_key_configured: bool,
+    credential_id_configured: bool,
+    requires_credential_injection: bool,
     network_ok: bool,
     network_message: String,
     mcp_url: String,
+    server_id: String,
     description_scan: DescriptionScanMode,
     sampling_enabled: bool,
 }
@@ -229,7 +287,9 @@ pub struct McpBridgeConnector {
     base: Arc<BaseConnector>,
     config: Option<McpBridgeConfig>,
     client: Option<Arc<McpClient>>,
-    session_id: Option<String>,
+    verifier: Option<CapabilityVerifier>,
+    zone_id: Option<ZoneId>,
+    session_id: Option<SessionId>,
     request_count: AtomicU64,
     error_count: AtomicU64,
     injection_scan_count: AtomicU64,
@@ -244,6 +304,8 @@ impl McpBridgeConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("mcp-bridge"))),
             config: None,
             client: None,
+            verifier: None,
+            zone_id: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -272,10 +334,20 @@ impl McpBridgeConnector {
         let client =
             McpClient::new(config.auth.clone(), &config.mcp_url).map_err(|e| e.to_fcp_error())?;
 
+        if let Some(old_client) = self.client.take() {
+            old_client.shutdown();
+        }
+        self.verifier = None;
+        self.zone_id = None;
+        self.session_id = None;
+        self.base.set_handshaken(false);
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
-        Ok(json!({}))
+        Ok(json!({
+            "configured": true,
+            "server_id": self.config.as_ref().map(|value| value.server_id.as_str()),
+        }))
     }
 
     /// Handle the `handshake` method.
@@ -290,33 +362,60 @@ impl McpBridgeConnector {
             });
         }
 
-        let session_id = params
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-
-        self.session_id = session_id;
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid handshake request: {error}"),
+            })?;
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
+        self.zone_id = Some(req.zone);
+        let session_id = SessionId::new();
+        self.session_id = Some(session_id.clone());
         self.base.set_handshaken(true);
 
-        Ok(json!({
-            "protocol_version": "2.0",
-            "connector_id": "fcp.mcp-bridge",
-            "connector_version": "0.1.0",
-            "capabilities": [
-                "mcp.tools.read",
-                "mcp.tools.write",
-                "mcp.resources.read",
-                "mcp.prompts.read",
-                "mcp.sampling.handle",
-                "mcp.server.metrics"
-            ]
-        }))
+        let capabilities_granted = req
+            .capabilities_requested
+            .into_iter()
+            .map(|capability| CapabilityGrant {
+                capability,
+                operation: None,
+            })
+            .collect();
+        serde_json::to_value(HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted,
+            session_id,
+            manifest_hash: manifest_hash(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: false,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        })
+        .map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize handshake response: {error}"),
+        })
     }
 
     /// Handle the `health` method.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.session_id.is_some() && self.verifier.is_some();
 
         let status = if configured && handshaken {
             "healthy"
@@ -364,7 +463,7 @@ impl McpBridgeConnector {
             critical: true,
         });
 
-        let handshaken = self.session_id.is_some();
+        let handshaken = self.session_id.is_some() && self.verifier.is_some();
         checks.push(DoctorCheck {
             name: "handshake".into(),
             passed: handshaken,
@@ -397,7 +496,7 @@ impl McpBridgeConnector {
             return Self::serialize_self_check_report(report);
         }
 
-        let Some(_client) = &self.client else {
+        let Some(client) = &self.client else {
             let mut report = SelfCheckReport::failed(
                 "client_missing",
                 "MCP client not initialized; re-run configure",
@@ -406,9 +505,26 @@ impl McpBridgeConnector {
             return Self::serialize_self_check_report(report);
         };
 
-        let mut report = SelfCheckReport::ok();
-        report.details = Some(json!({ "provisioning": readiness }));
-        Self::serialize_self_check_report(report)
+        let probe = match client.tools_list().await {
+            Ok(_) => {
+                let mut report = SelfCheckReport::ok();
+                report.details = Some(json!({
+                    "provisioning": readiness,
+                    "probe": "POST /mcp tools/list",
+                }));
+                report
+            }
+            Err(error) => {
+                let mut report =
+                    SelfCheckReport::failed("provider_probe_failed", error.safe_summary());
+                report.details = Some(json!({
+                    "provisioning": readiness,
+                    "probe": "POST /mcp tools/list",
+                }));
+                report
+            }
+        };
+        Self::serialize_self_check_report(probe)
     }
 
     /// Handle the `introspect` method.
@@ -427,32 +543,59 @@ impl McpBridgeConnector {
         self.base.check_ready()?;
 
         let operation = params
-            .get("operation_id")
+            .get("operation")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1003,
-                message: "Missing operation_id".into(),
+                message: "Missing operation".into(),
             })?;
 
-        let input = params
-            .get("input")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+
+        let operation_id: OperationId =
+            operation.parse().map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid operation ID format".into(),
+            })?;
+        let capability = required_capability(operation)?;
+        let resources = self.resource_uris_for_operation(operation, &input)?;
+        let token_value =
+            params
+                .get("capability_token")
+                .cloned()
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing capability_token".into(),
+                })?;
+        let token: CapabilityToken =
+            serde_json::from_value(token_value).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token: {error}"),
+            })?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(token, &capability, &operation_id, &resources)?;
+
+        if matches!(operation, OP_TOOLS_CALL | OP_SAMPLING_HANDLE) {
+            let target = self.approval_target(operation, &input, &resources)?;
+            self.require_execution_approval(operation, &target, &params)?;
+        }
+
+        if operation == OP_TOOLS_CALL {
+            return Err(FcpError::CapabilityDenied {
+                capability: "mcp.tools.write".into(),
+                reason: "MCP tool invocation is deferred until a typed route and capability discovery path exists".into(),
+            });
+        }
 
         self.request_count.fetch_add(1, Ordering::Relaxed);
 
-        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
-            message: "Client not initialized".into(),
-        })?;
-
         let result = match operation {
-            OP_TOOLS_LIST => self.invoke_tools_list(client).await,
-            OP_TOOLS_CALL => self.invoke_tools_call(client, &input).await,
-            OP_RESOURCES_LIST => self.invoke_resources_list(client).await,
-            OP_RESOURCES_READ => self.invoke_resources_read(client, &input).await,
-            OP_PROMPTS_LIST => self.invoke_prompts_list(client).await,
+            OP_TOOLS_LIST => self.invoke_tools_list(self.client_ref()?).await,
+            OP_RESOURCES_LIST => self.invoke_resources_list(self.client_ref()?).await,
+            OP_RESOURCES_READ => self.invoke_resources_read(self.client_ref()?, &input).await,
+            OP_PROMPTS_LIST => self.invoke_prompts_list(self.client_ref()?).await,
             OP_SAMPLING_HANDLE => self.invoke_sampling_handle(&input).await,
-            OP_SERVER_METRICS => self.invoke_server_metrics(client).await,
+            OP_SERVER_METRICS => self.invoke_server_metrics().await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -470,18 +613,27 @@ impl McpBridgeConnector {
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
-            .get("operation_id")
+            .get("operation")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
+        let known = operations_info().as_array().is_some_and(|ops| {
             ops.iter()
                 .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
         });
+        let deferred = operation == OP_TOOLS_CALL;
+        let allowed = known && !deferred;
+        let reason = if deferred {
+            "Deferred: MCP tool invocation fails closed until a typed route and capability discovery path exists"
+        } else if allowed {
+            "Operation supported"
+        } else {
+            "Unknown operation"
+        };
 
         Ok(json!({
             "allowed": allowed,
-            "reason": if allowed { "Operation supported" } else { "Unknown operation" },
+            "reason": reason,
         }))
     }
 
@@ -496,6 +648,9 @@ impl McpBridgeConnector {
         }
         self.client = None;
         self.config = None;
+        self.verifier = None;
+        self.zone_id = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -574,33 +729,26 @@ impl McpBridgeConnector {
                 message: "Connector not configured".into(),
             })?;
         if !config.sampling.enabled {
-            return Err(McpBridgeError::McpError {
-                code: -32091,
-                message: "MCP sampling is disabled; configure sampling.enabled=true".into(),
+            return Err(McpBridgeError::LocalPolicy {
+                reason: "sampling is disabled by local configuration",
             });
         }
 
         let request = normalize_sampling_request(input);
         let params = request
             .get("params")
-            .ok_or_else(|| McpBridgeError::McpError {
-                code: -32602,
-                message: "sampling request missing params".into(),
+            .ok_or(McpBridgeError::LocalValidation {
+                reason: "sampling request must include params",
             })?;
         let max_tokens = params
             .get("maxTokens")
             .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| McpBridgeError::McpError {
-                code: -32602,
-                message: "sampling params.maxTokens must be an integer".into(),
+            .ok_or(McpBridgeError::LocalValidation {
+                reason: "sampling maxTokens must be an unsigned integer",
             })?;
         if max_tokens > u64::from(config.sampling.max_tokens_cap) {
-            return Err(McpBridgeError::McpError {
-                code: -32602,
-                message: format!(
-                    "sampling maxTokens {max_tokens} exceeds configured cap {}",
-                    config.sampling.max_tokens_cap
-                ),
+            return Err(McpBridgeError::LocalPolicy {
+                reason: "sampling request exceeds the local max_tokens cap",
             });
         }
 
@@ -635,7 +783,11 @@ impl McpBridgeConnector {
                 "model_override": config.sampling.model_override.clone(),
                 "allowed_models": config.sampling.allowed_models.clone(),
             },
-            "request": request,
+            "request": {
+                "method": "sampling/createMessage",
+                "message_count": messages_count,
+                "max_tokens": max_tokens,
+            },
             "redaction": {
                 "prompt_logged": false,
                 "response_logged": false,
@@ -644,11 +796,11 @@ impl McpBridgeConnector {
         }))
     }
 
-    async fn invoke_server_metrics(
-        &self,
-        client: &McpClient,
-    ) -> Result<serde_json::Value, McpBridgeError> {
-        let client_metrics = client.metrics();
+    async fn invoke_server_metrics(&self) -> Result<serde_json::Value, McpBridgeError> {
+        let client_metrics = self
+            .client
+            .as_ref()
+            .map_or(McpClientMetrics::default(), |client| client.metrics());
         Ok(json!({
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
@@ -658,6 +810,126 @@ impl McpBridgeConnector {
             "auth_retries": client_metrics.auth_retry_count,
             "session_expired_retries": client_metrics.session_expired_retry_count,
         }))
+    }
+
+    fn client_ref(&self) -> FcpResult<&McpClient> {
+        self.client.as_deref().ok_or_else(|| FcpError::Internal {
+            message: "Client not initialized".into(),
+        })
+    }
+
+    fn resource_uris_for_operation(
+        &self,
+        operation: &str,
+        input: &serde_json::Value,
+    ) -> FcpResult<Vec<String>> {
+        let server_id = self
+            .config
+            .as_ref()
+            .ok_or(FcpError::NotConfigured)?
+            .server_id
+            .as_str();
+        let resource = match operation {
+            OP_TOOLS_LIST | OP_RESOURCES_LIST | OP_PROMPTS_LIST | OP_SAMPLING_HANDLE
+            | OP_SERVER_METRICS => instance_resource_uri(server_id),
+            OP_TOOLS_CALL => {
+                let name = require_str(input, "name").map_err(|error| error.to_fcp_error())?;
+                tool_resource_uri(server_id, name).map_err(|error| error.to_fcp_error())?
+            }
+            OP_RESOURCES_READ => {
+                let uri = require_str(input, "uri").map_err(|error| error.to_fcp_error())?;
+                resource_resource_uri(server_id, uri).map_err(|error| error.to_fcp_error())?
+            }
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1002,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+        Ok(vec![resource])
+    }
+
+    fn approval_target(
+        &self,
+        operation: &str,
+        input: &serde_json::Value,
+        resources: &[String],
+    ) -> FcpResult<ApprovalTarget> {
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let resource_uri = resources
+            .first()
+            .cloned()
+            .ok_or_else(|| FcpError::Internal {
+                message: "MCP approval resource URI was not constructed".into(),
+            })?;
+        let canonical_payload = if operation == OP_TOOLS_CALL {
+            normalize_tools_call_input(input).map_err(|error| error.to_fcp_error())?
+        } else {
+            normalize_sampling_request(input)
+        };
+        let payload_digest = canonical_payload_digest(&canonical_payload);
+        let mut normalized_input = json!({
+            "server_id": config.server_id,
+            "resource_uri": resource_uri,
+            "operation": operation,
+            "provider": if operation == OP_SAMPLING_HANDLE { "local" } else { "mcp" },
+            "payload_sha256": hex::encode(payload_digest),
+        });
+        if operation == OP_TOOLS_CALL {
+            let name = require_str(input, "name").map_err(|error| error.to_fcp_error())?;
+            normalized_input["tool_name"] = json!(name);
+        } else {
+            normalized_input["sampling_method"] = json!("sampling/createMessage");
+        }
+        Ok(ApprovalTarget {
+            resource_uri,
+            normalized_input,
+            payload_digest,
+        })
+    }
+
+    fn require_execution_approval(
+        &self,
+        operation: &str,
+        target: &ApprovalTarget,
+        params: &serde_json::Value,
+    ) -> FcpResult<()> {
+        let approval_values = params
+            .get("approval_tokens")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "operation requires a non-empty approval_tokens collection".into(),
+            })?;
+        let approvals: Vec<ApprovalToken> = approval_values
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid approval token: {error}"),
+            })?;
+        let now_ms = current_time_ms();
+        let matching = approvals
+            .iter()
+            .filter(|approval| {
+                is_matching_execution_approval(
+                    approval,
+                    operation,
+                    self.zone_id.as_ref(),
+                    target,
+                    now_ms,
+                )
+            })
+            .count();
+        if matching != 1 {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "operation requires exactly one matching execution approval token".into(),
+            });
+        }
+        Ok(())
     }
 
     fn annotate_catalog(
@@ -687,8 +959,8 @@ impl McpBridgeConnector {
                 if collides {
                     info!(
                         event = "mcp_tool_collision_skipped",
-                        server = %config.mcp_url,
-                        name,
+                        server_id = %config.server_id,
+                        item_sha256 = %catalog_item_sha256(&config.server_id, "tool", name, ""),
                         "Skipping MCP tool that collides with bridge operation namespace"
                     );
                 }
@@ -714,7 +986,7 @@ impl McpBridgeConnector {
 
             let findings = if config.description_scan.scans() {
                 self.injection_scan_count.fetch_add(1, Ordering::Relaxed);
-                scan_description(&config.mcp_url, &name, &description)
+                scan_description(&config.server_id, &name, &description)
             } else {
                 Vec::new()
             };
@@ -725,16 +997,22 @@ impl McpBridgeConnector {
             let max_severity = max_severity_label(&findings);
             info!(
                 event = "mcp_description_scanned",
-                server = %config.mcp_url,
+                server_id = %config.server_id,
                 catalog_kind,
-                name = %name,
+                item_sha256 = %catalog_item_sha256(
+                    &config.server_id,
+                    catalog_kind,
+                    &name,
+                    &description,
+                ),
+                item_length = name.len().saturating_add(description.len()),
                 finding_count = findings.len(),
                 max_severity,
                 "MCP catalog description scanned"
             );
             for finding in &findings {
                 let payload = finding_log_payload(
-                    &config.mcp_url,
+                    &config.server_id,
                     catalog_kind,
                     &name,
                     &description,
@@ -744,9 +1022,8 @@ impl McpBridgeConnector {
             }
 
             if config.description_scan == DescriptionScanMode::Block && !findings.is_empty() {
-                return Err(McpBridgeError::McpError {
-                    code: -32092,
-                    message: format!("MCP {catalog_kind} {name} blocked by description scanner"),
+                return Err(McpBridgeError::LocalPolicy {
+                    reason: "catalog description blocked by local scanner policy",
                 });
             }
 
@@ -781,6 +1058,98 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| McpBridgeError::McpError {
             code: -32602,
             message: format!("Missing required field: {field}"),
+        })
+}
+
+fn instance_resource_uri(server_id: &str) -> String {
+    format!("fwc-mcp-bridge://{server_id}")
+}
+
+fn tool_resource_uri(server_id: &str, name: &str) -> McpBridgeResult<String> {
+    let name = non_empty_resource_component(name, "tool name")?;
+    let encoded = utf8_percent_encode(name, NON_ALPHANUMERIC);
+    Ok(format!("fwc-mcp-bridge://{server_id}/tools/{encoded}"))
+}
+
+fn resource_resource_uri(server_id: &str, uri: &str) -> McpBridgeResult<String> {
+    let uri = non_empty_resource_component(uri, "resource URI")?;
+    let encoded = utf8_percent_encode(uri, NON_ALPHANUMERIC);
+    Ok(format!("fwc-mcp-bridge://{server_id}/resources/{encoded}"))
+}
+
+fn non_empty_resource_component<'a>(value: &'a str, field: &str) -> McpBridgeResult<&'a str> {
+    if value.trim().is_empty() {
+        Err(McpBridgeError::InvalidInput(format!(
+            "{field} must not be empty"
+        )))
+    } else {
+        Ok(value)
+    }
+}
+
+fn is_matching_execution_approval(
+    approval: &ApprovalToken,
+    operation: &str,
+    zone_id: Option<&ZoneId>,
+    target: &ApprovalTarget,
+    now_ms: u64,
+) -> bool {
+    if approval.signature.as_ref().is_none_or(Vec::is_empty)
+        || !approval.is_valid(now_ms)
+        || zone_id != Some(&approval.zone_id)
+    {
+        return false;
+    }
+    let ApprovalScope::Execution(scope) = &approval.scope else {
+        return false;
+    };
+    scope.connector_id == "fcp.mcp-bridge"
+        && scope.method_pattern == operation
+        && scope.request_object_id.is_none()
+        && scope
+            .input_hash
+            .as_ref()
+            .is_none_or(|input_hash| input_hash == &target.payload_digest)
+        && has_exact_approval_constraints(&scope.input_constraints, &target.normalized_input)
+}
+
+fn has_exact_approval_constraints(
+    constraints: &[InputConstraint],
+    normalized_input: &serde_json::Value,
+) -> bool {
+    let required = normalized_input.as_object().map_or(0, serde_json::Map::len);
+    constraints.len() == required
+        && normalized_input.as_object().is_some_and(|values| {
+            values.iter().all(|(field, expected)| {
+                constraints.iter().any(|constraint| {
+                    constraint.pointer == format!("/{field}") && &constraint.expected == expected
+                })
+            })
+        })
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        })
+}
+
+fn manifest_hash() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(MANIFEST_TOML.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    typed_operations_info()
+        .into_iter()
+        .find(|info| info.id.as_ref() == operation)
+        .map(|info| info.capability)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1002,
+            message: format!("Unknown operation: {operation}"),
         })
 }
 
@@ -861,20 +1230,75 @@ fn optional_string_vec(
 
 fn normalize_sampling_request(input: &serde_json::Value) -> serde_json::Value {
     let candidate = input.get("request").unwrap_or(input);
-    if candidate.get("method").and_then(serde_json::Value::as_str) == Some("sampling/createMessage")
-    {
-        return candidate.clone();
-    }
-    if candidate.get("params").is_some() {
-        return json!({
-            "method": "sampling/createMessage",
-            "params": candidate["params"].clone(),
-        });
-    }
+    let params = candidate
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| candidate.clone());
     json!({
         "method": "sampling/createMessage",
-        "params": candidate.clone(),
+        "params": params,
     })
+}
+
+fn normalize_tools_call_input(input: &serde_json::Value) -> McpBridgeResult<serde_json::Value> {
+    let name = require_str(input, "name")?;
+    let arguments = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let arguments = if arguments.is_null() {
+        json!({})
+    } else if arguments.is_object() {
+        arguments
+    } else {
+        return Err(McpBridgeError::McpError {
+            code: -32602,
+            message: "arguments must be an object".into(),
+        });
+    };
+    Ok(json!({
+        "name": name,
+        "arguments": arguments,
+    }))
+}
+
+fn canonical_payload_digest(payload: &serde_json::Value) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"FCP/MCP-Bridge/approval-payload/v1\0");
+    hasher.update(canonical_json_bytes(payload));
+    hasher.finalize().into()
+}
+
+fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
+    match value {
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => serde_json::to_vec(value).unwrap_or_default(),
+        serde_json::Value::Array(values) => {
+            let mut output = vec![b'['];
+            for (index, item) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend(canonical_json_bytes(item));
+            }
+            output.push(b']');
+            output
+        }
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            let mut output = vec![b'{'];
+            for (index, (key, item)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend(serde_json::to_vec(key).unwrap_or_default());
+                output.push(b':');
+                output.extend(canonical_json_bytes(item));
+            }
+            output.push(b'}');
+            output
+        }
+    }
 }
 
 fn max_severity_label(findings: &[crate::security::InjectionFinding]) -> &'static str {
@@ -955,79 +1379,76 @@ fn operations_info() -> serde_json::Value {
 
 /// Build the provisioning recipe for the MCP Bridge connector.
 ///
-/// MCP Bridge connects to arbitrary MCP servers, so the recipe prompts
-/// for the server URL and an optional auth token.
+/// MCP Bridge provisioning never handles raw provider secrets. The recipe
+/// collects trusted identity/endpoint metadata and a host-managed credential
+/// reference only.
 pub fn provisioning_recipe() -> ProvisioningRecipe {
     ProvisioningRecipe::new(
-        RecipeId::new("mcp-bridge.api_token"),
+        RecipeId::new("mcp-bridge.host_credential"),
         "1",
-        "Provision MCP Bridge connector with an MCP server URL and optional auth token",
+        "Provision MCP Bridge with a canonical server identity, exact /mcp endpoint, and host-managed credential reference",
     )
     .with_step(ProvisioningStep::new(
-        StepId::new("enter_url"),
+        StepId::new("enter_server_id"),
         ProvisioningStepType::PromptUser {
-            message: "Enter the MCP server URL (e.g. https://mcp.example.com)".into(),
+            message: "Enter the trusted lowercase server_id slug (1-64 ASCII letters, digits, '-' or '_')".into(),
         },
     ))
     .with_step(
         ProvisioningStep::new(
-            StepId::new("enter_token"),
-            ProvisioningStepType::PromptSecret {
-                message: "Paste your MCP server auth token (leave empty if none)".into(),
+            StepId::new("enter_mcp_endpoint"),
+            ProvisioningStepType::PromptUser {
+                message: "Enter the exact MCP endpoint ending in /mcp (only one trailing slash is normalized)".into(),
             },
         )
-        .depends_on(StepId::new("enter_url")),
+        .depends_on(StepId::new("enter_server_id")),
     )
     .with_step(
         ProvisioningStep::new(
-            StepId::new("store_token"),
-            ProvisioningStepType::StoreSecret {
-                key: "api_key".into(),
-                value_from: StepId::new("enter_token"),
-                scope: "connector:fcp.mcp-bridge".into(),
+            StepId::new("enter_credential_id"),
+            ProvisioningStepType::PromptUser {
+                message: "Enter the host-managed credential_id UUID reference; never paste a raw API key (leave empty only for an unauthenticated loopback fixture)".into(),
             },
         )
-        .depends_on(StepId::new("enter_token")),
+        .depends_on(StepId::new("enter_mcp_endpoint")),
     )
 }
 
 /// Validate the MCP server URL.
 ///
-/// MCP Bridge is permissive: any host is valid as long as the URL can be
-/// parsed. Both HTTP and HTTPS are accepted because MCP servers may run
-/// locally over plain HTTP.
+/// Enforce the same exact-endpoint policy used by the client. Loopback HTTP
+/// is reserved for deterministic local fixtures; production targets must pass
+/// the client's HTTPS/443 and host policy before any provider traffic.
 fn base_url_policy(mcp_url: &str) -> (bool, String) {
-    let parsed = match Url::parse(mcp_url) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return (false, format!("mcp_url could not be parsed: {error}"));
-        }
-    };
-
-    let Some(host) = parsed.host_str() else {
-        return (false, "mcp_url must include a host".into());
-    };
-
-    let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
-        return (
-            false,
-            format!("mcp_url must use http or https scheme, got: {scheme}"),
-        );
+    match McpClient::canonicalize_base_url(mcp_url) {
+        Ok(canonical) => (true, format!("Exact MCP endpoint accepted: {canonical}")),
+        Err(error) => (false, error.safe_summary()),
     }
-
-    if host.is_empty() {
-        return (false, "mcp_url host must not be empty".into());
-    }
-
-    (
-        true,
-        format!("MCP server endpoint accepted by policy checks: {mcp_url}"),
-    )
 }
 
 fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn validate_server_id(server_id: &str) -> FcpResult<()> {
+    let bytes = server_id.as_bytes();
+    let valid = (1..=64).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        && server_id
+            .chars()
+            .all(|character| !character.is_ascii_uppercase());
+    if valid {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "server_id must be a lowercase canonical slug (1-64 ASCII letters, digits, '-' or '_')".into(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1041,21 +1462,23 @@ mod tests {
     #[test]
     fn config_from_valid_params() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
         }))
         .unwrap();
-        assert_eq!(config.mcp_url, "http://localhost:3000");
+        assert_eq!(config.mcp_url, "http://localhost:3000/mcp");
         assert!(config.auth.api_key.is_none());
     }
 
     #[test]
     fn config_with_api_key() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
             "api_key": "sk-test-key",
         }))
         .unwrap();
-        assert_eq!(config.mcp_url, "http://localhost:3000");
+        assert_eq!(config.mcp_url, "http://localhost:3000/mcp");
         assert_eq!(config.auth.api_key, Some("sk-test-key".into()));
     }
 
@@ -1108,16 +1531,18 @@ mod tests {
     #[test]
     fn config_trims_mcp_url() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "  http://localhost:3000  ",
+            "server_id": "mcp-test",
+            "mcp_url": "  http://localhost:3000/mcp  ",
         }))
         .unwrap();
-        assert_eq!(config.mcp_url, "http://localhost:3000");
+        assert_eq!(config.mcp_url, "http://localhost:3000/mcp");
     }
 
     #[test]
     fn config_ignores_empty_api_key() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
             "api_key": "",
         }))
         .unwrap();
@@ -1127,7 +1552,8 @@ mod tests {
     #[test]
     fn config_ignores_whitespace_api_key() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
             "api_key": "   ",
         }))
         .unwrap();
@@ -1137,7 +1563,8 @@ mod tests {
     #[test]
     fn config_trims_api_key() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
             "api_key": "  sk-key  ",
         }))
         .unwrap();
@@ -1701,7 +2128,7 @@ mod tests {
     #[test]
     fn provisioning_recipe_has_3_steps() {
         let recipe = provisioning_recipe();
-        assert_eq!(recipe.id.as_str(), "mcp-bridge.api_token");
+        assert_eq!(recipe.id.as_str(), "mcp-bridge.host_credential");
         assert_eq!(recipe.version, "1");
         assert_eq!(recipe.steps.len(), 3);
     }
@@ -1709,9 +2136,9 @@ mod tests {
     #[test]
     fn provisioning_recipe_step_order() {
         let recipe = provisioning_recipe();
-        assert_eq!(recipe.steps[0].id.as_str(), "enter_url");
-        assert_eq!(recipe.steps[1].id.as_str(), "enter_token");
-        assert_eq!(recipe.steps[2].id.as_str(), "store_token");
+        assert_eq!(recipe.steps[0].id.as_str(), "enter_server_id");
+        assert_eq!(recipe.steps[1].id.as_str(), "enter_mcp_endpoint");
+        assert_eq!(recipe.steps[2].id.as_str(), "enter_credential_id");
     }
 
     #[test]
@@ -1719,17 +2146,21 @@ mod tests {
         let recipe = provisioning_recipe();
         assert!(recipe.steps[0].depends_on.is_empty());
         assert_eq!(recipe.steps[1].depends_on.len(), 1);
-        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_url");
+        assert_eq!(recipe.steps[1].depends_on[0].as_str(), "enter_server_id");
         assert_eq!(recipe.steps[2].depends_on.len(), 1);
-        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_token");
+        assert_eq!(recipe.steps[2].depends_on[0].as_str(), "enter_mcp_endpoint");
     }
 
     #[test]
     fn provisioning_recipe_serializes() {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
-        assert_eq!(v["id"], "mcp-bridge.api_token");
+        assert_eq!(v["id"], "mcp-bridge.host_credential");
         assert_eq!(v["steps"].as_array().unwrap().len(), 3);
+        let serialized = v.to_string();
+        assert!(!serialized.contains("prompt_secret"));
+        assert!(!serialized.contains("store_secret"));
+        assert!(!serialized.contains("api_key"));
     }
 
     #[test]
@@ -1748,42 +2179,41 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_recipe_step2_is_prompt_secret() {
+    fn provisioning_recipe_step2_is_endpoint_prompt() {
         let recipe = provisioning_recipe();
         assert!(matches!(
             recipe.steps[1].kind,
-            ProvisioningStepType::PromptSecret { .. }
+            ProvisioningStepType::PromptUser { .. }
         ));
     }
 
     #[test]
-    fn provisioning_recipe_step3_is_store_secret() {
+    fn provisioning_recipe_step3_is_credential_reference_prompt() {
         let recipe = provisioning_recipe();
         assert!(matches!(
             recipe.steps[2].kind,
-            ProvisioningStepType::StoreSecret { .. }
+            ProvisioningStepType::PromptUser { .. }
         ));
     }
 
     #[test]
-    fn provisioning_recipe_store_secret_scope() {
+    fn provisioning_recipe_prompts_for_canonical_metadata_only() {
         let recipe = provisioning_recipe();
-        if let ProvisioningStepType::StoreSecret { scope, key, .. } = &recipe.steps[2].kind {
-            assert_eq!(scope, "connector:fcp.mcp-bridge");
-            assert_eq!(key, "api_key");
-        } else {
-            panic!("expected StoreSecret step");
-        }
-    }
-
-    #[test]
-    fn provisioning_recipe_store_secret_value_from() {
-        let recipe = provisioning_recipe();
-        if let ProvisioningStepType::StoreSecret { value_from, .. } = &recipe.steps[2].kind {
-            assert_eq!(value_from.as_str(), "enter_token");
-        } else {
-            panic!("expected StoreSecret step");
-        }
+        let messages: Vec<_> = recipe
+            .steps
+            .iter()
+            .filter_map(|step| match &step.kind {
+                ProvisioningStepType::PromptUser { message } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(messages.iter().any(|message| message.contains("server_id")));
+        assert!(messages.iter().any(|message| message.contains("/mcp")));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("credential_id"))
+        );
     }
 
     #[test]
@@ -1798,33 +2228,33 @@ mod tests {
 
     #[test]
     fn base_url_policy_accepts_https() {
-        let (ok, message) = base_url_policy("https://mcp.example.com");
+        let (ok, message) = base_url_policy("https://mcp.example.com/mcp");
         assert!(ok);
         assert!(message.contains("accepted"));
     }
 
     #[test]
-    fn base_url_policy_accepts_http() {
+    fn base_url_policy_rejects_remote_http() {
         let (ok, message) = base_url_policy("http://mcp.example.com");
-        assert!(ok);
-        assert!(message.contains("accepted"));
+        assert!(!ok);
+        assert!(!message.is_empty());
     }
 
     #[test]
     fn base_url_policy_accepts_localhost() {
-        let (ok, _) = base_url_policy("http://localhost:3000");
+        let (ok, _) = base_url_policy("http://localhost:3000/mcp");
         assert!(ok);
     }
 
     #[test]
     fn base_url_policy_accepts_127_0_0_1() {
-        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        let (ok, _) = base_url_policy("http://127.0.0.1:9090/mcp");
         assert!(ok);
     }
 
     #[test]
     fn base_url_policy_accepts_any_host() {
-        let (ok, _) = base_url_policy("https://any-host.example.org:8443/v1");
+        let (ok, _) = base_url_policy("https://any-host.example.org/mcp");
         assert!(ok);
     }
 
@@ -1832,14 +2262,14 @@ mod tests {
     fn base_url_policy_rejects_invalid_url() {
         let (ok, message) = base_url_policy("not a url");
         assert!(!ok);
-        assert!(message.contains("could not be parsed"));
+        assert!(!message.is_empty());
     }
 
     #[test]
     fn base_url_policy_rejects_ftp_scheme() {
         let (ok, message) = base_url_policy("ftp://files.example.com/data");
         assert!(!ok);
-        assert!(message.contains("http or https"));
+        assert!(!message.is_empty());
     }
 
     #[test]
@@ -1850,14 +2280,14 @@ mod tests {
 
     #[test]
     fn base_url_policy_accepts_ipv6() {
-        let (ok, _) = base_url_policy("http://[::1]:8080");
+        let (ok, _) = base_url_policy("http://[::1]:8080/mcp");
         assert!(ok);
     }
 
     #[test]
-    fn base_url_policy_accepts_https_with_path() {
+    fn base_url_policy_rejects_non_mcp_path() {
         let (ok, _) = base_url_policy("https://mcp.example.com/api/v2");
-        assert!(ok);
+        assert!(!ok);
     }
 
     // -- ProvisioningReadiness tests ---------------------------------------------
@@ -1865,48 +2295,52 @@ mod tests {
     #[test]
     fn provisioning_readiness_with_api_key() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
             "api_key": "test-key",
         }))
         .unwrap();
         let readiness = config.provisioning_readiness();
         assert_eq!(readiness.auth_mode, "api_key");
-        assert!(readiness.token_configured);
+        assert!(readiness.api_key_configured);
         assert!(readiness.network_ok);
-        assert_eq!(readiness.mcp_url, "http://localhost:3000");
+        assert_eq!(readiness.mcp_url, "http://localhost:3000/mcp");
     }
 
     #[test]
     fn provisioning_readiness_without_api_key() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
         }))
         .unwrap();
         let readiness = config.provisioning_readiness();
         assert_eq!(readiness.auth_mode, "none");
-        assert!(!readiness.token_configured);
+        assert!(!readiness.api_key_configured);
         assert!(readiness.network_ok);
     }
 
     #[test]
     fn provisioning_readiness_serializes() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "https://mcp.example.com",
+            "server_id": "mcp-test",
+            "mcp_url": "https://mcp.example.com/mcp",
             "api_key": "tok",
         }))
         .unwrap();
         let readiness = config.provisioning_readiness();
         let v = serde_json::to_value(&readiness).unwrap();
         assert_eq!(v["auth_mode"], "api_key");
-        assert_eq!(v["token_configured"], true);
+        assert_eq!(v["api_key_configured"], true);
         assert_eq!(v["network_ok"], true);
-        assert_eq!(v["mcp_url"], "https://mcp.example.com");
+        assert_eq!(v["mcp_url"], "https://mcp.example.com/mcp");
     }
 
     #[test]
     fn provisioning_readiness_network_message_contains_accepted() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "https://mcp.example.com",
+            "server_id": "mcp-test",
+            "mcp_url": "https://mcp.example.com/mcp",
         }))
         .unwrap();
         let readiness = config.provisioning_readiness();
@@ -1916,7 +2350,8 @@ mod tests {
     #[test]
     fn config_defaults_security_warn_and_sampling_disabled() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
         }))
         .unwrap();
         assert_eq!(config.description_scan, DescriptionScanMode::Warn);
@@ -1927,7 +2362,8 @@ mod tests {
     #[test]
     fn config_accepts_nested_security_scan_mode() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
             "security": {"description_scan": "block"},
         }))
         .unwrap();
@@ -1937,7 +2373,8 @@ mod tests {
     #[test]
     fn config_rejects_invalid_security_scan_mode() {
         let result = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
             "description_scan": "audit",
         }));
         assert!(result.is_err());
@@ -1946,7 +2383,8 @@ mod tests {
     #[test]
     fn config_parses_sampling_settings() {
         let config = McpBridgeConfig::from_params(&json!({
-            "mcp_url": "http://localhost:3000",
+            "server_id": "mcp-test",
+            "mcp_url": "http://localhost:3000/mcp",
             "sampling": {
                 "enabled": true,
                 "llm_connector": "groq",

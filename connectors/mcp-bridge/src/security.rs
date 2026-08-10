@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 /// Scanner operating mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,22 +224,43 @@ pub fn tool_name_collides_with_builtin(tool_name: &str) -> bool {
 /// Redacted scanner finding log payload.
 #[must_use]
 pub fn finding_log_payload(
-    server: &str,
+    server_id: &str,
     catalog_kind: &str,
-    name: &str,
+    item_identity: &str,
     description: &str,
     finding: &InjectionFinding,
 ) -> serde_json::Value {
+    let item_sha256 = catalog_item_sha256(server_id, catalog_kind, item_identity, description);
+    let item_length = item_identity.len().saturating_add(description.len());
     json!({
         "event": "mcp_injection_finding",
-        "server": server,
+        "server_id": server_id,
         "catalog_kind": catalog_kind,
-        "name": name,
+        "item_sha256": item_sha256,
+        "item_length": item_length,
         "pattern_id": finding.pattern_id,
         "reason": finding.reason,
         "severity": finding.severity,
-        "description_prefix": description.chars().take(200).collect::<String>(),
+        "description_present": !description.is_empty(),
+        "description_length": description.chars().count(),
     })
+}
+
+/// Return a deterministic, redaction-safe catalog item fingerprint.
+#[must_use]
+pub fn catalog_item_sha256(
+    server_id: &str,
+    catalog_kind: &str,
+    item_identity: &str,
+    description: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"FCP/MCP-Bridge/catalog-item/v1\0");
+    for component in [server_id, catalog_kind, item_identity, description] {
+        hasher.update((component.len() as u64).to_be_bytes());
+        hasher.update(component.as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
@@ -347,14 +369,26 @@ mod tests {
     }
 
     #[test]
-    fn finding_payload_redacts_to_prefix() {
+    fn finding_payload_does_not_include_description() {
         let finding = InjectionFinding {
             pattern_id: "x".into(),
             reason: "y".into(),
             severity: Severity::Warn,
         };
         let long = "a".repeat(250);
-        let payload = finding_log_payload("s", "tool", "t", &long, &finding);
-        assert_eq!(payload["description_prefix"].as_str().unwrap().len(), 200);
+        let payload = finding_log_payload("mcp-test", "tool", "tool-name", &long, &finding);
+        assert_eq!(payload["server_id"], "mcp-test");
+        assert!(
+            payload["item_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)
+        );
+        assert_eq!(payload["item_length"], 259);
+        assert_eq!(payload["description_present"], true);
+        assert_eq!(payload["description_length"], 250);
+        assert!(payload.get("description_prefix").is_none());
+        assert!(payload.get("name").is_none());
+        assert!(!payload.to_string().contains("tool-name"));
+        assert!(!payload.to_string().contains(&long));
     }
 }

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:7641c4d323456be37407868ce9f161c119505f9c64cf6538d538ae7b45b86ba2"
+interface_hash = "blake3-256:fcp.interface.v2:883f4eec3d9bacac3f2ac589dc4be23f00bd72c43d7536e6efbec94071137bdd"
 
 [connector]
 id = "fcp.mcp-bridge"
@@ -79,18 +79,14 @@ type = "object"
 type = "array"
 
 [provides.operations."mcp.prompts.list".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [
-    3000,
-    8080,
-    8443,
-]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -130,18 +126,14 @@ type = "object"
 type = "array"
 
 [provides.operations."mcp.resources.list".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [
-    3000,
-    8080,
-    8443,
-]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -185,18 +177,14 @@ type = "object"
 type = "array"
 
 [provides.operations."mcp.resources.read".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [
-    3000,
-    8080,
-    8443,
-]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -213,7 +201,7 @@ examples = ['{"uri": "file:///tmp/data.txt"}']
 related = ["mcp.resources.list"]
 
 [provides.operations."mcp.sampling.handle"]
-description = "Convert an MCP sampling/createMessage request into a host- or agent-dispatched FCP event"
+description = "Handle an approval-gated local sampling/createMessage fallback; no provider dispatch occurs in this packet"
 capability = "mcp.sampling.handle"
 risk_level = "high"
 safety_tier = "risky"
@@ -251,18 +239,14 @@ type = "string"
 type = "object"
 
 [provides.operations."mcp.sampling.handle".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [
-    3000,
-    8080,
-    8443,
-]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -273,9 +257,9 @@ total_timeout_ms = 30000
 max_response_bytes = 1048576
 
 [provides.operations."mcp.sampling.handle".ai_hints]
-when_to_use = "Use only when an MCP server asks for sampling/createMessage and sampling.enabled is explicitly configured."
+when_to_use = "Use only after exact capability and execution-approval gates when sampling.enabled is explicitly configured; this packet returns redacted local metadata and does not dispatch to a provider."
 common_mistakes = [
-    "Do not treat this as direct connector-to-connector dispatch; it returns an event fallback for host or agent orchestration.",
+    "Do not treat this as direct connector-to-connector or provider dispatch; it returns a redacted local event fallback.",
     "Never log prompt, response, or metadata content from sampling requests.",
 ]
 examples = ['{"request": {"method": "sampling/createMessage", "params": {"messages": [], "maxTokens": 128}}}']
@@ -328,18 +312,14 @@ type = "integer"
 type = "integer"
 
 [provides.operations."mcp.server.metrics".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [
-    3000,
-    8080,
-    8443,
-]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -359,7 +339,7 @@ related = [
 ]
 
 [provides.operations."mcp.tools.call"]
-description = "Invoke an MCP tool"
+description = "Deferred MCP tool call: verify capability and approval, then fail closed before provider dispatch in this packet"
 capability = "mcp.tools.write"
 risk_level = "high"
 safety_tier = "risky"
@@ -390,18 +370,14 @@ type = "object"
 type = "array"
 
 [provides.operations."mcp.tools.call".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [
-    3000,
-    8080,
-    8443,
-]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
@@ -412,10 +388,10 @@ total_timeout_ms = 120000
 max_response_bytes = 52428800
 
 [provides.operations."mcp.tools.call".ai_hints]
-when_to_use = "Invoke an MCP tool by name with arguments."
+when_to_use = "Use only for a future typed tool route; this packet verifies the exact capability and approval, then fails closed before provider dispatch."
 common_mistakes = [
     "Passing arguments as a string instead of an object.",
-    "Not validating tool arguments against the tool's input schema before calling — use tools.list first to retrieve schemas",
+    "Treating this generic escape hatch as a live provider call; it is deferred until typed route and capability discovery work exists.",
 ]
 examples = ['{"name": "read_file", "arguments": {"path": "/tmp/data.txt"}}']
 related = ["mcp.tools.list"]
@@ -441,18 +417,14 @@ type = "object"
 type = "array"
 
 [provides.operations."mcp.tools.list".network_constraints]
-host_allow = ["localhost.localdomain"]
-port_allow = [
-    3000,
-    8080,
-    8443,
-]
+host_allow = ["operator-configured"]
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
-deny_localhost = false
-deny_private_ranges = false
+deny_localhost = true
+deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = false
+require_sni = true
 spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true

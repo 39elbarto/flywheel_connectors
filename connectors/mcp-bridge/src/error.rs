@@ -13,6 +13,18 @@ pub type McpBridgeResult<T> = Result<T, McpBridgeError>;
 /// MCP Bridge-specific errors.
 #[derive(Error, Debug)]
 pub enum McpBridgeError {
+    /// Local validation or a deferred security boundary.
+    #[error("Invalid MCP Bridge request: {0}")]
+    InvalidInput(String),
+
+    /// A local policy rejected an otherwise well-formed MCP input.
+    #[error("LOCAL_POLICY: {reason}")]
+    LocalPolicy { reason: &'static str },
+
+    /// A local MCP input failed validation before provider dispatch.
+    #[error("LOCAL_VALIDATION: {reason}")]
+    LocalValidation { reason: &'static str },
+
     /// HTTP request failed
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
@@ -47,6 +59,29 @@ pub enum McpBridgeError {
 }
 
 impl McpBridgeError {
+    #[must_use]
+    pub fn safe_summary(&self) -> String {
+        match self {
+            Self::InvalidInput(message) => message.clone(),
+            Self::LocalPolicy { reason } => format!("LOCAL_POLICY: {reason}"),
+            Self::LocalValidation { reason } => format!("LOCAL_VALIDATION: {reason}"),
+            Self::Http(error) => {
+                let status = error.status().map_or_else(
+                    || "no status".to_string(),
+                    |status| status.as_u16().to_string(),
+                );
+                format!("MCP transport error ({status})")
+            }
+            Self::Json(_) => "MCP response was not valid JSON".into(),
+            Self::McpError { code, .. } => format!("MCP JSON-RPC provider error ({code})"),
+            Self::RateLimited { .. } => "MCP provider rate limited the request".into(),
+            Self::Unauthorized => "MCP provider authentication failed".into(),
+            Self::Forbidden => "MCP provider denied the request".into(),
+            Self::NotFound { .. } => "MCP provider endpoint was not found".into(),
+            Self::Api { status_code, .. } => format!("MCP provider returned HTTP {status_code}"),
+        }
+    }
+
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         match self {
@@ -103,9 +138,21 @@ impl McpBridgeError {
     #[must_use]
     pub fn to_fcp_error(&self) -> FcpError {
         match self {
+            Self::InvalidInput(message) => FcpError::InvalidRequest {
+                code: 1003,
+                message: message.clone(),
+            },
+            Self::LocalPolicy { .. } => FcpError::CapabilityDenied {
+                capability: "mcp.local.policy".into(),
+                reason: self.safe_summary(),
+            },
+            Self::LocalValidation { .. } => FcpError::InvalidRequest {
+                code: 1003,
+                message: self.safe_summary(),
+            },
             Self::Http(e) => FcpError::External {
                 service: "mcp-bridge".into(),
-                message: e.to_string(),
+                message: self.safe_summary(),
                 status_code: e.status().map(|s| s.as_u16()),
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
@@ -113,19 +160,19 @@ impl McpBridgeError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::McpError { code, message } => FcpError::External {
+            Self::McpError { code, .. } => FcpError::External {
                 service: "mcp-bridge".into(),
-                message: format!("MCP JSON-RPC error ({code}): {message}"),
+                message: format!("MCP JSON-RPC provider error ({code})"),
                 status_code: None,
                 retryable: false,
                 retry_after: None,
             },
             Self::Api {
                 status_code,
-                message,
+                message: _,
             } => FcpError::External {
                 service: "mcp-bridge".into(),
-                message: message.clone(),
+                message: self.safe_summary(),
                 status_code: Some(*status_code),
                 retryable: self.is_retryable(),
                 retry_after: None,
@@ -151,9 +198,9 @@ impl McpBridgeError {
                 retryable: false,
                 retry_after: None,
             },
-            Self::NotFound { resource } => FcpError::External {
+            Self::NotFound { .. } => FcpError::External {
                 service: "mcp-bridge".into(),
-                message: format!("Not found: {resource}"),
+                message: "MCP provider endpoint was not found".into(),
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
@@ -404,7 +451,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(status_code, Some(404));
-                assert!(message.contains("tool:my_tool"));
+                assert_eq!(message, "MCP provider endpoint was not found");
                 assert!(!retryable);
             }
             other => panic!("expected External, got {other:?}"),
@@ -450,7 +497,7 @@ mod tests {
                 assert_eq!(service, "mcp-bridge");
                 assert_eq!(status_code, Some(503));
                 assert!(retryable);
-                assert_eq!(message, "unavailable");
+                assert_eq!(message, "MCP provider returned HTTP 503");
             }
             other => panic!("expected External, got {other:?}"),
         }
@@ -473,7 +520,7 @@ mod tests {
             } => {
                 assert_eq!(service, "mcp-bridge");
                 assert!(message.contains("-32601"));
-                assert!(message.contains("Method not found"));
+                assert_eq!(message, "MCP JSON-RPC provider error (-32601)");
                 assert!(status_code.is_none());
                 assert!(!retryable);
             }
@@ -487,6 +534,48 @@ mod tests {
         match McpBridgeError::Json(bad.unwrap_err()).to_fcp_error() {
             FcpError::Internal { message } => assert!(message.starts_with("JSON error:")),
             other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_policy_is_safe_and_capability_denied() {
+        let error = McpBridgeError::LocalPolicy {
+            reason: "catalog description blocked by local scanner policy",
+        };
+        assert_eq!(
+            error.safe_summary(),
+            "LOCAL_POLICY: catalog description blocked by local scanner policy"
+        );
+        match error.to_fcp_error() {
+            FcpError::CapabilityDenied { capability, reason } => {
+                assert_eq!(capability, "mcp.local.policy");
+                assert_eq!(
+                    reason,
+                    "LOCAL_POLICY: catalog description blocked by local scanner policy"
+                );
+            }
+            other => panic!("expected CapabilityDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_validation_is_safe_and_invalid_request() {
+        let error = McpBridgeError::LocalValidation {
+            reason: "sampling maxTokens must be an unsigned integer",
+        };
+        assert_eq!(
+            error.safe_summary(),
+            "LOCAL_VALIDATION: sampling maxTokens must be an unsigned integer"
+        );
+        match error.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert_eq!(
+                    message,
+                    "LOCAL_VALIDATION: sampling maxTokens must be an unsigned integer"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
         }
     }
 

@@ -6946,6 +6946,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "blake3",
  "bytes",
  "ciborium",
  "fcp-async-core",

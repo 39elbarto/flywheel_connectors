@@ -45,6 +45,7 @@ mod error;
 mod health;
 mod invoke_audit;
 mod migration_linux;
+mod local_mcp;
 #[cfg(target_os = "macos")]
 mod migration_macos;
 mod network_policy;
@@ -74,6 +75,7 @@ pub use enforcement::*;
 pub use error::*;
 pub use invoke_audit::*;
 pub use migration_linux::*;
+pub use local_mcp::*;
 #[cfg(target_os = "macos")]
 pub use migration_macos::*;
 pub use network_policy::*;

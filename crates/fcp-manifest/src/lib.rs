@@ -45,6 +45,8 @@ struct InterfaceDescriptorV2<'a> {
     state: EffectiveStateModel<'a>,
     capabilities: InterfaceCapabilitiesDescriptor<'a>,
     operations: Vec<InterfaceOperationDescriptor<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_mcp: Option<&'a LocalMcpPolicy>,
 }
 
 #[derive(Debug, Serialize)]
@@ -412,6 +414,10 @@ impl ConnectorManifest {
                 forbidden,
             },
             operations,
+            local_mcp: self
+                .security
+                .as_ref()
+                .and_then(|security| security.local_mcp.as_ref()),
         };
 
         let canonical = fcp_cbor::to_canonical_cbor(&descriptor)?;
@@ -491,12 +497,302 @@ impl ManifestError {
     }
 }
 
+/// The fixed JSON-RPC methods understood by the Linux local MCP adapter.
+pub const LOCAL_MCP_METHODS: [&str; 4] = [
+    "initialize",
+    "notifications/initialized",
+    "tools/list",
+    "tools/call",
+];
+
+/// The only protocol version accepted by the fixed local adapter.
+pub const LOCAL_MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// The expected API-disabled local catalog for the n8n MCP package.
+pub const LOCAL_MCP_CATALOG_TOOLS: [&str; 7] = [
+    "tools_documentation",
+    "search_nodes",
+    "get_node",
+    "validate_node",
+    "get_template",
+    "search_templates",
+    "validate_workflow",
+];
+
+/// Digest the canonical JSON encoding of an MCP tool input schema.
+///
+/// Object keys are recursively sorted before serialization, so the digest is
+/// stable even when `serde_json` is built with `preserve_order`. The digest is
+/// metadata only; the schema itself is never emitted by the adapter's receipts
+/// or logs.
+#[must_use]
+pub fn local_mcp_schema_digest(schema: &serde_json::Value) -> String {
+    blake3::hash(
+        &serde_json::to_vec(&canonical_json(schema)).expect("JSON values are serializable"),
+    )
+    .to_hex()
+    .to_string()
+}
+
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<_> = object.iter().collect();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            let mut canonical = serde_json::Map::new();
+            for (key, child) in entries {
+                canonical.insert(key.clone(), canonical_json(child));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        serde_json::Value::Array(array) => {
+            serde_json::Value::Array(array.iter().map(canonical_json).collect())
+        }
+        scalar => scalar.clone(),
+    }
+}
+
+/// Signed, fixed policy for a request-scoped local MCP stdio provider.
+///
+/// This section is intentionally separate from public connector operations.
+/// It describes the only executable, arguments, methods, catalog entries, and
+/// bounds the host may use; no field is sourced from model input.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalMcpPolicy {
+    pub package_id: String,
+    pub package_version: semver::Version,
+    pub launcher_path: String,
+    pub launcher_digest: String,
+    pub runtime_executable: String,
+    pub runtime_executable_digest: String,
+    pub package_metadata_path: String,
+    pub package_metadata_digest: String,
+    pub protocol_version: String,
+    #[serde(default)]
+    pub fixed_args: Vec<String>,
+    #[serde(default)]
+    pub fixed_env: BTreeMap<String, String>,
+    pub allowed_methods: Vec<String>,
+    pub expected_catalog: BTreeMap<String, String>,
+    pub callable_tools: Vec<String>,
+    pub max_frame_bytes: u32,
+    pub max_request_bytes: u32,
+    pub max_result_bytes: u32,
+    pub max_sequential_calls: u16,
+    pub startup_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub shutdown_timeout_ms: u64,
+    #[serde(default)]
+    pub idle_window_ms: u64,
+    pub network_disabled: bool,
+}
+
+impl LocalMcpPolicy {
+    /// Validate the immutable packet-one policy.
+    ///
+    /// # Errors
+    /// Returns a manifest error for any drift from the fixed Linux MVP policy.
+    pub fn validate(&self) -> Result<(), ManifestError> {
+        if self.package_id.is_empty()
+            || self
+                .package_id
+                .chars()
+                .any(|ch| ch.is_control() || ch.is_whitespace())
+        {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.package_id",
+                message: "must be a non-empty stable package identifier without whitespace".into(),
+            });
+        }
+
+        validate_absolute_identity_path(&self.launcher_path, "local_mcp.launcher_path")?;
+        validate_absolute_identity_path(&self.runtime_executable, "local_mcp.runtime_executable")?;
+        validate_digest(&self.launcher_digest, "local_mcp.launcher_digest")?;
+        validate_digest(
+            &self.runtime_executable_digest,
+            "local_mcp.runtime_executable_digest",
+        )?;
+        validate_absolute_identity_path(
+            &self.package_metadata_path,
+            "local_mcp.package_metadata_path",
+        )?;
+        validate_digest(
+            &self.package_metadata_digest,
+            "local_mcp.package_metadata_digest",
+        )?;
+        if self.protocol_version != LOCAL_MCP_PROTOCOL_VERSION {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.protocol_version",
+                message: "must match the host-supported MCP protocol version".into(),
+            });
+        }
+
+        if self
+            .fixed_args
+            .iter()
+            .any(|arg| arg.is_empty() || arg.chars().any(char::is_control))
+        {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.fixed_args",
+                message: "must contain only non-empty, non-control fixed arguments".into(),
+            });
+        }
+        for key in self.fixed_env.keys() {
+            let upper = key.to_ascii_uppercase();
+            if key.is_empty()
+                || key.chars().any(char::is_control)
+                || upper.contains("TOKEN")
+                || upper.contains("SECRET")
+                || upper.contains("PASSWORD")
+                || upper.contains("API_KEY")
+                || upper.contains("CREDENTIAL")
+            {
+                return Err(ManifestError::Invalid {
+                    field: "local_mcp.fixed_env",
+                    message: "must not declare secret-like environment keys".into(),
+                });
+            }
+        }
+        if self
+            .fixed_env
+            .values()
+            .any(|value| value.chars().any(char::is_control))
+        {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.fixed_env",
+                message: "values must not contain control characters".into(),
+            });
+        }
+
+        let expected_methods: Vec<String> = LOCAL_MCP_METHODS
+            .iter()
+            .map(|method| (*method).to_string())
+            .collect();
+        if self.allowed_methods != expected_methods {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.allowed_methods",
+                message: "must exactly match the packet-one MCP method allowlist".into(),
+            });
+        }
+
+        let expected_tools: Vec<String> = LOCAL_MCP_CATALOG_TOOLS
+            .iter()
+            .map(|tool| (*tool).to_string())
+            .collect();
+        let mut expected_catalog_names: Vec<&str> =
+            self.expected_catalog.keys().map(String::as_str).collect();
+        expected_catalog_names.sort_unstable();
+        let mut required_catalog_names = LOCAL_MCP_CATALOG_TOOLS.to_vec();
+        required_catalog_names.sort_unstable();
+        if expected_catalog_names != required_catalog_names {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.expected_catalog",
+                message: "must contain exactly the seven fixed catalog tools in canonical order"
+                    .into(),
+            });
+        }
+        if self.callable_tools != expected_tools {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.callable_tools",
+                message: "must exactly match the packet-one callable tool allowlist".into(),
+            });
+        }
+        for digest in self.expected_catalog.values() {
+            validate_digest(digest, "local_mcp.expected_catalog")?;
+        }
+
+        if self.max_frame_bytes < 1024 || self.max_frame_bytes > 256 * 1024 {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.max_frame_bytes",
+                message: "must be between 1024 and 262144 bytes".into(),
+            });
+        }
+        if self.max_request_bytes == 0 || self.max_request_bytes > self.max_frame_bytes {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.max_request_bytes",
+                message: "must be non-zero and no larger than max_frame_bytes".into(),
+            });
+        }
+        if self.max_result_bytes == 0 || self.max_result_bytes > self.max_frame_bytes {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.max_result_bytes",
+                message: "must be non-zero and no larger than max_frame_bytes".into(),
+            });
+        }
+        if self.max_sequential_calls == 0 || self.max_sequential_calls > 32 {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.max_sequential_calls",
+                message: "must be between 1 and 32".into(),
+            });
+        }
+        for (field, value) in [
+            ("local_mcp.startup_timeout_ms", self.startup_timeout_ms),
+            ("local_mcp.request_timeout_ms", self.request_timeout_ms),
+            ("local_mcp.shutdown_timeout_ms", self.shutdown_timeout_ms),
+        ] {
+            if value == 0 || value > 600_000 {
+                return Err(ManifestError::Invalid {
+                    field,
+                    message: "must be between 1 and 600000 milliseconds".into(),
+                });
+            }
+        }
+        if self.idle_window_ms != 0 {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.idle_window_ms",
+                message: "must be exactly zero in packet one".into(),
+            });
+        }
+        if !self.network_disabled {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.network_disabled",
+                message: "must be true for the API-disabled local provider".into(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_absolute_identity_path(path: &str, field: &'static str) -> Result<(), ManifestError> {
+    let path = Path::new(path);
+    if !path.is_absolute()
+        || path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|component| component == Component::ParentDir)
+    {
+        return Err(ManifestError::Invalid {
+            field,
+            message: "must be an absolute path without parent traversal".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_digest(value: &str, field: &'static str) -> Result<(), ManifestError> {
+    if value.len() != 64
+        || value
+            .chars()
+            .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
+    {
+        return Err(ManifestError::Invalid {
+            field,
+            message: "must be 64 lowercase hexadecimal characters".into(),
+        });
+    }
+    Ok(())
+}
+
 /// Optional connector-local security controls.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorSecuritySection {
     #[serde(default = "default_description_scan_mode")]
     pub description_scan: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_mcp: Option<LocalMcpPolicy>,
 }
 
 impl ConnectorSecuritySection {
@@ -507,7 +803,11 @@ impl ConnectorSecuritySection {
                 field: "security.description_scan",
                 message: format!("must be one of warn, block, off; got {other}"),
             }),
+        }?;
+        if let Some(local_mcp) = &self.local_mcp {
+            local_mcp.validate()?;
         }
+        Ok(())
     }
 }
 

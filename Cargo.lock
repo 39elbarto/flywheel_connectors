@@ -5900,6 +5900,7 @@ dependencies = [
  "blake3",
  "chrono",
  "ciborium",
+ "clap",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -5915,6 +5916,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wiremock",
 ]
 

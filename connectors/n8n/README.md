@@ -1,7 +1,7 @@
 # n8n Connector Security Contract
 
-> **Status**: Linux owned per-invocation launch now supplies an authenticated inherited-FD host-egress channel and proves process-group teardown; real-host narrow-token verification against EEC and Hetzner remains pending
-> **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.21`
+> **Status**: Linux owned per-invocation launch now supplies an authenticated inherited-FD host-egress channel and proves process-group teardown. The thin `fwc-n8n` wrapper resolves and routes typed operations; local, REST, and official-MCP provider dispatch remain pending host-owned wiring. Real-host narrow-token verification against EEC and Hetzner also remains pending.
+> **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.21`
 > **Verification script**: none tracked; use the commands below
 > **n8n public REST API**: https://docs.n8n.io/api/
 > **n8n API reference**: https://docs.n8n.io/api/api-reference/
@@ -30,6 +30,15 @@ The current crate exposes these operations:
 Important runtime truths:
 
 - Package and binary name are `fcp-n8n`.
+- The crate also builds the operator wrapper `fwc-n8n`. Its current commands are
+  `resolve`, `route <public-operation>`, `run-once <public-operation>`, and
+  `status`. `run-once` validates only the currently router-covered public
+  operation names and returns `provider_not_wired` before reading operation
+  input; provider dispatch is host-owned and not part of this wrapper.
+  `n8n.targets.resolve`, `n8n.capabilities.inspect`, `n8n.runtime.status`,
+  `n8n.node_resources.explore`, `n8n.evaluations.manage`, and
+  `n8n.mcp_access.reconcile` still need dedicated routing intents or host-local
+  dispatch before they can use this command.
 - The library now includes a compact, provider-neutral target resolver and
   provider router. It accepts explicit server, confirmed project mapping,
   workflow/execution provenance, canonical resource URI, or bounded ambiguity;
@@ -39,8 +48,12 @@ Important runtime truths:
   names: known-ID reads prefer REST, local node/template knowledge and
   validation prefer local `n8n-mcp`, and capabilities without typed parity
   prefer official MCP. Every fallback is represented explicitly and unknown
-  write capability fails closed. Provider execution wiring remains part of the
-  Phase 1 integration gate.
+  write capability fails closed. These are typed routing decisions only; the
+  wrapper does not spawn a local provider, load a policy file, or dispatch REST
+  or official MCP. All provider execution remains behind a host-owned boundary.
+- `fwc-n8n status` is intentionally request-process scoped. It reports the
+  wrapper's own idle state and does not scan, adopt, or stop unrelated Codex
+  profile processes.
 - Runtime `BaseConnector` ID is `n8n`.
 - Manifest and reported connector ID are `fcp.n8n`.
 - The manifest interface hash is generated from the current operation surface; `fwc manifest fix connectors/n8n/manifest.toml --check --json` must report `changed=false` before release.

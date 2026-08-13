@@ -14,6 +14,17 @@ of truth for the code that exists today.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
+Current implementation boundary: `fwc-n8n` is a thin typed CLI for `resolve`,
+`route`, and `status`. Its `run-once` command validates the public operation
+names represented by the current `OperationIntent` enum and fails closed with
+`provider_not_wired` before reading an operation payload.
+`n8n.targets.resolve`, `n8n.capabilities.inspect`, `n8n.runtime.status`,
+`n8n.node_resources.explore`, `n8n.evaluations.manage`, and
+`n8n.mcp_access.reconcile` are not all representable by that enum yet. Local,
+typed REST, and official MCP dispatch must be wired through the host-owned
+boundary; this wrapper does not load policy files, spawn provider processes, or
+accept model-supplied commands, paths, environments, or upstream tool names.
+
 ## 1. Fixed owner decisions
 
 - One compact `n8n.*` surface is presented to the model. Provider catalogs are
@@ -454,8 +465,8 @@ future workflows require a later reconciliation.
 |---|---|---|---|
 | Known-ID workflow/execution metadata | Typed REST | Official MCP | Small schema, bounded response, predictable latency |
 | Search workflows/executions/projects | Typed REST where parity exists | Official MCP | Native pagination and filters |
-| Node/template knowledge | Local MCP run-once with API disabled | Official MCP builder tools | Local indexed knowledge and validation |
-| Node/workflow validation | Local MCP run-once | Official MCP | Detailed local validation without server dependency |
+| Node/template knowledge | Host-owned local MCP run-once with API disabled | Official MCP builder tools | Local indexed knowledge and validation |
+| Node/workflow validation | Host-owned local MCP run-once | Official MCP | Detailed local validation without server dependency |
 | Draft/published comparison | Official MCP | REST plus local validation | Official server semantics expose both graphs |
 | Workflow SDK create/update | Official MCP | Typed REST only after parity | Server-side SDK and node schema validation |
 | Publish/unpublish/archive/restore | Typed REST after parity | Official MCP | Typed preconditions and compact readback |
@@ -678,15 +689,16 @@ origin and re-probed when it fails.
 
 The stateless protocol reduces connection/session state but does not itself
 guarantee zero memory: a host may still keep a client process, HTTP pool, cached
-catalog, or model-visible schemas resident. `fwc-n8n` reaches zero idle local
-provider memory through bounded process ownership and teardown, regardless of
-which MCP era the remote server supports.
+catalog, or model-visible schemas resident. The host-owned local provider path
+must reach zero idle provider memory through bounded process ownership and
+teardown, regardless of which MCP era the remote server supports.
 
 The connector must not assume that Codex, n8n, and the local bridge support the
-same revision. Current code in `connectors/mcp-bridge` is a legacy first slice:
-it hard-codes `2025-06-18`, appends `/mcp`, lacks full SSE parsing, OAuth,
-secretless credentials, capability enforcement, and approval enforcement. It
-is reference code, not an approved provider adapter.
+same revision. Current code in `connectors/mcp-bridge` supports the reviewed
+modern and legacy transport paths with bounded responses, authenticated
+credential references, capability enforcement, approval enforcement, and
+process teardown. It remains a provider adapter behind typed public operations,
+not a generic model-visible `tools/call` surface.
 
 Catalog policy:
 

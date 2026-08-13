@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "fcp-n8n"
 path = "src/main.rs"
 
+[[bin]]
+name = "fwc-n8n"
+path = "src/bin/fwc-n8n.rs"
+
 [lints]
 workspace = true
 
@@ -30,6 +34,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 blake3.workspace = true
+clap = { workspace = true, features = ["derive"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -39,6 +44,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 hex.workspace = true
 percent-encoding.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true

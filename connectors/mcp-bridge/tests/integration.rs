@@ -21,11 +21,25 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use wiremock::matchers::{body_partial_json, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_mcp_bridge::connector::McpBridgeConnector;
 
 const TEST_SERVER_ID: &str = "mcp-test";
+
+struct MatchingJsonRpcIdResponder;
+
+impl Respond for MatchingJsonRpcIdResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: Value =
+            serde_json::from_slice(&request.body).expect("JSON-RPC request should be JSON");
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": body["id"].clone(),
+            "result": {"tools": []}
+        }))
+    }
+}
 
 fn test_signing_key() -> Ed25519SigningKey {
     Ed25519SigningKey::from_bytes(&[42_u8; 32]).expect("deterministic test signing key")
@@ -670,51 +684,6 @@ async fn tools_list_skips_builtin_name_collisions() {
 // -- tools/call --------------------------------------------------------------
 
 #[fcp_async_core::runtime::test]
-async fn tools_call_basic() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/mcp"))
-        .and(body_partial_json(json!({
-            "method": "tools/call",
-            "params": {
-                "name": "read_file",
-                "arguments": {"path": "/tmp/data.txt"}
-            }
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "content": [
-                    {"type": "text", "text": "file contents here"}
-                ]
-            }
-        })))
-        .mount(&server)
-        .await;
-
-    let c = setup_connector(&server.uri()).await;
-    let error = c
-        .handle_invoke(json!({
-            "operation_id": "mcp.tools.call",
-            "input": {
-                "name": "read_file",
-                "arguments": {"path": "/tmp/data.txt"}
-            }
-        }))
-        .await
-        .expect_err("tools.call remains deferred after security gates");
-    assert!(format!("{error:?}").contains("deferred"));
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty()
-    );
-}
-
-#[fcp_async_core::runtime::test]
 async fn tools_call_missing_name() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -754,8 +723,8 @@ async fn tools_call_with_empty_arguments() {
             "input": {"name": "ping"}
         }))
         .await
-        .expect_err("tools.call remains deferred after security gates");
-    assert!(format!("{error:?}").contains("deferred"));
+        .expect_err("tools.call without policy must fail before provider I/O");
+    assert!(format!("{error:?}").contains("capability_policy"));
     assert!(
         server
             .received_requests()
@@ -810,8 +779,8 @@ async fn tools_call_with_complex_result() {
             "input": {"name": "multi_result", "arguments": {}}
         }))
         .await
-        .expect_err("tools.call remains deferred after security gates");
-    assert!(format!("{error:?}").contains("deferred"));
+        .expect_err("tools.call without policy must fail before provider I/O");
+    assert!(format!("{error:?}").contains("capability_policy"));
     assert!(
         server
             .received_requests()
@@ -1458,7 +1427,12 @@ async fn simulate_known_tools_call() {
         .await
         .unwrap();
     assert_eq!(result["allowed"], false);
-    assert!(result["reason"].as_str().unwrap().contains("Deferred"));
+    assert!(
+        result["reason"]
+            .as_str()
+            .unwrap()
+            .contains("capability_policy")
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1607,11 +1581,7 @@ async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/mcp"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {"tools": []}
-        })))
+        .respond_with(MatchingJsonRpcIdResponder)
         .mount(&server)
         .await;
 
@@ -1848,38 +1818,6 @@ async fn negative_approval_matrix_denies_before_provider_effect() {
             "approval case {label} must fail closed"
         );
     }
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty()
-    );
-}
-
-#[fcp_async_core::runtime::test]
-async fn valid_capability_and_approval_still_defer_tools_call() {
-    let server = MockServer::start().await;
-    let connector = setup_connector(&server.uri()).await;
-    let input = json!({
-        "name": "read_file",
-        "arguments": {"path": "/tmp/deferred.txt"}
-    });
-    let error = connector
-        .inner
-        .handle_invoke(json!({
-            "operation": "mcp.tools.call",
-            "input": input.clone(),
-            "capability_token": capability_token(
-                "mcp.tools.call",
-                &input,
-                &connector.instance_id,
-            ),
-            "approval_tokens": [approval_for("mcp.tools.call", &input)],
-        }))
-        .await
-        .expect_err("valid gates must still reach deferred fail-closed route");
-    assert!(format!("{error:?}").contains("deferred"));
     assert!(
         server
             .received_requests()

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:883f4eec3d9bacac3f2ac589dc4be23f00bd72c43d7536e6efbec94071137bdd"
+interface_hash = "blake3-256:fcp.interface.v2:0d9f9c20f0f3556a12ff0946155ce71c94352774e367eba94b9b03f02fbd72b6"
 
 [connector]
 id = "fcp.mcp-bridge"
@@ -339,7 +339,7 @@ related = [
 ]
 
 [provides.operations."mcp.tools.call"]
-description = "Deferred MCP tool call: verify capability and approval, then fail closed before provider dispatch in this packet"
+description = "Call an MCP tool after fresh capability discovery, exact snapshot approval, capability-token, and execution-approval gates"
 capability = "mcp.tools.write"
 risk_level = "high"
 safety_tier = "risky"
@@ -388,10 +388,10 @@ total_timeout_ms = 120000
 max_response_bytes = 52428800
 
 [provides.operations."mcp.tools.call".ai_hints]
-when_to_use = "Use only for a future typed tool route; this packet verifies the exact capability and approval, then fails closed before provider dispatch."
+when_to_use = "Use only when fresh capability discovery and exact capability/execution approvals permit the requested MCP tool call."
 common_mistakes = [
     "Passing arguments as a string instead of an object.",
-    "Treating this generic escape hatch as a live provider call; it is deferred until typed route and capability discovery work exists.",
+    "Assuming discovery approval is durable; every call performs a fresh tools/list and never retries or replays the side-effecting call.",
 ]
 examples = ['{"name": "read_file", "arguments": {"path": "/tmp/data.txt"}}']
 related = ["mcp.tools.list"]
@@ -415,6 +415,10 @@ type = "object"
 
 [provides.operations."mcp.tools.list".output_schema.properties.tools]
 type = "array"
+
+[provides.operations."mcp.tools.list".output_schema.properties.capability_snapshot]
+description = "Redacted fresh capability snapshot when an explicit capability_policy is configured"
+type = "object"
 
 [provides.operations."mcp.tools.list".network_constraints]
 host_allow = ["operator-configured"]

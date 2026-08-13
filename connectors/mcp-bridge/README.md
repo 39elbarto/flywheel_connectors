@@ -11,7 +11,7 @@
 
 This document fixes the operator-facing contract for `fcp.mcp-bridge`. The connector exposes the Model Context Protocol server surface implemented in this crate: tools, resources, prompts, sampling request fallback, and local bridge metrics.
 
-The connector is intentionally a bounded MCP bridge. It is not a full MCP host runtime, SSE stream consumer, stdio process launcher, OAuth installer, prompt execution engine, direct LLM router, MCP server registry, or general egress proxy.
+The connector is intentionally a bounded MCP bridge. It is not a full MCP host runtime, incremental SSE stream consumer, stdio process launcher, OAuth installer, prompt execution engine, direct LLM router, MCP server registry, or general egress proxy.
 
 ## Current Runtime Snapshot
 
@@ -30,13 +30,15 @@ Important runtime truths the contract preserves:
 - Package and binary name are `fcp-mcp-bridge`.
 - Runtime `BaseConnector` ID is `mcp-bridge`.
 - Manifest and reported connector ID are `fcp.mcp-bridge`.
-- Manifest status is `ready`; tool calls remain explicitly deferred after security gates.
-- Manifest interface hash is `blake3-256:fcp.interface.v2:883f4eec3d9bacac3f2ac589dc4be23f00bd72c43d7536e6efbec94071137bdd`.
+- Manifest status is `ready`; tool calls are conditionally enabled only after fresh discovery and exact security gates.
+- Manifest interface hash is `blake3-256:fcp.interface.v2:0d9f9c20f0f3556a12ff0946155ce71c94352774e367eba94b9b03f02fbd72b6`.
 - Configuration requires `server_id` and a non-empty exact MCP endpoint.
 - `server_id` is a generic lowercase canonical slug: 1–64 ASCII letters, digits, `-`, or `_`; first and last characters are alphanumeric. The FWC layer owns any eec/hetzner/legacy registry mapping.
 - `mcp_url` must be exactly `/mcp`; only one trailing slash is normalized. Production URLs require HTTPS/443. Loopback HTTP is reserved for local fixtures.
 - Direct non-loopback egress fails closed until host-mediated exact-origin enforcement is available.
 - Configuration accepts one of an optional trimmed `api_key` or a UUID `credential_id`, never both.
+- Optional `capability_policy` is owner-reviewed configuration for `eec`, `hetzner`, or `legacy` and contains bounded `n8n_version`, exact `auth_mode` (`oauth` or `access_token`), bounded `api_scope_digest`, and up to 256 unique exact `approved_tools` entries (`name`, `class`, input/output schema digests). A direct `api_key` requires `auth_mode = access_token`; with `credential_id`, the mode remains trusted host-provisioning metadata because the connector cannot inspect the referenced secret type.
+- Without `capability_policy`, generic catalog reads still work but `mcp.tools.call` is denied locally before provider I/O.
 - Direct API-key mode sends `Authorization: Bearer {api_key}`.
 - `credential_id` is only a host-mediated reference; this crate never resolves it or sends it as a provider header.
 - `description_scan` may be supplied at top level or under `security.description_scan`.
@@ -45,13 +47,14 @@ Important runtime truths the contract preserves:
 - Sampling defaults are `max_rpm = 10`, `timeout_secs = 30`, `max_tokens_cap = 4096`, and `max_tool_rounds = 5`.
 - Sampling may also set `llm_connector`, `model_override`, and `allowed_models`.
 - The client sends JSON-RPC requests to the canonical `{mcp_url}` endpoint.
-- The client sends `MCP-Protocol-Version: 2025-06-18`.
-- The client sends `Accept: application/json, text/event-stream`, but the runtime reads the response body as a JSON-RPC JSON document. It does not consume a streaming SSE event sequence.
-- Runtime request timeout is 120 seconds.
-- There is no automatic retry: every provider request is one attempt, including 401, 404, 429, and unknown-effect failures. Retry counters remain zero.
+- The current path sends `MCP-Protocol-Version: 2026-07-28`; only an empty or unrecognized HTTP 400 enters the bounded legacy initialize fallback for negotiated 2025 protocol versions.
+- The client sends `Accept: application/json, text/event-stream` and parses bounded JSON or buffered SSE event sequences with an exact request ID and body, line, and event limits. Incremental/long-lived streaming, subscriptions, and unsolicited server streams remain out of scope.
+- Runtime request timeout is 30 seconds; the operation manifest may retain a larger outer deadline.
+- There is no automatic retry: every provider request is one attempt, including 401, 404, 429, and unknown-effect failures. Authentication expiry is fail-closed with no connector-side refresh; retry counters remain zero.
 - Runtime `invoke` requires `operation`, a host-key-verified bound `capability_token`, the negotiated zone, exact instance binding, expiry, capability, and resource URI.
 - `mcp.tools.call` and enabled `mcp.sampling.handle` require exactly one valid execution approval. The approval includes exact normalized input constraints and a SHA-256 digest of the canonical payload.
-- `mcp.tools.call` is fail-closed/deferred after all gates; it never reaches the provider in this packet.
+- `mcp.tools.call` performs exactly two provider calls per invocation: one fresh `tools/list` with the verified call context, then one `tools/call` only for an exact `Approved` snapshot entry. Unknown, blocked, or schema-drifted tools fail locally. There is no automatic retry or replay.
+- The attached `capability_snapshot` contains only server/protocol/auth metadata, schema digests, classes, statuses, and a snapshot digest; raw schemas, descriptions, arguments, results, and provider payloads are not retained.
 - Sampling remains local-only and returns safe metadata counts, never prompt content.
 - Provisioning requests only the trusted `server_id`, exact `/mcp` endpoint, and host-managed `credential_id` reference. It has no raw-secret prompt or storage step.
 - Reconfigure and shutdown clear the client, verifier, zone, session, and handshaken state.
@@ -70,7 +73,7 @@ This packet makes the following boundaries mechanical:
 - The HTTP client disables redirects and performs no automatic retry.
 - Description scanning remains an independent hostile-input guardrail; it is not an authorization substitute.
 
-Out of scope for this packet are actual Streamable HTTP/SSE event-sequence consumption, stdio/process transport, OAuth installation, and host-side credential resolution.
+Out of scope for this packet are incremental or long-lived Streamable HTTP/SSE streams, subscriptions, unsolicited server streams, stdio/process transport, OAuth installation or refresh, and host-side credential resolution.
 
 ## First-Slice Scope
 
@@ -94,7 +97,7 @@ The current MCP Bridge slice documents the bounded runtime surface:
 - Forbidden zones: `z:public` and `z:community`.
 - Runtime capability surface is enforced by a host-key verifier, negotiated zone, exact bound instance, operation, expiry, capability, and resource URI:
   - `mcp.tools.read` gates tool catalog metadata.
-  - `mcp.tools.write` gates the deferred tool-call route.
+- `mcp.tools.write` gates the fresh-discovery and exact-approval tool-call route.
   - `mcp.resources.read` gates resource listing and reads.
   - `mcp.prompts.read` gates prompt catalog metadata.
   - `mcp.sampling.handle` gates the local sampling fallback.
@@ -107,6 +110,34 @@ The current MCP Bridge slice documents the bounded runtime surface:
 
 The `mcp-bridge.host_credential` recipe collects only the trusted lowercase `server_id`, the exact `/mcp` endpoint, and an optional host-managed `credential_id` UUID reference. It does not prompt for, store, or return a raw API key; an unauthenticated mode is reserved for loopback fixtures.
 
+An owner-reviewed policy is supplied in connector configuration when tool calls
+are required:
+
+```json
+{
+  "server_id": "eec",
+  "mcp_url": "https://operator-configured.example/mcp",
+  "capability_policy": {
+    "n8n_version": "1.0.0",
+    "auth_mode": "access_token",
+    "api_scope_digest": "scope-digest",
+    "approved_tools": [
+      {
+        "name": "read_file",
+        "class": "read",
+        "input_schema_digest": "sha256:...",
+        "output_schema_digest": "sha256:..."
+      }
+    ]
+  }
+}
+```
+
+Every `mcp.tools.call` re-discovers the remote catalog and compares only
+bounded schema digests and the exact reviewed class. Names, descriptions,
+annotations, and remote payloads never classify or approve a tool. The
+connector keeps no durable raw catalog or tool result state.
+
 ## Network And Runtime Invariants
 
 - Runtime endpoint shape: exact `{mcp_url}` path `/mcp`; one trailing slash is normalized.
@@ -115,7 +146,7 @@ The `mcp-bridge.host_credential` recipe collects only the trusted lowercase `ser
 - Manifest `network_constraints` are declarative operator policy (operator-configured host, HTTPS/443, TLS/SNI, and deny rules); they are not a substitute for host-mediated DNS/private-range/max-response enforcement.
 - Non-loopback and `credential_id` egress fail before DNS/HTTP until host mediation exists.
 - Redirects are disabled and automatic retry is disabled.
-- Runtime request timeout: `120 seconds`.
+- Runtime request timeout: `30 seconds` (the operation manifest may retain a larger outer deadline).
 - Runtime retry policy: single attempt; retry metrics are retained for compatibility and always remain zero.
 - Runtime JSON-RPC IDs are process-local integers starting at `1`.
 - Provider HTTP 401, 403, 404, 429, and other API errors map to typed connector/FCP errors.
@@ -141,7 +172,7 @@ The `mcp-bridge.host_credential` recipe collects only the trusted lowercase `ser
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Rationale |
 |-----------|----------------|------------|------------|-----------|-------------|-----------|
 | `mcp.tools.list` | JSON-RPC `tools/list` | `mcp.tools.read` | `Safe` | `Low` | `Strict` | Lists tools, scans descriptions when enabled, and filters names that collide with bridge-owned operations. |
-| `mcp.tools.call` | deferred after gate | `mcp.tools.write` | `Risky` | `High` | `None` | Requires exact capability and one digest-bound approval, then fails closed until a typed route exists. |
+| `mcp.tools.call` | fresh `tools/list` then one `tools/call` | `mcp.tools.write` | `Risky` | `High` | `None` | Requires capability-token, exact execution approval, explicit policy, and a fresh exact Approved snapshot. |
 | `mcp.resources.list` | JSON-RPC `resources/list` | `mcp.resources.read` | `Safe` | `Low` | `Strict` | Lists resources and annotates descriptions with scanner findings when enabled. |
 | `mcp.resources.read` | JSON-RPC `resources/read` | `mcp.resources.read` | `Safe` | `Low` | `Strict` | Reads one resource by `uri`. |
 | `mcp.prompts.list` | JSON-RPC `prompts/list` | `mcp.prompts.read` | `Safe` | `Low` | `Strict` | Lists prompt templates and annotates descriptions with scanner findings when enabled. |
@@ -199,11 +230,11 @@ Capability-token verification binds every operation to a deterministic resource 
 The current implementation does not include:
 
 - MCP stdio transport, process spawning, server lifecycle management, or server discovery
-- actual streaming SSE event parsing despite the advertised `Accept` header
+- incremental or long-lived SSE streaming, subscriptions, and unsolicited server streams
 - tool schema validation beyond requiring `name` and object `arguments`
 - prompt execution, prompt rendering, resource subscriptions, notifications, roots, elicitation, or completion
 - direct sampling dispatch to an LLM or connector
-- OAuth installation, token refresh, secretless credential injection, or API-key rotation
+- OAuth installation or token refresh, secretless credential injection, or API-key rotation
 - durable storage of MCP catalogs, resources, prompts, tool results, or sampling requests
 
 These are excluded on purpose:
@@ -220,7 +251,7 @@ These are excluded on purpose:
 - URL readiness plus a `POST /mcp` `tools/list` self-check probe
 - degraded or unhealthy states for unconfigured, missing client, and missing session ID cases
 - operation metadata with capability, risk, safety tier, idempotency, schemas, and hints
-- simulation allow/deny for canonical `operation` values, with `mcp.tools.call` explicitly deferred
+- simulation allow/deny for canonical `operation` values, with `mcp.tools.call` reporting conditional policy-gated semantics
 - typed provider/FCP error mapping
 
 The deterministic integration evidence is anchored on connector-local tests covering:
@@ -267,6 +298,6 @@ rch exec -- cargo fmt --check
 - Use a canonical exact `/mcp` endpoint. Production direct egress is intentionally fail-closed until host mediation is present.
 - Treat all MCP catalog descriptions and remote tool output as untrusted model-facing input.
 - Keep `description_scan = "warn"` or `"block"` unless deterministic fixture tests require disabling it.
-- Treat `mcp.tools.call` and `mcp.sampling.handle` as high-review operations; both are digest-bound approval gates, and tool calls remain deferred.
+- Treat `mcp.tools.call` and `mcp.sampling.handle` as high-review operations; tool calls are arbitrary official MCP side-effect boundaries and require fresh discovery, exact snapshot approval, capability-token, and execution approval. No remote tool is assumed safe from its name or description.
 - Runtime capability and approval verification is enforced before provider or local effects; keep host signatures and exact input bindings authoritative.
 - Do not interpret this connector as a stdio MCP server launcher or direct LLM sampling engine.

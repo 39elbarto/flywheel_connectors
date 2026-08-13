@@ -32,7 +32,7 @@ const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
 const BEAD_ID: &str = "flywheel_connectors-bky21.3.7.3";
 const CONNECTOR_ID: &str = "mcp-bridge";
 const LOOPBACK_CREDENTIAL: &str = "mcp-bridge-local-loopback-credential";
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 const SERVER_ID: &str = "mcp-local";
 
 #[derive(Debug)]
@@ -566,7 +566,19 @@ async fn local_non_mock_tools_list_posts_streamable_http_boundary_and_scans_cata
     let requests = server.join();
     let body = assert_rpc_request(&requests[0], "tools/list");
 
-    assert_eq!(body["params"], json!({}));
+    assert_eq!(
+        body["params"],
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "fcp-mcp-bridge",
+                    "version": "0.1.0"
+                }
+            }
+        })
+    );
     let tools = result["tools"].as_array().expect("tools array");
     assert_eq!(tools.len(), 2);
     assert_eq!(tools[0]["name"], "search_workspace");
@@ -605,7 +617,7 @@ async fn local_non_mock_tools_list_posts_streamable_http_boundary_and_scans_cata
 }
 
 #[fcp_async_core::runtime::test]
-async fn local_non_mock_tools_call_is_deferred_before_http_effect() {
+async fn local_non_mock_tools_call_requires_capability_policy_before_http_effect() {
     let probe = NoEgressProbe::start();
     let connector = configured_connector(probe.base_url()).await;
 
@@ -621,8 +633,8 @@ async fn local_non_mock_tools_call_is_deferred_before_http_effect() {
             }
         }))
         .await
-        .expect_err("tools.call must remain deferred");
-    assert!(format!("{error:?}").contains("deferred"));
+        .expect_err("tools.call without policy must fail before provider I/O");
+    assert!(format!("{error:?}").contains("capability_policy"));
     probe.assert_no_connection();
 
     emit_acceptance_evidence(
@@ -658,7 +670,7 @@ async fn local_non_mock_resources_read_and_prompts_list_use_json_rpc_boundary() 
             "200 OK",
             &json!({
                 "jsonrpc": "2.0",
-                "id": 1,
+                "id": 2,
                 "result": {
                     "prompts": [
                         {
@@ -696,7 +708,19 @@ async fn local_non_mock_resources_read_and_prompts_list_use_json_rpc_boundary() 
     assert_eq!(resource["contents"][0]["text"], "# Workspace");
 
     let prompts_body = assert_rpc_request(&requests[1], "prompts/list");
-    assert_eq!(prompts_body["params"], json!({}));
+    assert_eq!(
+        prompts_body["params"],
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "fcp-mcp-bridge",
+                    "version": "0.1.0"
+                }
+            }
+        })
+    );
     assert_eq!(prompts["prompts"][0]["name"], "summarize_project");
     assert!(
         prompts["prompts"][0]["injection_findings"]

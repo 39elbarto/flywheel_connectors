@@ -30,5 +30,6 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod protocol;
 pub mod security;
 pub mod types;

@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
+use base64::Engine;
+use fcp_manifest::{ConnectorManifest, HostEgressContext, ManifestApprovalMode, OperationSection};
 use fcp_prelude::{
     ApprovalMode, ApprovalScope, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId,
     CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
@@ -22,6 +23,10 @@ use tracing::{info, instrument};
 use crate::{
     client::{McpAuth, McpClient, McpClientMetrics},
     error::{McpBridgeError, McpBridgeResult},
+    protocol::{
+        AuthMode, CapabilitySnapshot, MAX_TOOL_COUNT, ProtocolEra, ProtocolVersion, ServerId,
+        ToolClass, ToolObservation,
+    },
     security::{
         DescriptionScanMode, Severity, catalog_item_sha256, finding_log_payload, scan_description,
         tool_name_collides_with_builtin,
@@ -55,6 +60,24 @@ struct McpBridgeConfig {
     auth: McpAuth,
     description_scan: DescriptionScanMode,
     sampling: SamplingConfig,
+    capability_policy: Option<CapabilityPolicy>,
+}
+
+#[derive(Debug, Clone)]
+struct CapabilityPolicy {
+    server_id: ServerId,
+    n8n_version: String,
+    auth_mode: AuthMode,
+    api_scope_digest: String,
+    approved_tools: Vec<ApprovedTool>,
+}
+
+#[derive(Debug, Clone)]
+struct ApprovedTool {
+    name: String,
+    class: ToolClass,
+    input_schema_digest: String,
+    output_schema_digest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +213,14 @@ impl McpBridgeConfig {
         let mcp_url = McpClient::canonicalize_base_url(&mcp_url)
             .map_err(|error| error.to_fcp_error())?
             .to_string();
+        let capability_policy = CapabilityPolicy::from_params(
+            params.get("capability_policy"),
+            server_id,
+            &McpAuth {
+                api_key: api_key.clone(),
+                credential_id,
+            },
+        )?;
 
         Ok(Self {
             server_id: server_id.to_string(),
@@ -200,6 +231,7 @@ impl McpBridgeConfig {
             },
             description_scan: description_scan_mode_from_params(params)?,
             sampling: SamplingConfig::from_params(params)?,
+            capability_policy,
         })
     }
 
@@ -224,6 +256,123 @@ impl McpBridgeConfig {
             description_scan: self.description_scan,
             sampling_enabled: self.sampling.enabled,
         }
+    }
+}
+
+impl CapabilityPolicy {
+    fn from_params(
+        raw_policy: Option<&serde_json::Value>,
+        server_id: &str,
+        auth: &McpAuth,
+    ) -> FcpResult<Option<Self>> {
+        let Some(raw_policy) = raw_policy else {
+            return Ok(None);
+        };
+        let policy = raw_policy
+            .as_object()
+            .ok_or_else(|| invalid_policy("capability_policy must be an object"))?;
+        if policy.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "n8n_version" | "auth_mode" | "api_scope_digest" | "approved_tools"
+            )
+        }) {
+            return Err(invalid_policy(
+                "capability_policy contains an unsupported field",
+            ));
+        }
+        let server_id = policy_server_id(server_id)?;
+        let n8n_version =
+            required_policy_string(policy.get("n8n_version"), "capability_policy.n8n_version")?;
+        let auth_mode =
+            match required_policy_string(policy.get("auth_mode"), "capability_policy.auth_mode")?
+                .as_str()
+            {
+                "oauth" => AuthMode::OAuth,
+                "access_token" => AuthMode::AccessToken,
+                _ => return Err(invalid_policy("capability_policy.auth_mode is unsupported")),
+            };
+        if auth.api_key.is_some() && auth_mode != AuthMode::AccessToken {
+            return Err(invalid_policy(
+                "capability_policy.auth_mode must be access_token for api_key auth",
+            ));
+        }
+        if auth.api_key.is_none() && auth.credential_id.is_none() {
+            return Err(invalid_policy(
+                "capability_policy requires configured authentication",
+            ));
+        }
+        let api_scope_digest = required_policy_string(
+            policy.get("api_scope_digest"),
+            "capability_policy.api_scope_digest",
+        )?;
+        let approved_values = policy
+            .get("approved_tools")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| invalid_policy("capability_policy.approved_tools must be an array"))?;
+        if approved_values.len() > MAX_TOOL_COUNT {
+            return Err(invalid_policy(
+                "capability_policy.approved_tools exceeds the configured limit",
+            ));
+        }
+
+        let mut approved_tools = Vec::with_capacity(approved_values.len());
+        for value in approved_values {
+            let object = value.as_object().ok_or_else(|| {
+                invalid_policy("capability_policy.approved_tools entry must be an object")
+            })?;
+            if object.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "name" | "class" | "input_schema_digest" | "output_schema_digest"
+                )
+            }) {
+                return Err(invalid_policy(
+                    "approved_tools contains an unsupported field",
+                ));
+            }
+            let name = required_policy_string(object.get("name"), "approved_tools.name")?;
+            let class = match required_policy_string(object.get("class"), "approved_tools.class")?
+                .as_str()
+            {
+                "read" => ToolClass::Read,
+                "write" => ToolClass::Write,
+                "execution" => ToolClass::Execution,
+                "credential" => ToolClass::Credential,
+                "destructive" => ToolClass::Destructive,
+                _ => return Err(invalid_policy("approved_tools.class is unsupported")),
+            };
+            let input_schema_digest = required_policy_string(
+                object.get("input_schema_digest"),
+                "approved_tools.input_schema_digest",
+            )?;
+            let output_schema_digest = required_policy_string(
+                object.get("output_schema_digest"),
+                "approved_tools.output_schema_digest",
+            )?;
+            if approved_tools
+                .iter()
+                .any(|tool: &ApprovedTool| tool.name == name)
+            {
+                return Err(invalid_policy(
+                    "capability_policy.approved_tools contains duplicate names",
+                ));
+            }
+            approved_tools.push(ApprovedTool {
+                name,
+                class,
+                input_schema_digest,
+                output_schema_digest,
+            });
+        }
+
+        Ok(Some(Self {
+            server_id,
+            n8n_version,
+            auth_mode,
+            api_scope_digest,
+            approved_tools,
+        }))
     }
 }
 
@@ -505,7 +654,19 @@ impl McpBridgeConnector {
             return Self::serialize_self_check_report(report);
         };
 
-        let probe = match client.tools_list().await {
+        if config.auth.credential_id.is_some() {
+            let mut report = SelfCheckReport::degraded(
+                "provider_probe_unavailable",
+                "Credential-backed provider probe requires verified invocation attribution",
+            );
+            report.details = Some(json!({
+                "provisioning": readiness,
+                "probe": "unavailable_without_verified_request_context",
+            }));
+            return Self::serialize_self_check_report(report);
+        }
+
+        let probe = match client.tools_list_with_context(None).await {
             Ok(_) => {
                 let mut report = SelfCheckReport::ok();
                 report.details = Some(json!({
@@ -573,27 +734,112 @@ impl McpBridgeConnector {
                 message: format!("Invalid capability_token: {error}"),
             })?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
-        verifier.verify_bound(token, &capability, &operation_id, &resources)?;
+        let verified_token =
+            verifier.verify_bound(token, &capability, &operation_id, &resources)?;
 
         if matches!(operation, OP_TOOLS_CALL | OP_SAMPLING_HANDLE) {
             let target = self.approval_target(operation, &input, &resources)?;
             self.require_execution_approval(operation, &target, &params)?;
         }
 
-        if operation == OP_TOOLS_CALL {
+        if operation == OP_TOOLS_CALL
+            && self
+                .config
+                .as_ref()
+                .and_then(|config| config.capability_policy.as_ref())
+                .is_none()
+        {
             return Err(FcpError::CapabilityDenied {
                 capability: "mcp.tools.write".into(),
-                reason: "MCP tool invocation is deferred until a typed route and capability discovery path exists".into(),
+                reason: "mcp.tools.call requires an explicit capability_policy".into(),
             });
         }
 
-        self.request_count.fetch_add(1, Ordering::Relaxed);
+        let request_number = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let egress_context = if matches!(
+            operation,
+            OP_TOOLS_CALL | OP_TOOLS_LIST | OP_RESOURCES_LIST | OP_RESOURCES_READ | OP_PROMPTS_LIST
+        ) {
+            let [canonical_resource] = resources.as_slice() else {
+                return Err(FcpError::Internal {
+                    message: "MCP egress requires exactly one canonical resource URI".into(),
+                });
+            };
+            Some(self.host_egress_context(
+                operation,
+                canonical_resource,
+                &verified_token,
+                request_number,
+            )?)
+        } else {
+            None
+        };
+
+        if operation == OP_TOOLS_CALL {
+            let context = egress_context.ok_or_else(|| FcpError::Internal {
+                message: "MCP tools/call requires an exact host-egress context".into(),
+            })?;
+            let client = self.client_ref()?;
+            let name = require_str(&input, "name").map_err(|error| error.to_fcp_error())?;
+            if name.is_empty() || name.len() > crate::protocol::MAX_PUBLIC_ID_BYTES {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "MCP tool name is empty or exceeds the configured size limit".into(),
+                });
+            }
+            let discovery = self
+                .invoke_tools_list(client, Some(context.clone()))
+                .await
+                .map_err(|error| {
+                    self.error_count.fetch_add(1, Ordering::Relaxed);
+                    error.to_fcp_error()
+                })?;
+            let snapshot = discovery
+                .get("capability_snapshot")
+                .cloned()
+                .ok_or_else(|| FcpError::Internal {
+                    message: "MCP tools/list did not return a capability snapshot".into(),
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<CapabilitySnapshot>(value).map_err(|_| {
+                        FcpError::Internal {
+                            message: "MCP capability snapshot could not be validated".into(),
+                        }
+                    })
+                })?;
+            if snapshot.tool_call_is_blocked(name) {
+                return Err(FcpError::CapabilityDenied {
+                    capability: "mcp.tools.write".into(),
+                    reason: "MCP tool is not exactly approved in the fresh capability snapshot"
+                        .into(),
+                });
+            }
+            return self
+                .invoke_tools_call(client, &input, context)
+                .await
+                .map_err(|error| {
+                    self.error_count.fetch_add(1, Ordering::Relaxed);
+                    error.to_fcp_error()
+                });
+        }
 
         let result = match operation {
-            OP_TOOLS_LIST => self.invoke_tools_list(self.client_ref()?).await,
-            OP_RESOURCES_LIST => self.invoke_resources_list(self.client_ref()?).await,
-            OP_RESOURCES_READ => self.invoke_resources_read(self.client_ref()?, &input).await,
-            OP_PROMPTS_LIST => self.invoke_prompts_list(self.client_ref()?).await,
+            OP_TOOLS_LIST => {
+                self.invoke_tools_list(self.client_ref()?, egress_context.clone())
+                    .await
+            }
+            OP_RESOURCES_LIST => {
+                self.invoke_resources_list(self.client_ref()?, egress_context.clone())
+                    .await
+            }
+            OP_RESOURCES_READ => {
+                self.invoke_resources_read(self.client_ref()?, &input, egress_context.clone())
+                    .await
+            }
+            OP_PROMPTS_LIST => {
+                self.invoke_prompts_list(self.client_ref()?, egress_context)
+                    .await
+            }
             OP_SAMPLING_HANDLE => self.invoke_sampling_handle(&input).await,
             OP_SERVER_METRICS => self.invoke_server_metrics().await,
             _ => {
@@ -621,10 +867,16 @@ impl McpBridgeConnector {
             ops.iter()
                 .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
         });
-        let deferred = operation == OP_TOOLS_CALL;
-        let allowed = known && !deferred;
-        let reason = if deferred {
-            "Deferred: MCP tool invocation fails closed until a typed route and capability discovery path exists"
+        let policy_present = self
+            .config
+            .as_ref()
+            .and_then(|config| config.capability_policy.as_ref())
+            .is_some();
+        let allowed = known && (operation != OP_TOOLS_CALL || policy_present);
+        let reason = if operation == OP_TOOLS_CALL && policy_present {
+            "Conditionally allowed: fresh capability discovery, mcp.tools.write, and exact execution approval are required"
+        } else if operation == OP_TOOLS_CALL {
+            "Denied: mcp.tools.call requires an explicit capability_policy"
         } else if allowed {
             "Operation supported"
         } else {
@@ -661,15 +913,18 @@ impl McpBridgeConnector {
     async fn invoke_tools_list(
         &self,
         client: &McpClient,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, McpBridgeError> {
-        let data = client.tools_list().await?;
-        self.annotate_catalog(data, "tools", "tool", true)
+        let data = client.tools_list_with_context(context).await?;
+        let data = self.annotate_catalog(data, "tools", "tool", true)?;
+        self.attach_capability_snapshot(data, client).await
     }
 
     async fn invoke_tools_call(
         &self,
         client: &McpClient,
         input: &serde_json::Value,
+        context: HostEgressContext,
     ) -> Result<serde_json::Value, McpBridgeError> {
         let name = require_str(input, "name")?;
         let arguments = input
@@ -687,15 +942,16 @@ impl McpBridgeConnector {
         } else {
             arguments
         };
-        let data = client.tools_call(name, &args).await?;
+        let data = client.tools_call_with_context(name, &args, context).await?;
         Ok(data)
     }
 
     async fn invoke_resources_list(
         &self,
         client: &McpClient,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, McpBridgeError> {
-        let data = client.resources_list().await?;
+        let data = client.resources_list_with_context(context).await?;
         self.annotate_catalog(data, "resources", "resource", false)
     }
 
@@ -703,17 +959,19 @@ impl McpBridgeConnector {
         &self,
         client: &McpClient,
         input: &serde_json::Value,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, McpBridgeError> {
         let uri = require_str(input, "uri")?;
-        let data = client.resources_read(uri).await?;
+        let data = client.resources_read_with_context(uri, context).await?;
         Ok(data)
     }
 
     async fn invoke_prompts_list(
         &self,
         client: &McpClient,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, McpBridgeError> {
-        let data = client.prompts_list().await?;
+        let data = client.prompts_list_with_context(context).await?;
         self.annotate_catalog(data, "prompts", "prompt", false)
     }
 
@@ -815,6 +1073,29 @@ impl McpBridgeConnector {
     fn client_ref(&self) -> FcpResult<&McpClient> {
         self.client.as_deref().ok_or_else(|| FcpError::Internal {
             message: "Client not initialized".into(),
+        })
+    }
+
+    fn host_egress_context<S>(
+        &self,
+        operation: &str,
+        resource_uri: &str,
+        token: &CapabilityToken<S>,
+        request_number: u64,
+    ) -> FcpResult<HostEgressContext> {
+        let zone_id = self.zone_id.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let session_id = self.session_id.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let token_cbor = token.raw().to_cbor().map_err(|_| FcpError::Internal {
+            message: "verified capability token could not be serialized".into(),
+        })?;
+        Ok(HostEgressContext {
+            connector_id: "fcp.mcp-bridge".into(),
+            operation_id: operation.into(),
+            resource_uri: resource_uri.into(),
+            zone_id: zone_id.to_string(),
+            request_id: format!("{session_id}:{request_number}"),
+            correlation_id: None,
+            capability_token_cbor_b64: base64::engine::general_purpose::STANDARD.encode(token_cbor),
         })
     }
 
@@ -1036,6 +1317,27 @@ impl McpBridgeConnector {
         Ok(data)
     }
 
+    async fn attach_capability_snapshot(
+        &self,
+        mut data: serde_json::Value,
+        client: &McpClient,
+    ) -> Result<serde_json::Value, McpBridgeError> {
+        let Some(policy) = self
+            .config
+            .as_ref()
+            .and_then(|config| config.capability_policy.as_ref())
+            .cloned()
+        else {
+            return Ok(data);
+        };
+        let (era, version) = client.negotiated_profile().await;
+        let snapshot = build_capability_snapshot(&data, &policy, era, version)?;
+        data["capability_snapshot"] = serde_json::to_value(snapshot).map_err(|_| {
+            McpBridgeError::InvalidInput("MCP capability snapshot could not be serialized".into())
+        })?;
+        Ok(data)
+    }
+
     fn serialize_self_check_report(report: SelfCheckReport) -> FcpResult<serde_json::Value> {
         info!(
             event = "mcp_bridge.provisioning.self_check",
@@ -1048,6 +1350,149 @@ impl McpBridgeConnector {
             message: format!("Failed to serialize self-check report: {e}"),
         })
     }
+}
+
+fn build_capability_snapshot(
+    data: &serde_json::Value,
+    policy: &CapabilityPolicy,
+    era: ProtocolEra,
+    version: ProtocolVersion,
+) -> McpBridgeResult<CapabilitySnapshot> {
+    let observations = capability_observations(data, policy)?;
+    let reviewed = reviewed_policy_snapshot(policy, era, version)?;
+    CapabilitySnapshot::from_observations(
+        policy.server_id,
+        &policy.n8n_version,
+        era,
+        vec![version],
+        policy.auth_mode,
+        &policy.api_scope_digest,
+        observations,
+        Some(&reviewed),
+    )
+    .map_err(|_| McpBridgeError::InvalidInput("MCP capability snapshot is invalid".into()))
+}
+
+fn capability_observations(
+    data: &serde_json::Value,
+    policy: &CapabilityPolicy,
+) -> McpBridgeResult<Vec<ToolObservation>> {
+    let tools = data
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            McpBridgeError::InvalidInput("MCP tools/list returned a malformed catalog".into())
+        })?;
+    if tools.len() > MAX_TOOL_COUNT {
+        return Err(McpBridgeError::InvalidInput(
+            "MCP tools/list returned too many tools".into(),
+        ));
+    }
+
+    let mut observations = Vec::with_capacity(tools.len());
+    let mut names = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let object = tool.as_object().ok_or_else(|| {
+            McpBridgeError::InvalidInput("MCP tools/list returned a malformed tool entry".into())
+        })?;
+        if object
+            .get("description")
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err(McpBridgeError::InvalidInput(
+                "MCP tools/list returned a malformed description".into(),
+            ));
+        }
+        let name = object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                McpBridgeError::InvalidInput("MCP tools/list returned a tool without a name".into())
+            })?;
+        if names.iter().any(|existing: &String| existing == name) {
+            return Err(McpBridgeError::InvalidInput(
+                "MCP tools/list returned duplicate tool names".into(),
+            ));
+        }
+        let input_schema = object
+            .get("inputSchema")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if !input_schema.is_null() && !input_schema.is_object() {
+            return Err(McpBridgeError::InvalidInput(
+                "MCP tools/list returned a malformed inputSchema".into(),
+            ));
+        }
+        let output_schema = object
+            .get("outputSchema")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        if !output_schema.is_null() && !output_schema.is_object() {
+            return Err(McpBridgeError::InvalidInput(
+                "MCP tools/list returned a malformed outputSchema".into(),
+            ));
+        }
+        let class = policy
+            .approved_tools
+            .iter()
+            .find(|approved| approved.name == name)
+            .map_or(ToolClass::Unknown, |approved| approved.class);
+        let observation = ToolObservation::from_schemas(name, &input_schema, &output_schema, class)
+            .map_err(|_| {
+                McpBridgeError::InvalidInput("MCP tools/list returned invalid tool metadata".into())
+            })?;
+        names.push(name.to_string());
+        observations.push(observation);
+    }
+    Ok(observations)
+}
+
+fn reviewed_policy_snapshot(
+    policy: &CapabilityPolicy,
+    era: ProtocolEra,
+    version: ProtocolVersion,
+) -> McpBridgeResult<CapabilitySnapshot> {
+    let observations = policy
+        .approved_tools
+        .iter()
+        .map(|approved| {
+            ToolObservation::from_digests(
+                &approved.name,
+                &approved.input_schema_digest,
+                &approved.output_schema_digest,
+                approved.class,
+            )
+            .map_err(|_| {
+                McpBridgeError::InvalidInput(
+                    "capability_policy contains invalid tool metadata".into(),
+                )
+            })
+        })
+        .collect::<McpBridgeResult<Vec<_>>>()?;
+    let mut snapshot = CapabilitySnapshot::from_observations(
+        policy.server_id,
+        &policy.n8n_version,
+        era,
+        vec![version],
+        policy.auth_mode,
+        &policy.api_scope_digest,
+        observations,
+        None,
+    )
+    .map_err(|_| McpBridgeError::InvalidInput("capability_policy is invalid".into()))?;
+    for approved in &policy.approved_tools {
+        snapshot
+            .approve_tool(
+                &approved.name,
+                approved.class,
+                &approved.input_schema_digest,
+                &approved.output_schema_digest,
+            )
+            .map_err(|_| {
+                McpBridgeError::InvalidInput("capability_policy approval is invalid".into())
+            })?;
+    }
+    Ok(snapshot)
 }
 
 /// Extract a required string field from input.
@@ -1169,6 +1614,39 @@ fn description_scan_mode_from_params(params: &serde_json::Value) -> FcpResult<De
         code: 1003,
         message,
     })
+}
+
+fn invalid_policy(message: &str) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
+}
+
+fn required_policy_string(value: Option<&serde_json::Value>, field: &str) -> FcpResult<String> {
+    let raw = value
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_policy(&format!("{field} must be a string")))?;
+    if raw.is_empty()
+        || raw.len() > crate::protocol::MAX_PUBLIC_ID_BYTES
+        || raw.chars().any(char::is_control)
+    {
+        return Err(invalid_policy(&format!(
+            "{field} is empty or exceeds the configured size limit"
+        )));
+    }
+    Ok(raw.to_string())
+}
+
+fn policy_server_id(server_id: &str) -> FcpResult<ServerId> {
+    match server_id {
+        "eec" => Ok(ServerId::Eec),
+        "hetzner" => Ok(ServerId::Hetzner),
+        "legacy" => Ok(ServerId::Legacy),
+        _ => Err(invalid_policy(
+            "capability_policy is supported only for eec, hetzner, or legacy server_id",
+        )),
+    }
 }
 
 fn optional_string(value: Option<&serde_json::Value>, field: &str) -> FcpResult<Option<String>> {
@@ -2357,6 +2835,329 @@ mod tests {
         assert_eq!(config.description_scan, DescriptionScanMode::Warn);
         assert!(!config.sampling.enabled);
         assert_eq!(config.sampling.max_tokens_cap, 4096);
+    }
+
+    fn policy_params(server_id: &str, approved_tools: serde_json::Value) -> serde_json::Value {
+        json!({
+            "server_id": server_id,
+            "mcp_url": "http://localhost:3000/mcp",
+            "api_key": "test-api-key",
+            "capability_policy": {
+                "n8n_version": "1.0.0",
+                "auth_mode": "access_token",
+                "api_scope_digest": "scope-digest",
+                "approved_tools": approved_tools,
+            },
+        })
+    }
+
+    fn policy_tool(
+        name: &str,
+        class: &str,
+        input_schema_digest: &str,
+        output_schema_digest: &str,
+    ) -> serde_json::Value {
+        json!({
+            "name": name,
+            "class": class,
+            "input_schema_digest": input_schema_digest,
+            "output_schema_digest": output_schema_digest,
+        })
+    }
+
+    fn schema_digests(
+        input_schema: &serde_json::Value,
+        output_schema: &serde_json::Value,
+    ) -> (String, String) {
+        let observation = ToolObservation::from_schemas(
+            "digest-probe",
+            input_schema,
+            output_schema,
+            ToolClass::Read,
+        )
+        .unwrap();
+        let snapshot = CapabilitySnapshot::from_observations(
+            ServerId::Eec,
+            "1.0.0",
+            ProtocolEra::Modern,
+            vec![ProtocolVersion::V20260728],
+            AuthMode::AccessToken,
+            "scope-digest",
+            vec![observation],
+            None,
+        )
+        .unwrap();
+        let tool = &snapshot.tools[0];
+        (
+            tool.input_schema_digest.clone(),
+            tool.output_schema_digest.clone(),
+        )
+    }
+
+    #[test]
+    fn capability_policy_parses_provider_identity_and_auth_mode() {
+        let eec = McpBridgeConfig::from_params(&policy_params("eec", json!([]))).unwrap();
+        let hetzner = McpBridgeConfig::from_params(&policy_params("hetzner", json!([]))).unwrap();
+        assert_eq!(
+            eec.capability_policy.as_ref().unwrap().server_id,
+            ServerId::Eec
+        );
+        assert_eq!(
+            hetzner.capability_policy.as_ref().unwrap().server_id,
+            ServerId::Hetzner
+        );
+        assert_ne!(
+            eec.capability_policy.as_ref().unwrap().server_id,
+            hetzner.capability_policy.as_ref().unwrap().server_id
+        );
+        assert_eq!(
+            eec.capability_policy.as_ref().unwrap().auth_mode,
+            AuthMode::AccessToken
+        );
+    }
+
+    #[test]
+    fn capability_policy_accepts_direct_api_key_access_token() {
+        let config = McpBridgeConfig::from_params(&policy_params("eec", json!([]))).unwrap();
+        assert!(config.auth.api_key.is_some());
+        assert_eq!(
+            config.capability_policy.as_ref().unwrap().auth_mode,
+            AuthMode::AccessToken
+        );
+    }
+
+    #[test]
+    fn capability_policy_rejects_direct_api_key_oauth() {
+        let mut params = policy_params("eec", json!([]));
+        params["capability_policy"]["auth_mode"] = json!("oauth");
+        assert!(McpBridgeConfig::from_params(&params).is_err());
+    }
+
+    #[test]
+    fn capability_policy_requires_configured_auth() {
+        let mut params = policy_params("eec", json!([]));
+        params
+            .as_object_mut()
+            .expect("test parameters object")
+            .remove("api_key");
+        assert!(McpBridgeConfig::from_params(&params).is_err());
+    }
+
+    #[test]
+    fn capability_policy_accepts_credential_id_with_either_declared_mode() {
+        for auth_mode in ["oauth", "access_token"] {
+            let mut params = policy_params("eec", json!([]));
+            let object = params.as_object_mut().expect("test parameters object");
+            object.remove("api_key");
+            object.insert(
+                "credential_id".into(),
+                json!(CredentialId::new().to_string()),
+            );
+            params["capability_policy"]["auth_mode"] = json!(auth_mode);
+            assert!(
+                McpBridgeConfig::from_params(&params).is_ok(),
+                "credential_id should accept {auth_mode} policy metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_policy_rejects_unsupported_identity_and_malformed_values() {
+        assert!(McpBridgeConfig::from_params(&policy_params("mcp-test", json!([]))).is_err());
+        let mut invalid_auth = policy_params("eec", json!([]));
+        invalid_auth["capability_policy"]["auth_mode"] = json!("bearer");
+        assert!(McpBridgeConfig::from_params(&invalid_auth).is_err());
+        let invalid_class = policy_params(
+            "eec",
+            json!([policy_tool("read", "unknown", "input", "output")]),
+        );
+        assert!(McpBridgeConfig::from_params(&invalid_class).is_err());
+        let duplicate = policy_params(
+            "eec",
+            json!([
+                policy_tool("read", "read", "input", "output"),
+                policy_tool("read", "read", "input", "output")
+            ]),
+        );
+        assert!(McpBridgeConfig::from_params(&duplicate).is_err());
+        let oversized = policy_params(
+            "eec",
+            serde_json::Value::Array(
+                (0..=MAX_TOOL_COUNT)
+                    .map(|index| policy_tool(&format!("tool-{index}"), "read", "input", "output"))
+                    .collect(),
+            ),
+        );
+        assert!(McpBridgeConfig::from_params(&oversized).is_err());
+    }
+
+    #[test]
+    fn capability_snapshot_exact_approval_and_unknown_classification() {
+        let input_schema = json!({"type": "object"});
+        let output_schema = serde_json::Value::Null;
+        let (input_digest, output_digest) = schema_digests(&input_schema, &output_schema);
+        let config = McpBridgeConfig::from_params(&policy_params(
+            "eec",
+            json!([policy_tool(
+                "approved",
+                "read",
+                &input_digest,
+                &output_digest
+            )]),
+        ))
+        .unwrap();
+        let policy = config.capability_policy.as_ref().unwrap();
+        let snapshot = build_capability_snapshot(
+            &json!({
+                "tools": [
+                    {"name": "approved", "inputSchema": input_schema, "outputSchema": null},
+                    {"name": "unlisted", "description": "read this", "inputSchema": {"type": "object"}}
+                ]
+            }),
+            policy,
+            ProtocolEra::Modern,
+            ProtocolVersion::V20260728,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.tool_status("approved"),
+            Some(crate::protocol::ToolStatus::Approved)
+        );
+        assert!(!snapshot.tool_call_is_blocked("approved"));
+        assert_eq!(
+            snapshot.tool_status("unlisted"),
+            Some(crate::protocol::ToolStatus::Blocked)
+        );
+        assert!(snapshot.tool_call_is_blocked("unlisted"));
+        assert_eq!(
+            snapshot
+                .tools
+                .iter()
+                .find(|tool| tool.name == "unlisted")
+                .unwrap()
+                .class,
+            ToolClass::Unknown
+        );
+    }
+
+    #[test]
+    fn capability_snapshot_schema_drift_is_changed_and_blocked() {
+        let original_input = json!({"type": "object"});
+        let (input_digest, output_digest) =
+            schema_digests(&original_input, &serde_json::Value::Null);
+        let config = McpBridgeConfig::from_params(&policy_params(
+            "eec",
+            json!([policy_tool(
+                "approved",
+                "write",
+                &input_digest,
+                &output_digest
+            )]),
+        ))
+        .unwrap();
+        let snapshot = build_capability_snapshot(
+            &json!({
+                "tools": [{
+                    "name": "approved",
+                    "inputSchema": {"type": "array"},
+                    "outputSchema": null
+                }]
+            }),
+            config.capability_policy.as_ref().unwrap(),
+            ProtocolEra::Modern,
+            ProtocolVersion::V20260728,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.tool_status("approved"),
+            Some(crate::protocol::ToolStatus::Changed)
+        );
+        assert!(snapshot.tool_call_is_blocked("approved"));
+    }
+
+    #[test]
+    fn capability_snapshot_rejects_duplicate_and_malformed_catalogs() {
+        let config = McpBridgeConfig::from_params(&policy_params("eec", json!([]))).unwrap();
+        let policy = config.capability_policy.as_ref().unwrap();
+        assert!(
+            build_capability_snapshot(
+                &json!({"tools": [{"name": "same"}, {"name": "same"}]}),
+                policy,
+                ProtocolEra::Modern,
+                ProtocolVersion::V20260728,
+            )
+            .is_err()
+        );
+        assert!(
+            build_capability_snapshot(
+                &json!({"tools": [{"name": "bad", "inputSchema": []}]}),
+                policy,
+                ProtocolEra::Modern,
+                ProtocolVersion::V20260728,
+            )
+            .is_err()
+        );
+        assert!(
+            build_capability_snapshot(
+                &json!({"tools": [{"description": "missing name"}]}),
+                policy,
+                ProtocolEra::Modern,
+                ProtocolVersion::V20260728,
+            )
+            .is_err()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_tools_call_is_conditionally_policy_gated_without_provider_io() {
+        let connector = McpBridgeConnector::new();
+        let denied = connector
+            .handle_simulate(json!({"operation": OP_TOOLS_CALL}))
+            .await
+            .unwrap();
+        assert_eq!(denied["allowed"], false);
+        assert!(
+            denied["reason"]
+                .as_str()
+                .unwrap()
+                .contains("capability_policy")
+        );
+
+        let mut configured = McpBridgeConnector::new();
+        configured
+            .handle_configure(policy_params("eec", json!([])))
+            .await
+            .unwrap();
+        let conditional = configured
+            .handle_simulate(json!({"operation": OP_TOOLS_CALL}))
+            .await
+            .unwrap();
+        assert_eq!(conditional["allowed"], true);
+        assert!(
+            conditional["reason"]
+                .as_str()
+                .unwrap()
+                .contains("fresh capability discovery")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_clears_capability_policy_and_client_state() {
+        let mut connector = McpBridgeConnector::new();
+        connector
+            .handle_configure(policy_params("eec", json!([])))
+            .await
+            .unwrap();
+        assert!(
+            connector
+                .config
+                .as_ref()
+                .and_then(|config| config.capability_policy.as_ref())
+                .is_some()
+        );
+        connector.handle_shutdown(json!({})).await.unwrap();
+        assert!(connector.config.is_none());
+        assert!(connector.client.is_none());
     }
 
     #[test]

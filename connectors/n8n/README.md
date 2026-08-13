@@ -1,16 +1,16 @@
 # n8n Connector Security Contract
 
-> **Status**: packet 1 security gates implemented; production provider egress and workflow lifecycle remain fail-closed
-> **Bead**: `flywheel_connectors-nqm81.2`
+> **Status**: Linux owned per-invocation launch now supplies an authenticated inherited-FD host-egress channel and proves process-group teardown; real-host narrow-token verification against EEC and Hetzner remains pending
+> **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.21`
 > **Verification script**: none tracked; use the commands below
 > **n8n public REST API**: https://docs.n8n.io/api/
 > **n8n API reference**: https://docs.n8n.io/api/api-reference/
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes workflow and execution reads, plus a capability- and approval-gated workflow lifecycle operation that is intentionally unavailable until a mediated write path is delivered.
+This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus a capability- and approval-gated workflow lifecycle operation that is intentionally unavailable until a mediated write path is delivered.
 
-The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client, credential manager, project manager, variable manager, audit client, webhook trigger runtime, event subscription client, n8n CLI replacement, or general HTTP proxy.
+The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client or credential secret/value manager, and it does not provide project-management writes, variable management, audit access, webhook trigger runtime, event subscriptions, n8n CLI replacement, or general HTTP proxy behavior.
 
 ## Current Runtime Snapshot
 
@@ -21,20 +21,38 @@ The current crate exposes these operations:
 - `n8n.workflows.activate`
 - `n8n.executions.list`
 - `n8n.executions.get`
+- `n8n.projects.list`
+- `n8n.credentials.list`
+- `n8n.tags.list`
+- `n8n.folders.list`
+- `n8n.folders.get`
 
 Important runtime truths:
 
 - Package and binary name are `fcp-n8n`.
+- The library now includes a compact, provider-neutral target resolver and
+  provider router. It accepts explicit server, confirmed project mapping,
+  workflow/execution provenance, canonical resource URI, or bounded ambiguity;
+  workflow name alone never selects a server and legacy requires explicit
+  opt-in.
+- Provider selection is typed rather than based on arbitrary upstream tool
+  names: known-ID reads prefer REST, local node/template knowledge and
+  validation prefer local `n8n-mcp`, and capabilities without typed parity
+  prefer official MCP. Every fallback is represented explicitly and unknown
+  write capability fails closed. Provider execution wiring remains part of the
+  Phase 1 integration gate.
 - Runtime `BaseConnector` ID is `n8n`.
 - Manifest and reported connector ID are `fcp.n8n`.
-- Manifest interface hash is `blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000`.
+- The manifest interface hash is generated from the current operation surface; `fwc manifest fix connectors/n8n/manifest.toml --check --json` must report `changed=false` before release.
 - Configuration requires exactly one auth source: direct `api_key` or `credential_id`.
-- Direct API-key mode is usable only against loopback test fixtures. Production provider egress fails before DNS or HTTP until host-mediated enforcement is available.
-- `credential_id` is only a host-managed reference. The direct client neither injects the secret nor sends the reference as a provider header; every provider call fails closed until host mediation is available.
+- Direct API-key mode is usable only against loopback test fixtures. Production direct provider egress fails before DNS or HTTP.
+- `credential_id` is only a host-managed reference. Every advertised read operation constructs a bounded host-egress request whose context carries the already-verified canonical resource separately from the HTTPS transport URL. The connector never resolves, stores, or sends the API key itself.
+- In the Linux owned per-invocation path, the host creates a connected Unix socketpair, passes only the child endpoint as an inherited file descriptor, and binds the channel to a fresh per-launch authentication token. Connector configuration and operation input cannot select or redirect this transport.
+- The host compares the connector's selected-operation introspection with trusted manifest metadata before activating egress, binds every egress frame to connector, operation, zone, request, correlation, and capability-token context, and proves child reap plus process-group absence before returning.
 - `credential_id` must be a valid UUID.
 - `base_url` is required and canonicalized to the `/api/v1` root.
-- Runtime endpoint shape is `{base_url}/workflows`, `{base_url}/workflows/{id}`, `{base_url}/executions`, and `{base_url}/executions/{id}`.
-- Runtime request timeout is 30 seconds; each direct client provider call is single-attempt and has no automatic retry.
+- Runtime endpoint shape is `{base_url}/workflows`, `{base_url}/workflows/{id}`, `{base_url}/executions`, `{base_url}/executions/{id}`, `{base_url}/projects`, `{base_url}/credentials`, `{base_url}/tags`, `{base_url}/projects/{projectId}/folders`, and `{base_url}/projects/{projectId}/folders/{folderId}`.
+- Runtime request and connect timeouts come from the supplied `ConnectorRuntimeConfig` (the connector default request timeout is 30 seconds); each direct provider call or host-proxy attempt is single-attempt and has no automatic retry.
 - Runtime `invoke` requires the canonical `operation` field.
 - A host-key-backed `CapabilityVerifier` validates the bound capability token before provider dispatch.
 - Activation additionally requires exactly one semantically matching execution approval; malformed entries fail closed. The host remains authoritative for approval signature verification.
@@ -44,10 +62,26 @@ Important runtime truths:
 ## Declarative Versus Mechanical Enforcement
 
 The manifest declares DNS, TLS SNI, host/port, private-range, redirect, timeout,
-and response-size policy for the host egress layer. The direct `reqwest` path does
-not mechanically enforce DNS resolution, private-range checks, or response-size
-limits. It is therefore unavailable for non-loopback provider traffic. No local
-proxy or substitute network policy is installed in this packet.
+and response-size policy for the host egress layer. Every advertised read
+operation uses the SDK `HostEgressProxyClient` for credential-reference requests.
+The production Linux loader accepts the reserved `inherited-fd-v1` transport,
+inherited descriptor, and per-launch authentication token only as a complete
+host-issued set; it does not fall back to the legacy loopback URL.
+The connector wire path relies on the host to enforce those network constraints
+and inject the referenced credential. Host capability verification uses the
+context's canonical logical resource; network enforcement independently evaluates
+the transport URL.
+The direct `reqwest` path does not mechanically enforce the host's DNS, TLS SNI,
+private-range, redirect, or network-allow controls and is therefore unavailable
+for non-loopback provider traffic; its separate body-size and runtime-timeout
+guards are described below.
+
+The direct client prechecks `Content-Length` and streams each provider response with a
+mechanical 10 MiB aggregate body cap before typed decoding. Chunked responses are
+bounded by the same cap; oversized success and error bodies fail closed without
+returning their bytes. The direct client also applies the supplied request and connect
+timeouts. Host-policy response-size and timeout entries remain independently enforced
+by the host egress layer.
 
 The connector does mechanically enforce configuration shape, canonical API-root
 validation, capability-token binding, approval semantic matching, safe path
@@ -58,11 +92,14 @@ mediation.
 
 This packet documents and verifies:
 
-- direct n8n API key and host credential-reference configuration
+- direct n8n API key and host credential-reference configuration, including the canonical-resource host-egress slice for every advertised read
 - required self-hosted API base URL behavior
 - local URL readiness, timeout, single-attempt provider calls, and error mapping
 - workflow reads and the activation approval boundary
+- safe project metadata reads
+- compact tag metadata reads
 - execution read operations
+- typed folder list/get reads with strict redaction and project-scoped provider access
 - handshake, self-check, introspection, simulation, and reset behavior
 - deterministic WireMock tests and direct proof commands
 
@@ -78,30 +115,58 @@ This packet documents and verifies:
   - `n8n.workflows.read` gates workflow list/get provider calls.
   - `n8n.workflows.write` gates the activation approval boundary; a valid request is then denied before provider traffic in this packet.
   - `n8n.executions.read` gates execution list/get provider calls.
+  - `n8n.projects.read` gates safe project list provider calls.
+  - `n8n.credentials.metadata.read` gates safe credential metadata list provider calls.
+  - `n8n.tags.read` gates compact tag list provider calls.
+- `n8n.folders.read` gates both folder list/get provider calls.
+- FCP capability IDs are connector authorization labels, not n8n API-key scopes; mediated project access must satisfy both layers.
+- Current provider mappings are `n8n.projects.read` -> upstream `project:list`, `n8n.credentials.metadata.read` -> upstream `credential:list`, `n8n.tags.read` -> upstream `tag:list`, and `n8n.folders.read` -> upstream `folder:list` / `folder:read`.
+- Upstream credential listing is owner/admin-only, requires `credential:list`, and excludes secret values. The current upstream contract is [credentials.yml](https://raw.githubusercontent.com/n8n-io/n8n/master/packages/cli/src/public-api/v1/handlers/credentials/spec/paths/credentials.yml); availability and flags are version/license dependent and are not inferred here.
+- Upstream project listing is license-gated by `feat:projectRole:admin`. The reviewed upstream commit has no analogous license middleware for tags.
+- Folder operations require n8n `>=2.19.0` with the `feat:folders` feature enabled. A provider `403` is ambiguous among folder license, API-key scope, and project RBAC; this connector claims no current mechanical discriminator. Before n8n `2.19`, or when the route is absent, expect `404` or a failed future non-mechanical OpenAPI route probe.
 - Capability tokens must bind to the current connector instance and exact resource URI. The host verifier checks the token signature; the connector performs the bound semantic check.
 - Activation approval must be an exact single execution approval for connector, canonical `operation`, zone, resource, workflow state, and normalized constraints. A host-bound `input_hash` is compatible; a `request_object_id` is not. Malformed approval entries fail closed.
 - The connector does not persist API keys, credential secret material, workflow definitions, execution payloads, provider error bodies, or API responses outside process memory.
-- Workflow and execution data can contain secrets, credentials metadata, prompts, private business data, or tool output. Treat live output as work-zone data unless a stricter zone policy is implemented.
+- Provider responses are untrusted work-zone data. Runtime read operations return only
+  the explicit safe metadata views; workflow graph/nodes/connections,
+  `activeVersion`, `meta`, credential references/bodies, Code source, `pinData`,
+  execution `data`/`resultData`, and unknown fields are discarded before output.
+- Compact workflow-list metadata preserves provider `activeVersionId` presence:
+  an omitted field is omitted, explicit `null` remains `null`, and a string is
+  returned exactly. Workflow get is stricter: the field and matching
+  `activeVersion` must both be explicitly present and consistent.
 
 ## Network And Runtime Invariants
 
 - Runtime endpoint shape:
-  - `GET {base_url}/workflows`
+  - `GET {base_url}/workflows?limit=<1..200>&cursor=<opaque>&excludePinnedData=true`
   - `GET {base_url}/workflows/{id}`
-  - `GET {base_url}/executions`
+  - `GET {base_url}/executions?limit=<1..200>&cursor=<opaque>&includeData=false&ignoreDataSizeLimit=false&redactExecutionData=true`
   - `GET {base_url}/executions/{id}`
+  - `GET {base_url}/projects?limit=<1..200>&cursor=<opaque>`
+  - `GET {base_url}/credentials?limit=<1..200>&cursor=<opaque>`
+  - `GET {base_url}/tags?limit=<1..200>&cursor=<opaque>`
+  - `GET {base_url}/projects/{projectId}/folders?select=%5B%22id%22%2C%22name%22%2C%22parentFolder%22%5D&filter=<optional-json>&skip=<n>&take=<1..200>`
+  - `GET {base_url}/projects/{projectId}/folders/{folderId}`
 - `n8n.workflows.activate` emits no provider request in this packet. Its capability and approval checks run first, then the operation fails closed with a deferred-lifecycle error. The mediated write path is owned by the lifecycle/egress follow-up beads.
 - Runtime sends `Accept: application/json`.
 - Loopback test requests with API-key mode send `X-N8N-API-KEY`.
-- Credential-reference mode sends no credential header from this client.
+- Owned production credential-reference reads send one typed request per provider call over the authenticated inherited-FD channel. Each strict envelope contains only the exact upstream HTTPS read URL, `GET`, safe `Accept`, the credential UUID, and verified request attribution (`fcp.n8n`, the exact operation, its canonical resource, current zone, session-derived request ID, and raw COSE CBOR capability token encoded as standard base64). The loopback HTTP `POST /rpc/egress/http` transport remains test/legacy-only.
+- Production transport provenance comes only from the host-created connected descriptor plus `FCP_HOST_EGRESS_TRANSPORT=inherited-fd-v1` and a fresh host-issued `FCP_HOST_EGRESS_AUTH_TOKEN`. All host-egress transport variables are reserved and rejected in managed connector environment. Neither connector configuration nor operation input can supply them. `FCP_HOST_EGRESS_PROXY_URL` is retained only for explicit legacy/test construction and is never a production fallback.
+- Credential-reference mode sends no provider credential header from this client. The host resolves and injects the credential; the connector neither receives nor returns it.
 - Runtime user agent is `fcp-n8n/0.1.0 (FCP connector)`.
-- Direct provider I/O is allowed only for loopback test hosts (`localhost`, `127.0.0.1`, or IPv6 loopback) with API-key mode. Production HTTPS configurations fail before DNS or HTTP and require host-mediated egress enforcement.
-- Credential references fail before any provider traffic until a host-mediated secret-injection contract is present.
-- Runtime request timeout: `30 seconds`.
+- Direct provider I/O is allowed only for loopback test hosts (`localhost`, `127.0.0.1`, or IPv6 loopback) with API-key mode. Production HTTPS reads use only the credential-reference host-egress path; full real-host readiness is not claimed until its narrow-token host test is executed.
+- Host egress treats `context.resource_uri` as the capability-constrained logical resource and treats `url` as an independent transport-policy target. Focused host tests cover matching logical-resource authorization, mismatched logical-resource denial, disallowed transport, inherited-channel identity binding, stale registry generation, pre-activation rejection, exact operation-metadata parity, bounded success, post-launch failure teardown, child reap, and process-group absence. Real EEC/Hetzner narrow-token proof remains a separate acceptance gate.
+- A missing, rejected, malformed, or failed host proxy response fails closed with no direct fallback and no second attempt. Host/provider bodies, headers, capability material, and credential UUIDs are not exposed in connector output or safe errors.
+- Mediated response bodies are bounded to 10 MiB before JSON and typed projection. Host decision metadata must exactly match the connector, exact operation, zone, request identity, target host/port, allow decision, managed operation-network constraint source, and successful credential injection.
+- Runtime request and connect timeouts are supplied by `ConnectorRuntimeConfig`; the connector default request timeout is `30 seconds`.
+- Direct provider response bodies are mechanically bounded to `10 MiB` before JSON and typed projection, including chunked responses and error bodies.
 - Direct client calls are single-attempt; no automatic retry loop is installed.
 - Provider HTTP 401, 403, 404, 429, and other API errors map to typed connector/FCP errors.
 - `Retry-After` on 429 is surfaced as a delay hint in the typed error; it does not trigger an automatic retry.
-- Manifest connect timeout, total timeout, DNS, private-range, redirect, SNI, and response-size entries are host-policy declarations, not claims about the direct client path.
+- Readiness diagnosis maps provider status classes without inferring a cause: a `403` is ambiguous among folder license, API-key scope, and project RBAC; pre-`2.19` or route absence is a `404` or a failed future non-mechanical OpenAPI route probe.
+- The installed `/api/v1/openapi.yml` is a future non-mechanical route/capability inspection; its `info.version` is the API specification version, not the n8n product version.
+- Manifest connect timeout, total timeout, DNS, private-range, redirect, and SNI entries remain host-policy declarations. The direct client independently applies the supplied runtime timeouts and the same `10 MiB` provider-body limit.
 - Sandbox profile is `strict`, with `256 MB` memory, `50%` CPU, no exec, and no inbound listener capability.
 - The connector does not open inbound sockets, receive n8n webhooks, run workflows locally, or connect to n8n's internal database.
 
@@ -109,28 +174,102 @@ This packet documents and verifies:
 
 | Operation | HTTP request | Capability | SafetyTier | RiskLevel | Idempotency | Required input |
 |-----------|--------------|------------|------------|-----------|-------------|----------------|
-| `n8n.workflows.list` | `GET /workflows` | `n8n.workflows.read` | `Safe` | `Low` | `Strict` | none |
+| `n8n.workflows.list` | `GET /workflows` with bounded `limit`/opaque `cursor` | `n8n.workflows.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
 | `n8n.workflows.get` | `GET /workflows/{id}` | `n8n.workflows.read` | `Safe` | `Low` | `Strict` | `id` string |
 | `n8n.workflows.activate` | no provider request; lifecycle deferred | `n8n.workflows.write` | `Risky` | `Medium` | `None` | `id` string and `active` bool plus one matching approval |
-| `n8n.executions.list` | `GET /executions` | `n8n.executions.read` | `Safe` | `Low` | `Strict` | none |
+| `n8n.executions.list` | `GET /executions` with bounded `limit`/opaque `cursor` | `n8n.executions.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
 | `n8n.executions.get` | `GET /executions/{id}` | `n8n.executions.read` | `Safe` | `Low` | `Strict` | `workflow_id` and `id` strings |
+| `n8n.projects.list` | `GET /projects` with bounded `limit`/opaque `cursor`; direct loopback API-key or canonical-resource host-egress credential reference | `n8n.projects.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
+| `n8n.credentials.list` | `GET /credentials` with bounded `limit`/opaque `cursor`; owner/admin and upstream `credential:list` caveat | `n8n.credentials.metadata.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
+| `n8n.tags.list` | `GET /tags` with bounded `limit`/opaque `cursor` | `n8n.tags.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
+| `n8n.folders.list` | `GET /projects/{projectId}/folders` with fixed `select`, optional JSON filter, and bounded `skip`/`take` | `n8n.folders.read` | `Safe` | `Low` | `Strict` | `project_id` |
+| `n8n.folders.get` | `GET /projects/{projectId}/folders/{folderId}` | `n8n.folders.read` | `Safe` | `Low` | `Strict` | `project_id`, `folder_id` |
+
+Read output boundary:
+- Workflow list items keep the compact metadata projection (`id`, nullable `name` and
+  description/state metadata, project/folder timestamps, and tag `id`/`name`) and
+  continue to discard graph content.
+- Workflow get requires explicit provider `active`, `versionId`,
+  `activeVersionId` (string or null), `isArchived`, current `nodes` and
+  `connections`, and `activeVersion` (object or null). It returns the normalized
+  state fields `id`, `name`, `projectId`, `folderId`, `versionId`, `active`,
+  `activeVersionId`, `isArchived`, `draft`, `published`, `stateDigest`, and
+  `updatedAt`. Missing or contradictory publication fields fail closed.
+- `draft.graphDigest` and `published.graphDigest` use domain-separated
+  BLAKE3-256 over deterministic JSON containing exactly `nodes` and
+  `connections`: object keys are recursively sorted, array order is preserved,
+  and only each node's top-level `credentials` binding is removed. Code node
+  source and all other graph semantics remain in the digest preimage but are
+  never returned or logged.
+- `stateDigest` uses a separate domain and includes normalized metadata,
+  version/lifecycle fields, provider `createdAt`/`updatedAt`, tags, and the
+  complete draft and published graphs including credential bindings. Provider
+  `createdAt` remains digest-only and is not added to the normalized public
+  output. `stateDigest` is the write-precondition
+  digest; an official MCP representation that hides credential bindings cannot
+  authorize a write without a typed REST readback that reproduces this digest.
+- Raw nodes, connections, Code source, credential references, pinned data, and
+  either digest preimage never cross the connector output or log boundary.
+- Execution reads serialize only `id`, `finished`, `mode`, `startedAt`, `stoppedAt`,
+  `workflowId`, `status`, `retryOf`, `retrySuccessId`, and `waitTill`.
+- Project reads serialize only `id`, `name`, and optional `type`. Users, roles,
+  memberships, credentials, workflow data, and arbitrary provider metadata are discarded.
+- The project projection assumes the current provider shape includes `id`; if it is absent, the connector fails closed rather than inventing an identifier.
+- Tag reads serialize only `id` and `name`; provider timestamps and arbitrary metadata
+  are discarded.
+- Credential reads serialize only `resourceUri`, `id`, `name`, and `type`; provider
+  values, secret/config maps, auth headers, sharing entries, and unrecognized fields
+  are discarded. Each item binds to `fwc-n8n://{server}/credentials/{credentialId}`.
+- Folder list responses preserve the provider `{count,data}` envelope and serialize
+  only `resourceUri`, `id`, `name`, and `parentFolderId`. Root folders return a null
+  `parentFolderId`; each item URI is `fwc-n8n://{server}/folders/{folderId}`.
+- Folder get responses serialize exactly `resourceUri`, `id`, `name`,
+  `parentFolderId`, `createdAt`, `updatedAt`, `totalSubFolders`, and
+  `totalWorkflows`. The provider must supply every field; only an explicit null
+  `parentFolderId` is accepted as a null value. Get URIs use the same folder-only
+  canonical shape.
+- Folder list capability tokens bind to `fwc-n8n://{server}/projects/{projectId}`;
+  folder get tokens bind to `fwc-n8n://{server}/folders/{folderId}`. The configured
+  `server_id` supplies server identity; `server_id` is not an operation input.
+- `name` and `finished` remain required output keys and may be `null`. List responses
+  always expose one safe page in `data`; a valid provider `nextCursor` is returned
+  exactly, while missing or `null` values omit the output key.
+- List input accepts only `limit` (integer `1..=200`, default `50`) and `cursor`
+  (non-empty opaque UTF-8 string, at most 4096 bytes, no control characters).
+  Invalid input is rejected before HTTP, and unknown properties fail closed.
+- Workflow get/activate, execution get, and folder get inputs are exact objects;
+  unknown properties fail before capability verification or provider egress.
+- Folder list input accepts required `project_id`, optional string
+  `parent_folder_id`, `skip` (default `0`), and `take` (default `50`, maximum
+  `200`). Unknown properties, invalid IDs, negative values, and `take > 200`
+  fail before HTTP. The provider `select` is always exactly
+  `["id","name","parentFolder"]`; `filter` is sent only when a parent filter
+  is supplied.
+- Workflow list requests force `excludePinnedData=true`. Execution list requests
+  force `includeData=false`, `ignoreDataSizeLimit=false`, and
+  `redactExecutionData=true`.
 
 ## Explicit Non-Goals
 
 The current implementation does not include:
 
-- workflow create, update, delete, import, export, clone, test-run, tag, project, variable, credential, user, audit, or source-control operations
-- pagination, filtering, sorting, or query parameter support for workflow or execution list calls
+- workflow create, update, delete, import, export, clone, test-run, tag write, project write, folder write, credential write/secret retrieval, variable, user, audit, or source-control operations
+- provider-specific filtering and sorting for workflow or execution list calls
 - activation provider lifecycle; capability and approval gates are present, but the provider write path is deferred
 - execution retry, stop, delete, log streaming, custom-data filtering, or execution-data redaction management
 - API-key provisioning, secret injection, or host egress enforcement
 - OAuth installation, API-key rotation, credential validation beyond local configuration shape, or live self-check probe
 - n8n CLI behavior, server CLI behavior, embedded n8n runtime, webhook receiver, scheduler, or trigger execution
+- provider credential claims: the connector does not infer or assert that a folder
+  `403` is caused by folder licensing, API-key scope, or project RBAC; no current
+  mechanical discriminator is claimed
 
 These are excluded on purpose:
 
 - Activating a workflow can start cron, webhook, polling, or other production triggers. This packet therefore denies the operation even after its capability and approval checks pass.
-- Workflow and execution payloads may contain sensitive data and need a clearer read policy before adding broad export or debugging surfaces.
+- Providers may supply sensitive workflow and execution payloads, but this slice
+  discards those payloads at the typed provider DTO -> safe runtime view boundary;
+  broad export and debugging surfaces remain non-goals.
 - n8n has a large public API; this connector should grow only through manifest-aligned, capability-gated slices.
 
 ## Readiness And Verification Surface
@@ -147,7 +286,14 @@ These are excluded on purpose:
 The deterministic integration evidence is anchored on connector-local tests covering:
 
 - lifecycle, configuration, health, doctor, self-check, introspection, simulation, shutdown, and counters
-- all read operations through deterministic HTTP fixtures, plus activation zero-traffic denial
+- all read operations through deterministic HTTP fixtures, including hostile-field redaction, bounded query encoding, cursor validation/preservation, strict workflow publication-state invariants, graph/state digest separation, and null required-key assertions, plus activation zero-traffic denial
+- project list success, pagination, bounded query encoding, input rejection before HTTP, cursor presence validation, safe projection, provider error classes, timeout mapping, and malformed JSON rejection
+- credential metadata list success, bounded pagination and cursor handling, owner/admin/scope caveat documentation, malformed required-field rejection, provider status/timeout/bad-JSON mapping, canonical resource binding, host-proxy envelope, no-fallback behavior, and hostile secret-field discard
+- direct provider response bounds for declared and chunked oversized success/error bodies, a boundary-safe response, and a short configured timeout
+- table-driven connector-to-proxy envelope/response handling for every advertised read, including exact operation/resource pairs and logical resources distinct from HTTPS transport URLs
+- focused host authorization source coverage with a non-wildcard token: matching logical resource accepted, mismatched logical resource rejected, and valid logical resource plus disallowed transport rejected by network policy; execution remains pending the resource-gated verification owner
+- tag list typed projection, timestamp/unknown-field redaction, bounded pagination, input/cursor validation, provider error mapping, timeout, malformed JSON, and capability/simulation parity
+- folder list/get projection and redaction, exact encoded paths and JSON query values, root/nested parent handling, defaults/bounds, invalid-input no-HTTP behavior, capability-resource binding, required-field rejection, safe 400/401/403/404/429/500/503 mapping, malformed JSON, configured timeout, and simulation parity
 - invoke rejection for unknown operation and missing required inputs
 - provider 401, 403, 404, 429, and 500 classes
 - API-key and credential-reference modes, auth redaction, zero-traffic egress denial, provisioning readiness, and base URL policy
@@ -156,11 +302,14 @@ The deterministic integration evidence is anchored on connector-local tests cove
 ## Source Notes
 
 - `connectors/n8n/src/connector.rs` defines configuration parsing, lifecycle handlers, URL readiness policy, provisioning recipe, introspection, simulation, and invoke dispatch.
-- `connectors/n8n/src/client.rs` defines auth headers, endpoint paths, timeout, URL trimming, and provider error mapping.
-- `connectors/n8n/src/types.rs` defines API error response shapes.
+- `connectors/n8n/src/client.rs` defines auth headers, endpoint paths, supplied runtime timeouts, bounded provider-body reads, URL trimming, and provider error mapping.
+- `connectors/n8n/src/types.rs` defines separate permissive list and strict
+  workflow-detail provider DTOs, serialize-only normalized state/views and list
+  envelopes, presence-aware publication state, strict folder field presence,
+  and API error response shapes.
 - `connectors/n8n/src/error.rs` defines connector error classes and FCP error conversion.
 - `connectors/n8n/manifest.toml` defines the manifest operation catalog, network constraints, sandbox boundary, zone policy, and rate-limit intent.
-- `connectors/n8n/tests/integration.rs` contains the runtime contract proof surface.
+- `connectors/n8n/tests/integration.rs` contains the runtime contract proof surface, including hostile provider-payload redaction fixtures.
 
 ## Verification Bundle
 
@@ -185,8 +334,9 @@ cargo fmt --all -- --check
 ## Operator Guidance
 
 - Configure an n8n public API root, commonly shaped like `https://n8n.example.com/api/v1`.
-- Use a host credential reference for the eventual mediated path; this connector cannot inject it and fails closed until that path exists.
+- A host credential reference is accepted and every advertised read uses a bounded proxy envelope carrying its canonical logical resource independently of its HTTPS target. Treat production readiness as pending until the focused real-host narrow-token test is run.
 - Direct API-key mode is for loopback fixtures only in this packet; production egress requires host mediation.
 - Treat workflow activation as deferred: capability and approval checks are enforced, but no provider lifecycle request is emitted.
 - Use `self_check()` as a safe readiness/probe report. Production and credential-reference modes report failure before provider traffic.
-- Expect list operations to return the provider's default page, not a complete synchronized inventory.
+- Expect list operations to return one bounded provider page. Pass a returned
+  `nextCursor` back unchanged to continue; provider-specific filtering remains unsupported.

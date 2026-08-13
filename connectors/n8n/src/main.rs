@@ -45,7 +45,7 @@ fn main() -> Result<()> {
 fn run_fcp_loop() -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    let mut connector = N8nConnector::new();
+    let mut connector = N8nConnector::try_new()?;
 
     let runtime = Builder::new_multi_thread().enable_all().build()?;
 

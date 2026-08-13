@@ -18,7 +18,7 @@ pub enum N8nError {
     Http(#[from] reqwest::Error),
 
     /// JSON serialization/deserialization failed
-    #[error("JSON error: {0}")]
+    #[error("Provider returned invalid JSON")]
     Json(#[from] serde_json::Error),
 
     /// n8n API returned an error
@@ -44,6 +44,10 @@ pub enum N8nError {
     /// Invalid input (missing field, path traversal, etc.).
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// Provider returned a structurally malformed response.
+    #[error("Malformed provider response")]
+    MalformedProviderResponse,
 }
 
 impl N8nError {
@@ -63,6 +67,7 @@ impl N8nError {
             Self::Forbidden => "n8n authorization failed".into(),
             Self::NotFound { .. } => "n8n resource was not found".into(),
             Self::InvalidInput(message) => format!("invalid n8n input: {message}"),
+            Self::MalformedProviderResponse => "n8n provider returned a malformed response".into(),
         }
     }
 
@@ -93,8 +98,8 @@ impl N8nError {
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
             },
-            Self::Json(e) => FcpError::Internal {
-                message: format!("JSON error: {e}"),
+            Self::Json(_) => FcpError::Internal {
+                message: "Provider returned invalid JSON".into(),
             },
             Self::Api {
                 status_code,
@@ -134,6 +139,13 @@ impl N8nError {
             Self::InvalidInput(msg) => FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("Invalid input: {msg}"),
+            },
+            Self::MalformedProviderResponse => FcpError::External {
+                service: "n8n".into(),
+                message: "Malformed provider response".into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
             },
         }
     }
@@ -196,6 +208,16 @@ mod tests {
     }
 
     #[test]
+    fn provider_json_errors_do_not_echo_provider_values() {
+        let source = serde_json::from_str::<u64>(r#""marker.provider.secret""#)
+            .expect_err("string must not decode as an integer");
+        let error = N8nError::from(source);
+        assert_eq!(error.to_string(), "Provider returned invalid JSON");
+        let mapped = error.to_fcp_error().to_string();
+        assert!(!mapped.contains("marker.provider.secret"));
+    }
+
+    #[test]
     fn api_502_is_retryable() {
         assert!(
             N8nError::Api {
@@ -215,6 +237,26 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    #[test]
+    fn malformed_provider_response_is_safe_and_non_retryable() {
+        let error = N8nError::MalformedProviderResponse;
+        assert_eq!(
+            error.safe_summary(),
+            "n8n provider returned a malformed response"
+        );
+        assert!(!error.is_retryable());
+        assert!(matches!(
+            error.to_fcp_error(),
+            FcpError::External {
+                service,
+                message,
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            } if service == "n8n" && message == "Malformed provider response"
+        ));
     }
 
     #[test]
@@ -429,7 +471,9 @@ mod tests {
     fn json_error_to_fcp_internal() {
         let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
         match N8nError::Json(bad.unwrap_err()).to_fcp_error() {
-            FcpError::Internal { message } => assert!(message.starts_with("JSON error:")),
+            FcpError::Internal { message } => {
+                assert_eq!(message, "Provider returned invalid JSON");
+            }
             other => panic!("expected Internal, got {other:?}"),
         }
     }

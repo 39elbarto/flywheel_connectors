@@ -136,8 +136,14 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
         .expect("shutdown connector");
     let requests = server.join();
     assert_eq!(requests.len(), 2);
-    assert_request(&requests[0], "GET /api/v1/workflows HTTP/1.1");
-    assert_request(&requests[1], "GET /api/v1/executions HTTP/1.1");
+    assert_request(
+        &requests[0],
+        "GET /api/v1/workflows?limit=50&excludePinnedData=true HTTP/1.1",
+    );
+    assert_request(
+        &requests[1],
+        "GET /api/v1/executions?limit=50&includeData=false&ignoreDataSizeLimit=false&redactExecutionData=true HTTP/1.1",
+    );
     assert_eq!(requests[0].body, json!({}));
     assert_eq!(requests[1].body, json!({}));
 
@@ -214,7 +220,10 @@ async fn local_non_mock_unauthorized_maps_non_retryable_external_error() {
 
     let requests = server.join();
     assert_eq!(requests.len(), 1);
-    assert_request(&requests[0], "GET /api/v1/workflows HTTP/1.1");
+    assert_request(
+        &requests[0],
+        "GET /api/v1/workflows?limit=50&excludePinnedData=true HTTP/1.1",
+    );
 
     let artifact = proof_artifact(&json!({
         "request_response_boundary": {

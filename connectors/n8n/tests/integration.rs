@@ -11,20 +11,25 @@
     clippy::unused_async
 )]
 
+use std::time::Duration;
+
+use base64::Engine;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope,
     FcpResult, InputConstraint, ZoneId,
 };
+use fcp_sdk::ConnectorRuntimeConfig;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_n8n::connector::N8nConnector;
 
 const TEST_SERVER_ID: &str = "eec";
 const TEST_INSTANCE_ID: &str = "inst_n8n_test";
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 fn test_signing_key() -> Ed25519SigningKey {
     Ed25519SigningKey::from_bytes(&[42_u8; 32]).expect("fixed test key should parse")
@@ -32,8 +37,22 @@ fn test_signing_key() -> Ed25519SigningKey {
 
 fn resource_uri(operation: &str, input: &Value) -> String {
     match operation {
-        "n8n.workflows.list" | "n8n.executions.list" => {
+        "n8n.workflows.list"
+        | "n8n.executions.list"
+        | "n8n.projects.list"
+        | "n8n.credentials.list"
+        | "n8n.tags.list" => {
             format!("fwc-n8n://{TEST_SERVER_ID}")
+        }
+        "n8n.folders.list" => {
+            let project_id = input["project_id"].as_str().unwrap_or("invalid-project");
+            let project_id = utf8_percent_encode(project_id, NON_ALPHANUMERIC);
+            format!("fwc-n8n://{TEST_SERVER_ID}/projects/{project_id}")
+        }
+        "n8n.folders.get" => {
+            let folder_id = input["folder_id"].as_str().unwrap_or("invalid-folder");
+            let folder_id = utf8_percent_encode(folder_id, NON_ALPHANUMERIC);
+            format!("fwc-n8n://{TEST_SERVER_ID}/folders/{folder_id}")
         }
         "n8n.workflows.get" | "n8n.workflows.activate" => {
             let id = input["id"].as_str().expect("workflow id for test token");
@@ -77,6 +96,10 @@ fn capability_token_with_options(
         "n8n.workflows.activate" => "n8n.workflows.write",
         "n8n.workflows.list" | "n8n.workflows.get" => "n8n.workflows.read",
         "n8n.executions.list" | "n8n.executions.get" => "n8n.executions.read",
+        "n8n.projects.list" => "n8n.projects.read",
+        "n8n.credentials.list" => "n8n.credentials.metadata.read",
+        "n8n.tags.list" => "n8n.tags.read",
+        "n8n.folders.list" | "n8n.folders.get" => "n8n.folders.read",
         _ => panic!("unknown operation in test token: {operation}"),
     };
     let constraints = CapabilityConstraints {
@@ -181,7 +204,18 @@ async fn setup_connector(mock_url: &str) -> N8nConnector {
 }
 
 async fn setup_connector_with_config(config: Value) -> N8nConnector {
-    let mut c = N8nConnector::new();
+    setup_connector_with_runtime_config(
+        config,
+        ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+    )
+    .await
+}
+
+async fn setup_connector_with_runtime_config(
+    config: Value,
+    runtime_config: ConnectorRuntimeConfig,
+) -> N8nConnector {
+    let mut c = N8nConnector::new_with_runtime_config(runtime_config);
     let key = test_signing_key();
     c.handle_configure(config).await.unwrap();
     c.handle_handshake(json!({
@@ -192,13 +226,190 @@ async fn setup_connector_with_config(config: Value) -> N8nConnector {
         "capabilities_requested": [
             "n8n.workflows.read",
             "n8n.workflows.write",
-            "n8n.executions.read"
+            "n8n.executions.read",
+            "n8n.projects.read",
+            "n8n.credentials.metadata.read",
+            "n8n.tags.read",
+            "n8n.folders.read"
         ],
         "requested_instance_id": TEST_INSTANCE_ID
     }))
     .await
     .unwrap();
     c
+}
+
+async fn setup_mediated_connector(proxy_url: &str) -> N8nConnector {
+    let runtime_config = ConnectorRuntimeConfig::default()
+        .with_request_timeout(Duration::from_secs(30))
+        .with_host_egress_proxy_url(proxy_url);
+    let mut c = N8nConnector::new_with_runtime_config(runtime_config);
+    let key = test_signing_key();
+    c.handle_configure(json!({
+        "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        "server_id": TEST_SERVER_ID,
+        "base_url": "https://n8n.example.com/api/v1",
+    }))
+    .await
+    .unwrap();
+    c.handle_handshake(json!({
+        "protocol_version": "1.0.0",
+        "zone": "z:work",
+        "host_public_key": key.verifying_key().to_bytes(),
+        "nonce": vec![0_u8; 32],
+        "capabilities_requested": [
+            "n8n.workflows.read",
+            "n8n.executions.read",
+            "n8n.projects.read",
+            "n8n.credentials.metadata.read",
+            "n8n.tags.read",
+            "n8n.folders.read"
+        ],
+        "requested_instance_id": TEST_INSTANCE_ID
+    }))
+    .await
+    .unwrap();
+    c
+}
+
+#[derive(Clone)]
+struct MediatedProjectsResponse {
+    status: u16,
+    body: Vec<u8>,
+    retry_after: Option<&'static str>,
+    malformed_decision: bool,
+}
+
+impl MediatedProjectsResponse {
+    fn json(status: u16, body: &Value) -> Self {
+        Self {
+            status,
+            body: serde_json::to_vec(&body).unwrap(),
+            retry_after: None,
+            malformed_decision: false,
+        }
+    }
+}
+
+impl Respond for MediatedProjectsResponse {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let envelope: Value = serde_json::from_slice(&request.body).unwrap();
+        let context = &envelope["context"];
+        let mut decision = json!({
+            "connector_id": context["connector_id"],
+            "operation_id": context["operation_id"],
+            "zone_id": context["zone_id"],
+            "request_id": context["request_id"],
+            "execution_mode": "host_egress_proxy",
+            "constraint_source": "managed_connector_config.operation_network_constraints",
+            "decision": "allow",
+            "resolved_host": "n8n.example.com",
+            "resolved_port": 443,
+            "credential_injected": true,
+            "elapsed_ms": 1,
+        });
+        if let Some(correlation_id) = context.get("correlation_id") {
+            decision["correlation_id"] = correlation_id.clone();
+        }
+        if self.malformed_decision {
+            decision["operation_id"] = json!("n8n.tags.list");
+        }
+        let headers = self.retry_after.map_or_else(Vec::new, |value| {
+            vec![json!({"name": "retry-after", "value": value})]
+        });
+        ResponseTemplate::new(200).set_body_json(json!({
+            "status": self.status,
+            "headers": headers,
+            "body": format!(
+                "base64:{}",
+                base64::engine::general_purpose::STANDARD.encode(&self.body)
+            ),
+            "egress": decision,
+        }))
+    }
+}
+
+fn assert_no_untrusted_output(value: &Value) {
+    let serialized = serde_json::to_string(value).expect("runtime view should serialize");
+    for field in [
+        "nodes",
+        "connections",
+        "activeVersion",
+        "meta",
+        "credentials",
+        "code",
+        "pinData",
+        "data",
+        "resultData",
+        "unknownField",
+        "users",
+        "roles",
+        "memberships",
+        "workflow",
+        "nextCursor",
+    ] {
+        assert!(
+            value.get(field).is_none(),
+            "untrusted field escaped: {field}"
+        );
+        let field_token = format!("\"{field}\"");
+        assert!(
+            !serialized.contains(&field_token),
+            "untrusted field name escaped: {field}"
+        );
+    }
+    for marker in [
+        "marker.workflow.graph",
+        "marker.workflow.code",
+        "marker.workflow.credentials",
+        "marker.workflow.pin",
+        "marker.execution.data",
+        "marker.execution.result",
+        "marker.execution.credentials",
+        "marker.execution.pin",
+        "marker.project.users",
+        "marker.project.memberships",
+        "marker.project.credentials",
+        "marker.project.workflow",
+        "marker.project.provider-error",
+        "marker.unknown",
+    ] {
+        assert!(
+            !serialized.contains(marker),
+            "untrusted marker escaped: {marker}"
+        );
+    }
+}
+
+fn assert_compact_tag_output(value: &Value) {
+    let serialized = serde_json::to_string(value).expect("tag view should serialize");
+    let object = value.as_object().expect("tag view should be an object");
+    assert!(object.contains_key("id"));
+    assert!(object.contains_key("name"));
+    assert_eq!(object.len(), 2, "tag output must contain only id and name");
+    for field in [
+        "createdAt",
+        "updatedAt",
+        "users",
+        "roles",
+        "memberships",
+        "credentials",
+        "unknownField",
+    ] {
+        assert!(value.get(field).is_none(), "tag field leaked: {field}");
+        assert!(
+            !serialized.contains(&format!("\"{field}\"")),
+            "tag field name escaped: {field}"
+        );
+    }
+    for marker in [
+        "marker.tag.created",
+        "marker.tag.updated",
+        "marker.tag.users",
+        "marker.tag.unknown",
+    ] {
+        assert!(!serialized.contains(marker), "tag marker escaped: {marker}");
+    }
 }
 
 // -- Lifecycle --
@@ -265,6 +476,7 @@ async fn lifecycle_self_check_configured() {
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows"))
         .and(query_param("limit", "1"))
+        .and(query_param("excludePinnedData", "true"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
         .mount(&server)
         .await;
@@ -347,6 +559,8 @@ async fn workflows_list() {
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows"))
         .and(header("X-N8N-API-KEY", "test-n8n-api-key-123"))
+        .and(query_param("limit", "50"))
+        .and(query_param("excludePinnedData", "true"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {"id": "1001", "name": "Daily Report", "active": true},
@@ -377,6 +591,1611 @@ async fn workflows_list_empty() {
     assert!(result["data"].as_array().unwrap().is_empty());
 }
 
+#[fcp_async_core::runtime::test]
+async fn workflows_list_null_cursor_is_omitted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [],
+            "nextCursor": null
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(&c, "n8n.workflows.list", json!({})).await.unwrap();
+    assert!(result.get("nextCursor").is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_list_accepts_bounded_limits_and_opaque_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(query_param("limit", "1"))
+        .and(query_param("excludePinnedData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(query_param("limit", "200"))
+        .and(query_param("cursor", "opaque cursor/%"))
+        .and(query_param("excludePinnedData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    invoke(&c, "n8n.workflows.list", json!({"limit": 1}))
+        .await
+        .unwrap();
+    invoke(
+        &c,
+        "n8n.workflows.list",
+        json!({"limit": 200, "cursor": "opaque cursor/%"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+// -- Projects List --
+
+#[fcp_async_core::runtime::test]
+async fn projects_list_projects_are_safely_projected() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .and(header("X-N8N-API-KEY", "test-n8n-api-key-123"))
+        .and(query_param("limit", "50"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "project-1",
+                    "name": "Operations",
+                    "type": "team",
+                    "users": [{"id": "marker.project.users"}],
+                    "roles": ["owner"],
+                    "memberships": [{"id": "marker.project.memberships"}],
+                    "credentials": {"api": "marker.project.credentials"},
+                    "workflow": {"nodes": ["marker.project.workflow"]},
+                    "unknownField": "marker.unknown"
+                },
+                {
+                    "id": "project-2",
+                    "name": "Personal",
+                    "users": [{"id": "marker.project.users"}]
+                }
+            ],
+            "nextCursor": "opaque-project-cursor"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(&c, "n8n.projects.list", json!({})).await.unwrap();
+    let projects = result["data"].as_array().unwrap();
+    assert_eq!(projects.len(), 2);
+    assert_eq!(projects[0]["id"], "project-1");
+    assert_eq!(projects[0]["name"], "Operations");
+    assert_eq!(projects[0]["type"], "team");
+    assert!(projects[1].get("type").is_none());
+    assert_eq!(result["nextCursor"], "opaque-project-cursor");
+    for project in projects {
+        assert_no_untrusted_output(project);
+        assert!(project.get("id").is_some());
+        assert!(project.get("name").is_some());
+        assert!(project.get("type").is_none() || project["type"].is_string());
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn projects_list_uses_bounded_limit_and_opaque_cursor_encoding() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .and(query_param("limit", "200"))
+        .and(query_param("cursor", "opaque cursor/%"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    invoke(
+        &c,
+        "n8n.projects.list",
+        json!({"limit": 200, "cursor": "opaque cursor/%"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn projects_list_missing_and_null_cursor_are_omitted() {
+    for response in [json!({"data": []}), json!({"data": [], "nextCursor": null})] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+
+        let c = setup_connector(&server.uri()).await;
+        let result = invoke(&c, "n8n.projects.list", json!({})).await.unwrap();
+        assert!(result.get("nextCursor").is_none());
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn projects_list_rejects_invalid_input_without_http() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let mut invalid_inputs = vec![
+        json!({"limit": 0}),
+        json!({"limit": 201}),
+        json!({"limit": -1}),
+        json!({"limit": 1.5}),
+        json!({"limit": "1"}),
+        json!({"limit": true}),
+        json!({"limit": null}),
+        json!({"cursor": ""}),
+        json!({"cursor": null}),
+        json!({"cursor": 1}),
+        json!({"cursor": "bad\ncursor"}),
+        json!({"unknown": 1}),
+    ];
+    invalid_inputs.push(json!({"cursor": "x".repeat(4097)}));
+
+    for input in invalid_inputs {
+        assert!(invoke(&c, "n8n.projects.list", input).await.is_err());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn projects_list_rejects_malformed_provider_cursor() {
+    for cursor in [json!(""), json!("bad\ncursor"), json!("x".repeat(4097))] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [],
+                "nextCursor": cursor
+            })))
+            .mount(&server)
+            .await;
+
+        let c = setup_connector(&server.uri()).await;
+        assert!(invoke(&c, "n8n.projects.list", json!({})).await.is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn projects_list_maps_provider_errors_without_leaking_body() {
+    for status in [401, 403, 404, 429, 500, 503] {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(status).set_body_json(json!({
+            "message": "marker.project.provider-error"
+        }));
+        if status == 429 {
+            response = response.insert_header("retry-after", "30");
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/v1/projects"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+
+        let c = setup_connector(&server.uri()).await;
+        let error = invoke(&c, "n8n.projects.list", json!({}))
+            .await
+            .expect_err("provider error should fail closed");
+        assert!(!error.to_string().contains("marker.project.provider-error"));
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn projects_list_rejects_bad_json() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{not-json"))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(invoke(&c, "n8n.projects.list", json!({})).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn credentials_list_uses_upstream_route_and_discards_secret_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/credentials"))
+        .and(header("X-N8N-API-KEY", "test-n8n-api-key-123"))
+        .and(query_param("limit", "200"))
+        .and(query_param("cursor", "opaque cursor/%"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "cred-1",
+                "name": "GitHub",
+                "type": "githubApi",
+                "data": {"token": "marker.credential.secret"},
+                "authHeader": "marker.credential.header",
+                "config": {"password": "marker.credential.config"},
+                "shared": [{"id": "project-1", "name": "Operations", "role": "credential:owner"}]
+            }],
+            "nextCursor": "opaque-next"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(
+        &c,
+        "n8n.credentials.list",
+        json!({"limit": 200, "cursor": "opaque cursor/%"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result,
+        json!({
+            "data": [{
+                "resourceUri": "fwc-n8n://eec/credentials/cred%2D1",
+                "id": "cred-1",
+                "name": "GitHub",
+                "type": "githubApi"
+            }],
+            "nextCursor": "opaque-next"
+        })
+    );
+    let serialized = serde_json::to_string(&result).unwrap();
+    for marker in [
+        "marker.credential.secret",
+        "marker.credential.header",
+        "marker.credential.config",
+        "shared",
+    ] {
+        assert!(!serialized.contains(marker));
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn credentials_list_omits_missing_or_null_cursor_and_rejects_bad_provider_shape() {
+    for response in [json!({"data": []}), json!({"data": [], "nextCursor": null})] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/credentials"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+        let c = setup_connector(&server.uri()).await;
+        let result = invoke(&c, "n8n.credentials.list", json!({})).await.unwrap();
+        assert!(result.get("nextCursor").is_none());
+    }
+
+    for malformed in [
+        json!({"data": [{"name": "missing-id", "type": "githubApi"}]}),
+        json!({"data": [{"id": "cred1", "type": "githubApi"}]}),
+        json!({"data": [{"id": "cred1", "name": "missing-type"}]}),
+        json!({"data": [{"id": 42, "name": "wrong-id", "type": "githubApi"}]}),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/credentials"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(malformed))
+            .mount(&server)
+            .await;
+        let c = setup_connector(&server.uri()).await;
+        assert!(invoke(&c, "n8n.credentials.list", json!({})).await.is_err());
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn credentials_list_classifies_invalid_provider_ids_as_malformed_without_echo() {
+    for invalid_id in [
+        "",
+        " marker-id",
+        "marker-id ",
+        "marker/id",
+        "marker\\id",
+        "marker%id",
+        "..",
+        "marker\u{0001}id",
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/credentials"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{
+                    "id": invalid_id,
+                    "name": "Safe credential",
+                    "type": "githubApi"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let c = setup_connector(&server.uri()).await;
+        let error = invoke(&c, "n8n.credentials.list", json!({}))
+            .await
+            .expect_err("invalid provider credential ID must fail closed");
+        assert!(matches!(
+            &error,
+            fcp_prelude::FcpError::External {
+                service,
+                status_code: None,
+                retryable: false,
+                ..
+            } if service == "n8n"
+        ));
+        let rendered = error.to_string();
+        assert!(rendered.contains("Malformed provider response"));
+        if !invalid_id.is_empty() {
+            assert!(!rendered.contains(invalid_id));
+        }
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn credentials_list_maps_statuses_and_bad_json_without_body_leaks() {
+    for status in [401, 403, 404, 429, 500, 503] {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(status).set_body_json(json!({
+            "message": "marker.credential.provider-error"
+        }));
+        if status == 429 {
+            response = response.insert_header("retry-after", "30");
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/v1/credentials"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let c = setup_connector(&server.uri()).await;
+        let error = invoke(&c, "n8n.credentials.list", json!({}))
+            .await
+            .expect_err("credential status must fail closed");
+        assert!(
+            !error
+                .to_string()
+                .contains("marker.credential.provider-error")
+        );
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/credentials"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{not-json"))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(invoke(&c, "n8n.credentials.list", json!({})).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn credentials_list_timeout_uses_shared_transport_error_mapping() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/credentials"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(100))
+                .set_body_json(json!({"data": []})),
+        )
+        .mount(&server)
+        .await;
+    let c = setup_connector_with_runtime_config(
+        json!({
+            "api_key": "test-n8n-api-key-123",
+            "server_id": TEST_SERVER_ID,
+            "base_url": format!("{}/api/v1", server.uri()),
+        }),
+        ConnectorRuntimeConfig::default()
+            .with_request_timeout(Duration::from_millis(20))
+            .with_connect_timeout(Duration::from_secs(1)),
+    )
+    .await;
+    let error = invoke(&c, "n8n.credentials.list", json!({}))
+        .await
+        .expect_err("credential timeout must fail closed");
+    assert!(!error.to_string().contains("data"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn direct_provider_declared_oversized_success_fails_closed() {
+    let server = MockServer::start().await;
+    let marker = "marker.oversized.provider-body";
+    let mut body = marker.as_bytes().to_vec();
+    body.resize(MAX_PROVIDER_RESPONSE_BYTES + 1, b'x');
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(&c, "n8n.projects.list", json!({}))
+        .await
+        .expect_err("declared oversized provider response must fail closed");
+    assert!(!error.to_string().contains(marker));
+}
+
+#[fcp_async_core::runtime::test]
+async fn direct_provider_chunked_oversized_success_fails_closed() {
+    let server = MockServer::start().await;
+    let marker = "marker.oversized.provider-body";
+    let mut body = marker.as_bytes().to_vec();
+    body.resize(MAX_PROVIDER_RESPONSE_BYTES + 1, b'x');
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("transfer-encoding", "chunked")
+                .set_body_bytes(body),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(&c, "n8n.projects.list", json!({}))
+        .await
+        .expect_err("chunked oversized provider response must fail closed");
+    assert!(!error.to_string().contains(marker));
+}
+
+#[fcp_async_core::runtime::test]
+async fn direct_provider_oversized_error_fails_closed_without_body() {
+    let server = MockServer::start().await;
+    let marker = "marker.oversized.provider-body";
+    let mut body = marker.as_bytes().to_vec();
+    body.resize(MAX_PROVIDER_RESPONSE_BYTES + 1, b'x');
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .respond_with(ResponseTemplate::new(500).set_body_bytes(body))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(&c, "n8n.projects.list", json!({}))
+        .await
+        .expect_err("oversized provider error response must fail closed");
+    assert!(!error.to_string().contains(marker));
+}
+
+#[fcp_async_core::runtime::test]
+async fn direct_provider_response_at_safe_boundary_is_accepted() {
+    let server = MockServer::start().await;
+    let response = serde_json::to_vec(&json!({
+        "data": [],
+        "padding": "x".repeat(MAX_PROVIDER_RESPONSE_BYTES - 256),
+    }))
+    .expect("boundary response should serialize");
+    assert!(response.len() <= MAX_PROVIDER_RESPONSE_BYTES);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(response))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(&c, "n8n.projects.list", json!({}))
+        .await
+        .expect("boundary-safe provider response should be accepted");
+    assert_eq!(result["data"], json!([]));
+}
+
+#[fcp_async_core::runtime::test]
+async fn projects_list_timeout_uses_shared_transport_error_mapping() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(31))
+                .set_body_json(json!({"data": []})),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(&c, "n8n.projects.list", json!({}))
+        .await
+        .expect_err("provider timeout should fail closed");
+    assert!(!error.to_string().contains("data"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn direct_provider_short_configured_timeout_fails_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(100))
+                .set_body_json(json!({"data": []})),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector_with_runtime_config(
+        json!({
+            "api_key": "test-n8n-api-key-123",
+            "server_id": TEST_SERVER_ID,
+            "base_url": format!("{}/api/v1", server.uri()),
+        }),
+        ConnectorRuntimeConfig::default()
+            .with_request_timeout(Duration::from_millis(20))
+            .with_connect_timeout(Duration::from_secs(1)),
+    )
+    .await;
+    let error = invoke(&c, "n8n.projects.list", json!({}))
+        .await
+        .expect_err("short configured request timeout must fail closed");
+    assert!(!error.to_string().contains("data"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_projects_list_proxy_fixture_proves_wire_contract_and_safe_projection() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(MediatedProjectsResponse::json(
+            200,
+            &json!({
+                "data": [{
+                    "id": "project-mediated",
+                    "name": "Mediated Operations",
+                    "type": "team",
+                    "users": [{"id": "marker.mediated.user"}],
+                    "credentials": {"secret": "marker.mediated.secret"},
+                    "unknown": "marker.mediated.unknown"
+                }],
+                "nextCursor": "next-mediated"
+            }),
+        ))
+        .mount(&proxy)
+        .await;
+
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    let result = invoke(
+        &c,
+        "n8n.projects.list",
+        json!({"limit": 200, "cursor": "opaque cursor/%"}),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result,
+        json!({
+            "data": [{
+                "id": "project-mediated",
+                "name": "Mediated Operations",
+                "type": "team"
+            }],
+            "nextCursor": "next-mediated"
+        })
+    );
+    let requests = proxy.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "mediated read must be single-attempt");
+    let envelope: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(
+        envelope["url"],
+        "https://n8n.example.com/api/v1/projects?limit=200&cursor=opaque+cursor%2F%25"
+    );
+    assert_eq!(envelope["method"], "GET");
+    assert_eq!(
+        envelope["headers"],
+        json!([{"name": "Accept", "value": "application/json"}])
+    );
+    assert!(envelope.get("body").is_none());
+    assert_eq!(
+        envelope["credential_id"],
+        "550e8400-e29b-41d4-a716-446655440000"
+    );
+    assert_eq!(envelope["context"]["connector_id"], "fcp.n8n");
+    assert_eq!(envelope["context"]["operation_id"], "n8n.projects.list");
+    assert_eq!(envelope["context"]["zone_id"], "z:work");
+    let logical_resource = resource_uri("n8n.projects.list", &json!({}));
+    assert_eq!(logical_resource, "fwc-n8n://eec");
+    assert_eq!(envelope["context"]["resource_uri"], logical_resource);
+    assert_ne!(envelope["url"], logical_resource);
+    assert!(
+        envelope["context"]["request_id"]
+            .as_str()
+            .is_some_and(|value| value.ends_with(":1"))
+    );
+    assert!(envelope["context"].get("correlation_id").is_none());
+    let capability_b64 = envelope["context"]["capability_token_cbor_b64"]
+        .as_str()
+        .unwrap();
+    let capability_cbor = base64::engine::general_purpose::STANDARD
+        .decode(capability_b64)
+        .unwrap();
+    assert!(!capability_cbor.is_empty());
+    assert!(!capability_b64.starts_with("base64:"));
+    let output = serde_json::to_string(&result).unwrap();
+    for forbidden in [
+        "capability_token",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "fwc-n8n://eec",
+        "marker.mediated",
+    ] {
+        assert!(!output.contains(forbidden));
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_credential_reads_share_operation_resource_and_safe_get_contract() {
+    let cases = vec![
+        (
+            "n8n.workflows.list",
+            json!({}),
+            json!({
+                "data": [{"id": "w1", "name": "Safe workflow", "nodes": "marker.workflow"}]
+            }),
+            "https://n8n.example.com/api/v1/workflows?limit=50&excludePinnedData=true",
+            "fwc-n8n://eec",
+        ),
+        (
+            "n8n.workflows.get",
+            json!({"id": "w1"}),
+            json!({
+                "id": "w1",
+                "name": "Safe workflow",
+                "active": false,
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "isArchived": false,
+                "nodes": [{"id": "node-1", "parameters": {}}],
+                "connections": {},
+                "activeVersion": null,
+                "pinData": "marker.workflow"
+            }),
+            "https://n8n.example.com/api/v1/workflows/w1",
+            "fwc-n8n://eec/workflows/w1",
+        ),
+        (
+            "n8n.executions.list",
+            json!({}),
+            json!({"data": [{"id": "e1", "finished": true, "data": "marker.execution"}]}),
+            "https://n8n.example.com/api/v1/executions?limit=50&includeData=false&ignoreDataSizeLimit=false&redactExecutionData=true",
+            "fwc-n8n://eec",
+        ),
+        (
+            "n8n.executions.get",
+            json!({"workflow_id": "w1", "id": "e1"}),
+            json!({"id": "e1", "finished": true, "data": "marker.execution"}),
+            "https://n8n.example.com/api/v1/executions/e1",
+            "fwc-n8n://eec/workflows/w1/executions/e1",
+        ),
+        (
+            "n8n.projects.list",
+            json!({}),
+            json!({"data": [{"id": "p1", "name": "Safe project", "credentials": "marker.project"}]}),
+            "https://n8n.example.com/api/v1/projects?limit=50",
+            "fwc-n8n://eec",
+        ),
+        (
+            "n8n.credentials.list",
+            json!({"limit": 200, "cursor": "opaque cursor/%"}),
+            json!({
+                "data": [{
+                    "id": "cred-1",
+                    "name": "Safe credential",
+                    "type": "githubApi",
+                    "data": {"token": "marker.credential.secret"},
+                    "authHeader": "marker.credential.header",
+                    "config": {"password": "marker.credential.config"}
+                }],
+                "nextCursor": null
+            }),
+            "https://n8n.example.com/api/v1/credentials?limit=200&cursor=opaque+cursor%2F%25",
+            "fwc-n8n://eec",
+        ),
+        (
+            "n8n.tags.list",
+            json!({}),
+            json!({"data": [{"id": "t1", "name": "Safe tag", "createdAt": "marker.tag"}]}),
+            "https://n8n.example.com/api/v1/tags?limit=50",
+            "fwc-n8n://eec",
+        ),
+        (
+            "n8n.folders.list",
+            json!({"project_id": "p1"}),
+            json!({"count": 1, "data": [{"id": "f1", "name": "Safe folder", "parentFolder": null}]}),
+            "https://n8n.example.com/api/v1/projects/p1/folders?select=%5B%22id%22%2C%22name%22%2C%22parentFolder%22%5D&skip=0&take=50",
+            "fwc-n8n://eec/projects/p1",
+        ),
+        (
+            "n8n.folders.get",
+            json!({"project_id": "p1", "folder_id": "f1"}),
+            json!({
+                "id": "f1",
+                "name": "Safe folder",
+                "parentFolderId": null,
+                "createdAt": "2024-01-01T00:00:00Z",
+                "updatedAt": "2024-01-01T00:00:00Z",
+                "totalSubFolders": 0,
+                "totalWorkflows": 0,
+                "unknown": "marker.folder"
+            }),
+            "https://n8n.example.com/api/v1/projects/p1/folders/f1",
+            "fwc-n8n://eec/folders/f1",
+        ),
+    ];
+
+    for (operation, input, body, expected_url, expected_resource) in cases {
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rpc/egress/http"))
+            .respond_with(MediatedProjectsResponse::json(200, &body))
+            .mount(&proxy)
+            .await;
+
+        let c = setup_mediated_connector(&proxy.uri()).await;
+        let result = invoke(&c, operation, input).await.unwrap();
+        let output = serde_json::to_string(&result).unwrap();
+        assert!(
+            !output.contains("marker."),
+            "unsafe fields leaked for {operation}"
+        );
+        assert!(!output.contains("550e8400-e29b-41d4-a716-446655440000"));
+
+        let requests = proxy.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "{operation} must be single-attempt");
+        let envelope: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(envelope["context"]["operation_id"], operation);
+        assert_eq!(envelope["context"]["resource_uri"], expected_resource);
+        assert_eq!(envelope["url"], expected_url);
+        assert_eq!(envelope["method"], "GET");
+        assert_eq!(
+            envelope["headers"],
+            json!([{"name": "Accept", "value": "application/json"}])
+        );
+        assert!(envelope.get("body").is_none());
+        assert_eq!(
+            envelope["credential_id"],
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn every_credential_read_fails_closed_without_proxy_or_on_proxy_rejection() {
+    let cases = [
+        ("n8n.workflows.list", json!({})),
+        ("n8n.workflows.get", json!({"id": "w1"})),
+        ("n8n.executions.list", json!({})),
+        (
+            "n8n.executions.get",
+            json!({"workflow_id": "w1", "id": "e1"}),
+        ),
+        ("n8n.projects.list", json!({})),
+        ("n8n.credentials.list", json!({})),
+        ("n8n.tags.list", json!({})),
+        ("n8n.folders.list", json!({"project_id": "p1"})),
+        (
+            "n8n.folders.get",
+            json!({"project_id": "p1", "folder_id": "f1"}),
+        ),
+    ];
+
+    for (operation, input) in &cases {
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rpc/egress/http"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_string("marker.proxy.rejection credential 550e8400"),
+            )
+            .mount(&proxy)
+            .await;
+        let c = setup_mediated_connector(&proxy.uri()).await;
+        let error = invoke(&c, operation, input.clone())
+            .await
+            .expect_err(operation);
+        assert!(!error.to_string().contains("marker.proxy.rejection"));
+        assert!(!error.to_string().contains("550e8400"));
+        assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+    }
+
+    for (operation, input) in &cases {
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rpc/egress/http"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{not-json"))
+            .mount(&proxy)
+            .await;
+        let c = setup_mediated_connector(&proxy.uri()).await;
+        let error = invoke(&c, operation, input.clone())
+            .await
+            .expect_err("malformed proxy response must fail closed");
+        assert!(!error.to_string().contains("not-json"));
+        assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+    }
+
+    for (operation, input) in &cases {
+        let c = setup_connector_with_config(json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "server_id": TEST_SERVER_ID,
+            "base_url": "https://n8n.example.com/api/v1",
+        }))
+        .await;
+        assert!(invoke(&c, operation, input.clone()).await.is_err());
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_projects_list_preserves_provider_status_taxonomy_without_body_leaks() {
+    for status in [401, 403, 404, 429, 500, 503] {
+        let proxy = MockServer::start().await;
+        let mut response = MediatedProjectsResponse::json(
+            status,
+            &json!({"message": "marker.mediated.provider-error"}),
+        );
+        if status == 429 {
+            response.retry_after = Some("30");
+        }
+        Mock::given(method("POST"))
+            .and(path("/rpc/egress/http"))
+            .respond_with(response)
+            .mount(&proxy)
+            .await;
+        let c = setup_mediated_connector(&proxy.uri()).await;
+        let error = invoke(&c, "n8n.projects.list", json!({}))
+            .await
+            .expect_err("provider status must fail closed");
+        assert!(!error.to_string().contains("marker.mediated.provider-error"));
+        assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_projects_list_host_rejections_and_malformed_payloads_fail_once() {
+    for host_status in [401, 403, 404, 429, 500, 503] {
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rpc/egress/http"))
+            .respond_with(
+                ResponseTemplate::new(host_status)
+                    .set_body_string("marker.host.rejection credential 550e8400"),
+            )
+            .mount(&proxy)
+            .await;
+        let c = setup_mediated_connector(&proxy.uri()).await;
+        let error = invoke(&c, "n8n.projects.list", json!({}))
+            .await
+            .expect_err("host rejection must fail closed");
+        assert!(!error.to_string().contains("marker.host.rejection"));
+        assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+    }
+
+    let malformed_json_proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{not-json"))
+        .mount(&malformed_json_proxy)
+        .await;
+    let c = setup_mediated_connector(&malformed_json_proxy.uri()).await;
+    assert!(invoke(&c, "n8n.projects.list", json!({})).await.is_err());
+    assert_eq!(
+        malformed_json_proxy
+            .received_requests()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let malformed_decision_proxy = MockServer::start().await;
+    let mut response = MediatedProjectsResponse::json(200, &json!({"data": []}));
+    response.malformed_decision = true;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(response)
+        .mount(&malformed_decision_proxy)
+        .await;
+    let c = setup_mediated_connector(&malformed_decision_proxy.uri()).await;
+    assert!(invoke(&c, "n8n.projects.list", json!({})).await.is_err());
+    assert_eq!(
+        malformed_decision_proxy
+            .received_requests()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let malformed_provider_body_proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(MediatedProjectsResponse {
+            status: 200,
+            body: b"{not-provider-json".to_vec(),
+            retry_after: None,
+            malformed_decision: false,
+        })
+        .mount(&malformed_provider_body_proxy)
+        .await;
+    let c = setup_mediated_connector(&malformed_provider_body_proxy.uri()).await;
+    assert!(invoke(&c, "n8n.projects.list", json!({})).await.is_err());
+    assert_eq!(
+        malformed_provider_body_proxy
+            .received_requests()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_projects_list_missing_or_failed_proxy_has_no_direct_fallback() {
+    let no_proxy = setup_connector_with_config(json!({
+        "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        "server_id": TEST_SERVER_ID,
+        "base_url": "https://n8n.example.com/api/v1",
+    }))
+    .await;
+    assert!(
+        invoke(&no_proxy, "n8n.projects.list", json!({}))
+            .await
+            .is_err()
+    );
+
+    let dead_proxy = MockServer::start().await;
+    let dead_proxy_url = dead_proxy.uri();
+    drop(dead_proxy);
+    let c = setup_mediated_connector(&dead_proxy_url).await;
+    assert!(invoke(&c, "n8n.projects.list", json!({})).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_projects_list_rejects_oversized_host_body() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(MediatedProjectsResponse {
+            status: 200,
+            body: vec![b'x'; 10 * 1024 * 1024 + 1],
+            retry_after: None,
+            malformed_decision: false,
+        })
+        .mount(&proxy)
+        .await;
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    assert!(invoke(&c, "n8n.projects.list", json!({})).await.is_err());
+    assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+}
+
+// -- Folders List/Get --
+
+#[fcp_async_core::runtime::test]
+async fn folders_list_projects_parent_shapes_and_fixed_projection() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("select", r#"["id","name","parentFolder"]"#))
+        .and(query_param(
+            "filter",
+            r#"{"parentFolderId":"parent folder"}"#,
+        ))
+        .and(query_param("skip", "7"))
+        .and(query_param("take", "200"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "count": 2,
+            "data": [
+                {
+                    "id": "folder root",
+                    "name": "Root",
+                    "parentFolder": null,
+                    "secret": "marker.folder.secret"
+                },
+                {
+                    "id": "folder child",
+                    "name": "Child",
+                    "parentFolder": {
+                        "id": "parent folder",
+                        "secret": "marker.parent.secret"
+                    },
+                    "createdAt": "marker.folder.created"
+                }
+            ],
+            "unknownField": "marker.folder.unknown"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(
+        &c,
+        "n8n.folders.list",
+        json!({
+            "project_id": "project one",
+            "parent_folder_id": "parent folder",
+            "skip": 7,
+            "take": 200
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result["count"], 2);
+    let folders = result["data"].as_array().unwrap();
+    assert_eq!(folders.len(), 2);
+    assert_eq!(
+        folders[0]["resourceUri"],
+        "fwc-n8n://eec/folders/folder%20root"
+    );
+    assert_eq!(folders[0]["parentFolderId"], Value::Null);
+    assert_eq!(folders[1]["parentFolderId"], "parent folder");
+    assert_eq!(
+        folders[1]["resourceUri"],
+        "fwc-n8n://eec/folders/folder%20child"
+    );
+    for folder in folders {
+        assert_no_untrusted_output(folder);
+        assert_eq!(folder.as_object().unwrap().len(), 4);
+    }
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url.path(),
+        "/api/v1/projects/project%20one/folders"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_list_defaults_and_root_filter_omission_are_exact() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("select", r#"["id","name","parentFolder"]"#))
+        .and(query_param("skip", "0"))
+        .and(query_param("take", "50"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "count": 0,
+            "data": []
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    invoke(&c, "n8n.folders.list", json!({"project_id": "project-1"}))
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.path(), "/api/v1/projects/project-1/folders");
+    assert!(!requests[0].url.query().unwrap().contains("filter="));
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_get_is_strictly_projected_and_uses_folder_uri() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "folder one",
+            "name": "Folder",
+            "parentFolderId": null,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+            "totalSubFolders": 3,
+            "totalWorkflows": 8,
+            "credentials": "marker.folder.credentials",
+            "unknownField": "marker.folder.unknown"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(
+        &c,
+        "n8n.folders.get",
+        json!({"project_id": "project one", "folder_id": "folder one"}),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result["resourceUri"], "fwc-n8n://eec/folders/folder%20one");
+    assert_eq!(result["parentFolderId"], Value::Null);
+    assert_eq!(result["totalSubFolders"], 3);
+    assert_eq!(result["totalWorkflows"], 8);
+    assert_eq!(result.as_object().unwrap().len(), 8);
+    assert_no_untrusted_output(&result);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests[0].url.path(),
+        "/api/v1/projects/project%20one/folders/folder%20one"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_reject_invalid_input_and_ids_before_http() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    for input in [
+        json!({}),
+        json!({"project_id": "project-1", "unknown": true}),
+        json!({"project_id": "project-1", "skip": -1}),
+        json!({"project_id": "project-1", "take": 0}),
+        json!({"project_id": "project-1", "take": 201}),
+        json!({"project_id": "project-1", "take": "50"}),
+        json!({"project_id": "project-1", "parent_folder_id": null}),
+        json!({"project_id": "project/1"}),
+        json!({"project_id": "project-1", "server_id": "eec"}),
+    ] {
+        let operation = if input.get("folder_id").is_some() {
+            "n8n.folders.get"
+        } else {
+            "n8n.folders.list"
+        };
+        assert!(invoke(&c, operation, input).await.is_err());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_get_rejects_invalid_ids_before_http() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    for folder_id in ["", "folder/id", "folder%2Fid", " folder", "folder\n"] {
+        assert!(
+            invoke(
+                &c,
+                "n8n.folders.get",
+                json!({"project_id": "project-1", "folder_id": folder_id}),
+            )
+            .await
+            .is_err()
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_capability_resources_bind_project_for_list_and_folder_for_get() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let list_input = json!({"project_id": "project-1"});
+    let get_input = json!({"project_id": "project-1", "folder_id": "folder-1"});
+    for (operation, input, wrong_resource) in [
+        (
+            "n8n.folders.list",
+            &list_input,
+            "fwc-n8n://eec/folders/folder-1",
+        ),
+        (
+            "n8n.folders.get",
+            &get_input,
+            "fwc-n8n://eec/projects/project-1",
+        ),
+    ] {
+        let params = json!({
+            "operation": operation,
+            "input": input,
+            "capability_token": capability_token_with_options(
+                operation,
+                &test_signing_key(),
+                TEST_INSTANCE_ID,
+                wrong_resource.into(),
+                chrono::Utc::now() - chrono::Duration::seconds(1),
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            )
+        });
+        assert!(c.handle_invoke(params).await.is_err());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn credentials_capability_resource_binds_to_instance() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let params = json!({
+        "operation": "n8n.credentials.list",
+        "input": {},
+        "capability_token": capability_token_with_options(
+            "n8n.credentials.list",
+            &test_signing_key(),
+            TEST_INSTANCE_ID,
+            "fwc-n8n://eec/projects/project-1".into(),
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        )
+    });
+    assert!(c.handle_invoke(params).await.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_get_missing_provider_fields_fails_closed() {
+    let fields = [
+        "id",
+        "name",
+        "parentFolderId",
+        "createdAt",
+        "updatedAt",
+        "totalSubFolders",
+        "totalWorkflows",
+    ];
+    for missing in fields {
+        let server = MockServer::start().await;
+        let mut body = json!({
+            "id": "folder-1",
+            "name": "Folder",
+            "parentFolderId": null,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+            "totalSubFolders": 3,
+            "totalWorkflows": 8
+        });
+        body.as_object_mut().unwrap().remove(missing);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let c = setup_connector(&server.uri()).await;
+        assert!(
+            invoke(
+                &c,
+                "n8n.folders.get",
+                json!({"project_id": "project-1", "folder_id": "folder-1"}),
+            )
+            .await
+            .is_err()
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_get_rejects_provider_id_mismatch_without_leaking() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "provider-folder-id",
+            "name": "Folder",
+            "parentFolderId": null,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+            "totalSubFolders": 3,
+            "totalWorkflows": 8,
+            "unknownField": "marker.folder.mismatched-provider"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(
+        &c,
+        "n8n.folders.get",
+        json!({"project_id": "project-1", "folder_id": "folder-1"}),
+    )
+    .await
+    .expect_err("provider ID mismatch should fail closed");
+    let error = error.to_string();
+    assert!(!error.contains("provider-folder-id"));
+    assert!(!error.contains("marker.folder.mismatched-provider"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_provider_errors_are_safe_and_non_leaking() {
+    for status in [400, 401, 403, 404, 429, 500, 503] {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(status).set_body_json(json!({
+            "message": "marker.folder.provider-error"
+        }));
+        if status == 429 {
+            response = response.insert_header("retry-after", "30");
+        }
+        Mock::given(method("GET"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let c = setup_connector(&server.uri()).await;
+        let error = invoke(
+            &c,
+            "n8n.folders.get",
+            json!({"project_id": "project-1", "folder_id": "folder-1"}),
+        )
+        .await
+        .expect_err("provider error should fail closed");
+        assert!(!error.to_string().contains("marker.folder.provider-error"));
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_list_provider_errors_are_safe_and_non_leaking() {
+    for status in [400, 401, 403, 404, 429, 500, 503] {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(status).set_body_json(json!({
+            "message": "marker.folder.list-provider-error"
+        }));
+        if status == 429 {
+            response = response.insert_header("retry-after", "30");
+        }
+        Mock::given(method("GET"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let c = setup_connector(&server.uri()).await;
+        let error = invoke(&c, "n8n.folders.list", json!({"project_id": "project-1"}))
+            .await
+            .expect_err("provider error should fail closed");
+        assert!(
+            !error
+                .to_string()
+                .contains("marker.folder.list-provider-error")
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_bad_json_and_timeout_fail_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{not-json"))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        invoke(
+            &c,
+            "n8n.folders.get",
+            json!({"project_id": "project-1", "folder_id": "folder-1"}),
+        )
+        .await
+        .is_err()
+    );
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(31))
+                .set_body_json(json!({
+                    "id": "folder-1",
+                    "name": "Folder",
+                    "parentFolderId": null,
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-02T00:00:00Z",
+                    "totalSubFolders": 0,
+                    "totalWorkflows": 0
+                })),
+        )
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(
+        &c,
+        "n8n.folders.get",
+        json!({"project_id": "project-1", "folder_id": "folder-1"}),
+    )
+    .await
+    .expect_err("provider timeout should fail closed");
+    assert!(!error.to_string().contains("marker.folder"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn folders_list_bad_json_and_timeout_fail_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{not-json"))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(&c, "n8n.folders.list", json!({"project_id": "project-1"}))
+        .await
+        .expect_err("malformed provider JSON should fail closed");
+    assert!(!error.to_string().contains("marker.folder.list"));
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(31))
+                .set_body_json(json!({"count": 0, "data": []})),
+        )
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(&c, "n8n.folders.list", json!({"project_id": "project-1"}))
+        .await
+        .expect_err("provider timeout should fail closed");
+    assert!(!error.to_string().contains("marker.folder"));
+}
+
+// -- Tags List --
+
+#[fcp_async_core::runtime::test]
+async fn tags_list_returns_only_compact_safe_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/tags"))
+        .and(header("X-N8N-API-KEY", "test-n8n-api-key-123"))
+        .and(query_param("limit", "50"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "tag-1",
+                    "name": "production",
+                    "createdAt": "marker.tag.created",
+                    "updatedAt": "marker.tag.updated",
+                    "users": [{"id": "marker.tag.users"}],
+                    "unknownField": "marker.tag.unknown"
+                },
+                {
+                    "id": "tag-2",
+                    "name": "reporting",
+                    "createdAt": "marker.tag.created",
+                    "updatedAt": "marker.tag.updated"
+                }
+            ],
+            "nextCursor": "opaque-tag-cursor"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(&c, "n8n.tags.list", json!({})).await.unwrap();
+    let tags = result["data"].as_array().unwrap();
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0]["id"], "tag-1");
+    assert_eq!(tags[0]["name"], "production");
+    assert_eq!(result["nextCursor"], "opaque-tag-cursor");
+    for tag in tags {
+        assert_compact_tag_output(tag);
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn tags_list_uses_bounded_limit_and_opaque_cursor_encoding() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/tags"))
+        .and(query_param("limit", "200"))
+        .and(query_param("cursor", "opaque cursor/%"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    invoke(
+        &c,
+        "n8n.tags.list",
+        json!({"limit": 200, "cursor": "opaque cursor/%"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn tags_list_missing_and_null_cursor_are_omitted() {
+    for response in [json!({"data": []}), json!({"data": [], "nextCursor": null})] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+
+        let c = setup_connector(&server.uri()).await;
+        let result = invoke(&c, "n8n.tags.list", json!({})).await.unwrap();
+        assert!(result.get("nextCursor").is_none());
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn tags_list_rejects_invalid_input_without_http() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let mut invalid_inputs = vec![
+        json!({"limit": 0}),
+        json!({"limit": 201}),
+        json!({"limit": -1}),
+        json!({"limit": 1.5}),
+        json!({"limit": "1"}),
+        json!({"limit": true}),
+        json!({"limit": null}),
+        json!({"cursor": ""}),
+        json!({"cursor": null}),
+        json!({"cursor": 1}),
+        json!({"cursor": "bad\ncursor"}),
+        json!({"unknown": 1}),
+    ];
+    invalid_inputs.push(json!({"cursor": "x".repeat(4097)}));
+
+    for input in invalid_inputs {
+        assert!(invoke(&c, "n8n.tags.list", input).await.is_err());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn tags_list_rejects_malformed_provider_cursor() {
+    for cursor in [json!(""), json!("bad\ncursor"), json!("x".repeat(4097))] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [],
+                "nextCursor": cursor
+            })))
+            .mount(&server)
+            .await;
+
+        let c = setup_connector(&server.uri()).await;
+        assert!(invoke(&c, "n8n.tags.list", json!({})).await.is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn tags_list_maps_provider_errors_without_leaking_body() {
+    for status in [401, 403, 404, 429, 500, 503] {
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(status).set_body_json(json!({
+            "message": "marker.tag.provider-error"
+        }));
+        if status == 429 {
+            response = response.insert_header("retry-after", "30");
+        }
+        Mock::given(method("GET"))
+            .and(path("/api/v1/tags"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+
+        let c = setup_connector(&server.uri()).await;
+        let error = invoke(&c, "n8n.tags.list", json!({}))
+            .await
+            .expect_err("provider error should fail closed");
+        assert!(!error.to_string().contains("marker.tag.provider-error"));
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn tags_list_rejects_bad_json() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{not-json"))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(invoke(&c, "n8n.tags.list", json!({})).await.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn tags_list_timeout_uses_shared_transport_error_mapping() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/tags"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(31))
+                .set_body_json(json!({"data": []})),
+        )
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let error = invoke(&c, "n8n.tags.list", json!({}))
+        .await
+        .expect_err("provider timeout should fail closed");
+    assert!(!error.to_string().contains("data"));
+}
+
 // -- Workflows Get --
 
 #[fcp_async_core::runtime::test]
@@ -389,8 +2208,19 @@ async fn workflows_get() {
             "id": "1001",
             "name": "Daily Report",
             "active": true,
-            "createdAt": "2025-01-15T10:00:00.000Z",
+            "versionId": "draft-v3",
+            "activeVersionId": "published-v2",
+            "isArchived": false,
+            "projectId": "project-1",
+            "parentFolderId": "folder-1",
             "updatedAt": "2025-02-20T14:30:00.000Z",
+            "nodes": [{"id": "node-1", "type": "n8n-nodes-base.code", "parameters": {"jsCode": "return items;"}}],
+            "connections": {},
+            "activeVersion": {
+                "versionId": "published-v2",
+                "nodes": [{"id": "node-1", "type": "n8n-nodes-base.code", "parameters": {"jsCode": "return [];"}}],
+                "connections": {}
+            }
         })))
         .mount(&server)
         .await;
@@ -402,6 +2232,324 @@ async fn workflows_get() {
     assert_eq!(result["id"], "1001");
     assert_eq!(result["name"], "Daily Report");
     assert_eq!(result["active"], true);
+    assert_eq!(result["versionId"], "draft-v3");
+    assert_eq!(result["draft"]["versionId"], "draft-v3");
+    assert_eq!(result["published"]["versionId"], "published-v2");
+    assert!(
+        result["draft"]["graphDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("blake3-256:"))
+    );
+    assert!(
+        result["stateDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("blake3-256:"))
+    );
+    assert_no_untrusted_output(&result);
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflow_handle_invoke_redacts_graphs_and_rejects_incomplete_state() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1001",
+            "name": "Safe workflow",
+            "active": false,
+            "versionId": "draft-v3",
+            "activeVersionId": "published-v2",
+            "isArchived": true,
+            "nodes": [{
+                "id": "node-1",
+                "parameters": {"jsCode": "marker.workflow.code"},
+                "credentials": {"api": {"id": "marker.workflow.credentials"}}
+            }],
+            "connections": {"marker.workflow.graph": {}},
+            "activeVersion": {
+                "versionId": "published-v2",
+                "nodes": [],
+                "connections": {}
+            },
+            "meta": {"value": "marker.workflow.graph"},
+            "pinData": {"trigger": [{"json": "marker.workflow.pin"}]},
+            "unknownField": "marker.unknown"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1002"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1002",
+            "name": null,
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "nodes": [{"id": "node-2", "parameters": {}}],
+            "connections": {},
+            "activeVersion": null
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1003"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1003",
+            "name": "Incomplete",
+            "active": false,
+            "versionId": "draft-v1",
+            "isArchived": false,
+            "nodes": [],
+            "connections": {},
+            "activeVersion": null
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let full = invoke(&c, "n8n.workflows.get", json!({"id": "1001"}))
+        .await
+        .unwrap();
+    assert_eq!(full["active"], false);
+    assert_eq!(full["versionId"], "draft-v3");
+    assert_eq!(full["activeVersionId"], "published-v2");
+    assert_eq!(full["isArchived"], true);
+    assert_no_untrusted_output(&full);
+
+    let explicit_null = invoke(&c, "n8n.workflows.get", json!({"id": "1002"}))
+        .await
+        .unwrap();
+    assert!(explicit_null["name"].is_null());
+    assert!(
+        explicit_null
+            .get("activeVersionId")
+            .is_some_and(serde_json::Value::is_null)
+    );
+    assert_no_untrusted_output(&explicit_null);
+
+    let missing = invoke(&c, "n8n.workflows.get", json!({"id": "1003"}))
+        .await
+        .expect_err("missing activeVersionId must fail closed");
+    assert!(!missing.to_string().contains("Incomplete"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflow_digests_separate_semantic_graph_from_credential_bound_state() {
+    let first = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/same-id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "same-id",
+            "name": "Digest test",
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "nodes": [{
+                "id": "node-1",
+                "type": "n8n-nodes-base.httpRequest",
+                "parameters": {"method": "GET", "url": "https://example.com"},
+                "credentials": {"httpHeaderAuth": {"id": "credential-a", "name": "A"}}
+            }],
+            "connections": {},
+            "activeVersion": null
+        })))
+        .mount(&first)
+        .await;
+
+    let second = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/same-id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "activeVersion": null,
+            "connections": {},
+            "nodes": [{
+                "credentials": {"httpHeaderAuth": {"name": "B", "id": "credential-b"}},
+                "parameters": {"url": "https://example.com", "method": "GET"},
+                "type": "n8n-nodes-base.httpRequest",
+                "id": "node-1"
+            }],
+            "isArchived": false,
+            "activeVersionId": null,
+            "versionId": "draft-v1",
+            "active": false,
+            "name": "Digest test",
+            "id": "same-id"
+        })))
+        .mount(&second)
+        .await;
+
+    let third = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/same-id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "same-id",
+            "name": "Digest test",
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "nodes": [{
+                "id": "node-1",
+                "type": "n8n-nodes-base.httpRequest",
+                "parameters": {"method": "POST", "url": "https://example.com"},
+                "credentials": {"httpHeaderAuth": {"id": "credential-b", "name": "B"}}
+            }],
+            "connections": {},
+            "activeVersion": null
+        })))
+        .mount(&third)
+        .await;
+
+    let first_connector = setup_connector(&first.uri()).await;
+    let second_connector = setup_connector(&second.uri()).await;
+    let third_connector = setup_connector(&third.uri()).await;
+    let first_result = invoke(
+        &first_connector,
+        "n8n.workflows.get",
+        json!({"id": "same-id"}),
+    )
+    .await
+    .unwrap();
+    let second_result = invoke(
+        &second_connector,
+        "n8n.workflows.get",
+        json!({"id": "same-id"}),
+    )
+    .await
+    .unwrap();
+    let third_result = invoke(
+        &third_connector,
+        "n8n.workflows.get",
+        json!({"id": "same-id"}),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        first_result["draft"]["graphDigest"], second_result["draft"]["graphDigest"],
+        "object key order and top-level node credential bindings are excluded from graphDigest"
+    );
+    assert_ne!(
+        first_result["stateDigest"], second_result["stateDigest"],
+        "credential bindings remain part of stateDigest"
+    );
+    assert_ne!(
+        second_result["draft"]["graphDigest"], third_result["draft"]["graphDigest"],
+        "semantic node parameter changes must change graphDigest"
+    );
+    for output in [&first_result, &second_result, &third_result] {
+        let rendered = serde_json::to_string(output).unwrap();
+        for forbidden in [
+            "credential-a",
+            "credential-b",
+            "httpHeaderAuth",
+            "https://example.com",
+        ] {
+            assert!(!rendered.contains(forbidden));
+        }
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflow_get_rejects_contradictory_published_state() {
+    let cases = [
+        (
+            "missing-object",
+            json!({
+                "id": "missing-object", "name": null, "active": true,
+                "versionId": "draft-v2", "activeVersionId": "published-v1",
+                "isArchived": false, "nodes": [], "connections": {},
+                "activeVersion": null
+            }),
+        ),
+        (
+            "unexpected-object",
+            json!({
+                "id": "unexpected-object", "name": null, "active": false,
+                "versionId": "draft-v2", "activeVersionId": null,
+                "isArchived": false, "nodes": [], "connections": {},
+                "activeVersion": {"versionId": "published-v1", "nodes": [], "connections": {}}
+            }),
+        ),
+        (
+            "mismatched-version",
+            json!({
+                "id": "mismatched-version", "name": null, "active": true,
+                "versionId": "draft-v2", "activeVersionId": "published-v1",
+                "isArchived": true, "nodes": [], "connections": {},
+                "activeVersion": {"versionId": "published-other", "nodes": [], "connections": {}}
+            }),
+        ),
+        (
+            "mismatched-workflow-id",
+            json!({
+                "id": "different-provider-id", "name": null, "active": false,
+                "versionId": "draft-v1", "activeVersionId": null,
+                "isArchived": false, "nodes": [], "connections": {},
+                "activeVersion": null
+            }),
+        ),
+    ];
+
+    let server = MockServer::start().await;
+    for (id, body) in &cases {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/workflows/{id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+    }
+    let c = setup_connector(&server.uri()).await;
+    for (id, _) in &cases {
+        let error = invoke(&c, "n8n.workflows.get", json!({"id": id}))
+            .await
+            .expect_err("contradictory published state must fail closed");
+        assert!(!error.to_string().contains(*id));
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflow_list_handle_invoke_redacts_items_and_preserves_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "1001",
+                    "name": "one",
+                    "nodes": [{"value": "marker.workflow.graph"}],
+                    "code": "marker.workflow.code",
+                    "credentials": {"api": "marker.workflow.credentials"},
+                    "pinData": {"trigger": "marker.workflow.pin"},
+                    "unknownField": "marker.unknown"
+                },
+                {
+                    "id": "1002",
+                    "activeVersion": {"value": "marker.workflow.graph"},
+                    "connections": {"value": "marker.workflow.graph"}
+                }
+            ],
+            "nextCursor": "opaque-workflow-cursor"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(&c, "n8n.workflows.list", json!({})).await.unwrap();
+    let workflows = result["data"].as_array().unwrap();
+    assert_eq!(workflows.len(), 2);
+    assert!(
+        workflows[1]
+            .get("name")
+            .is_some_and(serde_json::Value::is_null)
+    );
+    assert_eq!(result["nextCursor"], "opaque-workflow-cursor");
+    for workflow in workflows {
+        assert_no_untrusted_output(workflow);
+    }
 }
 
 #[fcp_async_core::runtime::test]
@@ -416,6 +2564,38 @@ async fn workflows_get_missing_id() {
         .await
         .is_err()
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn exact_object_inputs_reject_unknown_fields_before_egress() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let cases = [
+        ("n8n.workflows.get", json!({"id": "1001", "unknown": true})),
+        (
+            "n8n.workflows.activate",
+            json!({"id": "1001", "active": true, "unknown": true}),
+        ),
+        (
+            "n8n.executions.get",
+            json!({"workflow_id": "1001", "id": "50001", "unknown": true}),
+        ),
+        (
+            "n8n.folders.get",
+            json!({"project_id": "project-1", "folder_id": "folder-1", "unknown": true}),
+        ),
+    ];
+
+    for (operation, input) in cases {
+        let error = invoke(&c, operation, input)
+            .await
+            .expect_err("unknown exact-object input field must fail closed");
+        assert!(
+            error.to_string().contains("unsupported property"),
+            "unexpected error for {operation}: {error}"
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[fcp_async_core::runtime::test]
@@ -683,6 +2863,10 @@ async fn executions_list() {
     Mock::given(method("GET"))
         .and(path("/api/v1/executions"))
         .and(header("X-N8N-API-KEY", "test-n8n-api-key-123"))
+        .and(query_param("limit", "50"))
+        .and(query_param("includeData", "false"))
+        .and(query_param("ignoreDataSizeLimit", "false"))
+        .and(query_param("redactExecutionData", "true"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 {"id": "50001", "finished": true, "status": "success", "workflowId": "1001"},
@@ -711,6 +2895,64 @@ async fn executions_list_empty() {
     let c = setup_connector(&server.uri()).await;
     let result = invoke(&c, "n8n.executions.list", json!({})).await.unwrap();
     assert!(result["data"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn executions_list_rejects_invalid_input_without_traffic() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let mut invalid_inputs = vec![
+        json!({"limit": 0}),
+        json!({"limit": 201}),
+        json!({"limit": -1}),
+        json!({"limit": 1.5}),
+        json!({"limit": "1"}),
+        json!({"limit": true}),
+        json!({"limit": null}),
+        json!({"cursor": ""}),
+        json!({"cursor": null}),
+        json!({"cursor": 1}),
+        json!({"cursor": "bad\ncursor"}),
+        json!({"unknown": 1}),
+    ];
+    invalid_inputs.push(json!({
+        "cursor": "x".repeat(4097),
+    }));
+
+    for input in invalid_inputs {
+        assert!(invoke(&c, "n8n.executions.list", input).await.is_err());
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn executions_list_rejects_malformed_provider_cursors() {
+    let malformed = vec![
+        json!(""),
+        json!("bad\ncursor"),
+        json!(123),
+        json!("x".repeat(4097)),
+    ];
+
+    for cursor in malformed {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/executions"))
+            .and(query_param("limit", "50"))
+            .and(query_param("includeData", "false"))
+            .and(query_param("ignoreDataSizeLimit", "false"))
+            .and(query_param("redactExecutionData", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [],
+                "nextCursor": cursor
+            })))
+            .mount(&server)
+            .await;
+
+        let c = setup_connector(&server.uri()).await;
+        assert!(invoke(&c, "n8n.executions.list", json!({})).await.is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
 }
 
 // -- Executions Get --
@@ -744,6 +2986,95 @@ async fn executions_get() {
     assert_eq!(result["id"], "50001");
     assert_eq!(result["finished"], true);
     assert_eq!(result["status"], "success");
+}
+
+#[fcp_async_core::runtime::test]
+async fn execution_handle_invoke_redacts_untrusted_fields_and_missing_finished_is_null() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/50001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "50001",
+            "finished": true,
+            "status": "success",
+            "data": {"value": "marker.execution.data"},
+            "resultData": {"value": "marker.execution.result"},
+            "credentials": {"api": "marker.execution.credentials"},
+            "pinData": {"trigger": "marker.execution.pin"},
+            "unknownField": "marker.unknown"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/50002"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "50002",
+            "data": {"value": "marker.execution.data"}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let full = invoke(
+        &c,
+        "n8n.executions.get",
+        json!({"workflow_id": "1001", "id": "50001"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(full["finished"], true);
+    assert_eq!(full["status"], "success");
+    assert_no_untrusted_output(&full);
+
+    let missing = invoke(
+        &c,
+        "n8n.executions.get",
+        json!({"workflow_id": "1001", "id": "50002"}),
+    )
+    .await
+    .unwrap();
+    assert!(missing["finished"].is_null());
+    assert_no_untrusted_output(&missing);
+}
+
+#[fcp_async_core::runtime::test]
+async fn execution_list_handle_invoke_redacts_items_and_preserves_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "50001",
+                    "finished": true,
+                    "data": {"value": "marker.execution.data"},
+                    "resultData": {"value": "marker.execution.result"},
+                    "credentials": {"api": "marker.execution.credentials"},
+                    "pinData": {"trigger": "marker.execution.pin"},
+                    "unknownField": "marker.unknown"
+                },
+                {"id": "50002", "finished": false},
+                {"id": "50003"}
+            ],
+            "nextCursor": "opaque-execution-cursor"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(&c, "n8n.executions.list", json!({})).await.unwrap();
+    let executions = result["data"].as_array().unwrap();
+    assert_eq!(executions.len(), 3);
+    assert_eq!(executions[1]["finished"], false);
+    assert!(
+        executions[2]
+            .get("finished")
+            .is_some_and(serde_json::Value::is_null)
+    );
+    assert_eq!(result["nextCursor"], "opaque-execution-cursor");
+    for execution in executions {
+        assert_no_untrusted_output(execution);
+    }
 }
 
 #[fcp_async_core::runtime::test]
@@ -938,6 +3269,48 @@ async fn simulate_known_executions_get() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn simulate_known_projects_list() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation": "n8n.projects.list"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_known_tags_list() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation": "n8n.tags.list"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_known_folder_operations() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    for operation in ["n8n.folders.list", "n8n.folders.get"] {
+        assert!(
+            c.handle_simulate(json!({"operation": operation}))
+                .await
+                .unwrap()["allowed"]
+                .as_bool()
+                .unwrap(),
+            "{operation} should be in simulation catalog"
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -1054,7 +3427,7 @@ async fn configure_with_credential_id() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn credential_id_provider_egress_fails_closed_before_request() {
+async fn credential_id_provider_egress_without_proxy_fails_closed_before_request() {
     let server = MockServer::start().await;
     let c = setup_connector_with_config(json!({
         "credential_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -1066,7 +3439,10 @@ async fn credential_id_provider_egress_fails_closed_before_request() {
     let err = invoke(&c, "n8n.workflows.list", json!({}))
         .await
         .expect_err("CredentialId must not use direct provider HTTP");
-    assert!(err.to_string().contains("host-mediated secret injection"));
+    assert!(
+        err.to_string()
+            .contains("trusted host egress proxy configuration")
+    );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
@@ -1141,7 +3517,14 @@ async fn auth_header_sent_correctly() {
         .and(header("X-N8N-API-KEY", "test-n8n-api-key-123"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "1001",
-            "name": "Test Workflow"
+            "name": "Test Workflow",
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "nodes": [],
+            "connections": {},
+            "activeVersion": null
         })))
         .mount(&server)
         .await;

@@ -5,15 +5,16 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:4d98e3ab4585f4cd39196a4c90d346bace4e1b47d0ad4bb3f0ad3780b78c776f"
 
 [connector]
 id = "fcp.n8n"
 name = "n8n Connector"
 version = "0.1.0"
-description = "FCP connector for n8n workflow automation (workflows, executions)"
+description = "FCP connector for n8n workflow automation (workflows, executions, projects, credential metadata, tags, folders)"
 archetypes = ["operational"]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "singleton_writer"
@@ -41,7 +42,11 @@ required = [
     "storage.state",
 ]
 optional = [
+    "n8n.credentials.metadata.read",
     "n8n.executions.read",
+    "n8n.folders.read",
+    "n8n.projects.read",
+    "n8n.tags.read",
     "n8n.workflows.write",
     "n8n.workflows.read",
 ]
@@ -52,10 +57,92 @@ forbidden = [
     "media.download",
 ]
 
-# The concrete n8n API host is operator-configured and substituted by the
-# host/egress layer. These network constraints are declarative host policy;
-# direct connector HTTP is test-only and production provider traffic fails
-# closed until a mediated egress path is available.
+[provides.operations."n8n.credentials.list"]
+description = "List safe credential metadata in the n8n instance"
+capability = "n8n.credentials.metadata.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.credentials.list".input_schema]
+additionalProperties = false
+required = []
+type = "object"
+
+[provides.operations."n8n.credentials.list".input_schema.properties.cursor]
+maxLength = 4096
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.credentials.list".input_schema.properties.limit]
+default = 50
+maximum = 200
+minimum = 1
+type = "integer"
+
+[provides.operations."n8n.credentials.list".output_schema]
+additionalProperties = false
+required = ["data"]
+type = "object"
+
+[provides.operations."n8n.credentials.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."n8n.credentials.list".output_schema.properties.data.items]
+additionalProperties = false
+required = [
+    "resourceUri",
+    "id",
+    "name",
+    "type",
+]
+type = "object"
+
+[provides.operations."n8n.credentials.list".output_schema.properties.data.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.credentials.list".output_schema.properties.data.items.properties.name]
+type = "string"
+
+[provides.operations."n8n.credentials.list".output_schema.properties.data.items.properties.resourceUri]
+type = "string"
+
+[provides.operations."n8n.credentials.list".output_schema.properties.data.items.properties.type]
+type = "string"
+
+[provides.operations."n8n.credentials.list".output_schema.properties.nextCursor]
+type = "string"
+
+[provides.operations."n8n.credentials.list".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.credentials.list".ai_hints]
+when_to_use = "List credential metadata without retrieving credential values."
+common_mistakes = [
+    "The upstream endpoint requires the credential:list scope and owner or admin access.",
+    "Credential values, secret maps, auth headers, and configuration data are never returned.",
+    "Availability and flags vary by n8n version and license; scopes and sharing state are not inferred.",
+    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.",
+]
+examples = ["{}"]
+related = ["n8n.projects.list"]
 
 [provides.operations."n8n.executions.get"]
 description = "Get details of a specific execution"
@@ -64,9 +151,14 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."n8n.executions.get".input_schema]
-required = ["workflow_id", "id"]
+additionalProperties = false
+required = [
+    "workflow_id",
+    "id",
+]
 type = "object"
 
 [provides.operations."n8n.executions.get".input_schema.properties.id]
@@ -78,6 +170,7 @@ description = "Workflow identifier containing the execution"
 type = "string"
 
 [provides.operations."n8n.executions.get".output_schema]
+additionalProperties = false
 required = [
     "id",
     "finished",
@@ -85,10 +178,61 @@ required = [
 type = "object"
 
 [provides.operations."n8n.executions.get".output_schema.properties.finished]
-type = "boolean"
+type = [
+    "boolean",
+    "null",
+]
 
 [provides.operations."n8n.executions.get".output_schema.properties.id]
 type = "string"
+
+[provides.operations."n8n.executions.get".output_schema.properties.mode]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.get".output_schema.properties.retryOf]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.get".output_schema.properties.retrySuccessId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.get".output_schema.properties.startedAt]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.get".output_schema.properties.status]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.get".output_schema.properties.stoppedAt]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.get".output_schema.properties.waitTill]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.get".output_schema.properties.workflowId]
+type = [
+    "string",
+    "null",
+]
 
 [provides.operations."n8n.executions.get".network_constraints]
 host_allow = ["operator-configured"]
@@ -127,17 +271,99 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."n8n.executions.list".input_schema]
+additionalProperties = false
 required = []
 type = "object"
 
+[provides.operations."n8n.executions.list".input_schema.properties.cursor]
+maxLength = 4096
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.executions.list".input_schema.properties.limit]
+default = 50
+maximum = 200
+minimum = 1
+type = "integer"
+
 [provides.operations."n8n.executions.list".output_schema]
+additionalProperties = false
 required = ["data"]
 type = "object"
 
 [provides.operations."n8n.executions.list".output_schema.properties.data]
 type = "array"
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items]
+additionalProperties = false
+required = [
+    "id",
+    "finished",
+]
+type = "object"
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.finished]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.mode]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.retryOf]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.retrySuccessId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.startedAt]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.status]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.stoppedAt]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.waitTill]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.workflowId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.nextCursor]
+type = "string"
 
 [provides.operations."n8n.executions.list".network_constraints]
 host_allow = ["operator-configured"]
@@ -161,13 +387,376 @@ max_response_bytes = 10485760
 when_to_use = "List recent workflow executions in n8n."
 common_mistakes = [
     "Expecting executions from all workflows — results may be limited to the most recent across the instance.",
-    "Not paginating when the execution history is large.",
+    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.",
 ]
 examples = ["{}"]
 related = [
     "n8n.executions.get",
     "n8n.workflows.list",
 ]
+
+[provides.operations."n8n.folders.get"]
+description = "Get safe details of an n8n project folder"
+capability = "n8n.folders.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.folders.get".input_schema]
+additionalProperties = false
+required = [
+    "project_id",
+    "folder_id",
+]
+type = "object"
+
+[provides.operations."n8n.folders.get".input_schema.properties.folder_id]
+description = "Folder identifier"
+type = "string"
+
+[provides.operations."n8n.folders.get".input_schema.properties.project_id]
+description = "Project identifier containing the folder"
+type = "string"
+
+[provides.operations."n8n.folders.get".output_schema]
+additionalProperties = false
+required = [
+    "resourceUri",
+    "id",
+    "name",
+    "parentFolderId",
+    "createdAt",
+    "updatedAt",
+    "totalSubFolders",
+    "totalWorkflows",
+]
+type = "object"
+
+[provides.operations."n8n.folders.get".output_schema.properties.createdAt]
+type = "string"
+
+[provides.operations."n8n.folders.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."n8n.folders.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."n8n.folders.get".output_schema.properties.parentFolderId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.folders.get".output_schema.properties.resourceUri]
+type = "string"
+
+[provides.operations."n8n.folders.get".output_schema.properties.totalSubFolders]
+type = "integer"
+
+[provides.operations."n8n.folders.get".output_schema.properties.totalWorkflows]
+type = "integer"
+
+[provides.operations."n8n.folders.get".output_schema.properties.updatedAt]
+type = "string"
+
+[provides.operations."n8n.folders.get".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.folders.get".ai_hints]
+when_to_use = "Retrieve safe folder details from an n8n project."
+common_mistakes = [
+    "Use both project_id and folder_id; folder IDs are scoped to a project.",
+    "The upstream folder:read surface requires n8n 2.19.0 or newer with feat:folders.",
+    "A provider 403 is ambiguous among folder license, API-key scope, and project RBAC; no current mechanical discriminator is claimed.",
+    "Before n8n 2.19, or when the route is absent, expect 404; version/route inspection is a future non-mechanical OpenAPI probe.",
+]
+examples = ['{"project_id": "project-1", "folder_id": "folder-1"}']
+related = [
+    "n8n.folders.list",
+    "n8n.projects.list",
+]
+
+[provides.operations."n8n.folders.list"]
+description = "List safe folder metadata in an n8n project"
+capability = "n8n.folders.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.folders.list".input_schema]
+additionalProperties = false
+required = ["project_id"]
+type = "object"
+
+[provides.operations."n8n.folders.list".input_schema.properties.parent_folder_id]
+description = "Optional parent folder identifier filter"
+type = "string"
+
+[provides.operations."n8n.folders.list".input_schema.properties.project_id]
+description = "Project identifier containing the folders"
+type = "string"
+
+[provides.operations."n8n.folders.list".input_schema.properties.skip]
+default = 0
+minimum = 0
+type = "integer"
+
+[provides.operations."n8n.folders.list".input_schema.properties.take]
+default = 50
+maximum = 200
+minimum = 1
+type = "integer"
+
+[provides.operations."n8n.folders.list".output_schema]
+additionalProperties = false
+required = [
+    "count",
+    "data",
+]
+type = "object"
+
+[provides.operations."n8n.folders.list".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."n8n.folders.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."n8n.folders.list".output_schema.properties.data.items]
+additionalProperties = false
+required = [
+    "resourceUri",
+    "id",
+    "name",
+    "parentFolderId",
+]
+type = "object"
+
+[provides.operations."n8n.folders.list".output_schema.properties.data.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.folders.list".output_schema.properties.data.items.properties.name]
+type = "string"
+
+[provides.operations."n8n.folders.list".output_schema.properties.data.items.properties.parentFolderId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.folders.list".output_schema.properties.data.items.properties.resourceUri]
+type = "string"
+
+[provides.operations."n8n.folders.list".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.folders.list".ai_hints]
+when_to_use = "List safe folder metadata in an n8n project."
+common_mistakes = [
+    "Use project_id, not a redundant server_id; server identity comes from connector configuration.",
+    "The provider returns {count,data}; folder list output is limited to the fixed safe projection.",
+    "The upstream folder:list surface requires n8n 2.19.0 or newer with feat:folders.",
+    "A provider 403 is ambiguous among folder license, API-key scope, and project RBAC; no current mechanical discriminator is claimed.",
+    "Before n8n 2.19, or when the route is absent, expect 404; version/route inspection is a future non-mechanical OpenAPI probe.",
+]
+examples = ['{"project_id": "project-1"}']
+related = [
+    "n8n.folders.get",
+    "n8n.projects.list",
+]
+
+[provides.operations."n8n.projects.list"]
+description = "List safe project metadata in the n8n instance"
+capability = "n8n.projects.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.projects.list".input_schema]
+additionalProperties = false
+required = []
+type = "object"
+
+[provides.operations."n8n.projects.list".input_schema.properties.cursor]
+maxLength = 4096
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.projects.list".input_schema.properties.limit]
+default = 50
+maximum = 200
+minimum = 1
+type = "integer"
+
+[provides.operations."n8n.projects.list".output_schema]
+additionalProperties = false
+required = ["data"]
+type = "object"
+
+[provides.operations."n8n.projects.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."n8n.projects.list".output_schema.properties.data.items]
+additionalProperties = false
+required = [
+    "id",
+    "name",
+]
+type = "object"
+
+[provides.operations."n8n.projects.list".output_schema.properties.data.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.projects.list".output_schema.properties.data.items.properties.name]
+type = "string"
+
+[provides.operations."n8n.projects.list".output_schema.properties.data.items.properties.type]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.projects.list".output_schema.properties.nextCursor]
+type = "string"
+
+[provides.operations."n8n.projects.list".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.projects.list".ai_hints]
+when_to_use = "List safe project metadata in the n8n instance."
+common_mistakes = [
+    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.",
+    "Project output is limited to id, name, and optional type; memberships and provider metadata are discarded.",
+]
+examples = ["{}"]
+related = ["n8n.workflows.list"]
+
+[provides.operations."n8n.tags.list"]
+description = "List compact tag metadata in the n8n instance"
+capability = "n8n.tags.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.tags.list".input_schema]
+additionalProperties = false
+required = []
+type = "object"
+
+[provides.operations."n8n.tags.list".input_schema.properties.cursor]
+maxLength = 4096
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.tags.list".input_schema.properties.limit]
+default = 50
+maximum = 200
+minimum = 1
+type = "integer"
+
+[provides.operations."n8n.tags.list".output_schema]
+additionalProperties = false
+required = ["data"]
+type = "object"
+
+[provides.operations."n8n.tags.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."n8n.tags.list".output_schema.properties.data.items]
+additionalProperties = false
+required = [
+    "id",
+    "name",
+]
+type = "object"
+
+[provides.operations."n8n.tags.list".output_schema.properties.data.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.tags.list".output_schema.properties.data.items.properties.name]
+type = "string"
+
+[provides.operations."n8n.tags.list".output_schema.properties.nextCursor]
+type = "string"
+
+[provides.operations."n8n.tags.list".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.tags.list".ai_hints]
+when_to_use = "List compact tag metadata in the n8n instance."
+common_mistakes = [
+    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.",
+    "Tag output contains only id and name; provider timestamps and metadata are discarded.",
+]
+examples = ["{}"]
+related = ["n8n.projects.list"]
 
 [provides.operations."n8n.workflows.activate"]
 description = "Capability- and approval-gated activation boundary; packet 1 fails closed and defers provider lifecycle I/O"
@@ -176,8 +765,10 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."n8n.workflows.activate".input_schema]
+additionalProperties = false
 required = [
     "id",
     "active",
@@ -193,6 +784,7 @@ description = "Workflow identifier"
 type = "string"
 
 [provides.operations."n8n.workflows.activate".output_schema]
+additionalProperties = false
 required = ["id"]
 type = "object"
 
@@ -236,8 +828,10 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."n8n.workflows.get".input_schema]
+additionalProperties = false
 required = ["id"]
 type = "object"
 
@@ -246,16 +840,100 @@ description = "Workflow identifier"
 type = "string"
 
 [provides.operations."n8n.workflows.get".output_schema]
+additionalProperties = false
 required = [
     "id",
     "name",
+    "projectId",
+    "folderId",
+    "versionId",
+    "active",
+    "activeVersionId",
+    "isArchived",
+    "draft",
+    "published",
+    "stateDigest",
+    "updatedAt",
 ]
 type = "object"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.active]
+type = "boolean"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.activeVersionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.get".output_schema.properties.draft]
+additionalProperties = false
+required = [
+    "versionId",
+    "graphDigest",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.draft.properties.graphDigest]
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.draft.properties.versionId]
+type = "string"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.folderId]
+type = [
+    "string",
+    "null",
+]
 
 [provides.operations."n8n.workflows.get".output_schema.properties.id]
 type = "string"
 
+[provides.operations."n8n.workflows.get".output_schema.properties.isArchived]
+type = "boolean"
+
 [provides.operations."n8n.workflows.get".output_schema.properties.name]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.get".output_schema.properties.projectId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.get".output_schema.properties.published]
+additionalProperties = false
+required = [
+    "versionId",
+    "graphDigest",
+]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."n8n.workflows.get".output_schema.properties.published.properties.graphDigest]
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.published.properties.versionId]
+type = "string"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.stateDigest]
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.updatedAt]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.get".output_schema.properties.versionId]
 type = "string"
 
 [provides.operations."n8n.workflows.get".network_constraints]
@@ -280,6 +958,8 @@ max_response_bytes = 10485760
 when_to_use = "Retrieve details of a specific n8n workflow by ID."
 common_mistakes = [
     "Using the workflow name or slug instead of the numeric workflow ID.",
+    "Treating graphDigest as a write precondition; stateDigest is the credential- and lifecycle-sensitive guard.",
+    "Expecting raw nodes, Code source, credential references, or pinned data in the normalized output.",
 ]
 examples = ['{"id": "1001"}']
 related = [
@@ -294,17 +974,127 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."n8n.workflows.list".input_schema]
+additionalProperties = false
 required = []
 type = "object"
 
+[provides.operations."n8n.workflows.list".input_schema.properties.cursor]
+maxLength = 4096
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.workflows.list".input_schema.properties.limit]
+default = 50
+maximum = 200
+minimum = 1
+type = "integer"
+
 [provides.operations."n8n.workflows.list".output_schema]
+additionalProperties = false
 required = ["data"]
 type = "object"
 
 [provides.operations."n8n.workflows.list".output_schema.properties.data]
 type = "array"
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items]
+additionalProperties = false
+required = [
+    "id",
+    "name",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.active]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.activeVersionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.createdAt]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.description]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.isArchived]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.name]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.parentFolderId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.projectId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.tags]
+type = [
+    "array",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.tags.items]
+additionalProperties = false
+type = "object"
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.tags.items.properties.id]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.tags.items.properties.name]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.updatedAt]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.versionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.list".output_schema.properties.nextCursor]
+type = "string"
 
 [provides.operations."n8n.workflows.list".network_constraints]
 host_allow = ["operator-configured"]
@@ -328,6 +1118,7 @@ max_response_bytes = 10485760
 when_to_use = "List all workflows in the n8n instance."
 common_mistakes = [
     "Assuming only active workflows are returned — inactive workflows are included in the list.",
+    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.",
 ]
 examples = ["{}"]
 related = [
@@ -347,6 +1138,20 @@ fs_readonly_paths = [
 fs_writable_paths = ["$CONNECTOR_STATE"]
 deny_exec = true
 deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "n8n.credentials.metadata.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "n8n.folders.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
 
 [[rate_limits.pools]]
 id = "n8n.workflows.read"
@@ -369,9 +1174,28 @@ window_ms = 60000
 burst = 20
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "n8n.projects.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "n8n.tags.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
 [rate_limits.operation_pools]
+"n8n.folders.get" = ["n8n.folders.read"]
+"n8n.workflows.list" = ["n8n.workflows.read"]
+"n8n.folders.list" = ["n8n.folders.read"]
+"n8n.projects.list" = ["n8n.projects.read"]
+"n8n.tags.list" = ["n8n.tags.read"]
+"n8n.executions.get" = ["n8n.executions.read"]
+"n8n.credentials.list" = ["n8n.credentials.metadata.read"]
+"n8n.executions.list" = ["n8n.executions.read"]
 "n8n.workflows.activate" = ["n8n.workflows.write"]
 "n8n.workflows.get" = ["n8n.workflows.read"]
-"n8n.workflows.list" = ["n8n.workflows.read"]
-"n8n.executions.get" = ["n8n.executions.read"]
-"n8n.executions.list" = ["n8n.executions.read"]

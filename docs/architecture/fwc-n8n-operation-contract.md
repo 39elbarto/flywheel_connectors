@@ -212,6 +212,7 @@ preferred route and the selected route, without provider response content.
   "isArchived": false,
   "draft": { "versionId": "string", "graphDigest": "blake3-256:..." },
   "published": null,
+  "stateDigest": "blake3-256:...",
   "updatedAt": "RFC3339|null"
 }
 ```
@@ -221,6 +222,26 @@ separate graph summary whose version ID equals `activeVersionId`. `active` is a
 provider state flag and must be read back; it is not inferred solely from a
 name, trigger, or UI label. `isArchived` is independent from both draft and
 published state.
+
+Digest contract v1:
+
+- `graphDigest` is a provider-neutral semantic comparison digest. Its preimage
+  is deterministic JSON containing exactly `nodes` and `connections`; object
+  keys are recursively sorted and array order is preserved. Only the top-level
+  `credentials` field on each node is removed. Code source and all other graph
+  semantics remain in the preimage. The domain is
+  `fwc-n8n.graph-digest.v1`, followed by a zero byte, followed by the canonical
+  JSON bytes, hashed with BLAKE3-256.
+- `stateDigest` is a separate write-precondition digest. Its preimage includes
+  workflow identity and metadata, version/lifecycle/archive fields, timestamps
+  and tags, plus complete draft and published graphs including credential
+  bindings. Its domain is `fwc-n8n.state-digest.v1` with the same zero-byte
+  separation and canonical JSON rules.
+- Raw graph values, Code source, credential bindings, pinned data, and digest
+  preimages are never returned or logged. An official MCP response that hides
+  credential bindings may support semantic comparison through `graphDigest`,
+  but cannot be the sole authority for a write guarded by `stateDigest`; typed
+  REST readback is required.
 
 ## 5. Public operation inventory
 

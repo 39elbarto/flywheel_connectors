@@ -1,16 +1,75 @@
 //! n8n API client.
 
-use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::net::IpAddr;
 use std::time::Duration;
 
+use fcp_manifest::{
+    HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader, HostEgressHttpRequest,
+    HostEgressHttpResponse,
+};
 use fcp_prelude::CredentialId;
+use fcp_sdk::migration::HostEgressProxyError;
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode, Url};
+use serde::de::DeserializeOwned;
 use tracing::{debug, instrument};
 
-use crate::error::{N8nError, N8nResult};
+use crate::{
+    error::{N8nError, N8nResult},
+    types::{
+        CredentialListResponse, Execution, ExecutionListResponse, Folder, FolderListResponse,
+        ListResponse, ProjectListResponse, TagListResponse, WorkflowDetail, WorkflowListResponse,
+    },
+};
+
+#[cfg(test)]
+use crate::types::Workflow;
+
+pub(crate) const DEFAULT_LIST_LIMIT: u64 = 50;
+pub(crate) const MAX_LIST_LIMIT: u64 = 200;
+pub(crate) const MAX_CURSOR_BYTES: usize = 4096;
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListQuery {
+    pub(crate) limit: u64,
+    pub(crate) cursor: Option<String>,
+}
+
+impl ListQuery {
+    pub(crate) fn new(limit: u64, cursor: Option<String>) -> N8nResult<Self> {
+        if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+            return Err(N8nError::InvalidInput(
+                "list limit must be an integer from 1 through 200".into(),
+            ));
+        }
+        if let Some(cursor) = cursor.as_deref() {
+            validate_cursor(cursor)?;
+        }
+        Ok(Self { limit, cursor })
+    }
+}
+
+pub(crate) fn validate_cursor(cursor: &str) -> N8nResult<()> {
+    if !cursor_is_valid(cursor) {
+        return Err(N8nError::InvalidInput(
+            "list cursor must be a non-empty opaque string of at most 4096 UTF-8 bytes without control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_provider_cursor(cursor: &str) -> N8nResult<()> {
+    if !cursor_is_valid(cursor) {
+        return Err(N8nError::MalformedProviderResponse);
+    }
+    Ok(())
+}
+
+fn cursor_is_valid(cursor: &str) -> bool {
+    !cursor.is_empty() && cursor.len() <= MAX_CURSOR_BYTES && !cursor.chars().any(char::is_control)
+}
 
 /// Authentication mode for the n8n API.
 #[derive(Clone)]
@@ -27,7 +86,7 @@ impl N8nAuth {
     pub fn redacted_label(&self) -> String {
         match self {
             Self::ApiKey(_) => "api_key:redacted".to_string(),
-            Self::CredentialId(id) => format!("credential_id:{id}"),
+            Self::CredentialId(_) => "credential_id:redacted".to_string(),
         }
     }
 
@@ -41,7 +100,7 @@ impl fmt::Debug for N8nAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
-            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+            Self::CredentialId(_) => f.debug_tuple("CredentialId").field(&"<redacted>").finish(),
         }
     }
 }
@@ -68,8 +127,29 @@ impl N8nClient {
     ///
     /// `base_url` is required for n8n (self-hosted).
     pub fn new(auth: N8nAuth, base_url: &str) -> N8nResult<Self> {
+        let runtime_config = ConnectorRuntimeConfig::default()
+            .with_request_timeout(Duration::from_secs(30))
+            .with_host_egress_from_env()
+            .map_err(|_| {
+                N8nError::InvalidInput("invalid host egress launch configuration".into())
+            })?;
+        Self::new_with_runtime_config(auth, base_url, runtime_config)
+    }
+
+    /// Create a client with trusted host-supplied runtime configuration.
+    pub(crate) fn new_with_runtime_config(
+        auth: N8nAuth,
+        base_url: &str,
+        runtime_config: ConnectorRuntimeConfig,
+    ) -> N8nResult<Self> {
+        if runtime_config.request_timeout.is_zero() || runtime_config.connect_timeout.is_zero() {
+            return Err(N8nError::InvalidInput(
+                "runtime request and connect timeouts must be non-zero".into(),
+            ));
+        }
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(runtime_config.connect_timeout)
+            .timeout(runtime_config.request_timeout)
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("fcp-n8n/0.1.0 (FCP connector)")
             .build()?;
@@ -82,9 +162,7 @@ impl N8nClient {
             client,
             auth,
             base_url,
-            runtime: ConnectorRuntime::new(
-                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
-            ),
+            runtime: ConnectorRuntime::new(runtime_config),
         })
     }
 
@@ -186,7 +264,7 @@ impl N8nClient {
     async fn handle_response(&self, resp: Response) -> N8nResult<serde_json::Value> {
         let status = resp.status();
         if status.is_success() {
-            let body = resp.text().await?;
+            let body = read_bounded_body(resp).await?;
             decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
@@ -204,7 +282,7 @@ impl N8nClient {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
 
-        let _body = resp.text().await.unwrap_or_default();
+        let _body = read_bounded_body(resp).await?;
         let detail = format!("n8n provider returned HTTP {}", status.as_u16());
 
         match status.as_u16() {
@@ -214,7 +292,7 @@ impl N8nClient {
                 resource: "n8n resource".into(),
             }),
             429 => Err(N8nError::RateLimited {
-                retry_after_ms: retry_after.unwrap_or(60) * 1000,
+                retry_after_ms: retry_after.unwrap_or(60).saturating_mul(1000),
             }),
             code => Err(N8nError::Api {
                 status_code: code,
@@ -223,20 +301,90 @@ impl N8nClient {
         }
     }
 
-    #[instrument(skip(self), fields(url))]
+    #[instrument(skip(self, path))]
     async fn get(&self, path: &str) -> N8nResult<serde_json::Value> {
-        self.ensure_provider_egress_allowed()?;
         let url = self.resolve_path(path)?;
-        debug!(url = %redact_url(url.as_str()), "GET request");
+        self.get_url(url).await
+    }
+
+    #[instrument(skip(self, url))]
+    async fn get_url(&self, url: Url) -> N8nResult<serde_json::Value> {
+        self.ensure_provider_egress_allowed()?;
+        debug!(has_query = url.query().is_some(), "GET request");
         let req = self
             .add_auth(self.client.get(url))
             .header("Accept", "application/json");
-        let resp = req.send().await?;
+        let resp = req.send().await.map_err(|_| N8nError::Api {
+            status_code: 502,
+            message: "n8n provider transport failed".into(),
+        })?;
         self.handle_response(resp).await
     }
 
+    async fn get_url_with_context(
+        &self,
+        url: Url,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        match (&self.auth, context) {
+            (N8nAuth::ApiKey(_), _) => self.get_url(url).await,
+            (N8nAuth::CredentialId(_), Some(context)) => self.get_url_mediated(url, context).await,
+            (N8nAuth::CredentialId(_), None) => Err(N8nError::InvalidInput(
+                "credential_id requires verified request attribution".into(),
+            )),
+        }
+    }
+
+    async fn get_url_mediated(
+        &self,
+        url: Url,
+        context: HostEgressContext,
+    ) -> N8nResult<serde_json::Value> {
+        let credential_id = match &self.auth {
+            N8nAuth::CredentialId(credential_id) => credential_id,
+            N8nAuth::ApiKey(_) => {
+                return Err(N8nError::InvalidInput(
+                    "host-mediated egress requires credential_id auth".into(),
+                ));
+            }
+        };
+        let proxy = self
+            .runtime
+            .host_egress_proxy_client()
+            .map_err(|_| {
+                N8nError::InvalidInput("trusted host egress proxy configuration is invalid".into())
+            })?
+            .ok_or_else(|| {
+                N8nError::InvalidInput(
+                    "credential_id requires the trusted host egress proxy configuration".into(),
+                )
+            })?;
+        let request = HostEgressHttpRequest {
+            context: context.clone(),
+            url: url.to_string(),
+            method: "GET".to_string(),
+            headers: vec![HostEgressHttpHeader {
+                name: "Accept".to_string(),
+                value: "application/json".to_string(),
+            }],
+            body: None,
+            credential_id: Some(credential_id.to_string()),
+        };
+        let response = proxy
+            .http(&request)
+            .await
+            .map_err(|error| map_host_egress_error(&error))?;
+        validate_host_egress_decision(&response.egress, &context, &url)?;
+        decode_mediated_response(&response)
+    }
+
     fn resolve_path(&self, path: &str) -> N8nResult<Url> {
-        if !path.starts_with('/') || path.contains("..") || path.contains('\\') {
+        if !path.starts_with('/')
+            || path.contains("..")
+            || path.contains('\\')
+            || path.contains('?')
+            || path.contains('#')
+        {
             return Err(N8nError::InvalidInput(
                 "provider path is not a safe connector-owned path".into(),
             ));
@@ -246,38 +394,435 @@ impl N8nClient {
             .map_err(|_| N8nError::InvalidInput("provider path could not be resolved".into()))
     }
 
+    fn resolve_path_segments(&self, segments: &[(&str, &str)]) -> N8nResult<Url> {
+        let mut url = self.base_url.clone();
+        let mut path_segments = url
+            .path_segments_mut()
+            .map_err(|()| N8nError::InvalidInput("provider path could not be resolved".into()))?;
+        path_segments.pop_if_empty();
+        for (field, value) in segments {
+            let value = sanitize_path_segment(value, field)?;
+            path_segments.push(value);
+        }
+        drop(path_segments);
+        Ok(url)
+    }
+
     // -- Workflows --
 
     /// List all workflows.
-    pub async fn list_workflows(&self) -> N8nResult<serde_json::Value> {
-        self.get("/workflows").await
+    async fn list_workflows(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        let mut url = self.resolve_path("/workflows")?;
+        {
+            let mut query_pairs = url.query_pairs_mut();
+            query_pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(cursor) = query.cursor.as_deref() {
+                query_pairs.append_pair("cursor", cursor);
+            }
+            query_pairs.append_pair("excludePinnedData", "true");
+        }
+        self.get_url_with_context(url, context).await
     }
 
     /// Perform a bounded read-only readiness probe and discard provider data.
     pub async fn self_check(&self) -> N8nResult<()> {
-        let response = self.get("/workflows?limit=1").await?;
+        let mut url = self.resolve_path("/workflows")?;
+        {
+            let mut query_pairs = url.query_pairs_mut();
+            query_pairs.append_pair("limit", "1");
+            query_pairs.append_pair("excludePinnedData", "true");
+        }
+        let response = self.get_url(url).await?;
         let _ = response;
         Ok(())
     }
 
     /// Get a specific workflow by ID.
-    pub async fn get_workflow(&self, id: &str) -> N8nResult<serde_json::Value> {
-        let id = sanitize_path_segment(id, "workflow id")?;
-        self.get(&format!("/workflows/{id}")).await
+    async fn get_workflow(
+        &self,
+        id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        let url =
+            self.resolve_path_segments(&[("path segment", "workflows"), ("workflow id", id)])?;
+        self.get_url_with_context(url, context).await
     }
 
     // -- Executions --
 
     /// List recent executions.
-    pub async fn list_executions(&self) -> N8nResult<serde_json::Value> {
-        self.get("/executions").await
+    async fn list_executions(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        let mut url = self.resolve_path("/executions")?;
+        {
+            let mut query_pairs = url.query_pairs_mut();
+            query_pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(cursor) = query.cursor.as_deref() {
+                query_pairs.append_pair("cursor", cursor);
+            }
+            query_pairs.append_pair("includeData", "false");
+            query_pairs.append_pair("ignoreDataSizeLimit", "false");
+            query_pairs.append_pair("redactExecutionData", "true");
+        }
+        self.get_url_with_context(url, context).await
+    }
+
+    // -- Projects --
+
+    /// List projects with the shared bounded pagination query.
+    async fn list_projects(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        let mut url = self.resolve_path("/projects")?;
+        {
+            let mut query_pairs = url.query_pairs_mut();
+            query_pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(cursor) = query.cursor.as_deref() {
+                query_pairs.append_pair("cursor", cursor);
+            }
+        }
+        self.get_url_with_context(url, context).await
+    }
+
+    // -- Credentials --
+
+    /// List safe credential metadata without requesting credential values.
+    async fn list_credentials(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        let mut url = self.resolve_path("/credentials")?;
+        {
+            let mut query_pairs = url.query_pairs_mut();
+            query_pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(cursor) = query.cursor.as_deref() {
+                query_pairs.append_pair("cursor", cursor);
+            }
+        }
+        self.get_url_with_context(url, context).await
+    }
+
+    // -- Tags --
+
+    /// List tags with the shared bounded pagination query.
+    async fn list_tags(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        let mut url = self.resolve_path("/tags")?;
+        {
+            let mut query_pairs = url.query_pairs_mut();
+            query_pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(cursor) = query.cursor.as_deref() {
+                query_pairs.append_pair("cursor", cursor);
+            }
+        }
+        self.get_url_with_context(url, context).await
+    }
+
+    // -- Folders --
+
+    /// List folders within a project using n8n's folder-specific pagination.
+    async fn list_folders(
+        &self,
+        project_id: &str,
+        parent_folder_id: Option<&str>,
+        skip: u64,
+        take: u64,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        if !(1..=200).contains(&take) {
+            return Err(N8nError::InvalidInput(
+                "folder take must be an integer from 1 through 200".into(),
+            ));
+        }
+        let parent_folder_id = parent_folder_id
+            .map(|id| sanitize_path_segment(id, "parent folder id"))
+            .transpose()?;
+        let mut url = self.resolve_path_segments(&[
+            ("path segment", "projects"),
+            ("project id", project_id),
+            ("path segment", "folders"),
+        ])?;
+        {
+            let mut query_pairs = url.query_pairs_mut();
+            query_pairs.append_pair("select", r#"["id","name","parentFolder"]"#);
+            if let Some(parent_folder_id) = parent_folder_id {
+                let filter = serde_json::to_string(&serde_json::json!({
+                    "parentFolderId": parent_folder_id,
+                }))?;
+                query_pairs.append_pair("filter", &filter);
+            }
+            query_pairs.append_pair("skip", &skip.to_string());
+            query_pairs.append_pair("take", &take.to_string());
+        }
+        self.get_url_with_context(url, context).await
+    }
+
+    /// Get a specific folder within a project.
+    async fn get_folder(
+        &self,
+        project_id: &str,
+        folder_id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        let url = self.resolve_path_segments(&[
+            ("path segment", "projects"),
+            ("project id", project_id),
+            ("path segment", "folders"),
+            ("folder id", folder_id),
+        ])?;
+        self.get_url_with_context(url, context).await
     }
 
     /// Get a specific execution by ID.
-    pub async fn get_execution(&self, id: &str) -> N8nResult<serde_json::Value> {
-        let id = sanitize_path_segment(id, "execution id")?;
-        self.get(&format!("/executions/{id}")).await
+    async fn get_execution(
+        &self,
+        id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        let url =
+            self.resolve_path_segments(&[("path segment", "executions"), ("execution id", id)])?;
+        self.get_url_with_context(url, context).await
     }
+
+    /// List workflows using the typed provider DTO layer.
+    ///
+    /// This wrapper preserves [`Self::list_workflows`] and its exact provider
+    /// route while making the response shape explicit for future normalization.
+    pub(crate) async fn list_workflows_typed(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<WorkflowListResponse> {
+        decode_list_typed(self.list_workflows(query, context).await?)
+    }
+
+    /// Get a workflow using the typed provider DTO layer.
+    pub(crate) async fn get_workflow_typed(
+        &self,
+        id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<WorkflowDetail> {
+        decode_typed(self.get_workflow(id, context).await?)
+    }
+
+    /// List executions using the typed provider DTO layer.
+    pub(crate) async fn list_executions_typed(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<ExecutionListResponse> {
+        decode_list_typed(self.list_executions(query, context).await?)
+    }
+
+    /// List projects using the typed provider DTO layer.
+    pub(crate) async fn list_projects_typed(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<ProjectListResponse> {
+        decode_list_typed(self.list_projects(query, context).await?)
+    }
+
+    /// List credential metadata using the typed provider DTO layer.
+    pub(crate) async fn list_credentials_typed(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<CredentialListResponse> {
+        decode_list_typed(self.list_credentials(query, context).await?)
+    }
+
+    /// List tags using the typed provider DTO layer.
+    pub(crate) async fn list_tags_typed(
+        &self,
+        query: &ListQuery,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<TagListResponse> {
+        decode_list_typed(self.list_tags(query, context).await?)
+    }
+
+    /// List folders using the typed provider DTO layer.
+    pub(crate) async fn list_folders_typed(
+        &self,
+        project_id: &str,
+        parent_folder_id: Option<&str>,
+        skip: u64,
+        take: u64,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<FolderListResponse> {
+        decode_typed(
+            self.list_folders(project_id, parent_folder_id, skip, take, context)
+                .await?,
+        )
+    }
+
+    /// Get a folder using the typed provider DTO layer.
+    pub(crate) async fn get_folder_typed(
+        &self,
+        project_id: &str,
+        folder_id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<Folder> {
+        decode_typed(self.get_folder(project_id, folder_id, context).await?)
+    }
+
+    /// Get an execution using the typed provider DTO layer.
+    pub(crate) async fn get_execution_typed(
+        &self,
+        id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<Execution> {
+        decode_typed(self.get_execution(id, context).await?)
+    }
+}
+
+async fn read_bounded_body(mut response: Response) -> N8nResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES as u64)
+    {
+        return Err(N8nError::MalformedProviderResponse);
+    }
+
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or_default()
+            .min(MAX_PROVIDER_RESPONSE_BYTES),
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| N8nError::MalformedProviderResponse)?
+    {
+        if chunk.len() > MAX_PROVIDER_RESPONSE_BYTES.saturating_sub(body.len()) {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn map_host_egress_error(error: &HostEgressProxyError) -> N8nError {
+    let message = match error {
+        HostEgressProxyError::Transport(_) => "host egress proxy transport failed",
+        HostEgressProxyError::InheritedChannel => "host egress proxy inherited channel failed",
+        HostEgressProxyError::RequestEnvelopeTooLarge => {
+            "host egress proxy request exceeded the configured limit"
+        }
+        HostEgressProxyError::MalformedRequestEnvelope => {
+            "host egress proxy request envelope was malformed"
+        }
+        HostEgressProxyError::EnvelopeTooLarge => {
+            "host egress proxy response exceeded the configured limit"
+        }
+        HostEgressProxyError::MalformedEnvelope => {
+            "host egress proxy returned a malformed response envelope"
+        }
+        HostEgressProxyError::Rejected { .. } => "host egress proxy rejected mediated request",
+    };
+    N8nError::Api {
+        status_code: 502,
+        message: message.into(),
+    }
+}
+
+fn validate_host_egress_decision(
+    decision: &HostEgressDecisionMetadata,
+    context: &HostEgressContext,
+    target: &Url,
+) -> N8nResult<()> {
+    let expected_host = target
+        .host_str()
+        .ok_or(N8nError::MalformedProviderResponse)?;
+    let expected_port = target
+        .port_or_known_default()
+        .ok_or(N8nError::MalformedProviderResponse)?;
+    if decision.connector_id != context.connector_id
+        || decision.operation_id != context.operation_id
+        || decision.zone_id != context.zone_id
+        || decision.request_id != context.request_id
+        || decision.correlation_id != context.correlation_id
+        || decision.execution_mode != "host_egress_proxy"
+        || decision.constraint_source != "managed_connector_config.operation_network_constraints"
+        || decision.decision != "allow"
+        || decision.resolved_host != expected_host
+        || decision.resolved_port != expected_port
+        || !decision.credential_injected
+    {
+        return Err(N8nError::MalformedProviderResponse);
+    }
+    Ok(())
+}
+
+fn decode_mediated_response(response: &HostEgressHttpResponse) -> N8nResult<serde_json::Value> {
+    if response.body.as_bytes().len() > MAX_PROVIDER_RESPONSE_BYTES {
+        return Err(N8nError::MalformedProviderResponse);
+    }
+    let status =
+        StatusCode::from_u16(response.status).map_err(|_| N8nError::MalformedProviderResponse)?;
+    if status.is_success() {
+        return decode_success_body(status, response.body.as_bytes());
+    }
+
+    let retry_after = response
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|header| header.value.parse::<u64>().ok());
+    map_provider_status(status.as_u16(), retry_after)
+}
+
+fn map_provider_status(
+    status_code: u16,
+    retry_after_seconds: Option<u64>,
+) -> N8nResult<serde_json::Value> {
+    match status_code {
+        401 => Err(N8nError::Unauthorized),
+        403 => Err(N8nError::Forbidden),
+        404 => Err(N8nError::NotFound {
+            resource: "n8n resource".into(),
+        }),
+        429 => Err(N8nError::RateLimited {
+            retry_after_ms: retry_after_seconds.unwrap_or(60).saturating_mul(1000),
+        }),
+        code => Err(N8nError::Api {
+            status_code: code,
+            message: format!("n8n provider returned HTTP {code}"),
+        }),
+    }
+}
+
+fn decode_typed<T>(value: serde_json::Value) -> N8nResult<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(value).map_err(|_| N8nError::MalformedProviderResponse)
+}
+
+fn decode_list_typed<T>(value: serde_json::Value) -> N8nResult<ListResponse<T>>
+where
+    T: DeserializeOwned,
+{
+    let page: ListResponse<T> = decode_typed(value)?;
+    if let Some(cursor) = page.next_cursor.as_deref() {
+        validate_provider_cursor(cursor)?;
+    }
+    Ok(page)
 }
 
 pub(crate) fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> N8nResult<&'a str> {
@@ -316,17 +861,17 @@ fn is_ip_literal(host: &str) -> bool {
     host.trim_matches(['[', ']']).parse::<IpAddr>().is_ok()
 }
 
-fn decode_success_body(status: StatusCode, body: &str) -> N8nResult<serde_json::Value> {
+fn decode_success_body(status: StatusCode, body: &[u8]) -> N8nResult<serde_json::Value> {
     if status == StatusCode::NO_CONTENT {
         return Ok(serde_json::json!({}));
     }
-    if body.trim().is_empty() {
+    if body.iter().all(u8::is_ascii_whitespace) {
         return Err(N8nError::Api {
             status_code: status.as_u16(),
             message: "empty response body".into(),
         });
     }
-    Ok(serde_json::from_str(body)?)
+    serde_json::from_slice(body).map_err(|_| N8nError::MalformedProviderResponse)
 }
 
 #[cfg(test)]
@@ -359,12 +904,21 @@ mod tests {
     fn auth_redacted_label_credential() {
         let cred = N8nAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
-        assert!(label.starts_with("credential_id:"));
+        assert_eq!(label, "credential_id:redacted");
+    }
+
+    #[test]
+    fn credential_auth_debug_redacts_reference() {
+        let id = CredentialId::new();
+        let id_text = id.to_string();
+        let debug = format!("{:?}", N8nAuth::CredentialId(id));
+        assert!(!debug.contains(&id_text));
+        assert!(debug.contains("redacted"));
     }
 
     #[test]
     fn decode_success_body_rejects_empty_ok() {
-        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        let err = decode_success_body(StatusCode::OK, b"").unwrap_err();
         assert!(matches!(
             err,
             N8nError::Api {
@@ -376,7 +930,7 @@ mod tests {
 
     #[test]
     fn decode_success_body_rejects_whitespace_ok() {
-        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        let err = decode_success_body(StatusCode::OK, b"  \n\t").unwrap_err();
         assert!(matches!(
             err,
             N8nError::Api {
@@ -389,9 +943,101 @@ mod tests {
     #[test]
     fn decode_success_body_allows_empty_no_content() {
         assert_eq!(
-            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            decode_success_body(StatusCode::NO_CONTENT, b"").unwrap(),
             serde_json::json!({})
         );
+    }
+
+    #[test]
+    fn typed_decoder_uses_provider_dto_layer() {
+        let page: WorkflowListResponse = decode_typed(serde_json::json!({
+            "data": [{
+                "id": "1001",
+                "name": "Daily Report",
+                "versionId": "version-1001",
+            }],
+            "nextCursor": "cursor-1",
+        }))
+        .unwrap();
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(page.data[0].id, "1001");
+        assert_eq!(page.data[0].version_id, Some("version-1001".into()));
+        assert_eq!(page.next_cursor, Some("cursor-1".into()));
+    }
+
+    #[test]
+    fn typed_project_decoder_preserves_only_project_contract_fields() {
+        let page: ProjectListResponse = decode_typed(serde_json::json!({
+            "data": [{
+                "id": "project-1",
+                "name": "Operations",
+                "type": "team",
+                "users": [{"id": "secret-user"}],
+                "unknownField": "marker.unknown",
+            }],
+            "nextCursor": null,
+        }))
+        .unwrap();
+        assert_eq!(page.data[0].id, "project-1");
+        assert_eq!(page.data[0].name, "Operations");
+        assert_eq!(page.data[0].project_type, Some("team".into()));
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn typed_tag_decoder_discards_provider_timestamps() {
+        let page: TagListResponse = decode_typed(serde_json::json!({
+            "data": [{
+                "id": "tag-1",
+                "name": "production",
+                "createdAt": "ignored",
+                "updatedAt": "ignored",
+                "unknownField": "marker.tag.unknown",
+            }],
+            "nextCursor": null,
+        }))
+        .unwrap();
+        let output = serde_json::to_value(page.data[0].clone().into_view()).unwrap();
+        assert_eq!(
+            output,
+            serde_json::json!({"id": "tag-1", "name": "production"})
+        );
+    }
+
+    #[test]
+    fn list_query_enforces_bounds_without_normalizing_cursor() {
+        let query = ListQuery::new(200, Some("cursor with spaces/%".into())).unwrap();
+        assert_eq!(query.limit, 200);
+        assert_eq!(query.cursor.as_deref(), Some("cursor with spaces/%"));
+        assert!(ListQuery::new(0, None).is_err());
+        assert!(ListQuery::new(201, None).is_err());
+    }
+
+    #[test]
+    fn cursor_validation_rejects_empty_control_and_oversized_values() {
+        assert!(validate_cursor("").is_err());
+        assert!(validate_cursor("cursor\nvalue").is_err());
+        assert!(validate_cursor(&"x".repeat(MAX_CURSOR_BYTES + 1)).is_err());
+        assert!(validate_cursor("opaque-cursor").is_ok());
+    }
+
+    #[test]
+    fn malformed_provider_cursors_are_not_user_input_errors() {
+        for cursor in ["", "cursor\nvalue"] {
+            let error = decode_list_typed::<Workflow>(serde_json::json!({
+                "data": [],
+                "nextCursor": cursor,
+            }))
+            .unwrap_err();
+            assert!(matches!(error, N8nError::MalformedProviderResponse));
+        }
+
+        let error = decode_list_typed::<Workflow>(serde_json::json!({
+            "data": [],
+            "nextCursor": "x".repeat(MAX_CURSOR_BYTES + 1),
+        }))
+        .unwrap_err();
+        assert!(matches!(error, N8nError::MalformedProviderResponse));
     }
 
     #[test]
@@ -402,6 +1048,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.base_url.as_str(), "https://n8n.example.com/api/v1/");
+    }
+
+    #[test]
+    fn host_egress_error_mapping_is_exhaustive_and_redacted() {
+        let cases = [
+            (
+                HostEgressProxyError::InheritedChannel,
+                "host egress proxy inherited channel failed",
+            ),
+            (
+                HostEgressProxyError::RequestEnvelopeTooLarge,
+                "host egress proxy request exceeded the configured limit",
+            ),
+            (
+                HostEgressProxyError::MalformedRequestEnvelope,
+                "host egress proxy request envelope was malformed",
+            ),
+        ];
+        for (error, expected) in cases {
+            let mapped = map_host_egress_error(&error);
+            match mapped {
+                N8nError::Api {
+                    status_code: 502,
+                    message,
+                } => assert_eq!(message, expected),
+                other => panic!("unexpected mapped host egress error: {other:?}"),
+            }
+            let rendered = error.to_string();
+            assert!(!rendered.contains("secret"));
+        }
     }
 
     #[test]
@@ -559,10 +1235,10 @@ mod tests {
     }
 
     #[test]
-    fn auth_debug_credential_does_not_say_redacted() {
+    fn auth_debug_credential_redacts_reference() {
         let cred = N8nAuth::CredentialId(CredentialId::new());
         let dbg = format!("{cred:?}");
-        assert!(!dbg.contains("redacted"));
+        assert_eq!(dbg, "CredentialId(\"<redacted>\")");
     }
 
     #[test]
@@ -571,11 +1247,10 @@ mod tests {
     }
 
     #[test]
-    fn auth_redacted_label_does_not_leak_credential_secret() {
+    fn auth_redacted_label_hides_credential_reference() {
         let cred = N8nAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
-        assert!(!label.contains("redacted"));
-        assert!(label.contains("credential_id:"));
+        assert_eq!(label, "credential_id:redacted");
     }
 
     #[test]

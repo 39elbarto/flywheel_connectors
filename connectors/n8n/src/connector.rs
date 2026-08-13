@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
+use fcp_manifest::HostEgressContext;
 use fcp_prelude::{
     AgentHint, ApprovalMode, ApprovalScope, ApprovalToken, BaseConnector, CapabilityGrant,
     CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps,
@@ -11,17 +13,25 @@ use fcp_prelude::{
     OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel,
     SafetyTier, SelfCheckReport, SessionId, StepId, ZoneId,
 };
+use fcp_sdk::ConnectorRuntimeConfig;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 use crate::{
-    client::{N8nAuth, N8nClient, sanitize_path_segment},
+    client::{
+        DEFAULT_LIST_LIMIT, ListQuery, MAX_CURSOR_BYTES, MAX_LIST_LIMIT, N8nAuth, N8nClient,
+        sanitize_path_segment,
+    },
     error::{N8nError, N8nResult},
+    types::{
+        CredentialMetadataView, FolderListView, ListView, WorkflowDetail, WorkflowGraphSummary,
+        WorkflowStateView, WorkflowVersion,
+    },
 };
 
 /// Parsed and validated n8n connector configuration.
@@ -191,13 +201,41 @@ pub struct N8nConnector {
     verifier: Option<CapabilityVerifier>,
     zone_id: Option<ZoneId>,
     session_id: Option<SessionId>,
+    runtime_config: ConnectorRuntimeConfig,
     request_count: AtomicU64,
     error_count: AtomicU64,
 }
 
 impl N8nConnector {
-    /// Create a new n8n connector.
+    /// Create a new n8n connector without reading process environment.
+    ///
+    /// This compatibility constructor is intended for tests and callers that
+    /// provide trusted runtime configuration separately. The production binary
+    /// uses [`Self::try_new`] so malformed host-launch values fail closed.
     pub fn new() -> Self {
+        Self::new_with_runtime_config(
+            ConnectorRuntimeConfig::default()
+                .with_request_timeout(std::time::Duration::from_secs(30)),
+        )
+    }
+
+    /// Create a connector from the fail-closed production host-launch loader.
+    ///
+    /// # Errors
+    /// Returns one static redaction-safe error when host-launch transport
+    /// variables are incomplete, conflicting, invalid, or unsupported.
+    pub fn try_new() -> N8nResult<Self> {
+        let runtime_config = ConnectorRuntimeConfig::default()
+            .with_request_timeout(std::time::Duration::from_secs(30))
+            .with_host_egress_from_env()
+            .map_err(|_| {
+                N8nError::InvalidInput("invalid host egress launch configuration".into())
+            })?;
+        Ok(Self::new_with_runtime_config(runtime_config))
+    }
+
+    /// Create a connector with trusted host-supplied runtime configuration.
+    pub fn new_with_runtime_config(runtime_config: ConnectorRuntimeConfig) -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("n8n"))),
             config: None,
@@ -205,6 +243,7 @@ impl N8nConnector {
             verifier: None,
             zone_id: None,
             session_id: None,
+            runtime_config,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
         }
@@ -226,8 +265,12 @@ impl N8nConnector {
         let config = N8nConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring n8n connector");
 
-        let client =
-            N8nClient::new(config.auth.clone(), &config.base_url).map_err(|e| e.to_fcp_error())?;
+        let client = N8nClient::new_with_runtime_config(
+            config.auth.clone(),
+            &config.base_url,
+            self.runtime_config.clone(),
+        )
+        .map_err(|e| e.to_fcp_error())?;
 
         if let Some(old_client) = self.client.take() {
             old_client.shutdown();
@@ -445,6 +488,7 @@ impl N8nConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+        validate_operation_input(operation, &input).map_err(|error| error.to_fcp_error())?;
 
         let operation_id: OperationId =
             operation.parse().map_err(|_| FcpError::InvalidRequest {
@@ -467,7 +511,13 @@ impl N8nConnector {
                 message: format!("Invalid capability_token: {error}"),
             })?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let mediated_token = token.clone();
         verifier.verify_bound(token, &capability, &operation_id, &resources)?;
+        let [canonical_resource] = resources.as_slice() else {
+            return Err(FcpError::Internal {
+                message: "Verified invocation must resolve exactly one canonical resource".into(),
+            });
+        };
 
         let activation_target = if operation == "n8n.workflows.activate" {
             Some(self.activation_target(&input, &resources)?)
@@ -486,17 +536,52 @@ impl N8nConnector {
             });
         }
 
-        self.request_count.fetch_add(1, Ordering::Relaxed);
+        let request_number = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "Client not initialized".into(),
         })?;
+        let context = self.host_egress_context(
+            operation,
+            canonical_resource,
+            &mediated_token,
+            request_number,
+        )?;
 
         let result = match operation {
-            "n8n.workflows.list" => self.invoke_workflows_list(client).await,
-            "n8n.workflows.get" => self.invoke_workflows_get(client, &input).await,
-            "n8n.executions.list" => self.invoke_executions_list(client).await,
-            "n8n.executions.get" => self.invoke_executions_get(client, &input).await,
+            "n8n.workflows.list" => {
+                self.invoke_workflows_list(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.workflows.get" => {
+                self.invoke_workflows_get(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.executions.list" => {
+                self.invoke_executions_list(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.executions.get" => {
+                self.invoke_executions_get(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.projects.list" => {
+                self.invoke_projects_list(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.credentials.list" => {
+                self.invoke_credentials_list(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.tags.list" => {
+                self.invoke_tags_list(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.folders.list" => {
+                self.invoke_folders_list(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.folders.get" => self.invoke_folders_get(client, &input, Some(context)).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -563,37 +648,211 @@ impl N8nConnector {
     async fn invoke_workflows_list(
         &self,
         client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, N8nError> {
-        let resp = client.list_workflows().await?;
-        let data = resp.get("data").cloned().unwrap_or_else(|| json!([]));
-        Ok(json!({ "data": data }))
+        let query = parse_list_query(input)?;
+        let resp = client.list_workflows_typed(&query, context).await?;
+        let data = resp
+            .data
+            .into_iter()
+            .map(|workflow| workflow.into_view())
+            .collect::<Vec<_>>();
+        serde_json::to_value(ListView {
+            data,
+            next_cursor: resp.next_cursor,
+        })
+        .map_err(N8nError::from)
     }
 
     async fn invoke_workflows_get(
         &self,
         client: &N8nClient,
         input: &serde_json::Value,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, N8nError> {
         let id = require_str(input, "id")?;
-        client.get_workflow(id).await
+        let workflow = client.get_workflow_typed(id, context).await?;
+        if workflow.id != id {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        Ok(serde_json::to_value(normalize_workflow_state(workflow)?)?)
+    }
+
+    async fn invoke_projects_list(
+        &self,
+        client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<serde_json::Value, N8nError> {
+        let query = parse_list_query(input)?;
+        let resp = client.list_projects_typed(&query, context).await?;
+        let data = resp
+            .data
+            .into_iter()
+            .map(|project| project.into_view())
+            .collect::<Vec<_>>();
+        serde_json::to_value(ListView {
+            data,
+            next_cursor: resp.next_cursor,
+        })
+        .map_err(N8nError::from)
+    }
+
+    async fn invoke_credentials_list(
+        &self,
+        client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<serde_json::Value, N8nError> {
+        let query = parse_list_query(input)?;
+        let resp = client.list_credentials_typed(&query, context).await?;
+        let server_id = self.configured_server_id()?;
+        let data = resp
+            .data
+            .into_iter()
+            .map(|credential| {
+                let resource_uri = credential_resource_uri(server_id, &credential.id)
+                    .map_err(|_| N8nError::MalformedProviderResponse)?;
+                Ok(credential.into_view(resource_uri))
+            })
+            .collect::<N8nResult<Vec<CredentialMetadataView>>>()?;
+        serde_json::to_value(ListView {
+            data,
+            next_cursor: resp.next_cursor,
+        })
+        .map_err(N8nError::from)
+    }
+
+    fn host_egress_context(
+        &self,
+        operation: &str,
+        resource_uri: &str,
+        token: &CapabilityToken,
+        request_number: u64,
+    ) -> FcpResult<HostEgressContext> {
+        let zone_id = self.zone_id.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let session_id = self.session_id.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let token_cbor = token.raw().to_cbor().map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize verified capability token: {error}"),
+        })?;
+        Ok(HostEgressContext {
+            connector_id: "fcp.n8n".to_string(),
+            operation_id: operation.to_string(),
+            resource_uri: resource_uri.to_string(),
+            zone_id: zone_id.to_string(),
+            request_id: format!("{session_id}:{request_number}"),
+            correlation_id: None,
+            capability_token_cbor_b64: base64::engine::general_purpose::STANDARD.encode(token_cbor),
+        })
+    }
+
+    async fn invoke_tags_list(
+        &self,
+        client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<serde_json::Value, N8nError> {
+        let query = parse_list_query(input)?;
+        let resp = client.list_tags_typed(&query, context).await?;
+        let data = resp
+            .data
+            .into_iter()
+            .map(|tag| tag.into_view())
+            .collect::<Vec<_>>();
+        serde_json::to_value(ListView {
+            data,
+            next_cursor: resp.next_cursor,
+        })
+        .map_err(N8nError::from)
     }
 
     async fn invoke_executions_list(
         &self,
         client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, N8nError> {
-        let resp = client.list_executions().await?;
-        let data = resp.get("data").cloned().unwrap_or_else(|| json!([]));
-        Ok(json!({ "data": data }))
+        let query = parse_list_query(input)?;
+        let resp = client.list_executions_typed(&query, context).await?;
+        let data = resp
+            .data
+            .into_iter()
+            .map(|execution| execution.into_view())
+            .collect::<Vec<_>>();
+        serde_json::to_value(ListView {
+            data,
+            next_cursor: resp.next_cursor,
+        })
+        .map_err(N8nError::from)
     }
 
     async fn invoke_executions_get(
         &self,
         client: &N8nClient,
         input: &serde_json::Value,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, N8nError> {
         let id = require_str(input, "id")?;
-        client.get_execution(id).await
+        let execution = client.get_execution_typed(id, context).await?;
+        Ok(serde_json::to_value(execution.into_view())?)
+    }
+
+    async fn invoke_folders_list(
+        &self,
+        client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<serde_json::Value, N8nError> {
+        let folder_input = parse_folder_list_input(input)?;
+        let resp = client
+            .list_folders_typed(
+                folder_input.project_id,
+                folder_input.parent_folder_id,
+                folder_input.skip,
+                folder_input.take,
+                context,
+            )
+            .await?;
+        let server_id = self.configured_server_id()?;
+        let data = resp
+            .data
+            .into_iter()
+            .map(|folder| {
+                let resource_uri = folder_resource_uri(server_id, &folder.id)?;
+                Ok(folder.into_view(resource_uri))
+            })
+            .collect::<N8nResult<Vec<_>>>()?;
+        serde_json::to_value(FolderListView {
+            count: resp.count,
+            data,
+        })
+        .map_err(N8nError::from)
+    }
+
+    async fn invoke_folders_get(
+        &self,
+        client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<serde_json::Value, N8nError> {
+        let folder_input = parse_folder_get_input(input)?;
+        let folder = client
+            .get_folder_typed(folder_input.project_id, folder_input.folder_id, context)
+            .await?;
+        if folder.id != folder_input.folder_id {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let resource_uri =
+            folder_resource_uri(self.configured_server_id()?, folder_input.folder_id)?;
+        Ok(serde_json::to_value(folder.into_view(resource_uri))?)
+    }
+
+    fn configured_server_id(&self) -> N8nResult<&str> {
+        self.config
+            .as_ref()
+            .map(|config| config.server_id.as_str())
+            .ok_or_else(|| N8nError::InvalidInput("connector is not configured".into()))
     }
 
     fn resource_uris_for_operation(
@@ -608,7 +867,25 @@ impl N8nConnector {
             .server_id
             .as_str();
         let resource = match operation {
-            "n8n.workflows.list" | "n8n.executions.list" => instance_resource_uri(server_id),
+            "n8n.workflows.list"
+            | "n8n.executions.list"
+            | "n8n.projects.list"
+            | "n8n.credentials.list"
+            | "n8n.tags.list" => instance_resource_uri(server_id),
+            "n8n.folders.list" => {
+                let project_id = parse_folder_list_input(input)
+                    .map_err(|error| error.to_fcp_error())?
+                    .project_id
+                    .to_string();
+                project_resource_uri(server_id, &project_id)
+                    .map_err(|error| error.to_fcp_error())?
+            }
+            "n8n.folders.get" => {
+                let folder_input =
+                    parse_folder_get_input(input).map_err(|error| error.to_fcp_error())?;
+                folder_resource_uri(server_id, folder_input.folder_id)
+                    .map_err(|error| error.to_fcp_error())?
+            }
             "n8n.workflows.get" | "n8n.workflows.activate" => {
                 let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
                 workflow_resource_uri(server_id, workflow_id)
@@ -785,9 +1062,28 @@ fn instance_resource_uri(server_id: &str) -> String {
     format!("fwc-n8n://{server_id}")
 }
 
+fn project_resource_uri(server_id: &str, project_id: &str) -> N8nResult<String> {
+    let project_id = encoded_resource_segment(project_id, "project id")?;
+    Ok(format!("fwc-n8n://{server_id}/projects/{project_id}"))
+}
+
+fn folder_resource_uri(server_id: &str, folder_id: &str) -> N8nResult<String> {
+    let folder_id = encoded_resource_segment(folder_id, "folder id")?;
+    Ok(format!("fwc-n8n://{server_id}/folders/{folder_id}"))
+}
+
+fn credential_resource_uri(server_id: &str, credential_id: &str) -> N8nResult<String> {
+    let credential_id = encoded_resource_segment(credential_id, "credential id")?;
+    Ok(format!("fwc-n8n://{server_id}/credentials/{credential_id}"))
+}
+
+fn encoded_resource_segment(value: &str, field: &str) -> N8nResult<String> {
+    let value = sanitize_path_segment(value, field)?;
+    Ok(utf8_percent_encode(value, NON_ALPHANUMERIC).to_string())
+}
+
 fn workflow_resource_uri(server_id: &str, workflow_id: &str) -> N8nResult<String> {
-    let id = sanitize_path_segment(workflow_id, "workflow id")?;
-    let encoded = utf8_percent_encode(id, NON_ALPHANUMERIC);
+    let encoded = encoded_resource_segment(workflow_id, "workflow id")?;
     Ok(format!("fwc-n8n://{server_id}/workflows/{encoded}"))
 }
 
@@ -796,10 +1092,8 @@ fn execution_resource_uri(
     workflow_id: &str,
     execution_id: &str,
 ) -> N8nResult<String> {
-    let workflow_id = sanitize_path_segment(workflow_id, "workflow id")?;
-    let execution_id = sanitize_path_segment(execution_id, "execution id")?;
-    let workflow_id = utf8_percent_encode(workflow_id, NON_ALPHANUMERIC);
-    let execution_id = utf8_percent_encode(execution_id, NON_ALPHANUMERIC);
+    let workflow_id = encoded_resource_segment(workflow_id, "workflow id")?;
+    let execution_id = encoded_resource_segment(execution_id, "execution id")?;
     Ok(format!(
         "fwc-n8n://{server_id}/workflows/{workflow_id}/executions/{execution_id}"
     ))
@@ -839,6 +1133,188 @@ fn manifest_hash() -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+const GRAPH_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.graph-digest.v1";
+const STATE_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.state-digest.v1";
+
+fn normalize_workflow_state(workflow: WorkflowDetail) -> N8nResult<WorkflowStateView> {
+    let WorkflowDetail {
+        id,
+        name,
+        description,
+        active,
+        version_id,
+        active_version_id,
+        is_archived,
+        project_id,
+        parent_folder_id,
+        created_at,
+        updated_at,
+        nodes,
+        connections,
+        active_version,
+        tags,
+    } = workflow;
+
+    let active_version_id = active_version_id.into_option();
+    let active_version = active_version.into_option();
+    match (&active_version_id, &active_version) {
+        (None, None) => {}
+        (Some(expected), Some(published)) if expected == &published.version_id => {}
+        _ => return Err(N8nError::MalformedProviderResponse),
+    }
+
+    let draft_graph_digest = workflow_graph_digest(&nodes, &connections)?;
+    let published = if let Some(published) = active_version.as_ref() {
+        Some(WorkflowGraphSummary {
+            version_id: published.version_id.clone(),
+            graph_digest: workflow_graph_digest(&published.nodes, &published.connections)?,
+        })
+    } else {
+        None
+    };
+    let state_digest = workflow_state_digest(
+        &id,
+        name.as_deref(),
+        description.as_deref(),
+        project_id.as_deref(),
+        parent_folder_id.as_deref(),
+        &version_id,
+        active,
+        active_version_id.as_deref(),
+        is_archived,
+        created_at.as_deref(),
+        updated_at.as_deref(),
+        tags.as_deref(),
+        &nodes,
+        &connections,
+        active_version.as_ref(),
+    )?;
+
+    Ok(WorkflowStateView {
+        id,
+        name,
+        project_id,
+        folder_id: parent_folder_id,
+        version_id: version_id.clone(),
+        active,
+        active_version_id,
+        is_archived,
+        draft: WorkflowGraphSummary {
+            version_id,
+            graph_digest: draft_graph_digest,
+        },
+        published,
+        state_digest,
+        updated_at,
+    })
+}
+
+fn workflow_graph_digest(nodes: &[Value], connections: &Value) -> N8nResult<String> {
+    if !connections.is_object() {
+        return Err(N8nError::MalformedProviderResponse);
+    }
+
+    let semantic_nodes = nodes
+        .iter()
+        .map(|node| {
+            let mut node = node.clone();
+            let Some(object) = node.as_object_mut() else {
+                return Err(N8nError::MalformedProviderResponse);
+            };
+            object.remove("credentials");
+            Ok(node)
+        })
+        .collect::<N8nResult<Vec<_>>>()?;
+    digest_canonical_json(
+        GRAPH_DIGEST_DOMAIN_V1,
+        &json!({
+            "nodes": semantic_nodes,
+            "connections": connections,
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workflow_state_digest(
+    id: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    project_id: Option<&str>,
+    folder_id: Option<&str>,
+    version_id: &str,
+    active: bool,
+    active_version_id: Option<&str>,
+    is_archived: bool,
+    created_at: Option<&str>,
+    updated_at: Option<&str>,
+    tags: Option<&[crate::types::Tag]>,
+    nodes: &[Value],
+    connections: &Value,
+    active_version: Option<&WorkflowVersion>,
+) -> N8nResult<String> {
+    let tags = tags.map(|tags| {
+        tags.iter()
+            .map(|tag| json!({"id": tag.id, "name": tag.name}))
+            .collect::<Vec<_>>()
+    });
+    let published = active_version.map(|published| {
+        json!({
+            "versionId": published.version_id,
+            "nodes": published.nodes,
+            "connections": published.connections,
+        })
+    });
+    digest_canonical_json(
+        STATE_DIGEST_DOMAIN_V1,
+        &json!({
+            "schema": "fwc-n8n.workflow-state.v1",
+            "id": id,
+            "name": name,
+            "description": description,
+            "projectId": project_id,
+            "folderId": folder_id,
+            "versionId": version_id,
+            "active": active,
+            "activeVersionId": active_version_id,
+            "isArchived": is_archived,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+            "tags": tags,
+            "draft": {
+                "nodes": nodes,
+                "connections": connections,
+            },
+            "published": published,
+        }),
+    )
+}
+
+fn digest_canonical_json(domain: &[u8], value: &Value) -> N8nResult<String> {
+    let canonical = canonical_json(value);
+    let bytes = serde_json::to_vec(&canonical)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(&bytes);
+    Ok(format!("blake3-256:{}", hasher.finalize().to_hex()))
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            let mut canonical = serde_json::Map::new();
+            for (key, child) in entries {
+                canonical.insert(key.clone(), canonical_json(child));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(array) => Value::Array(array.iter().map(canonical_json).collect()),
+        scalar => scalar.clone(),
+    }
+}
+
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     operations_info()
         .into_iter()
@@ -848,6 +1324,152 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
             code: 1002,
             message: format!("Unknown operation: {operation}"),
         })
+}
+
+fn parse_list_query(input: &serde_json::Value) -> N8nResult<ListQuery> {
+    let object = require_exact_object(input, &["limit", "cursor"], "list input")?;
+
+    let limit = object
+        .get("limit")
+        .map_or(Ok(DEFAULT_LIST_LIMIT), |value| {
+            value
+                .as_u64()
+                .ok_or_else(|| N8nError::InvalidInput("list limit must be an integer".into()))
+        })?;
+    let cursor = object
+        .get("cursor")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| N8nError::InvalidInput("list cursor must be a string".into()))
+        })
+        .transpose()?;
+    ListQuery::new(limit, cursor)
+}
+
+struct FolderListInput<'a> {
+    project_id: &'a str,
+    parent_folder_id: Option<&'a str>,
+    skip: u64,
+    take: u64,
+}
+
+struct FolderGetInput<'a> {
+    project_id: &'a str,
+    folder_id: &'a str,
+}
+
+fn parse_folder_list_input(input: &serde_json::Value) -> N8nResult<FolderListInput<'_>> {
+    let object = require_exact_object(
+        input,
+        &["project_id", "parent_folder_id", "skip", "take"],
+        "folder list input",
+    )?;
+
+    let project_id = require_path_str(input, "project_id", "project id")?;
+    let parent_folder_id = object
+        .get("parent_folder_id")
+        .map(|value| {
+            let parent_folder_id = value.as_str().ok_or_else(|| {
+                N8nError::InvalidInput("parent_folder_id must be a string".into())
+            })?;
+            sanitize_path_segment(parent_folder_id, "parent folder id")
+        })
+        .transpose()?;
+    let skip = object
+        .get("skip")
+        .map_or(Ok(0), |value| parse_u64_field(value, "skip"))?;
+    let take = object
+        .get("take")
+        .map_or(Ok(50), |value| parse_u64_field(value, "take"))?;
+    if !(1..=200).contains(&take) {
+        return Err(N8nError::InvalidInput(
+            "take must be an integer from 1 through 200".into(),
+        ));
+    }
+
+    Ok(FolderListInput {
+        project_id,
+        parent_folder_id,
+        skip,
+        take,
+    })
+}
+
+fn parse_folder_get_input(input: &serde_json::Value) -> N8nResult<FolderGetInput<'_>> {
+    require_exact_object(input, &["project_id", "folder_id"], "folder get input")?;
+
+    Ok(FolderGetInput {
+        project_id: require_path_str(input, "project_id", "project id")?,
+        folder_id: require_path_str(input, "folder_id", "folder id")?,
+    })
+}
+
+fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nResult<()> {
+    match operation {
+        "n8n.workflows.list"
+        | "n8n.executions.list"
+        | "n8n.projects.list"
+        | "n8n.credentials.list"
+        | "n8n.tags.list" => parse_list_query(input).map(|_| ()),
+        "n8n.workflows.get" => {
+            require_exact_object(input, &["id"], "workflow get input")?;
+            require_str(input, "id")?;
+            Ok(())
+        }
+        "n8n.workflows.activate" => {
+            require_exact_object(input, &["id", "active"], "workflow activation input")?;
+            require_str(input, "id")?;
+            input
+                .get("active")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| {
+                    N8nError::InvalidInput("Missing required field: active (boolean)".into())
+                })?;
+            Ok(())
+        }
+        "n8n.executions.get" => {
+            require_exact_object(input, &["workflow_id", "id"], "execution get input")?;
+            require_str(input, "workflow_id")?;
+            require_str(input, "id")?;
+            Ok(())
+        }
+        "n8n.folders.list" => parse_folder_list_input(input).map(|_| ()),
+        "n8n.folders.get" => parse_folder_get_input(input).map(|_| ()),
+        _ => Ok(()),
+    }
+}
+
+fn require_exact_object<'a>(
+    input: &'a serde_json::Value,
+    allowed: &[&str],
+    label: &str,
+) -> N8nResult<&'a serde_json::Map<String, serde_json::Value>> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| N8nError::InvalidInput(format!("{label} must be an object")))?;
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(N8nError::InvalidInput(format!(
+            "{label} contains an unsupported property"
+        )));
+    }
+    Ok(object)
+}
+
+fn parse_u64_field(value: &serde_json::Value, field: &str) -> N8nResult<u64> {
+    value
+        .as_u64()
+        .ok_or_else(|| N8nError::InvalidInput(format!("{field} must be a non-negative integer")))
+}
+
+fn require_path_str<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+    label: &str,
+) -> N8nResult<&'a str> {
+    let value = require_str(input, field)?;
+    sanitize_path_segment(value, label)
 }
 
 /// Extract a required string field from input.
@@ -879,13 +1501,272 @@ fn op_info(
         output_schema,
         capability: CapabilityId::from_static(capability),
         risk_level,
-        description: None,
+        description: Some(summary.into()),
         rate_limit: None,
-        requires_approval: (id == "n8n.workflows.activate").then_some(ApprovalMode::Policy),
+        requires_approval: Some(if id == "n8n.workflows.activate" {
+            ApprovalMode::Policy
+        } else {
+            ApprovalMode::None
+        }),
         safety_tier,
         idempotency,
         ai_hints,
     }
+}
+
+fn tag_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "id": {"type": ["string", "null"]},
+            "name": {"type": ["string", "null"]},
+        },
+    })
+}
+
+fn workflow_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name"],
+        "properties": {
+            "id": {"type": "string"},
+            "name": {"type": ["string", "null"]},
+            "description": {"type": ["string", "null"]},
+            "active": {"type": ["boolean", "null"]},
+            "versionId": {"type": ["string", "null"]},
+            "activeVersionId": {"type": ["string", "null"]},
+            "isArchived": {"type": ["boolean", "null"]},
+            "projectId": {"type": ["string", "null"]},
+            "parentFolderId": {"type": ["string", "null"]},
+            "createdAt": {"type": ["string", "null"]},
+            "updatedAt": {"type": ["string", "null"]},
+            "tags": {
+                "type": ["array", "null"],
+                "items": tag_view_schema(),
+            },
+        },
+    })
+}
+
+fn workflow_graph_summary_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["versionId", "graphDigest"],
+        "properties": {
+            "versionId": {"type": "string"},
+            "graphDigest": {
+                "type": "string",
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+        },
+    })
+}
+
+fn nullable_workflow_graph_summary_schema() -> serde_json::Value {
+    json!({
+        "type": ["object", "null"],
+        "additionalProperties": false,
+        "required": ["versionId", "graphDigest"],
+        "properties": {
+            "versionId": {"type": "string"},
+            "graphDigest": {
+                "type": "string",
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+        },
+    })
+}
+
+fn workflow_state_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "id",
+            "name",
+            "projectId",
+            "folderId",
+            "versionId",
+            "active",
+            "activeVersionId",
+            "isArchived",
+            "draft",
+            "published",
+            "stateDigest",
+            "updatedAt",
+        ],
+        "properties": {
+            "id": {"type": "string"},
+            "name": {"type": ["string", "null"]},
+            "projectId": {"type": ["string", "null"]},
+            "folderId": {"type": ["string", "null"]},
+            "versionId": {"type": "string"},
+            "active": {"type": "boolean"},
+            "activeVersionId": {"type": ["string", "null"]},
+            "isArchived": {"type": "boolean"},
+            "draft": workflow_graph_summary_schema(),
+            "published": nullable_workflow_graph_summary_schema(),
+            "stateDigest": {
+                "type": "string",
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+            "updatedAt": {"type": ["string", "null"]},
+        },
+    })
+}
+
+fn execution_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "finished"],
+        "properties": {
+            "id": {"type": "string"},
+            "finished": {"type": ["boolean", "null"]},
+            "mode": {"type": ["string", "null"]},
+            "startedAt": {"type": ["string", "null"]},
+            "stoppedAt": {"type": ["string", "null"]},
+            "workflowId": {"type": ["string", "null"]},
+            "status": {"type": ["string", "null"]},
+            "retryOf": {"type": ["string", "null"]},
+            "retrySuccessId": {"type": ["string", "null"]},
+            "waitTill": {"type": ["string", "null"]},
+        },
+    })
+}
+
+fn project_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name"],
+        "properties": {
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "type": {"type": ["string", "null"]},
+        },
+    })
+}
+
+fn credential_metadata_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resourceUri", "id", "name", "type"],
+        "properties": {
+            "resourceUri": {"type": "string"},
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "type": {"type": "string"},
+        },
+    })
+}
+
+fn folder_list_item_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resourceUri", "id", "name", "parentFolderId"],
+        "properties": {
+            "resourceUri": {"type": "string"},
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "parentFolderId": {"type": ["string", "null"]},
+        },
+    })
+}
+
+fn folder_list_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["count", "data"],
+        "properties": {
+            "count": {"type": "integer"},
+            "data": {
+                "type": "array",
+                "items": folder_list_item_view_schema(),
+            },
+        },
+    })
+}
+
+fn folder_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "resourceUri",
+            "id",
+            "name",
+            "parentFolderId",
+            "createdAt",
+            "updatedAt",
+            "totalSubFolders",
+            "totalWorkflows",
+        ],
+        "properties": {
+            "resourceUri": {"type": "string"},
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+            "parentFolderId": {"type": ["string", "null"]},
+            "createdAt": {"type": "string"},
+            "updatedAt": {"type": "string"},
+            "totalSubFolders": {"type": "integer"},
+            "totalWorkflows": {"type": "integer"},
+        },
+    })
+}
+
+fn tag_record_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name"],
+        "properties": {
+            "id": {"type": "string"},
+            "name": {"type": "string"},
+        },
+    })
+}
+
+fn list_output_schema(item_schema: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["data"],
+        "properties": {
+            "data": {
+                "type": "array",
+                "items": item_schema,
+            },
+            "nextCursor": {"type": "string"},
+        },
+    })
+}
+
+fn list_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_LIST_LIMIT,
+                "default": DEFAULT_LIST_LIMIT,
+            },
+            "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CURSOR_BYTES,
+            },
+        },
+    })
 }
 
 /// Build the operations info for introspection.
@@ -894,8 +1775,8 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "n8n.workflows.list",
             "List all workflows in the n8n instance",
-            json!({"type": "object", "required": [], "properties": {}}),
-            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
+            list_input_schema(),
+            list_output_schema(&workflow_view_schema()),
             "n8n.workflows.read",
             RiskLevel::Low,
             SafetyTier::Safe,
@@ -904,6 +1785,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "List all workflows in the n8n instance.".into(),
                 common_mistakes: vec![
                     "Assuming only active workflows are returned — inactive workflows are included in the list.".into(),
+                    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.".into(),
                 ],
                 examples: vec!["{}".into()],
                 related: vec![
@@ -915,8 +1797,8 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "n8n.workflows.get",
             "Get a specific workflow by ID",
-            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}}}),
-            json!({"type": "object", "required": ["id", "name"], "properties": {"id": {"type": "string"}, "name": {"type": "string"}}}),
+            json!({"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}}}),
+            workflow_state_view_schema(),
             "n8n.workflows.read",
             RiskLevel::Low,
             SafetyTier::Safe,
@@ -925,6 +1807,8 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Retrieve details of a specific n8n workflow by ID.".into(),
                 common_mistakes: vec![
                     "Using the workflow name or slug instead of the numeric workflow ID.".into(),
+                    "Treating graphDigest as a write precondition; stateDigest is the credential- and lifecycle-sensitive guard.".into(),
+                    "Expecting raw nodes, Code source, credential references, or pinned data in the normalized output.".into(),
                 ],
                 examples: vec![r#"{"id": "1001"}"#.into()],
                 related: vec![
@@ -935,18 +1819,18 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.activate",
-            "Activation boundary; provider lifecycle is deferred and fail-closed in packet 1",
-            json!({"type": "object", "required": ["id", "active"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}, "active": {"type": "boolean", "description": "Whether to activate (true) or deactivate (false)"}}}),
-            json!({"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}),
+            "Capability- and approval-gated activation boundary; packet 1 fails closed and defers provider lifecycle I/O",
+            json!({"type": "object", "additionalProperties": false, "required": ["id", "active"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}, "active": {"type": "boolean", "description": "Whether to activate (true) or deactivate (false)"}}}),
+            json!({"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"type": "string"}}}),
             "n8n.workflows.write",
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::None,
             AgentHint {
-                when_to_use: "Request activation or deactivation only as a deferred lifecycle intent; packet 1 verifies capability and approval, then fails closed before provider I/O.".into(),
+                when_to_use: "Request activation or deactivation only when the host has the mediated lifecycle path; packet 1 verifies capability and approval, then fails closed before provider I/O.".into(),
                 common_mistakes: vec![
-                    "Expecting packet 1 to change provider lifecycle state; the operation is deferred and always fails closed here.".into(),
-                    "Treating a matching approval as sufficient for provider I/O; the mediated lifecycle path is still required.".into(),
+                    "Expecting packet 1 to change provider lifecycle state; activation is deferred until the mediated write path is available.".into(),
+                    "Passing the workflow name instead of the numeric workflow ID, or omitting the matching execution approval.".into(),
                 ],
                 examples: vec![r#"{"id": "1001", "active": true}"#.into()],
                 related: vec![
@@ -958,8 +1842,8 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "n8n.executions.list",
             "List recent workflow executions",
-            json!({"type": "object", "required": [], "properties": {}}),
-            json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
+            list_input_schema(),
+            list_output_schema(&execution_view_schema()),
             "n8n.executions.read",
             RiskLevel::Low,
             SafetyTier::Safe,
@@ -968,7 +1852,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "List recent workflow executions in n8n.".into(),
                 common_mistakes: vec![
                     "Expecting executions from all workflows — results may be limited to the most recent across the instance.".into(),
-                    "Not paginating when the execution history is large.".into(),
+                    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.".into(),
                 ],
                 examples: vec!["{}".into()],
                 related: vec![
@@ -980,8 +1864,8 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "n8n.executions.get",
             "Get details of a specific execution",
-            json!({"type": "object", "required": ["workflow_id", "id"], "properties": {"workflow_id": {"type": "string", "description": "Workflow identifier containing the execution"}, "id": {"type": "string", "description": "Execution identifier"}}}),
-            json!({"type": "object", "required": ["id", "finished"], "properties": {"id": {"type": "string"}, "finished": {"type": "boolean"}}}),
+            json!({"type": "object", "additionalProperties": false, "required": ["workflow_id", "id"], "properties": {"workflow_id": {"type": "string", "description": "Workflow identifier containing the execution"}, "id": {"type": "string", "description": "Execution identifier"}}}),
+            execution_view_schema(),
             "n8n.executions.read",
             RiskLevel::Low,
             SafetyTier::Safe,
@@ -999,12 +1883,313 @@ fn operations_info() -> Vec<OperationInfo> {
                 ],
             },
         ),
+        op_info(
+            "n8n.projects.list",
+            "List safe project metadata in the n8n instance",
+            list_input_schema(),
+            list_output_schema(&project_view_schema()),
+            "n8n.projects.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List safe project metadata in the n8n instance.".into(),
+                common_mistakes: vec![
+                    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.".into(),
+                    "Project output is limited to id, name, and optional type; memberships and provider metadata are discarded.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("n8n.workflows.list")],
+            },
+        ),
+        op_info(
+            "n8n.credentials.list",
+            "List safe credential metadata in the n8n instance",
+            list_input_schema(),
+            list_output_schema(&credential_metadata_view_schema()),
+            "n8n.credentials.metadata.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List credential metadata without retrieving credential values.".into(),
+                common_mistakes: vec![
+                    "The upstream endpoint requires the credential:list scope and owner or admin access.".into(),
+                    "Credential values, secret maps, auth headers, and configuration data are never returned.".into(),
+                    "Availability and flags vary by n8n version and license; scopes and sharing state are not inferred.".into(),
+                    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("n8n.projects.list")],
+            },
+        ),
+        op_info(
+            "n8n.tags.list",
+            "List compact tag metadata in the n8n instance",
+            list_input_schema(),
+            list_output_schema(&tag_record_view_schema()),
+            "n8n.tags.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List compact tag metadata in the n8n instance.".into(),
+                common_mistakes: vec![
+                    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.".into(),
+                    "Tag output contains only id and name; provider timestamps and metadata are discarded.".into(),
+                ],
+                examples: vec!["{}".into()],
+                related: vec![CapabilityId::from_static("n8n.projects.list")],
+            },
+        ),
+        op_info(
+            "n8n.folders.list",
+            "List safe folder metadata in an n8n project",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["project_id"],
+                "properties": {
+                    "project_id": {"type": "string", "description": "Project identifier containing the folders"},
+                    "parent_folder_id": {"type": "string", "description": "Optional parent folder identifier filter"},
+                    "skip": {"type": "integer", "minimum": 0, "default": 0},
+                    "take": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                },
+            }),
+            folder_list_view_schema(),
+            "n8n.folders.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "List safe folder metadata in an n8n project.".into(),
+                common_mistakes: vec![
+                    "Use project_id, not a redundant server_id; server identity comes from connector configuration.".into(),
+                    "The provider returns {count,data}; folder list output is limited to the fixed safe projection.".into(),
+                    "The upstream folder:list surface requires n8n 2.19.0 or newer with feat:folders.".into(),
+                    "A provider 403 is ambiguous among folder license, API-key scope, and project RBAC; no current mechanical discriminator is claimed.".into(),
+                    "Before n8n 2.19, or when the route is absent, expect 404; version/route inspection is a future non-mechanical OpenAPI probe.".into(),
+                ],
+                examples: vec![r#"{"project_id": "project-1"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.folders.get"),
+                    CapabilityId::from_static("n8n.projects.list"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.folders.get",
+            "Get safe details of an n8n project folder",
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["project_id", "folder_id"],
+                "properties": {
+                    "project_id": {"type": "string", "description": "Project identifier containing the folder"},
+                    "folder_id": {"type": "string", "description": "Folder identifier"},
+                },
+            }),
+            folder_view_schema(),
+            "n8n.folders.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve safe folder details from an n8n project.".into(),
+                common_mistakes: vec![
+                    "Use both project_id and folder_id; folder IDs are scoped to a project.".into(),
+                    "The upstream folder:read surface requires n8n 2.19.0 or newer with feat:folders.".into(),
+                    "A provider 403 is ambiguous among folder license, API-key scope, and project RBAC; no current mechanical discriminator is claimed.".into(),
+                    "Before n8n 2.19, or when the route is absent, expect 404; version/route inspection is a future non-mechanical OpenAPI probe.".into(),
+                ],
+                examples: vec![r#"{"project_id": "project-1", "folder_id": "folder-1"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.folders.list"),
+                    CapabilityId::from_static("n8n.projects.list"),
+                ],
+            },
+        ),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::RequiredNullable;
+
+    fn digest_test_workflow() -> WorkflowDetail {
+        serde_json::from_value(json!({
+            "id": "workflow-1",
+            "name": "Digest test",
+            "description": "baseline",
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "projectId": "project-1",
+            "parentFolderId": "folder-1",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-02T00:00:00Z",
+            "tags": [{"id": "tag-1", "name": "baseline"}],
+            "nodes": [{
+                "id": "node-1",
+                "type": "n8n-nodes-base.code",
+                "parameters": {"jsCode": "return items;"},
+                "credentials": {"api": {"id": "credential-1"}}
+            }],
+            "connections": {},
+            "activeVersion": null
+        }))
+        .unwrap()
+    }
+
+    fn normalized_state_digest(workflow: WorkflowDetail) -> String {
+        normalize_workflow_state(workflow).unwrap().state_digest
+    }
+
+    #[test]
+    fn state_digest_covers_metadata_lifecycle_versions_and_graphs() {
+        let baseline = digest_test_workflow();
+        let expected = normalized_state_digest(baseline.clone());
+        let mut variants = Vec::new();
+
+        let mut variant = baseline.clone();
+        variant.active = true;
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.is_archived = true;
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.version_id = "draft-v2".into();
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.created_at = Some("2026-01-01T00:00:01Z".into());
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.updated_at = Some("2026-01-02T00:00:01Z".into());
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.name = Some("Changed name".into());
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.description = Some("changed description".into());
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.project_id = Some("project-2".into());
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.parent_folder_id = Some("folder-2".into());
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.tags = Some(vec![crate::types::Tag {
+            id: Some("tag-2".into()),
+            name: Some("changed".into()),
+        }]);
+        variants.push(variant);
+
+        let mut variant = baseline.clone();
+        variant.nodes[0]["credentials"]["api"]["id"] = json!("credential-2");
+        variants.push(variant);
+
+        let mut variant = baseline;
+        variant.active_version_id = RequiredNullable::Value("published-v1".into());
+        variant.active_version = RequiredNullable::Value(WorkflowVersion {
+            version_id: "published-v1".into(),
+            nodes: vec![json!({
+                "id": "published-node",
+                "parameters": {"jsCode": "return [];"},
+                "credentials": {"api": {"id": "published-credential"}}
+            })],
+            connections: json!({}),
+        });
+        variants.push(variant);
+
+        for variant in variants {
+            assert_ne!(expected, normalized_state_digest(variant));
+        }
+    }
+
+    #[test]
+    fn code_source_changes_semantic_graph_digest() {
+        let first = workflow_graph_digest(
+            &[json!({
+                "id": "code-node",
+                "parameters": {"jsCode": "return items;"},
+                "credentials": {"api": {"id": "credential-1"}}
+            })],
+            &json!({}),
+        )
+        .unwrap();
+        let second = workflow_graph_digest(
+            &[json!({
+                "id": "code-node",
+                "parameters": {"jsCode": "return [];"},
+                "credentials": {"api": {"id": "credential-2"}}
+            })],
+            &json!({}),
+        )
+        .unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn graph_digest_preserves_semantic_array_order() {
+        let first = workflow_graph_digest(
+            &[json!({
+                "id": "node-1",
+                "parameters": {"values": ["first", "second"]}
+            })],
+            &json!({}),
+        )
+        .unwrap();
+        let second = workflow_graph_digest(
+            &[json!({
+                "id": "node-1",
+                "parameters": {"values": ["second", "first"]}
+            })],
+            &json!({}),
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn published_graph_digest_excludes_credentials_but_state_digest_keeps_them() {
+        let mut first = digest_test_workflow();
+        first.active_version_id = RequiredNullable::Value("published-v1".into());
+        first.active_version = RequiredNullable::Value(WorkflowVersion {
+            version_id: "published-v1".into(),
+            nodes: vec![json!({
+                "id": "published-node",
+                "parameters": {"jsCode": "return items;"},
+                "credentials": {"api": {"id": "published-credential-1"}}
+            })],
+            connections: json!({}),
+        });
+        let mut second = first.clone();
+        let RequiredNullable::Value(second_published) = &mut second.active_version else {
+            unreachable!("test fixture has a published version");
+        };
+        second_published.nodes[0]["credentials"]["api"]["id"] = json!("published-credential-2");
+
+        let first = normalize_workflow_state(first).unwrap();
+        let second = normalize_workflow_state(second).unwrap();
+        assert_eq!(
+            first.published.as_ref().unwrap().graph_digest,
+            second.published.as_ref().unwrap().graph_digest
+        );
+        assert_ne!(first.state_digest, second.state_digest);
+    }
 
     #[test]
     fn config_from_api_key() {
@@ -1185,9 +2370,16 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_5_operations() {
+    fn operations_info_has_10_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 5);
+        assert_eq!(ops.len(), 10);
+        let operation_ids = ops
+            .iter()
+            .map(|operation| operation.id.as_ref())
+            .collect::<Vec<_>>();
+        assert!(operation_ids.contains(&"n8n.folders.list"));
+        assert!(operation_ids.contains(&"n8n.folders.get"));
+        assert!(operation_ids.contains(&"n8n.credentials.list"));
     }
 
     #[test]
@@ -1196,8 +2388,8 @@ mod tests {
             .into_iter()
             .find(|op| op.id.as_ref() == "n8n.workflows.activate")
             .expect("activation operation should be catalogued");
-        assert!(activation.summary.contains("deferred"));
-        assert!(activation.summary.contains("fail-closed"));
+        assert!(activation.summary.contains("defer"));
+        assert!(activation.summary.contains("fails closed"));
         assert!(activation.ai_hints.when_to_use.contains("fails closed"));
         assert!(
             activation
@@ -1288,6 +2480,9 @@ mod tests {
         assert!(ids.contains(&"n8n.workflows.activate"));
         assert!(ids.contains(&"n8n.executions.list"));
         assert!(ids.contains(&"n8n.executions.get"));
+        assert!(ids.contains(&"n8n.projects.list"));
+        assert!(ids.contains(&"n8n.credentials.list"));
+        assert!(ids.contains(&"n8n.tags.list"));
     }
 
     #[test]
@@ -1415,24 +2610,142 @@ mod tests {
     }
 
     #[test]
-    fn operations_capabilities_match_manifest() {
-        let ops = operations_info();
-        let expected_caps = [
-            ("n8n.workflows.list", "n8n.workflows.read"),
-            ("n8n.workflows.get", "n8n.workflows.read"),
-            ("n8n.workflows.activate", "n8n.workflows.write"),
-            ("n8n.executions.list", "n8n.executions.read"),
-            ("n8n.executions.get", "n8n.executions.read"),
-        ];
-        for (op_id, expected_cap) in &expected_caps {
-            let found = ops
-                .iter()
-                .any(|o| o.id.as_ref() == *op_id && o.capability.as_ref() == *expected_cap);
+    fn operations_and_rate_pools_match_parsed_manifest() {
+        use std::collections::BTreeSet;
+
+        let manifest = fcp_manifest::ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+            .expect("embedded n8n manifest should parse");
+        let runtime_operations = operations_info();
+        let manifest_ids = manifest
+            .provides
+            .operations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let runtime_ids = runtime_operations
+            .iter()
+            .map(|operation| operation.id.as_ref().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(runtime_ids, manifest_ids, "operation ID sets must match");
+
+        for runtime in &runtime_operations {
+            let id = runtime.id.as_ref();
+            let declared = manifest
+                .provides
+                .operations
+                .get(id)
+                .expect("runtime operation should exist in parsed manifest");
+            assert_eq!(runtime.summary, declared.description, "summary drift: {id}");
+            assert_eq!(
+                runtime.description.as_deref(),
+                Some(declared.description.as_str()),
+                "description drift: {id}"
+            );
+            assert_eq!(
+                runtime.capability, declared.capability,
+                "capability drift: {id}"
+            );
+            assert_eq!(
+                serde_json::to_value(runtime.risk_level).unwrap(),
+                serde_json::to_value(declared.risk_level).unwrap(),
+                "risk drift: {id}"
+            );
+            assert_eq!(
+                serde_json::to_value(runtime.safety_tier).unwrap(),
+                serde_json::to_value(declared.safety_tier).unwrap(),
+                "safety drift: {id}"
+            );
+            assert_eq!(
+                serde_json::to_value(runtime.requires_approval).unwrap(),
+                serde_json::to_value(declared.requires_approval).unwrap(),
+                "approval drift: {id}"
+            );
+            assert_eq!(
+                serde_json::to_value(runtime.idempotency).unwrap(),
+                serde_json::to_value(declared.idempotency).unwrap(),
+                "idempotency drift: {id}"
+            );
+            assert_eq!(
+                runtime.input_schema, declared.input_schema,
+                "input schema drift: {id}"
+            );
+            assert_eq!(
+                runtime.output_schema, declared.output_schema,
+                "output schema drift: {id}"
+            );
+            assert_eq!(
+                serde_json::to_value(&runtime.ai_hints).unwrap(),
+                serde_json::to_value(&declared.ai_hints).unwrap(),
+                "AI hints drift: {id}"
+            );
+            assert_eq!(
+                runtime.rate_limit.is_some(),
+                declared.rate_limit.is_some(),
+                "per-operation rate-limit drift: {id}"
+            );
             assert!(
-                found,
-                "operation {op_id} should have capability {expected_cap}"
+                manifest
+                    .capabilities
+                    .optional
+                    .iter()
+                    .any(|capability| capability == &runtime.capability),
+                "operation capability must be optional in manifest: {id}"
             );
         }
+
+        let rate_limits = manifest
+            .rate_limits
+            .as_ref()
+            .expect("n8n manifest should declare rate-limit pools");
+        let mapped_operation_ids = rate_limits
+            .operation_pools
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            mapped_operation_ids, manifest_ids,
+            "rate-pool mappings must cover exactly the operation set"
+        );
+
+        let pool_ids = rate_limits
+            .pools
+            .iter()
+            .map(|pool| pool.id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            pool_ids.len(),
+            rate_limits.pools.len(),
+            "rate-limit pool IDs must be unique"
+        );
+        let mut referenced_pool_ids = BTreeSet::new();
+        for runtime in &runtime_operations {
+            let id = runtime.id.as_ref();
+            let mappings = rate_limits
+                .operation_pools
+                .get(id)
+                .expect("every operation should have a rate-pool mapping");
+            assert!(
+                !mappings.is_empty(),
+                "rate-pool mapping must not be empty: {id}"
+            );
+            for pool_id in mappings {
+                assert!(
+                    pool_ids.contains(pool_id),
+                    "unknown rate-limit pool {pool_id}: {id}"
+                );
+                referenced_pool_ids.insert(pool_id.clone());
+            }
+            assert!(
+                mappings
+                    .iter()
+                    .any(|pool_id| pool_id == runtime.capability.as_ref()),
+                "operation must consume its capability-named pool: {id}"
+            );
+        }
+        assert_eq!(
+            referenced_pool_ids, pool_ids,
+            "every declared rate-limit pool must be referenced"
+        );
     }
 
     #[test]

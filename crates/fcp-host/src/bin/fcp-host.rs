@@ -4,11 +4,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::Cursor;
+#[cfg(target_os = "linux")]
+use std::net::Shutdown;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream as StdUnixStream;
 #[cfg(unix)]
 use std::path::Path as FsPath;
 use std::path::{Path as StdPath, PathBuf};
 use std::pin::pin;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -64,17 +70,18 @@ use fcp_host::{
     ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
     ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
-    ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, CredentialCooldown,
-    CredentialLease, CredentialMutationOutcome, CredentialPayload, CredentialPoolError,
-    CredentialPoolKey, CredentialPoolRegistry, CredentialPoolStrategy, CredentialPoolView,
-    CredentialUpsertMode, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
-    DoctorRequest, DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse,
-    EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
-    HostHealthStatus, HostPreflightRequest, HostSimulateRequest, HostSimulateResponse,
-    IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
-    LifecycleTransitionResponse, LocalPlacementController, LocalPlacementPlan,
-    LocalPlacementPressureSnapshot, LocalPlacementRequest, LogQueryRequest, LogQueryResponse,
-    ManagedConnectorConfig, ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
+    ConnectorInventoryResponse, ConnectorLaunchBinding, ConnectorLifecycleMode, ConnectorRegistry,
+    ConnectorSummary, CredentialCooldown, CredentialLease, CredentialMutationOutcome,
+    CredentialPayload, CredentialPoolError, CredentialPoolKey, CredentialPoolRegistry,
+    CredentialPoolStrategy, CredentialPoolView, CredentialUpsertMode, DiscoveryEndpoint,
+    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
+    EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse,
+    GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus, HostPreflightRequest,
+    HostSimulateRequest, HostSimulateResponse, IntrospectionResponse, JournalQueryRequest,
+    JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse,
+    LocalPlacementController, LocalPlacementPlan, LocalPlacementPressureSnapshot,
+    LocalPlacementRequest, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
+    ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
     NativeProxyOnlySandboxDecision, NativeProxyOnlySandboxSupport, OperationResult,
     OperationResultStatus, PLACEMENT_EVIDENCE_EVENT, PlacementHintDerivationInput,
     PlacementOperationClass, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
@@ -97,18 +104,22 @@ use fcp_host::{
     validate_runtime_network_claim, wasi_config_for_operation_network_policy,
 };
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
+#[cfg(target_os = "linux")]
+use fcp_host::{InheritedEgressCodec, OwnedInvocationConfig, OwnedInvocationHandle};
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, HealthState, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, LimitType, OperationId,
-    RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
-    RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
+    HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse,
+    InvokeStatus, LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, LimitType,
+    OperationId, OperationInfo, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool,
+    RateLimitScope, RateLimitUnit, RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
 use fcp_manifest::{
     ConnectorManifest, HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader,
     HostEgressHttpRequest, HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse,
     NetworkConstraints,
 };
+#[cfg(target_os = "linux")]
+use fcp_manifest::{HostEgressWireError, HostEgressWireRequestPayload, HostEgressWireResponseBody};
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer, PrincipalId,
     RequestDescriptor, TRUTH_PRECEDENCE_DEFAULT_ENV,
@@ -135,6 +146,8 @@ use fcp_provider_auth::{
     TokenRefreshPolicy,
 };
 use fcp_ratelimit::{BackpressureThresholds, TokenBucket};
+#[cfg(target_os = "linux")]
+use fcp_sandbox::ProcessSpec;
 use fcp_sandbox::{
     CredentialInjector, DefaultTlsVerifier, EgressError, EgressGuard, EgressHttpRequest,
     EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector, TlsVerifier, WasiConfig,
@@ -1550,6 +1563,201 @@ struct UnavailableNativeProxyOnlyConnector {
     support: NativeProxyOnlySandboxSupport,
 }
 
+const PER_INVOCATION_PENDING_REASON: &str =
+    "per-invocation launch is unavailable until owned launch teardown is implemented";
+const PER_INVOCATION_BINDING_INVALID_REASON: &str = "per-invocation launch is unavailable because its host-owned launch binding is missing or invalid";
+const PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS: [&str; 5] = [
+    "FCP_HOST_EGRESS_FD",
+    "FCP_HOST_EGRESS_TRANSPORT",
+    "FCP_HOST_EGRESS_AUTH_TOKEN",
+    "FCP_HOST_EGRESS_SOCKET",
+    "FCP_HOST_EGRESS_PROXY_URL",
+];
+
+#[derive(Clone, Debug)]
+struct ValidatedConnectorLaunchBinding {
+    launcher_path: PathBuf,
+    launcher_digest: String,
+    runtime_executable: PathBuf,
+    expected_runtime_executable_digest: String,
+}
+
+#[allow(dead_code)] // Consumed by the owned-launch packet when spawn is wired.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValidatedConnectorLaunchSnapshot {
+    launcher_path: PathBuf,
+    launcher_digest: String,
+    runtime_executable: PathBuf,
+    expected_runtime_executable_digest: String,
+    fixed_args: Vec<OsString>,
+    fixed_env: BTreeMap<OsString, OsString>,
+    network_disabled: bool,
+}
+
+impl ValidatedConnectorLaunchBinding {
+    fn from_config(config: &ConnectorConfig) -> Option<Self> {
+        let binding = config.launch_binding.as_ref()?;
+        binding.validate_for_binary(&config.binary).ok()?;
+        Some(Self {
+            launcher_path: PathBuf::from(&binding.launcher_path),
+            launcher_digest: binding.launcher_digest.clone(),
+            runtime_executable: PathBuf::from(&binding.runtime_executable),
+            expected_runtime_executable_digest: binding.runtime_executable_digest.clone(),
+        })
+    }
+
+    fn launch_snapshot(
+        &self,
+        fixed_args: &[String],
+        fixed_env: &BTreeMap<String, String>,
+        network_disabled: bool,
+    ) -> ValidatedConnectorLaunchSnapshot {
+        ValidatedConnectorLaunchSnapshot {
+            launcher_path: self.launcher_path.clone(),
+            launcher_digest: self.launcher_digest.clone(),
+            runtime_executable: self.runtime_executable.clone(),
+            expected_runtime_executable_digest: self.expected_runtime_executable_digest.clone(),
+            fixed_args: fixed_args.iter().map(OsString::from).collect(),
+            fixed_env: fixed_env
+                .iter()
+                .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+                .collect(),
+            network_disabled,
+        }
+    }
+}
+
+/// Opaque, request-scoped input for the future owned per-invocation launcher.
+///
+/// This plan is deliberately not `Debug`: the validated launch snapshot and
+/// deferred configure payload can contain operator-controlled environment and
+/// credential references. Construction only copies trusted registry state and
+/// never accepts request payload or capability-token material.
+#[derive(Clone)]
+struct PerInvocationExecutionPlan {
+    registry_generation: u64,
+    connector_id: ConnectorId,
+    operation: OperationId,
+    zone_id: ZoneId,
+    request_id: RequestId,
+    request_correlation_id: Option<CorrelationId>,
+    manifest_operation: OperationInfo,
+    launch_snapshot: ValidatedConnectorLaunchSnapshot,
+    network_constraints: NetworkConstraints,
+    configure_payload: Option<Value>,
+    capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    requested_instance_id: Option<InstanceId>,
+    state_root: Option<PathBuf>,
+}
+
+/// Metadata-only runtime entry for the explicit per-invocation lifecycle mode.
+///
+/// Per-invocation mode deliberately does not start a child here. The launch
+/// material is retained with the entry for owned process/UDS setup without
+/// changing registry identity or configuration semantics.
+#[derive(Clone)]
+struct PerInvocationConnector {
+    config: ConnectorConfig,
+    summary: ConnectorSummary,
+    resilience: Arc<ResilienceLayer>,
+    capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    validated_launch_binding: Option<ValidatedConnectorLaunchBinding>,
+    manifest_introspection: Option<Introspection>,
+}
+
+impl PerInvocationConnector {
+    fn new(
+        config: ConnectorConfig,
+        resilience: Arc<ResilienceLayer>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+        manifest_constraints: &ManifestOperationConstraintCatalog,
+    ) -> HostResult<Self> {
+        let mut summary = connector_summary_from_config(&config)?;
+        if let Some(introspection) = &manifest_constraints.introspection {
+            summary.tool_count = introspection.operations.len() as u32;
+            summary.max_safety_tier = introspection
+                .operations
+                .iter()
+                .map(|operation| operation.safety_tier)
+                .max_by_key(|tier| tier.level())
+                .unwrap_or(SafetyTier::Safe);
+        }
+        let validated_launch_binding = ValidatedConnectorLaunchBinding::from_config(&config);
+        summary.health = ConnectorHealth::unavailable(if validated_launch_binding.is_some() {
+            PER_INVOCATION_PENDING_REASON
+        } else {
+            PER_INVOCATION_BINDING_INVALID_REASON
+        });
+        summary.last_health_check = None;
+        resilience.ensure_connector(&summary.id);
+        Ok(Self {
+            config,
+            summary,
+            resilience,
+            capability_verifying_key,
+            validated_launch_binding,
+            manifest_introspection: manifest_constraints.introspection.clone(),
+        })
+    }
+
+    fn unavailable_error(&self) -> HostError {
+        // Keep the launch dependencies live and observable without exposing
+        // their contents. The owned launch and handshake path consumes these
+        // values when per-invocation execution is supported.
+        self.resilience.ensure_connector(&self.summary.id);
+        tracing::debug!(
+            event = "per_invocation_connector_pending",
+            connector_id = %self.summary.id,
+            capability_verifying_key_configured = self.capability_verifying_key.is_some(),
+            "per-invocation connector launch denied before owned lifecycle support"
+        );
+        let reason = if self.validated_launch_binding.is_some() {
+            PER_INVOCATION_PENDING_REASON
+        } else {
+            PER_INVOCATION_BINDING_INVALID_REASON
+        };
+        HostError::Unavailable(format!("connector `{}`: {reason}", self.summary.id))
+    }
+
+    /// Build the future owned-launch snapshot from validated binding and fixed policy only.
+    /// This method intentionally does not access the filesystem or spawn a child.
+    #[allow(dead_code)] // Consumed by the owned-launch packet when spawn is wired.
+    fn launch_snapshot(
+        &self,
+        network_disabled: bool,
+    ) -> HostResult<ValidatedConnectorLaunchSnapshot> {
+        let binding = self.validated_launch_binding.as_ref().ok_or_else(|| {
+            HostError::Unavailable(format!(
+                "connector `{}`: {PER_INVOCATION_BINDING_INVALID_REASON}",
+                self.summary.id
+            ))
+        })?;
+        Ok(binding.launch_snapshot(&self.config.args, &self.config.env, network_disabled))
+    }
+
+    fn invoke(&self, _request: InvokeRequest) -> HostResult<InvokeResponse> {
+        Err(self.unavailable_error())
+    }
+
+    fn simulate(&self, _request: SimulateRequest) -> HostResult<SimulateResponse> {
+        Err(self.unavailable_error())
+    }
+
+    fn introspect(&self) -> HostResult<Introspection> {
+        self.manifest_introspection
+            .clone()
+            .ok_or_else(|| self.unavailable_error())
+    }
+
+    fn summary_snapshot(&self) -> ConnectorSummary {
+        self.summary.clone()
+    }
+
+    fn self_check(&self) -> HostResult<SelfCheckReport> {
+        Err(self.unavailable_error())
+    }
+}
+
 impl UnavailableNativeProxyOnlyConnector {
     fn new(config: &ConnectorConfig, support: NativeProxyOnlySandboxSupport) -> HostResult<Self> {
         Ok(Self {
@@ -1660,10 +1868,25 @@ enum ConnectorRuntime {
     Native(Arc<SubprocessConnector>),
     NativeWarmPool(Arc<NativeWarmPoolConnector>),
     Wasi(Arc<WasiConnector>),
+    PerInvocation(Arc<PerInvocationConnector>),
     UnavailableNativeProxyOnly(Arc<UnavailableNativeProxyOnlyConnector>),
 }
 
 impl ConnectorRuntime {
+    fn metadata_only(
+        config: ConnectorConfig,
+        resilience: Arc<ResilienceLayer>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+        manifest_constraints: &ManifestOperationConstraintCatalog,
+    ) -> HostResult<Self> {
+        Ok(Self::PerInvocation(Arc::new(PerInvocationConnector::new(
+            config,
+            resilience,
+            capability_verifying_key,
+            manifest_constraints,
+        )?)))
+    }
+
     async fn spawn(
         config: ConnectorConfig,
         resilience: Arc<ResilienceLayer>,
@@ -1711,6 +1934,7 @@ impl ConnectorRuntime {
             Self::Native(connector) => connector.invoke(request).await,
             Self::NativeWarmPool(connector) => connector.invoke(request).await,
             Self::Wasi(connector) => connector.invoke(request).await,
+            Self::PerInvocation(connector) => connector.invoke(request),
             Self::UnavailableNativeProxyOnly(connector) => connector.invoke(request).await,
         }
     }
@@ -1720,6 +1944,7 @@ impl ConnectorRuntime {
             Self::Native(connector) => connector.simulate(request).await,
             Self::NativeWarmPool(connector) => connector.simulate(request).await,
             Self::Wasi(connector) => connector.simulate(request).await,
+            Self::PerInvocation(connector) => connector.simulate(request),
             Self::UnavailableNativeProxyOnly(connector) => connector.simulate(request).await,
         }
     }
@@ -1729,6 +1954,7 @@ impl ConnectorRuntime {
             Self::Native(connector) => connector.introspect().await,
             Self::NativeWarmPool(connector) => connector.introspect().await,
             Self::Wasi(connector) => connector.introspect(),
+            Self::PerInvocation(connector) => connector.introspect(),
             Self::UnavailableNativeProxyOnly(connector) => connector.introspect(),
         }
     }
@@ -1738,6 +1964,7 @@ impl ConnectorRuntime {
             Self::Native(connector) => connector.summary_snapshot().await,
             Self::NativeWarmPool(connector) => connector.summary_snapshot().await,
             Self::Wasi(connector) => connector.summary_snapshot(),
+            Self::PerInvocation(connector) => connector.summary_snapshot(),
             Self::UnavailableNativeProxyOnly(connector) => connector.summary_snapshot(),
         }
     }
@@ -1747,6 +1974,7 @@ impl ConnectorRuntime {
             Self::Native(connector) => connector.summary.clone(),
             Self::NativeWarmPool(connector) => connector.static_summary(),
             Self::Wasi(connector) => connector.summary.clone(),
+            Self::PerInvocation(connector) => connector.summary.clone(),
             Self::UnavailableNativeProxyOnly(connector) => connector.summary.clone(),
         }
     }
@@ -1756,6 +1984,7 @@ impl ConnectorRuntime {
             Self::Native(connector) => connector.self_check().await,
             Self::NativeWarmPool(connector) => connector.self_check().await,
             Self::Wasi(connector) => connector.self_check(),
+            Self::PerInvocation(connector) => connector.self_check(),
             Self::UnavailableNativeProxyOnly(connector) => Ok(connector.self_check()),
         }
     }
@@ -1795,16 +2024,47 @@ struct ManifestOperationConstraintCatalog {
     source: Option<String>,
     declared_operations: HashSet<String>,
     network_constraints: HashMap<String, NetworkConstraints>,
+    introspection: Option<Introspection>,
+    rate_limits: Option<RateLimitDeclarations>,
 }
 
 impl ManifestOperationConstraintCatalog {
-    fn from_manifest(manifest: &ConnectorManifest, source: impl Into<String>) -> Self {
+    fn from_manifest(manifest: &ConnectorManifest, source: impl Into<String>) -> HostResult<Self> {
         let declared_operations = manifest
             .provides
             .operations
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
+        let operations = manifest
+            .provides
+            .operations
+            .iter()
+            .map(|(operation_id, operation)| {
+                let id = OperationId::new(operation_id.clone()).map_err(|error| {
+                    HostError::InvalidFilter(format!(
+                        "invalid manifest operation id `{operation_id}`: {error}"
+                    ))
+                })?;
+                Ok(OperationInfo {
+                    id,
+                    summary: operation.description.clone(),
+                    description: Some(operation.description.clone()),
+                    input_schema: operation.input_schema.clone(),
+                    output_schema: operation.output_schema.clone(),
+                    capability: operation.capability.clone(),
+                    risk_level: operation.risk_level,
+                    safety_tier: operation.safety_tier,
+                    idempotency: operation.idempotency,
+                    ai_hints: operation.ai_hints.clone(),
+                    rate_limit: operation
+                        .rate_limit
+                        .as_ref()
+                        .map(|rate_limit| rate_limit.as_inner().clone()),
+                    requires_approval: Some(operation.requires_approval.into()),
+                })
+            })
+            .collect::<HostResult<Vec<_>>>()?;
         let network_constraints = manifest
             .provides
             .operations
@@ -1816,11 +2076,22 @@ impl ManifestOperationConstraintCatalog {
                     .map(|constraints| (operation.clone(), constraints))
             })
             .collect::<HashMap<_, _>>();
-        Self {
+        Ok(Self {
             source: Some(source.into()),
             declared_operations,
             network_constraints,
-        }
+            introspection: Some(Introspection {
+                operations,
+                events: Vec::new(),
+                resource_types: Vec::new(),
+                auth_caps: None,
+                event_caps: None,
+            }),
+            rate_limits: manifest
+                .rate_limits
+                .as_ref()
+                .map(fcp_manifest::RateLimitsSection::to_declarations),
+        })
     }
 }
 
@@ -1842,10 +2113,7 @@ fn load_manifest_operation_constraints(
             config.id, path
         ))
     })?;
-    Ok(ManifestOperationConstraintCatalog::from_manifest(
-        &manifest,
-        path.to_string(),
-    ))
+    ManifestOperationConstraintCatalog::from_manifest(&manifest, path.to_string())
 }
 
 fn validate_production_prewarm_policy(config: &ConnectorConfig) -> HostResult<()> {
@@ -1878,11 +2146,31 @@ fn validate_production_prewarm_policy(config: &ConnectorConfig) -> HostResult<()
     }
 }
 
+fn validate_connector_lifecycle_policy(config: &ConnectorConfig) -> HostResult<()> {
+    if config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation {
+        return Ok(());
+    }
+
+    let incompatible_strategy = match config.prewarm.strategy {
+        PrewarmStrategy::OnDemand => None,
+        PrewarmStrategy::WarmPool => Some("warm_pool"),
+        PrewarmStrategy::Zygote => Some("zygote"),
+    };
+    if let Some(strategy) = incompatible_strategy {
+        return Err(HostError::InvalidFilter(format!(
+            "connector '{}' uses per_invocation lifecycle and cannot combine it with {} prewarm",
+            config.id, strategy
+        )));
+    }
+    Ok(())
+}
+
 async fn build_registry_entry(
     config: ConnectorConfig,
     resilience: Arc<ResilienceLayer>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
 ) -> HostResult<RegistryEntry> {
+    validate_connector_lifecycle_policy(&config)?;
     validate_production_prewarm_policy(&config)?;
     validate_runtime_network_claim(
         &config.id,
@@ -1894,8 +2182,17 @@ async fn build_registry_entry(
     let manifest_constraints = load_manifest_operation_constraints(&config)?;
     let hrw_routing = current_hrw_lease_routing_config()?;
     enforce_hrw_singleton_writer_launch_route(&config, hrw_routing.as_ref())?;
-    let connector =
-        ConnectorRuntime::spawn(config.clone(), resilience, capability_verifying_key).await?;
+    let connector = match config.lifecycle_mode {
+        ConnectorLifecycleMode::Persistent => {
+            ConnectorRuntime::spawn(config.clone(), resilience, capability_verifying_key).await?
+        }
+        ConnectorLifecycleMode::PerInvocation => ConnectorRuntime::metadata_only(
+            config.clone(),
+            resilience,
+            capability_verifying_key,
+            &manifest_constraints,
+        )?,
+    };
     Ok(RegistryEntry {
         config,
         connector,
@@ -1918,6 +2215,14 @@ struct RuntimeNetworkPolicySnapshot {
 #[derive(Default)]
 struct RegistryState {
     connectors: HashMap<ConnectorId, RegistryEntry>,
+    generation: u64,
+}
+
+#[derive(Clone)]
+struct LiveRequestRegistrySnapshot {
+    allow_list: AllowListSnapshot,
+    runtime_network: RuntimeNetworkPolicySnapshot,
+    per_invocation_plan: Option<PerInvocationExecutionPlan>,
 }
 
 struct PreparedRegistryApply {
@@ -2035,7 +2340,10 @@ impl SubprocessRegistry {
             map.insert(connector_id, entry);
         }
         Ok(Self {
-            state: Arc::new(RwLock::new(RegistryState { connectors: map })),
+            state: Arc::new(RwLock::new(RegistryState {
+                connectors: map,
+                generation: 1,
+            })),
             resilience,
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key,
@@ -2158,6 +2466,14 @@ impl SubprocessRegistry {
         let changed = prepared.changed();
 
         let mut state = self.state.write().await;
+        let next_generation = if changed {
+            state
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| HostError::Internal("registry generation exhausted".to_string()))?
+        } else {
+            state.generation
+        };
         let mut current_entries = std::mem::take(&mut state.connectors);
         let mut next_entries = HashMap::new();
         let next_configs = std::mem::take(&mut prepared.next_configs);
@@ -2173,18 +2489,15 @@ impl SubprocessRegistry {
             }
         }
         state.connectors = next_entries;
+        state.generation = next_generation;
+        let registry_version = state.generation;
+        self.version.store(registry_version, Ordering::SeqCst);
         drop(state);
-
-        let registry_version = if changed {
-            self.version.fetch_add(1, Ordering::SeqCst) + 1
-        } else {
-            self.version.load(Ordering::SeqCst)
-        };
 
         Ok(prepared.report(registry_version))
     }
 
-    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+    async fn invoke_persistent(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
         let connector_id = request.connector_id.clone();
         let connector = {
             let state = self.state.read().await;
@@ -2195,6 +2508,69 @@ impl SubprocessRegistry {
         }
         .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
         connector.invoke(request).await
+    }
+
+    async fn invoke_with_execution_plan(
+        &self,
+        host_state: &Arc<AppState>,
+        request: InvokeRequest,
+        plan: Option<PerInvocationExecutionPlan>,
+    ) -> HostResult<InvokeResponse> {
+        if plan.is_none() {
+            let state = self.state.read().await;
+            if state
+                .connectors
+                .get(&request.connector_id)
+                .is_some_and(|entry| {
+                    entry.config.lifecycle_mode == ConnectorLifecycleMode::PerInvocation
+                })
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plan is missing".to_string(),
+                ));
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(plan) = plan {
+            // Keep this generation pinned through teardown. Besides closing the
+            // check-to-spawn race, this prevents a concurrent admin apply from
+            // changing egress or launch authority during the owned operation.
+            let registry_state = self.state.read().await;
+            let entry = registry_state
+                .connectors
+                .get(&request.connector_id)
+                .ok_or_else(|| HostError::ConnectorNotFound(request.connector_id.to_string()))?;
+            self.revalidate_per_invocation_execution_plan(
+                entry,
+                &request,
+                &plan,
+                registry_state.generation,
+            )?;
+            let result = invoke_owned_per_invocation(host_state, plan, request).await;
+            drop(registry_state);
+            return result;
+        }
+        #[cfg(not(target_os = "linux"))]
+        if plan.is_some() {
+            return Err(HostError::PreflightFailed(
+                "per-invocation execution plans require Linux".to_string(),
+            ));
+        }
+        self.invoke_persistent(request).await
+    }
+
+    /// Unscoped callers (discovery/legacy tests) remain persistent-only. A
+    /// per-invocation request must arrive with the exact plan returned by
+    /// verified preflight, so this path never launches it.
+    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        let plan = self.per_invocation_execution_plan(&request).await?;
+        if plan.is_some() {
+            return Err(HostError::Unavailable(format!(
+                "connector `{}`: {PER_INVOCATION_PENDING_REASON}; request-scoped host state is required",
+                request.connector_id
+            )));
+        }
+        self.invoke_persistent(request).await
     }
 
     /// br-l9tt6: snapshot connector governance fields
@@ -2228,6 +2604,382 @@ impl SubprocessRegistry {
                 manifest_constraints: entry.manifest_constraints.clone(),
             }
         })
+    }
+
+    async fn live_request_registry_snapshot(
+        &self,
+        request: &InvokeRequest,
+    ) -> HostResult<LiveRequestRegistrySnapshot> {
+        let state = self.state.read().await;
+        let entry = state
+            .connectors
+            .get(&request.connector_id)
+            .ok_or_else(|| HostError::ConnectorNotFound(request.connector_id.to_string()))?;
+        let cfg = &entry.config;
+        let allow_list = AllowListSnapshot {
+            allowed_zones: cfg.allowed_zones.clone(),
+            allowed_operations: cfg.allowed_operations.clone(),
+            enforce_operation_network_constraints: cfg.enforce_operation_network_constraints,
+            enforce_empty_allow_lists: cfg.enforce_empty_allow_lists,
+            manifest_constraints: entry.manifest_constraints.clone(),
+        };
+        let runtime_network = RuntimeNetworkPolicySnapshot {
+            enforcement: cfg.runtime_network_enforcement,
+            operation_constraints: cfg
+                .operation_network_constraints
+                .get(request.operation.as_str())
+                .cloned(),
+            connector_config: cfg.config.clone(),
+        };
+        let per_invocation_plan =
+            self.per_invocation_execution_plan_from_entry(entry, request, state.generation)?;
+        Ok(LiveRequestRegistrySnapshot {
+            allow_list,
+            runtime_network,
+            per_invocation_plan,
+        })
+    }
+
+    /// Build the fail-closed input for the future owned per-invocation launch.
+    ///
+    /// Every decision is made while holding one registry read lock. This keeps
+    /// the operation metadata, manifest constraints, managed constraints,
+    /// launch binding, and fixed launch material on one trusted snapshot. The
+    /// method intentionally does not touch the filesystem, inspect request
+    /// payloads/tokens, mutate sandbox support flags, or spawn a process.
+    async fn per_invocation_execution_plan(
+        &self,
+        request: &InvokeRequest,
+    ) -> HostResult<Option<PerInvocationExecutionPlan>> {
+        let state = self.state.read().await;
+        let entry = state
+            .connectors
+            .get(&request.connector_id)
+            .ok_or_else(|| HostError::ConnectorNotFound(request.connector_id.to_string()))?;
+
+        self.per_invocation_execution_plan_from_entry(entry, request, state.generation)
+    }
+
+    fn per_invocation_execution_plan_from_entry(
+        &self,
+        entry: &RegistryEntry,
+        request: &InvokeRequest,
+        registry_generation: u64,
+    ) -> HostResult<Option<PerInvocationExecutionPlan>> {
+        if entry.config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation {
+            return Ok(None);
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(HostError::PreflightFailed(
+                "per-invocation execution plans require Linux".to_string(),
+            ));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if entry.config.runtime_network_enforcement
+                != RuntimeNetworkEnforcement::HostEgressProxy
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plans require host_egress_proxy enforcement"
+                        .to_string(),
+                ));
+            }
+            if !entry.config.enforce_operation_network_constraints {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plans require enforced operation network constraints"
+                        .to_string(),
+                ));
+            }
+            if let Some(key) = PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS
+                .iter()
+                .find(|key| entry.config.env.contains_key(**key))
+            {
+                return Err(HostError::PreflightFailed(format!(
+                    "per-invocation launch env key `{key}` is reserved for host egress"
+                )));
+            }
+
+            if entry.manifest_constraints.source.is_none() {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plan requires a validated manifest source"
+                        .to_string(),
+                ));
+            }
+            let introspection = entry
+                .manifest_constraints
+                .introspection
+                .as_ref()
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan has no validated manifest metadata"
+                            .to_string(),
+                    )
+                })?;
+            if !entry
+                .manifest_constraints
+                .declared_operations
+                .contains(request.operation.as_str())
+            {
+                return Err(HostError::PreflightFailed(format!(
+                    "per-invocation execution plan operation `{}` is not declared by the manifest",
+                    request.operation
+                )));
+            }
+            let manifest_operation = introspection
+                .operations
+                .iter()
+                .find(|operation| operation.id == request.operation)
+                .cloned()
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(format!(
+                        "per-invocation execution plan has no manifest metadata for operation `{}`",
+                        request.operation
+                    ))
+                })?;
+            let manifest_constraints = entry
+                .manifest_constraints
+                .network_constraints
+                .get(request.operation.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(format!(
+                        "per-invocation execution plan has no manifest network constraints for operation `{}`",
+                        request.operation
+                    ))
+                })?;
+            let managed_constraints = entry
+                .config
+                .operation_network_constraints
+                .get(request.operation.as_str())
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(format!(
+                        "per-invocation execution plan has no managed network constraints for operation `{}`",
+                        request.operation
+                    ))
+                })?;
+            let resolved_constraints = managed_constraints
+                .resolve(entry.config.config.as_ref())
+                .map_err(|_| {
+                    HostError::PreflightFailed(format!(
+                        "per-invocation execution plan could not resolve managed network constraints for operation `{}`",
+                        request.operation
+                    ))
+                })?;
+            if resolved_constraints != manifest_constraints {
+                return Err(HostError::PreflightFailed(format!(
+                    "per-invocation execution plan network constraints mismatch for operation `{}`",
+                    request.operation
+                )));
+            }
+
+            let binding = entry.config.launch_binding.as_ref().ok_or_else(|| {
+                HostError::PreflightFailed(
+                    "per-invocation execution plan requires a validated launch binding".to_string(),
+                )
+            })?;
+            binding
+                .validate_for_binary(&entry.config.binary)
+                .map_err(|_| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan launch binding is invalid".to_string(),
+                    )
+                })?;
+            let validated_binding = ValidatedConnectorLaunchBinding::from_config(&entry.config)
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan launch binding is unavailable".to_string(),
+                    )
+                })?;
+            let launch_snapshot =
+                validated_binding.launch_snapshot(&entry.config.args, &entry.config.env, true);
+            let requested_instance_id =
+                requested_instance_id_from_config(&entry.config).map_err(|_| {
+                    HostError::PreflightFailed(format!(
+                        "per-invocation execution plan rejected invalid {REQUESTED_INSTANCE_ID_ENV}"
+                    ))
+                })?;
+            let state_root = configured_connector_state_root(&entry.config);
+
+            Ok(Some(PerInvocationExecutionPlan {
+                registry_generation,
+                connector_id: request.connector_id.clone(),
+                operation: request.operation.clone(),
+                zone_id: request.zone_id.clone(),
+                request_id: request.id.clone(),
+                request_correlation_id: request.correlation_id.clone(),
+                manifest_operation,
+                launch_snapshot,
+                network_constraints: manifest_constraints,
+                configure_payload: entry.config.config.clone(),
+                capability_verifying_key: self.capability_verifying_key,
+                requested_instance_id,
+                state_root,
+            }))
+        }
+    }
+
+    fn revalidate_per_invocation_execution_plan(
+        &self,
+        entry: &RegistryEntry,
+        request: &InvokeRequest,
+        plan: &PerInvocationExecutionPlan,
+        registry_generation: u64,
+    ) -> HostResult<()> {
+        if plan.registry_generation != registry_generation {
+            return Err(HostError::PreflightFailed(
+                "per-invocation execution plan is stale".to_string(),
+            ));
+        }
+        if plan.connector_id != request.connector_id
+            || plan.operation != request.operation
+            || plan.zone_id != request.zone_id
+            || plan.request_id != request.id
+            || plan.request_correlation_id != request.correlation_id
+        {
+            return Err(HostError::PreflightFailed(
+                "per-invocation execution plan request binding mismatch".to_string(),
+            ));
+        }
+        if entry.config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation {
+            return Err(HostError::PreflightFailed(
+                "per-invocation execution plan lifecycle changed".to_string(),
+            ));
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(HostError::PreflightFailed(
+                "per-invocation execution plans require Linux".to_string(),
+            ));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if entry.config.runtime_network_enforcement
+                != RuntimeNetworkEnforcement::HostEgressProxy
+                || !entry.config.enforce_operation_network_constraints
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plan network enforcement changed".to_string(),
+                ));
+            }
+            if PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS
+                .iter()
+                .any(|key| entry.config.env.contains_key(*key))
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation launch env contains a reserved host-egress key".to_string(),
+                ));
+            }
+            if entry.manifest_constraints.source.is_none()
+                || !entry
+                    .manifest_constraints
+                    .declared_operations
+                    .contains(request.operation.as_str())
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plan manifest proof changed".to_string(),
+                ));
+            }
+            let introspection = entry
+                .manifest_constraints
+                .introspection
+                .as_ref()
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan has no validated manifest metadata"
+                            .to_string(),
+                    )
+                })?;
+            let manifest_operation = introspection
+                .operations
+                .iter()
+                .find(|operation| operation.id == request.operation)
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan manifest operation proof changed"
+                            .to_string(),
+                    )
+                })?;
+            if !owned_operation_matches(&plan.manifest_operation, manifest_operation)? {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plan operation metadata changed".to_string(),
+                ));
+            }
+            let manifest_constraints = entry
+                .manifest_constraints
+                .network_constraints
+                .get(request.operation.as_str())
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan network proof changed".to_string(),
+                    )
+                })?;
+            let managed_constraints = entry
+                .config
+                .operation_network_constraints
+                .get(request.operation.as_str())
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan managed network proof changed".to_string(),
+                    )
+                })?;
+            let resolved_constraints = managed_constraints
+                .resolve(entry.config.config.as_ref())
+                .map_err(|_| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan managed network proof is invalid"
+                            .to_string(),
+                    )
+                })?;
+            if manifest_constraints != &plan.network_constraints
+                || resolved_constraints != plan.network_constraints
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plan network proof changed".to_string(),
+                ));
+            }
+            let binding = entry.config.launch_binding.as_ref().ok_or_else(|| {
+                HostError::PreflightFailed(
+                    "per-invocation execution plan launch binding proof changed".to_string(),
+                )
+            })?;
+            binding
+                .validate_for_binary(&entry.config.binary)
+                .map_err(|_| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan launch binding is invalid".to_string(),
+                    )
+                })?;
+            let validated_binding = ValidatedConnectorLaunchBinding::from_config(&entry.config)
+                .ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "per-invocation execution plan launch binding is unavailable".to_string(),
+                    )
+                })?;
+            let launch_snapshot =
+                validated_binding.launch_snapshot(&entry.config.args, &entry.config.env, true);
+            if launch_snapshot != plan.launch_snapshot
+                || plan.configure_payload != entry.config.config
+                || plan.capability_verifying_key != self.capability_verifying_key
+                || plan.requested_instance_id
+                    != requested_instance_id_from_config(&entry.config).map_err(|_| {
+                        HostError::PreflightFailed(
+                            "per-invocation execution plan instance binding proof is invalid"
+                                .to_string(),
+                        )
+                    })?
+                || plan.state_root != configured_connector_state_root(&entry.config)
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation execution plan launch proof changed".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn connector_requires_singleton_writer(&self, connector_id: &ConnectorId) -> bool {
@@ -2266,22 +3018,30 @@ impl SubprocessRegistry {
     /// enforcement must fail closed here instead of pretending static manifest
     /// metadata is enough.
     async fn enforce_runtime_network_policy(&self, request: &InvokeRequest) -> HostResult<()> {
+        let snapshot = self
+            .runtime_network_policy_snapshot(&request.connector_id, &request.operation)
+            .await
+            .ok_or_else(|| HostError::ConnectorNotFound(request.connector_id.to_string()))?;
+        self.enforce_runtime_network_policy_snapshot(request, &snapshot)
+    }
+
+    fn enforce_runtime_network_policy_snapshot(
+        &self,
+        request: &InvokeRequest,
+        snapshot: &RuntimeNetworkPolicySnapshot,
+    ) -> HostResult<()> {
         let started_at = Instant::now();
         let request_id = request.id.to_string();
         let correlation_id = request
             .correlation_id
             .as_ref()
             .map(std::string::ToString::to_string);
-        let snapshot = self
-            .runtime_network_policy_snapshot(&request.connector_id, &request.operation)
-            .await
-            .ok_or_else(|| HostError::ConnectorNotFound(request.connector_id.to_string()))?;
 
         if !snapshot.enforcement.requires_runtime_enforcement() {
             return Ok(());
         }
 
-        let Some(managed_constraints) = snapshot.operation_constraints else {
+        let Some(managed_constraints) = snapshot.operation_constraints.as_ref() else {
             let elapsed_ms = started_at.elapsed().as_millis();
             tracing::warn!(
                 event = "runtime_egress_policy_decision",
@@ -2711,6 +3471,9 @@ impl ConnectorRegistry for SubprocessRegistry {
                 );
                 return None;
             }
+            if entry.config.lifecycle_mode == ConnectorLifecycleMode::PerInvocation {
+                return entry.manifest_constraints.introspection.clone();
+            }
             Some(entry.connector.clone())
         }?;
         connector.introspect().await.ok()
@@ -2725,6 +3488,11 @@ impl ConnectorRegistry for SubprocessRegistry {
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<RateLimitDeclarations> {
         let state = self.state.read().await;
         let entry = state.connectors.get(id)?;
+        if entry.config.lifecycle_mode == ConnectorLifecycleMode::PerInvocation
+            && let Some(rate_limits) = &entry.manifest_constraints.rate_limits
+        {
+            return Some(rate_limits.clone());
+        }
         configured_subprocess_rate_limits(&entry.config)
     }
 
@@ -2752,6 +3520,580 @@ fn runtime_self_check_failure_report(error: &HostError) -> SelfCheckReport {
         "self_check_runtime",
         format!("connector self_check failed: {error}"),
     )
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct OwnedPerInvocationBinding {
+    connector_id: String,
+    operation_id: String,
+    zone_id: String,
+    request_id: String,
+    correlation_id: Option<String>,
+    capability_token_cbor_b64: String,
+    network_constraints: NetworkConstraints,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedPerInvocationBinding {
+    fn from_plan(plan: &PerInvocationExecutionPlan, request: &InvokeRequest) -> HostResult<Self> {
+        let capability_token_cbor_b64 = capability_token_b64(&request.capability_token)?;
+        if plan.connector_id != request.connector_id
+            || plan.operation != request.operation
+            || plan.zone_id != request.zone_id
+            || plan.request_id != request.id
+        {
+            return Err(HostError::InvalidFilter(
+                "owned per-invocation plan does not match request identity".to_string(),
+            ));
+        }
+        Ok(Self {
+            connector_id: plan.connector_id.to_string(),
+            operation_id: plan.operation.to_string(),
+            zone_id: plan.zone_id.to_string(),
+            request_id: plan.request_id.to_string(),
+            correlation_id: request
+                .correlation_id
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            capability_token_cbor_b64,
+            network_constraints: plan.network_constraints.clone(),
+        })
+    }
+
+    fn matches_context(&self, context: &HostEgressContext) -> bool {
+        self.connector_id == context.connector_id
+            && self.operation_id == context.operation_id
+            && self.zone_id == context.zone_id
+            && self.request_id == context.request_id
+            && self.correlation_id == context.correlation_id
+            && bool::from(
+                self.capability_token_cbor_b64
+                    .as_bytes()
+                    .ct_eq(context.capability_token_cbor_b64.as_bytes()),
+            )
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn owned_launch_auth_token() -> String {
+    format!("{}{}", fcp_core::Uuid::new_v4(), fcp_core::Uuid::new_v4())
+}
+
+#[cfg(target_os = "linux")]
+fn owned_handshake_nonce() -> [u8; 32] {
+    let first = fcp_core::Uuid::new_v4();
+    let second = fcp_core::Uuid::new_v4();
+    let mut nonce = [0_u8; 32];
+    nonce[..16].copy_from_slice(first.as_bytes());
+    nonce[16..].copy_from_slice(second.as_bytes());
+    nonce
+}
+
+#[cfg(target_os = "linux")]
+fn owned_process_spec(
+    plan: &PerInvocationExecutionPlan,
+    auth_token: &str,
+) -> HostResult<ProcessSpec> {
+    if !plan.launch_snapshot.network_disabled {
+        return Err(HostError::PreflightFailed(
+            "owned per-invocation launch requires network_disabled".to_string(),
+        ));
+    }
+    let mut fixed_env = plan.launch_snapshot.fixed_env.clone();
+    if fixed_env.keys().any(|key| {
+        PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS
+            .iter()
+            .any(|reserved| key == OsStr::new(reserved))
+    }) {
+        return Err(HostError::PreflightFailed(
+            "owned per-invocation launch fixed environment contains a reserved host-egress key"
+                .to_string(),
+        ));
+    }
+    fixed_env.insert(
+        OsString::from("FCP_HOST_EGRESS_TRANSPORT"),
+        OsString::from("inherited-fd-v1"),
+    );
+    fixed_env.insert(
+        OsString::from("FCP_HOST_EGRESS_AUTH_TOKEN"),
+        OsString::from(auth_token),
+    );
+    Ok(ProcessSpec {
+        launcher_path: plan.launch_snapshot.launcher_path.clone(),
+        launcher_digest: plan.launch_snapshot.launcher_digest.clone(),
+        runtime_executable: plan.launch_snapshot.runtime_executable.clone(),
+        expected_runtime_executable_digest: plan
+            .launch_snapshot
+            .expected_runtime_executable_digest
+            .clone(),
+        fixed_args: plan.launch_snapshot.fixed_args.clone(),
+        fixed_env,
+        network_disabled: plan.launch_snapshot.network_disabled,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn owned_invocation_error(_error: fcp_host::OwnedInvocationError) -> HostError {
+    HostError::RegistryError("owned per-invocation RPC or lifecycle failure".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn owned_codec_error(_error: fcp_host::InheritedEgressCodecError) -> HostError {
+    HostError::Internal("owned host-egress wire protocol failure".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn owned_rpc_result(response: Value) -> HostResult<Value> {
+    if response.get("error").is_some() {
+        return Err(HostError::RegistryError(
+            "owned per-invocation RPC returned an error".to_string(),
+        ));
+    }
+    response.get("result").cloned().ok_or_else(|| {
+        HostError::RegistryError("owned per-invocation RPC response has no result".to_string())
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn owned_rpc(
+    handle: &mut OwnedInvocationHandle,
+    method: &str,
+    params: Value,
+) -> HostResult<Value> {
+    let response = handle
+        .request(method.to_string(), params)
+        .await
+        .map_err(owned_invocation_error)?;
+    owned_rpc_result(response)
+}
+
+#[cfg(target_os = "linux")]
+fn owned_operation_matches(trusted: &OperationInfo, observed: &OperationInfo) -> HostResult<bool> {
+    let trusted = serde_json::to_value(trusted).map_err(|_| {
+        HostError::Internal("failed to encode trusted operation metadata".to_string())
+    })?;
+    let observed = serde_json::to_value(observed).map_err(|_| {
+        HostError::RegistryError("failed to encode connector operation metadata".to_string())
+    })?;
+    Ok(owned_operation_serialized_matches(&trusted, &observed))
+}
+
+#[cfg(target_os = "linux")]
+fn owned_operation_serialized_matches(trusted: &Value, observed: &Value) -> bool {
+    trusted == observed
+}
+
+#[cfg(target_os = "linux")]
+fn owned_egress_gate_denial(active: bool) -> Option<(u16, HostEgressWireError)> {
+    (!active).then_some((403, HostEgressWireError::Rejected))
+}
+
+#[cfg(target_os = "linux")]
+fn owned_egress_error_response(error: &HostError) -> (u16, HostEgressWireError) {
+    match error {
+        HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => {
+            (403, HostEgressWireError::Rejected)
+        }
+        _ => (500, HostEgressWireError::Internal),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn owned_perform_egress(
+    state: &Arc<AppState>,
+    binding: &OwnedPerInvocationBinding,
+    payload: HostEgressWireRequestPayload,
+) -> HostResult<HostEgressWireResponseBody> {
+    match payload {
+        HostEgressWireRequestPayload::Http(request) => {
+            let started_at = Instant::now();
+            let authorized = authorize_host_egress_context(
+                state,
+                &request.context,
+                &request.context.resource_uri,
+            )
+            .await?;
+            if authorized.connector_id.to_string() != binding.connector_id
+                || authorized.operation.to_string() != binding.operation_id
+                || authorized.zone_id.to_string() != binding.zone_id
+                || authorized.request_id != binding.request_id
+                || authorized.correlation_id != binding.correlation_id
+                || authorized.constraints != binding.network_constraints
+            {
+                return Err(HostError::PreflightFailed(
+                    "owned host-egress authorization did not match invocation binding".to_string(),
+                ));
+            }
+            let lease = acquire_host_egress_credential_lease(
+                state,
+                &authorized.zone_id,
+                request.credential_id.as_deref(),
+                &authorized.credential_allow,
+            )
+            .await?;
+            let result = authorize_and_perform_host_http_egress(
+                state,
+                &authorized,
+                request,
+                lease.as_ref(),
+                started_at,
+            )
+            .await;
+            if let Some(lease) = lease {
+                release_host_egress_credential_lease(state, lease).await;
+            }
+            result.map(HostEgressWireResponseBody::Http)
+        }
+        HostEgressWireRequestPayload::Tcp(request) => {
+            let started_at = Instant::now();
+            let authorized = authorize_host_egress_context(
+                state,
+                &request.context,
+                &request.context.resource_uri,
+            )
+            .await?;
+            if authorized.connector_id.to_string() != binding.connector_id
+                || authorized.operation.to_string() != binding.operation_id
+                || authorized.zone_id.to_string() != binding.zone_id
+                || authorized.request_id != binding.request_id
+                || authorized.correlation_id != binding.correlation_id
+                || authorized.constraints != binding.network_constraints
+            {
+                return Err(HostError::PreflightFailed(
+                    "owned host-egress authorization did not match invocation binding".to_string(),
+                ));
+            }
+            let lease = acquire_host_egress_credential_lease(
+                state,
+                &authorized.zone_id,
+                request.credential_id.as_deref(),
+                &authorized.credential_allow,
+            )
+            .await?;
+            let injector = HostCredentialInjector::new(lease.clone());
+            let noop = NoOpCredentialInjector;
+            let injector_ref: &dyn CredentialInjector = if request.credential_id.is_some() {
+                &injector
+            } else {
+                &noop
+            };
+            let result = authorize_and_perform_host_tcp_egress(
+                &authorized,
+                request,
+                injector_ref,
+                started_at,
+            )
+            .await;
+            if let Some(lease) = lease {
+                release_host_egress_credential_lease(state, lease).await;
+            }
+            result.map(HostEgressWireResponseBody::Tcp)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn owned_egress_loop(
+    state: Arc<AppState>,
+    mut codec: InheritedEgressCodec,
+    binding: OwnedPerInvocationBinding,
+    activated: Arc<AtomicBool>,
+    shutting_down: Arc<AtomicBool>,
+) -> HostResult<()> {
+    loop {
+        if shutting_down.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let request = match codec.read_request().await {
+            Ok(request) => request,
+            Err(_error) if shutting_down.load(Ordering::Acquire) => return Ok(()),
+            Err(error) => return Err(owned_codec_error(error)),
+        };
+        if let Some((status, error)) = owned_egress_gate_denial(activated.load(Ordering::Acquire)) {
+            let response = codec
+                .error_response(status, error)
+                .map_err(owned_codec_error)?;
+            codec
+                .write_response(&response)
+                .await
+                .map_err(owned_codec_error)?;
+            return Err(HostError::PreflightFailed(
+                "owned host-egress request arrived before activation".to_string(),
+            ));
+        }
+        let context = match &request.payload {
+            HostEgressWireRequestPayload::Http(request) => &request.context,
+            HostEgressWireRequestPayload::Tcp(request) => &request.context,
+        };
+        if !binding.matches_context(context) {
+            let response = codec
+                .error_response(400, HostEgressWireError::InvalidRequest)
+                .map_err(owned_codec_error)?;
+            codec
+                .write_response(&response)
+                .await
+                .map_err(owned_codec_error)?;
+            return Err(HostError::InvalidFilter(
+                "owned host-egress request identity does not match invocation".to_string(),
+            ));
+        }
+        match owned_perform_egress(&state, &binding, request.payload).await {
+            Ok(body) => {
+                let response = codec.success_response(body).map_err(owned_codec_error)?;
+                codec
+                    .write_response(&response)
+                    .await
+                    .map_err(owned_codec_error)?;
+            }
+            Err(error) => {
+                let (status, code) = owned_egress_error_response(&error);
+                let response = codec
+                    .error_response(status, code)
+                    .map_err(owned_codec_error)?;
+                codec
+                    .write_response(&response)
+                    .await
+                    .map_err(owned_codec_error)?;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn owned_run_protocol(
+    handle: &mut OwnedInvocationHandle,
+    plan: &PerInvocationExecutionPlan,
+    request: &InvokeRequest,
+    activated: &AtomicBool,
+) -> HostResult<InvokeResponse> {
+    if let Some(configure_payload) = plan.configure_payload.clone() {
+        let _ = owned_rpc(handle, "configure", configure_payload).await?;
+    }
+    let introspection_value = owned_rpc(handle, "introspect", json!({})).await?;
+    let introspection: Introspection =
+        serde_json::from_value(introspection_value).map_err(|_| {
+            HostError::RegistryError("connector introspection response was malformed".to_string())
+        })?;
+    let observed_operation = introspection
+        .operations
+        .iter()
+        .find(|operation| operation.id == plan.operation)
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "connector introspection omitted the selected operation".to_string(),
+            )
+        })?;
+    if !owned_operation_matches(&plan.manifest_operation, observed_operation)? {
+        return Err(HostError::PreflightFailed(
+            "connector introspection operation metadata did not match the trusted manifest"
+                .to_string(),
+        ));
+    }
+    activated.store(true, Ordering::Release);
+
+    if let Some(host_public_key) = plan.capability_verifying_key {
+        let state_root = plan
+            .state_root
+            .clone()
+            .unwrap_or_else(connector_state_root_dir);
+        let zone_dir =
+            prepare_connector_zone_state_dir(&state_root, &plan.connector_id, &plan.zone_id)?;
+        let nonce = owned_handshake_nonce();
+        let handshake = HandshakeRequest {
+            protocol_version: "1.0.0".to_string(),
+            zone: plan.zone_id.clone(),
+            zone_dir: Some(zone_dir.to_string_lossy().into_owned()),
+            host_public_key,
+            nonce,
+            capabilities_requested: Vec::new(),
+            host: None,
+            transport_caps: None,
+            requested_instance_id: plan.requested_instance_id.clone(),
+        };
+        let handshake_value = serde_json::to_value(handshake).map_err(|_| {
+            HostError::Internal("failed to encode owned connector handshake".to_string())
+        })?;
+        let handshake_value = owned_rpc(handle, "handshake", handshake_value).await?;
+        let response: HandshakeResponse =
+            serde_json::from_value(handshake_value).map_err(|_| {
+                HostError::RegistryError("connector handshake response was malformed".to_string())
+            })?;
+        if response.status != "accepted" || response.nonce != nonce {
+            return Err(HostError::PreflightFailed(
+                "connector handshake was not accepted".to_string(),
+            ));
+        }
+    }
+
+    let invoke_params = serde_json::to_value(request)
+        .map_err(|_| HostError::Internal("failed to encode owned invoke request".to_string()))?;
+    let invoke_value = owned_rpc(handle, "invoke", invoke_params).await?;
+    let response: InvokeResponse = serde_json::from_value(invoke_value).map_err(|_| {
+        HostError::RegistryError("connector invoke response was malformed".to_string())
+    })?;
+    if response.id != request.id {
+        return Err(HostError::RegistryError(
+            "owned connector invoke response id did not match request".to_string(),
+        ));
+    }
+    Ok(response)
+}
+
+#[cfg(target_os = "linux")]
+async fn owned_finalize(
+    handle: OwnedInvocationHandle,
+    host_shutdown: StdUnixStream,
+    shutting_down: Arc<AtomicBool>,
+    egress_task: JoinHandle<HostResult<()>>,
+    operation_result: HostResult<InvokeResponse>,
+) -> HostResult<InvokeResponse> {
+    shutting_down.store(true, Ordering::Release);
+    let shutdown_result = host_shutdown.shutdown(Shutdown::Both);
+    let egress_result = match egress_task.await {
+        Ok(result) => result,
+        Err(_) => Err(HostError::Internal(
+            "owned host-egress loop stopped unexpectedly".to_string(),
+        )),
+    };
+    let termination_result = handle.terminate().await.map_err(owned_invocation_error);
+    if let Ok(report) = termination_result.as_ref()
+        && (!report.group_absent || !report.reaped)
+    {
+        return Err(HostError::Internal(
+            "owned connector teardown did not prove group absence and reap".to_string(),
+        ));
+    }
+    if let Err(error) = termination_result {
+        return Err(error);
+    }
+    if operation_result.is_ok() {
+        if shutdown_result.is_err() {
+            return Err(HostError::Internal(
+                "owned host-egress endpoint shutdown failed".to_string(),
+            ));
+        }
+        if let Err(error) = egress_result {
+            return Err(error);
+        }
+    }
+    operation_result
+}
+
+#[cfg(target_os = "linux")]
+async fn invoke_owned_per_invocation(
+    state: &Arc<AppState>,
+    plan: PerInvocationExecutionPlan,
+    request: InvokeRequest,
+) -> HostResult<InvokeResponse> {
+    let binding = OwnedPerInvocationBinding::from_plan(&plan, &request)?;
+    let auth_token = owned_launch_auth_token();
+    let spec = owned_process_spec(&plan, &auth_token)?;
+    let (host_endpoint, child_endpoint) = StdUnixStream::pair()
+        .map_err(|_| HostError::Internal("owned host-egress socketpair failed".to_string()))?;
+    let host_shutdown = host_endpoint
+        .try_clone()
+        .map_err(|_| HostError::Internal("owned host-egress shutdown clone failed".to_string()))?;
+    let host_endpoint = fcp_async_core::net::UnixStream::from_std(host_endpoint).map_err(|_| {
+        HostError::Internal("owned host-egress async stream setup failed".to_string())
+    })?;
+    let codec = InheritedEgressCodec::new(host_endpoint, &auth_token).map_err(owned_codec_error)?;
+    let activated = Arc::new(AtomicBool::new(false));
+    let shutting_down = Arc::new(AtomicBool::new(false));
+    let egress_task = task::spawn(owned_egress_loop(
+        Arc::clone(state),
+        codec,
+        binding,
+        Arc::clone(&activated),
+        Arc::clone(&shutting_down),
+    ));
+    let mut handle =
+        match OwnedInvocationHandle::launch(spec, child_endpoint, OwnedInvocationConfig::default())
+            .await
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                shutting_down.store(true, Ordering::Release);
+                let _ = host_shutdown.shutdown(Shutdown::Both);
+                let _ = egress_task.await;
+                return Err(owned_invocation_error(error));
+            }
+        };
+    let operation_result = owned_run_protocol(&mut handle, &plan, &request, &activated).await;
+    owned_finalize(
+        handle,
+        host_shutdown,
+        shutting_down,
+        egress_task,
+        operation_result,
+    )
+    .await
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod owned_per_invocation_unit_tests {
+    use super::*;
+
+    #[test]
+    fn exact_operation_metadata_parity_is_required() {
+        let trusted = json!({"id": "mail.read", "input_schema": {"type": "object"}});
+        assert!(owned_operation_serialized_matches(&trusted, &trusted));
+        let mut mismatch = trusted.clone();
+        mismatch["input_schema"]["required"] = json!(["id"]);
+        assert!(!owned_operation_serialized_matches(&trusted, &mismatch));
+    }
+
+    #[test]
+    fn context_binding_rejects_identity_or_capability_mismatch() {
+        let constraints: NetworkConstraints = serde_json::from_value(json!({
+            "host_allow": [],
+            "port_allow": [],
+            "require_sni": false
+        }))
+        .expect("minimal network constraints");
+        let binding = OwnedPerInvocationBinding {
+            connector_id: "fcp.test".to_string(),
+            operation_id: "mail.read".to_string(),
+            zone_id: "z:private".to_string(),
+            request_id: "req-1".to_string(),
+            correlation_id: Some("corr-1".to_string()),
+            capability_token_cbor_b64: "secret-token".to_string(),
+            network_constraints: constraints,
+        };
+        let mut context = HostEgressContext {
+            connector_id: "fcp.test".to_string(),
+            operation_id: "mail.read".to_string(),
+            resource_uri: "fcp-test://mail".to_string(),
+            zone_id: "z:private".to_string(),
+            request_id: "req-1".to_string(),
+            correlation_id: Some("corr-1".to_string()),
+            capability_token_cbor_b64: "secret-token".to_string(),
+        };
+        assert!(binding.matches_context(&context));
+        context.operation_id = "mail.write".to_string();
+        assert!(!binding.matches_context(&context));
+        context.operation_id = "mail.read".to_string();
+        context.capability_token_cbor_b64 = "wrong-token".to_string();
+        assert!(!binding.matches_context(&context));
+    }
+
+    #[test]
+    fn early_egress_gate_is_typed_rejection() {
+        assert_eq!(
+            owned_egress_gate_denial(false),
+            Some((403, HostEgressWireError::Rejected))
+        );
+        assert_eq!(owned_egress_gate_denial(true), None);
+    }
+
+    #[test]
+    fn rpc_result_extractor_redacts_error_and_rejects_wrong_shape() {
+        let error = owned_rpc_result(json!({"error": {"message": "secret-child-error"}}))
+            .expect_err("JSON-RPC error must fail");
+        assert!(!error.to_string().contains("secret-child-error"));
+        let shape = owned_rpc_result(json!({"id": "0:0"})).expect_err("missing result");
+        assert!(shape.to_string().contains("has no result"));
+    }
 }
 
 fn configured_subprocess_archetype(config: &ConnectorConfig) -> ConnectorArchetype {
@@ -4557,11 +5899,27 @@ impl AppState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct VerifiedLiveRequest {
     principal: String,
     approval_required: bool,
     safety_tier: SafetyTier,
+    per_invocation_plan: Option<PerInvocationExecutionPlan>,
+}
+
+impl std::fmt::Debug for VerifiedLiveRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VerifiedLiveRequest")
+            .field("principal", &"<redacted>")
+            .field("approval_required", &self.approval_required)
+            .field("safety_tier", &self.safety_tier)
+            .field(
+                "per_invocation_plan_present",
+                &self.per_invocation_plan.is_some(),
+            )
+            .finish()
+    }
 }
 
 fn parse_cli_action() -> HostResult<CliAction> {
@@ -6512,29 +7870,23 @@ async fn verify_live_request(
     // distinct rejection message so receipts and logs distinguish missing
     // zone-envelope inventory from generic preflight failures.
     //
-    // br-l9tt6: snapshot ALL THREE allow-list fields under one registry
-    // read-lock so the zone gate and the operation gate that follows
-    // both decide against the SAME admin-state generation. The earlier
-    // shape took two separate `state.read().await` acquisitions per
-    // gate (allow-list, then `enforce_empty`), which let a concurrent
-    // admin writer interleave between them and produce a
-    // stale-allow-list + fresh-enforce-flag mix — a real fail-OPEN
-    // window during in-flight config updates.
-    let allow_snapshot = state
+    // Capture allow-list, runtime policy, manifest metadata, and the opaque
+    // per-invocation plan under one registry read lock. The generation is
+    // copied into the plan and revalidated immediately before spawn.
+    let live_snapshot = state
         .registry
-        .allow_list_snapshot(&request.connector_id)
-        .await;
-    if let Some(snapshot) = &allow_snapshot {
-        let allowed = &snapshot.allowed_zones;
-        require_allowed_zones_configured(&request.connector_id, allowed)?;
-        if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
-            return Err(HostError::PreflightFailed(format!(
-                "connector `{}` is not bound to zone `{}` (allowed: [{}])",
-                request.connector_id,
-                request.zone_id.as_str(),
-                allowed.join(", ")
-            )));
-        }
+        .live_request_registry_snapshot(request)
+        .await?;
+    let allow_snapshot = &live_snapshot.allow_list;
+    let allowed = &allow_snapshot.allowed_zones;
+    require_allowed_zones_configured(&request.connector_id, allowed)?;
+    if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` is not bound to zone `{}` (allowed: [{}])",
+            request.connector_id,
+            request.zone_id.as_str(),
+            allowed.join(", ")
+        )));
     }
 
     // br-ike8x: operator-pinned operation gate. The pre-existing
@@ -6553,38 +7905,35 @@ async fn verify_live_request(
     // br-v2kt4: same explicit fail-closed shape for empty allowed_operations.
     // br-l9tt6: re-uses the snapshot captured above so both gates
     // decide against the same atomic read.
-    if let Some(snapshot) = &allow_snapshot {
-        let allowed_ops = &snapshot.allowed_operations;
-        if allowed_ops.is_empty() {
-            if snapshot.enforce_empty_allow_lists {
-                return Err(HostError::PreflightFailed(format!(
-                    "connector `{}` has no `allowed_operations` and is configured \
-                     enforce_empty_allow_lists=true; deny-all (br-v2kt4)",
-                    request.connector_id
-                )));
-            }
-            // Empty allowed_operations with the legacy flag disabled falls
-            // through to the connector introspection operation check.
-        } else if !allowed_ops
-            .iter()
-            .any(|op| op == request.operation.as_str())
-        {
+    let allowed_ops = &allow_snapshot.allowed_operations;
+    if allowed_ops.is_empty() {
+        if allow_snapshot.enforce_empty_allow_lists {
             return Err(HostError::PreflightFailed(format!(
-                "connector `{}` does not allow operation `{}` (allowed: [{}])",
-                request.connector_id,
-                request.operation.as_str(),
-                allowed_ops.join(", ")
+                "connector `{}` has no `allowed_operations` and is configured \
+                 enforce_empty_allow_lists=true; deny-all (br-v2kt4)",
+                request.connector_id
             )));
         }
+        // Empty allowed_operations with the legacy flag disabled falls
+        // through to the connector introspection operation check.
+    } else if !allowed_ops
+        .iter()
+        .any(|op| op == request.operation.as_str())
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` does not allow operation `{}` (allowed: [{}])",
+            request.connector_id,
+            request.operation.as_str(),
+            allowed_ops.join(", ")
+        )));
     }
 
-    if let Some(snapshot) = &allow_snapshot {
-        enforce_operation_network_constraint_dispatch(snapshot, request)?;
+    if live_snapshot.per_invocation_plan.is_none() {
+        enforce_operation_network_constraint_dispatch(allow_snapshot, request)?;
+        state
+            .registry
+            .enforce_runtime_network_policy_snapshot(request, &live_snapshot.runtime_network)?;
     }
-    state
-        .registry
-        .enforce_runtime_network_policy(request)
-        .await?;
 
     let introspection = state.discovery.introspect(&request.connector_id).await?;
     let tool = introspection
@@ -6767,6 +8116,7 @@ async fn verify_live_request(
         principal: principal.to_owned(),
         approval_required,
         safety_tier: tool.safety_tier,
+        per_invocation_plan: live_snapshot.per_invocation_plan,
     })
 }
 
@@ -6862,6 +8212,31 @@ async fn verified_cancellation_principal(
     Ok(principal.to_string())
 }
 
+async fn evaluate_verified_live_preflight(
+    state: &AppState,
+    request: &InvokeRequest,
+    principal_override: Option<&str>,
+) -> HostResult<VerifiedLiveRequest> {
+    let response = state
+        .discovery
+        .preflight(PreflightRequest {
+            connector_id: request.connector_id.clone(),
+            operation: request.operation.to_string(),
+            params: Some(request.input.clone()),
+            principal: principal_override.map(ToOwned::to_owned),
+            zone_id: Some(request.zone_id.clone()),
+        })
+        .await;
+    if !response.allowed {
+        return Err(HostError::PreflightFailed(
+            response
+                .reason
+                .unwrap_or_else(|| "live preflight denied request".to_string()),
+        ));
+    }
+    verify_live_request(state, request, principal_override).await
+}
+
 async fn evaluate_live_preflight(
     state: &AppState,
     request: &InvokeRequest,
@@ -6877,11 +8252,17 @@ async fn evaluate_live_preflight(
             zone_id: Some(request.zone_id.clone()),
         })
         .await;
-    if !response.allowed {
-        return response;
-    }
 
-    match verify_live_request(state, request, principal_override).await {
+    match if response.allowed {
+        verify_live_request(state, request, principal_override).await
+    } else {
+        Err(HostError::PreflightFailed(
+            response
+                .reason
+                .clone()
+                .unwrap_or_else(|| "live preflight denied request".to_string()),
+        ))
+    } {
         Ok(verified) => {
             tracing::debug!(
                 event = "live_request_verified",
@@ -8822,8 +10203,12 @@ fn oauth_challenge_from_value(
 
 impl BlockingOAuthTransport {
     fn new() -> Result<Self, AuthError> {
+        Self::with_timeout(Duration::from_secs(30))
+    }
+
+    fn with_timeout(timeout: Duration) -> Result<Self, AuthError> {
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(timeout)
             .build()
             .map_err(|error| invalid_oauth_provider_response("oauth_http", error.to_string()))?;
         Ok(Self { client })
@@ -11248,7 +12633,7 @@ fn mcp_sampling_host_response(
 }
 
 async fn maybe_orchestrate_mcp_sampling(
-    state: &AppState,
+    state: &Arc<AppState>,
     asserted_principal: Option<&str>,
     source: &InvokeRequest,
     response: InvokeResponse,
@@ -11263,17 +12648,14 @@ async fn maybe_orchestrate_mcp_sampling(
         return Ok(response);
     };
     let downstream_request = mcp_sampling_downstream_request(source, event, dispatch)?;
-    let preflight = evaluate_live_preflight(state, &downstream_request, asserted_principal).await;
-    if !preflight.allowed {
-        return Err(HostError::PreflightFailed(format!(
-            "MCP sampling host dispatch denied for connector `{}` operation `{}`: {}",
-            downstream_request.connector_id,
-            downstream_request.operation,
-            preflight
-                .reason
-                .unwrap_or_else(|| "preflight denied downstream LLM request".to_string())
-        )));
-    }
+    let verified = evaluate_verified_live_preflight(state, &downstream_request, asserted_principal)
+        .await
+        .map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "MCP sampling host dispatch denied for connector `{}` operation `{}`: {error}",
+                downstream_request.connector_id, downstream_request.operation
+            ))
+        })?;
 
     tracing::info!(
         event = "mcp_sampling_host_dispatch",
@@ -11287,7 +12669,14 @@ async fn maybe_orchestrate_mcp_sampling(
         response_logged = false,
         "dispatching MCP sampling request through configured LLM connector"
     );
-    let downstream_response = state.registry.invoke(downstream_request.clone()).await?;
+    let downstream_response = state
+        .registry
+        .invoke_with_execution_plan(
+            state,
+            downstream_request.clone(),
+            verified.per_invocation_plan,
+        )
+        .await?;
     Ok(mcp_sampling_host_response(
         source.id.clone(),
         response,
@@ -11890,6 +13279,7 @@ struct AuthorizedHostEgress {
     zone_id: ZoneId,
     request_id: String,
     correlation_id: Option<String>,
+    idempotency: IdempotencyClass,
     constraints: NetworkConstraints,
     credential_allow: Vec<String>,
 }
@@ -11961,6 +13351,14 @@ async fn authorize_host_egress_context(
     context: &HostEgressContext,
     resource_uri: &str,
 ) -> HostResult<AuthorizedHostEgress> {
+    if resource_uri.is_empty()
+        || resource_uri != resource_uri.trim()
+        || resource_uri.chars().any(char::is_control)
+    {
+        return Err(HostError::InvalidFilter(
+            "invalid host-egress canonical resource_uri".to_string(),
+        ));
+    }
     let (connector_id, operation, zone_id) = parse_host_egress_context(context)?;
     let snapshot = state
         .registry
@@ -12064,6 +13462,7 @@ async fn authorize_host_egress_context(
         zone_id,
         request_id: context.request_id.clone(),
         correlation_id: context.correlation_id.clone(),
+        idempotency: tool.idempotency,
         constraints,
         credential_allow,
     })
@@ -12371,9 +13770,10 @@ async fn host_egress_http_handler(
     Json(request): Json<HostEgressHttpRequest>,
 ) -> Result<Json<HostEgressHttpResponse>, (StatusCode, String)> {
     let started_at = Instant::now();
-    let authorized = authorize_host_egress_context(&state, &request.context, &request.url)
-        .await
-        .map_err(map_host_error)?;
+    let authorized =
+        authorize_host_egress_context(&state, &request.context, &request.context.resource_uri)
+            .await
+            .map_err(map_host_error)?;
     let lease = acquire_host_egress_credential_lease(
         &state,
         &authorized.zone_id,
@@ -12417,6 +13817,10 @@ async fn authorize_and_perform_host_http_egress(
         return Ok(response);
     }
 
+    if !host_egress_allows_unauthorized_refresh_replay(authorized.idempotency, &request) {
+        return Ok(response);
+    }
+
     let Some(lease) = lease else {
         return Ok(response);
     };
@@ -12427,12 +13831,35 @@ async fn authorize_and_perform_host_http_egress(
         return Ok(response);
     }
 
-    let refreshed_lease =
-        refresh_host_egress_credential_after_unauthorized(state, authorized, credential_id, lease)
-            .await?;
+    let refreshed_lease = refresh_host_egress_credential_after_unauthorized(
+        state,
+        authorized,
+        credential_id,
+        lease,
+        started_at,
+    )
+    .await?;
     let refreshed_injector = HostCredentialInjector::new(Some(refreshed_lease));
     perform_authorized_host_http_egress_once(authorized, &request, &refreshed_injector, started_at)
         .await
+}
+
+fn host_egress_allows_unauthorized_refresh_replay(
+    idempotency: IdempotencyClass,
+    request: &HostEgressHttpRequest,
+) -> bool {
+    idempotency == IdempotencyClass::Strict
+        && matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS")
+        && request.body.is_none()
+}
+
+fn host_egress_remaining_timeout(
+    authorized: &AuthorizedHostEgress,
+    started_at: Instant,
+) -> Option<Duration> {
+    Duration::from_millis(u64::from(authorized.constraints.total_timeout_ms))
+        .checked_sub(started_at.elapsed())
+        .filter(|remaining| !remaining.is_zero())
 }
 
 async fn perform_authorized_host_http_egress_once(
@@ -12461,10 +13888,8 @@ async fn perform_authorized_host_http_egress_once(
         &mut guard_request,
         injector,
     )?;
-    let total_timeout = Duration::from_millis(u64::from(authorized.constraints.total_timeout_ms));
-    let remaining_timeout = total_timeout
-        .checked_sub(started_at.elapsed())
-        .ok_or_else(|| {
+    let remaining_timeout =
+        host_egress_remaining_timeout(authorized, started_at).ok_or_else(|| {
             HostError::PreflightFailed(format!(
                 "host-egress HTTP request to `{}` timed out after {}ms",
                 decision.canonical_host, authorized.constraints.total_timeout_ms
@@ -12494,6 +13919,7 @@ async fn refresh_host_egress_credential_after_unauthorized(
     authorized: &AuthorizedHostEgress,
     credential_id: &str,
     lease: &CredentialLease,
+    started_at: Instant,
 ) -> HostResult<CredentialLease> {
     let requested = CredentialId::parse(credential_id).map_err(|err| {
         HostError::PreflightFailed(format!(
@@ -12516,24 +13942,37 @@ async fn refresh_host_egress_credential_after_unauthorized(
             "host-egress credential refresh requires an auth-profile payload".to_string(),
         )
     })?;
-    let transport = BlockingOAuthTransport::new().map_err(|err| {
+    let remaining_timeout =
+        host_egress_remaining_timeout(authorized, started_at).ok_or_else(|| {
+            HostError::PreflightFailed(
+                "host-egress operation deadline exhausted before OAuth credential refresh"
+                    .to_string(),
+            )
+        })?;
+    let transport = BlockingOAuthTransport::with_timeout(remaining_timeout).map_err(|err| {
         HostError::PreflightFailed(format!("host-egress OAuth refresh transport failed: {err}"))
     })?;
     let cx = fcp_async_core::compatibility_cx();
-    let refresh_result = match &mut profile.method {
-        AuthMethodKind::OAuthDeviceCode(method) => {
-            method.refresh_with_transport(&cx, &transport).await
+    let refresh_result = fcp_async_core::time::timeout(remaining_timeout, async {
+        match &mut profile.method {
+            AuthMethodKind::OAuthDeviceCode(method) => {
+                method.refresh_with_transport(&cx, &transport).await
+            }
+            AuthMethodKind::OAuthAuthCode(method) => {
+                method.refresh_with_transport(&cx, &transport).await
+            }
+            other => Err(AuthError::UnsupportedMethod {
+                method: other.id(),
+                operation: "host_egress_credential_refresh",
+            }),
         }
-        AuthMethodKind::OAuthAuthCode(method) => {
-            method.refresh_with_transport(&cx, &transport).await
-        }
-        other => {
-            return Err(HostError::PreflightFailed(format!(
-                "host-egress credential method `{}` is not refreshable after 401",
-                other.id()
-            )));
-        }
-    };
+    })
+    .await
+    .map_err(|_| {
+        HostError::PreflightFailed(
+            "host-egress OAuth credential refresh exceeded the operation deadline".to_string(),
+        )
+    })?;
     refresh_result.map_err(|err| {
         HostError::PreflightFailed(format!(
             "host-egress OAuth credential refresh failed: {err}"
@@ -12541,20 +13980,32 @@ async fn refresh_host_egress_credential_after_unauthorized(
     })?;
 
     let refreshed_payload = CredentialPayload::auth_profile_with_allowed_hosts(profile, host_allow);
-    state
-        .credential_pools
-        .lock()
-        .await
-        .replace_payload_in_zone(
+    let remaining_timeout =
+        host_egress_remaining_timeout(authorized, started_at).ok_or_else(|| {
+            HostError::PreflightFailed(
+                "host-egress operation deadline exhausted before refreshed credential persistence"
+                    .to_string(),
+            )
+        })?;
+    let persist_result = fcp_async_core::time::timeout(remaining_timeout, async {
+        state.credential_pools.lock().await.replace_payload_in_zone(
             &authorized.zone_id,
             lease.credential_id,
             refreshed_payload.clone(),
         )
-        .map_err(|err| {
-            HostError::PreflightFailed(format!(
-                "host-egress refreshed credential could not be persisted: {err}"
-            ))
-        })?;
+    })
+    .await
+    .map_err(|_| {
+        HostError::PreflightFailed(
+            "host-egress refreshed credential persistence exceeded the operation deadline"
+                .to_string(),
+        )
+    })?;
+    persist_result.map_err(|err| {
+        HostError::PreflightFailed(format!(
+            "host-egress refreshed credential could not be persisted: {err}"
+        ))
+    })?;
 
     Ok(CredentialLease {
         token: lease.token,
@@ -13247,10 +14698,10 @@ async fn host_egress_tcp_handler(
     Json(request): Json<HostEgressTcpRequest>,
 ) -> Result<Json<HostEgressTcpResponse>, (StatusCode, String)> {
     let started_at = Instant::now();
-    let resource_uri = format!("tcp://{}:{}", request.host, request.port);
-    let authorized = authorize_host_egress_context(&state, &request.context, &resource_uri)
-        .await
-        .map_err(map_host_error)?;
+    let authorized =
+        authorize_host_egress_context(&state, &request.context, &request.context.resource_uri)
+            .await
+            .map_err(map_host_error)?;
     let lease = acquire_host_egress_credential_lease(
         &state,
         &authorized.zone_id,
@@ -13443,44 +14894,49 @@ async fn invoke_handler(
             .unwrap_or(0),
     };
 
-    let preflight = evaluate_live_preflight(&state, &request, asserted_principal.as_deref()).await;
-    if !preflight.allowed {
-        let reason = preflight
-            .reason
-            .unwrap_or_else(|| "preflight denied invoke request".to_string());
-        // br-mvax3: deny path MUST append a hash-linked audit event so
-        // the README "every operation produces an audit event" claim is
-        // literally true even for denied requests.
-        if let Err(err) = state.invoke_audit.append(
-            &audit_ctx,
-            fcp_host::InvokePhase::PreflightDeny {
-                reason: reason.clone(),
-            },
-        ) {
-            tracing::warn!(
-                event = "invoke_audit_append_error",
-                phase = "deny",
-                error = %err,
-                "failed to append invoke deny audit event"
-            );
-        }
-        tracing::warn!(
-            event = "invoke_error",
-            schema_version = "fwc.google_workspace.telemetry.v1",
-            event_type = "workspace.phase.host",
-            producer_layer = "host",
-            host_phase = "preflight_denied",
-            connector_id = %connector_id,
-            operation = %operation,
-            operation_id = %operation_id,
-            correlation_id,
-            error_class = "local.policy_denied",
-            duration_ms = started_at.elapsed().as_millis() as u64,
-            host_total_us = u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
-            "invoke request failed preflight"
-        );
-        return Err(map_host_error(HostError::PreflightFailed(reason)));
-    }
+    let verified =
+        match evaluate_verified_live_preflight(&state, &request, asserted_principal.as_deref())
+            .await
+        {
+            Ok(verified) => verified,
+            Err(error) => {
+                let reason = error.to_string();
+                // br-mvax3: deny path MUST append a hash-linked audit event so
+                // the README "every operation produces an audit event" claim is
+                // literally true even for denied requests.
+                if let Err(err) = state.invoke_audit.append(
+                    &audit_ctx,
+                    fcp_host::InvokePhase::PreflightDeny {
+                        reason: reason.clone(),
+                    },
+                ) {
+                    tracing::warn!(
+                        event = "invoke_audit_append_error",
+                        phase = "deny",
+                        error = %err,
+                        "failed to append invoke deny audit event"
+                    );
+                }
+                tracing::warn!(
+                    event = "invoke_error",
+                    schema_version = "fwc.google_workspace.telemetry.v1",
+                    event_type = "workspace.phase.host",
+                    producer_layer = "host",
+                    host_phase = "preflight_denied",
+                    connector_id = %connector_id,
+                    operation = %operation,
+                    operation_id = %operation_id,
+                    correlation_id,
+                    error_class = "local.policy_denied",
+                    duration_ms = started_at.elapsed().as_millis() as u64,
+                    host_total_us =
+                        u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+                    "invoke request failed preflight"
+                );
+                return Err(map_host_error(HostError::PreflightFailed(reason)));
+            }
+        };
+    let per_invocation_plan = verified.per_invocation_plan;
 
     // br-mvax3: preflight allow → append hash-linked audit event before
     // dispatch (matches README's End-to-End Request Flow §11).
@@ -13504,13 +14960,16 @@ async fn invoke_handler(
     track_verified_cancellation_owner(state.cancellation.as_ref(), &operation_id, &request)
         .map_err(map_host_error)?;
     let source_request = request.clone();
-    let invoke_result = state.registry.invoke(request).await;
+    let invoke_result = state
+        .registry
+        .invoke_with_execution_plan(&state, request, per_invocation_plan)
+        .await;
     state.cancellation.complete(&operation_id);
 
     match invoke_result {
         Ok(response) => {
             let response = maybe_orchestrate_mcp_sampling(
-                state.as_ref(),
+                &state,
                 asserted_principal.as_deref(),
                 &source_request,
                 response,
@@ -13830,24 +15289,27 @@ async fn execute_batch_operation(
         };
     }
 
-    let preflight = evaluate_live_preflight(&state, &request, principal_override.as_deref()).await;
-
-    if !preflight.allowed {
-        let reason = preflight
-            .reason
-            .unwrap_or_else(|| "preflight denied batch operation".to_string());
-        return OperationResult {
-            id: operation.id,
-            status: OperationResultStatus::Error,
-            output: None,
-            error: Some(batch_error_from_host_error(HostError::PreflightFailed(
-                reason,
-            ))),
-            duration_ms: elapsed_millis(started_at),
+    let verified =
+        match evaluate_verified_live_preflight(&state, &request, principal_override.as_deref())
+            .await
+        {
+            Ok(verified) => verified,
+            Err(error) => {
+                return OperationResult {
+                    id: operation.id,
+                    status: OperationResultStatus::Error,
+                    output: None,
+                    error: Some(batch_error_from_host_error(error)),
+                    duration_ms: elapsed_millis(started_at),
+                };
+            }
         };
-    }
 
-    match state.registry.invoke(request).await {
+    match state
+        .registry
+        .invoke_with_execution_plan(&state, request, verified.per_invocation_plan)
+        .await
+    {
         Ok(response) => {
             let duration_ms = elapsed_millis(started_at);
             record_invoke_budget_usage(
@@ -14850,8 +16312,8 @@ mod tests {
     use fcp_host::{CancelReason, CleanupBehavior, CredentialPoolAuditOperation};
     use fcp_kernel::{
         AgentHint, BudgetEnforcement, HealthState, IdempotencyClass, LifecycleRecord, OperationId,
-        OperationInfo, SelfCheckStatus, TransitionReason, UsageBudgetLimit, UsageBudgetPolicy,
-        UsageMetric, UsageMetricKind,
+        SelfCheckStatus, TransitionReason, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric,
+        UsageMetricKind,
     };
     use fcp_policy::OperationalModelVersion;
     use fcp_prelude::{CapabilityId, RiskLevel};
@@ -14956,6 +16418,8 @@ mod tests {
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             prewarm: Default::default(),
+            lifecycle_mode: Default::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
         }
     }
@@ -15008,6 +16472,8 @@ mod tests {
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             prewarm: Default::default(),
+            lifecycle_mode: Default::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
         };
         let incoming = ConnectorConfig {
@@ -15027,6 +16493,8 @@ mod tests {
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             prewarm: Default::default(),
+            lifecycle_mode: Default::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
         };
 
@@ -15159,7 +16627,8 @@ deny_ptrace = true
         let catalog = ManifestOperationConstraintCatalog::from_manifest(
             &manifest,
             "inline-test-manifest".to_string(),
-        );
+        )
+        .expect("valid test manifest");
 
         let op_a = catalog
             .network_constraints
@@ -15174,6 +16643,88 @@ deny_ptrace = true
         assert_eq!(op_a.port_allow, vec![443]);
         assert_eq!(op_b.host_allow, vec!["api-b.example"]);
         assert_eq!(op_b.port_allow, vec![8443]);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn per_invocation_registry_uses_trusted_manifest_metadata_without_spawn() {
+        let mut manifest = two_operation_network_manifest();
+        manifest.rate_limits = Some(fcp_manifest::RateLimitsSection {
+            pools: vec![fcp_manifest::RateLimitPoolSection {
+                id: "api".to_string(),
+                description: Some("API requests".to_string()),
+                requests: 10,
+                window_ms: 1_000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: HashMap::from([("op.a".to_string(), vec!["api".to_string()])]),
+        });
+        let catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &manifest,
+            "inline-test-manifest".to_string(),
+        )
+        .expect("valid test manifest");
+        let connector_id = "fcp.test.per-invocation-manifest:utility:1.0.0";
+        let mut config = dispatcher_test_config(connector_id);
+        config.lifecycle_mode = ConnectorLifecycleMode::PerInvocation;
+        config.binary = "/definitely/missing/per-invocation-manifest-sentinel".to_string();
+        let connector = ConnectorRuntime::metadata_only(
+            config.clone(),
+            Arc::new(ResilienceLayer::default()),
+            None,
+            &catalog,
+        )
+        .expect("manifest metadata runtime must not spawn");
+        let key = ConnectorId::from_static(connector_id);
+        let mut connectors = HashMap::new();
+        connectors.insert(
+            key.clone(),
+            RegistryEntry {
+                config,
+                connector,
+                manifest_constraints: catalog.clone(),
+            },
+        );
+        let registry = SubprocessRegistry {
+            state: Arc::new(RwLock::new(RegistryState {
+                connectors,
+                generation: 1,
+            })),
+            resilience: Arc::new(ResilienceLayer::default()),
+            version: Arc::new(AtomicU64::new(1)),
+            capability_verifying_key: None,
+            rate_limiters: Arc::new(HostRateLimiterStore::default()),
+        };
+
+        let introspection = registry
+            .get_introspection(&key)
+            .await
+            .expect("validated manifest introspection");
+        assert_eq!(introspection.operations.len(), 2);
+        let operation = introspection
+            .operations
+            .iter()
+            .find(|operation| operation.id == OperationId::from_static("op.a"))
+            .expect("op.a metadata");
+        assert_eq!(operation.summary, "Operation A");
+        assert_eq!(operation.description.as_deref(), Some("Operation A"));
+        assert_eq!(operation.input_schema, json!({"type": "object"}));
+        assert_eq!(operation.output_schema, json!({"type": "object"}));
+        assert_eq!(
+            operation.capability,
+            CapabilityId::from_static("test.network")
+        );
+        assert_eq!(operation.risk_level, RiskLevel::Low);
+        assert_eq!(operation.safety_tier, SafetyTier::Safe);
+        assert_eq!(operation.idempotency, IdempotencyClass::None);
+        assert_eq!(operation.requires_approval, Some(ApprovalMode::None));
+
+        let summary = registry.get(&key).await.expect("metadata summary");
+        assert_eq!(summary.tool_count, 2);
+        assert_eq!(summary.max_safety_tier, SafetyTier::Safe);
+        assert_eq!(registry.get_rate_limits(&key).await, catalog.rate_limits);
     }
 
     #[test]
@@ -15194,7 +16745,8 @@ deny_ptrace = true
         let mut catalog = ManifestOperationConstraintCatalog::from_manifest(
             &manifest,
             "inline-test-manifest".to_string(),
-        );
+        )
+        .expect("valid test manifest");
         catalog.network_constraints.remove("op.b");
         let snapshot = operation_network_snapshot(true, catalog);
         let request = operation_network_request("op.b");
@@ -15216,7 +16768,8 @@ deny_ptrace = true
         let catalog = ManifestOperationConstraintCatalog::from_manifest(
             &manifest,
             "inline-test-manifest".to_string(),
-        );
+        )
+        .expect("valid test manifest");
         let snapshot = operation_network_snapshot(true, catalog);
         let request = operation_network_request("op.b");
 
@@ -15306,7 +16859,10 @@ deny_ptrace = true
             },
         );
         Arc::new(SubprocessRegistry {
-            state: Arc::new(RwLock::new(RegistryState { connectors })),
+            state: Arc::new(RwLock::new(RegistryState {
+                connectors,
+                generation: 1,
+            })),
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
@@ -15329,7 +16885,10 @@ deny_ptrace = true
             );
         }
         Arc::new(SubprocessRegistry {
-            state: Arc::new(RwLock::new(RegistryState { connectors })),
+            state: Arc::new(RwLock::new(RegistryState {
+                connectors,
+                generation: 1,
+            })),
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
@@ -15438,7 +16997,18 @@ deny_ptrace = true
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             prewarm: Default::default(),
+            lifecycle_mode: Default::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
+        }
+    }
+
+    fn synthetic_launch_binding(launcher_path: &str) -> ConnectorLaunchBinding {
+        ConnectorLaunchBinding {
+            launcher_path: launcher_path.to_string(),
+            launcher_digest: "a".repeat(64),
+            runtime_executable: "/usr/bin/fcp-runtime".to_string(),
+            runtime_executable_digest: "b".repeat(64),
         }
     }
 
@@ -17113,6 +18683,8 @@ deny_ptrace = true
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             prewarm: Default::default(),
+            lifecycle_mode: Default::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
         };
         let registry = dispatcher_registry_with_connector(connector_id, connector, initial_config);
@@ -17348,6 +18920,575 @@ deny_ptrace = true
             !msg.contains("/definitely/missing"),
             "denial should prove the connector was not spawned or loaded: {msg}"
         );
+    }
+
+    fn per_invocation_plan_test_fixture() -> (
+        ConnectorConfig,
+        ManifestOperationConstraintCatalog,
+        InvokeRequest,
+    ) {
+        let connector_id = "fcp.test.per-invocation-plan:utility:1.0.0";
+        let manifest = two_operation_network_manifest();
+        let catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &manifest,
+            "inline-test-manifest".to_string(),
+        )
+        .expect("valid test manifest");
+        let mut config = dispatcher_test_config(connector_id);
+        config.binary = "/definitely/missing/per-invocation-plan-sentinel".to_string();
+        config.manifest_path = Some("inline-test-manifest".to_string());
+        config.lifecycle_mode = ConnectorLifecycleMode::PerInvocation;
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.enforce_operation_network_constraints = true;
+        config.allowed_operations = vec!["op.a".to_string()];
+        config.launch_binding = Some(synthetic_launch_binding(&config.binary));
+        config.config = Some(json!({ "profile": "plan-test" }));
+        config.env.insert(
+            REQUESTED_INSTANCE_ID_ENV.to_string(),
+            "inst_per_invocation_plan".to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            "/definitely/missing/per-invocation-state-root".to_string(),
+        );
+        let mut managed_constraints =
+            runtime_network_test_constraints("api-a.example", ManagedPortConstraint::Static(443));
+        managed_constraints.max_redirects = 5;
+        managed_constraints.max_response_bytes = 10_485_760;
+        config
+            .operation_network_constraints
+            .insert("op.a".to_string(), managed_constraints);
+        let request = runtime_network_test_request(connector_id, "op.a");
+        (config, catalog, request)
+    }
+
+    fn per_invocation_plan_test_registry(
+        config: ConnectorConfig,
+        manifest_constraints: ManifestOperationConstraintCatalog,
+    ) -> SubprocessRegistry {
+        let connector = ConnectorRuntime::metadata_only(
+            config.clone(),
+            Arc::new(ResilienceLayer::default()),
+            None,
+            &manifest_constraints,
+        )
+        .expect("metadata-only connector must not spawn");
+        let connector_id = config.id.parse().expect("valid connector id");
+        let mut connectors = HashMap::new();
+        connectors.insert(
+            connector_id,
+            RegistryEntry {
+                config,
+                connector,
+                manifest_constraints,
+            },
+        );
+        SubprocessRegistry {
+            state: Arc::new(RwLock::new(RegistryState {
+                connectors,
+                generation: 1,
+            })),
+            resilience: Arc::new(ResilienceLayer::default()),
+            version: Arc::new(AtomicU64::new(1)),
+            capability_verifying_key: None,
+            rate_limiters: Arc::new(HostRateLimiterStore::default()),
+        }
+    }
+
+    async fn assert_per_invocation_plan_denied(
+        config: ConnectorConfig,
+        manifest_constraints: ManifestOperationConstraintCatalog,
+        request: InvokeRequest,
+        expected: &str,
+    ) {
+        let registry = per_invocation_plan_test_registry(config, manifest_constraints);
+        let error = match registry.per_invocation_execution_plan(&request).await {
+            Ok(_) => panic!("invalid per-invocation plan must fail closed"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(expected),
+            "expected `{expected}` in redaction-safe error, got: {message}"
+        );
+        assert!(
+            !message.contains("per-invocation-plan-sentinel"),
+            "plan error must not expose launch paths: {message}"
+        );
+        assert!(
+            !message.contains("sentinel-value"),
+            "plan error must not expose environment values: {message}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn per_invocation_execution_plan_validates_one_registry_snapshot() {
+        let (config, catalog, request) = per_invocation_plan_test_fixture();
+        let support_before = NativeProxyOnlySandboxSupport::current();
+        let registry = per_invocation_plan_test_registry(config, catalog.clone());
+        let plan = registry
+            .per_invocation_execution_plan(&request)
+            .await
+            .expect("valid per-invocation plan")
+            .expect("per-invocation lifecycle should produce a plan");
+
+        assert_eq!(plan.connector_id, request.connector_id);
+        assert_eq!(plan.operation, request.operation);
+        assert_eq!(plan.zone_id, request.zone_id);
+        assert_eq!(plan.request_id, request.id);
+        assert_eq!(plan.registry_generation, 1);
+        assert_eq!(plan.request_correlation_id, request.correlation_id);
+        assert_eq!(plan.manifest_operation.id, OperationId::from_static("op.a"));
+        assert_eq!(plan.network_constraints.host_allow, vec!["api-a.example"]);
+        assert_eq!(plan.network_constraints.port_allow, vec![443]);
+        assert!(plan.launch_snapshot.network_disabled);
+        assert_eq!(
+            plan.configure_payload,
+            Some(json!({ "profile": "plan-test" }))
+        );
+        assert_eq!(
+            plan.requested_instance_id.as_ref().map(InstanceId::as_str),
+            Some("inst_per_invocation_plan")
+        );
+        assert_eq!(
+            plan.state_root.as_deref(),
+            Some(StdPath::new(
+                "/definitely/missing/per-invocation-state-root"
+            ))
+        );
+        assert_eq!(NativeProxyOnlySandboxSupport::current(), support_before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn per_invocation_execution_plan_stale_generation_is_denied_before_launch() {
+        let (config, catalog, request) = per_invocation_plan_test_fixture();
+        let registry = per_invocation_plan_test_registry(config, catalog);
+        let snapshot = registry
+            .live_request_registry_snapshot(&request)
+            .await
+            .expect("live request snapshot");
+        let plan = snapshot
+            .per_invocation_plan
+            .expect("per-invocation request must carry a plan");
+        {
+            let mut state = registry.state.write().await;
+            state.generation = state.generation.saturating_add(1);
+        }
+        let state = registry.state.read().await;
+        let entry = state
+            .connectors
+            .get(&request.connector_id)
+            .expect("connector remains registered");
+        let error = registry
+            .revalidate_per_invocation_execution_plan(entry, &request, &plan, state.generation)
+            .expect_err("stale request-scoped plan must be denied");
+        match error {
+            HostError::PreflightFailed(reason) => {
+                assert_eq!(reason, "per-invocation execution plan is stale");
+            }
+            other => panic!("expected stale-plan preflight denial, got {other}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn owned_per_invocation_e2e_fixture(
+        observed_introspection: Introspection,
+    ) -> (Arc<AppState>, PerInvocationExecutionPlan, InvokeRequest) {
+        let (mut config, catalog, request) = per_invocation_plan_test_fixture();
+        let launcher_path = PathBuf::from("/bin/sh");
+        let runtime_path = std::fs::canonicalize(&launcher_path).expect("canonical shell path");
+        let launcher_digest =
+            blake3::hash(&std::fs::read(&launcher_path).expect("read shell launcher for digest"))
+                .to_hex()
+                .to_string();
+        let runtime_digest =
+            blake3::hash(&std::fs::read(&runtime_path).expect("read shell runtime for digest"))
+                .to_hex()
+                .to_string();
+        let script = r#"
+set -eu
+sequence=0
+while IFS= read -r line; do
+    case "$sequence" in
+        0)
+            case "$line" in *'"id":"0:0"'*) ;; *) exit 41 ;; esac
+            case "$line" in *'"method":"configure"'*) ;; *) exit 42 ;; esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":"0:0","result":{"status":"ok"}}'
+            ;;
+        1)
+            case "$line" in *'"id":"0:1"'*) ;; *) exit 43 ;; esac
+            case "$line" in *'"method":"introspect"'*) ;; *) exit 44 ;; esac
+            printf '{"jsonrpc":"2.0","id":"0:1","result":%s}\n' "$FCP_TEST_OWNED_INTROSPECTION"
+            ;;
+        2)
+            case "$line" in *'"id":"0:2"'*) ;; *) exit 45 ;; esac
+            case "$line" in *'"method":"invoke"'*) ;; *) exit 46 ;; esac
+            printf '{"jsonrpc":"2.0","id":"0:2","result":%s}\n' "$FCP_TEST_OWNED_RESPONSE"
+            ;;
+        *)
+            exit 47
+            ;;
+    esac
+    sequence=$((sequence + 1))
+done
+"#
+        .to_string();
+        config.binary = launcher_path.display().to_string();
+        config.args = vec!["-c".to_string(), script];
+        config.config = Some(json!({"fixture": "owned-e2e"}));
+        config.env.insert(
+            "FCP_TEST_OWNED_INTROSPECTION".to_string(),
+            serde_json::to_string(&observed_introspection).expect("serialize fake introspection"),
+        );
+        config.env.insert(
+            "FCP_TEST_OWNED_RESPONSE".to_string(),
+            serde_json::to_string(&InvokeResponse::ok(
+                request.id.clone(),
+                json!({"owned": true}),
+            ))
+            .expect("serialize fake invoke response"),
+        );
+        config.launch_binding = Some(ConnectorLaunchBinding {
+            launcher_path: config.binary.clone(),
+            launcher_digest,
+            runtime_executable: runtime_path.display().to_string(),
+            runtime_executable_digest: runtime_digest,
+        });
+
+        let registry = Arc::new(per_invocation_plan_test_registry(config, catalog));
+        let plan = registry
+            .per_invocation_execution_plan(&request)
+            .await
+            .expect("owned E2E plan construction")
+            .expect("owned E2E fixture must be per-invocation");
+        let state = dispatcher_app_state(
+            Arc::new(empty_registry(1)),
+            Arc::new(HostAdminStateStore::new()),
+            None,
+            HashMap::new(),
+        );
+        (state, plan, request)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn owned_per_invocation_e2e_success_proves_rpc_ids_and_teardown() {
+        let (_, catalog, _) = per_invocation_plan_test_fixture();
+        let observed = catalog
+            .introspection
+            .clone()
+            .expect("fixture introspection");
+        let (state, plan, request) = owned_per_invocation_e2e_fixture(observed).await;
+        let support_before = NativeProxyOnlySandboxSupport::current();
+        let response = fcp_async_core::time::timeout(
+            Duration::from_secs(5),
+            invoke_owned_per_invocation(&state, plan, request.clone()),
+        )
+        .await
+        .expect("owned E2E success must be bounded")
+        .expect("fake connector RPC should succeed");
+
+        assert_eq!(response.id, request.id);
+        assert_eq!(response.result, Some(json!({"owned": true})));
+        assert_eq!(NativeProxyOnlySandboxSupport::current(), support_before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn owned_per_invocation_e2e_metadata_mismatch_tears_down_child_group() {
+        let (_, catalog, _) = per_invocation_plan_test_fixture();
+        let mut observed = catalog
+            .introspection
+            .clone()
+            .expect("fixture introspection");
+        observed.operations[0].summary = "owned-e2e-mismatch".to_string();
+        let (state, plan, request) = owned_per_invocation_e2e_fixture(observed).await;
+        let error = fcp_async_core::time::timeout(
+            Duration::from_secs(5),
+            invoke_owned_per_invocation(&state, plan, request),
+        )
+        .await
+        .expect("owned E2E mismatch teardown must be bounded")
+        .expect_err("metadata mismatch must fail after launch");
+
+        match error {
+            HostError::PreflightFailed(reason) => assert!(
+                reason.contains("metadata did not match"),
+                "unexpected redaction-safe mismatch: {reason}"
+            ),
+            other => panic!("expected metadata mismatch denial, got {other}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn per_invocation_execution_plan_matrix_fails_closed_without_global_mutation() {
+        let support_before = NativeProxyOnlySandboxSupport::current();
+
+        let (mut config, catalog, request) = per_invocation_plan_test_fixture();
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::NativeUnmediated;
+        assert_per_invocation_plan_denied(config, catalog, request, "host_egress_proxy").await;
+
+        let (mut config, catalog, request) = per_invocation_plan_test_fixture();
+        config.enforce_operation_network_constraints = false;
+        assert_per_invocation_plan_denied(config, catalog, request, "enforced operation").await;
+
+        let (mut config, catalog, request) = per_invocation_plan_test_fixture();
+        config.launch_binding = None;
+        assert_per_invocation_plan_denied(config, catalog, request, "launch binding").await;
+
+        let (config, mut catalog, request) = per_invocation_plan_test_fixture();
+        catalog.source = None;
+        assert_per_invocation_plan_denied(config, catalog, request, "manifest source").await;
+
+        let (config, mut catalog, request) = per_invocation_plan_test_fixture();
+        catalog.declared_operations.clear();
+        assert_per_invocation_plan_denied(config, catalog, request, "not declared").await;
+
+        let (config, mut catalog, request) = per_invocation_plan_test_fixture();
+        catalog
+            .introspection
+            .as_mut()
+            .expect("fixture introspection")
+            .operations
+            .clear();
+        assert_per_invocation_plan_denied(config, catalog, request, "manifest metadata").await;
+
+        let (config, mut catalog, request) = per_invocation_plan_test_fixture();
+        catalog.network_constraints.clear();
+        assert_per_invocation_plan_denied(config, catalog, request, "manifest network constraints")
+            .await;
+
+        let (mut config, catalog, request) = per_invocation_plan_test_fixture();
+        config.operation_network_constraints.clear();
+        assert_per_invocation_plan_denied(config, catalog, request, "managed network constraints")
+            .await;
+
+        let (mut config, catalog, request) = per_invocation_plan_test_fixture();
+        config
+            .operation_network_constraints
+            .get_mut("op.a")
+            .expect("fixture managed constraints")
+            .host_allow = vec!["different.example".to_string()];
+        assert_per_invocation_plan_denied(config, catalog, request, "mismatch").await;
+
+        for key in PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS {
+            let (mut config, catalog, request) = per_invocation_plan_test_fixture();
+            config
+                .env
+                .insert(key.to_string(), "sentinel-value".to_string());
+            assert_per_invocation_plan_denied(config, catalog, request, key).await;
+        }
+
+        let (mut config, catalog, request) = per_invocation_plan_test_fixture();
+        config.env.insert(
+            REQUESTED_INSTANCE_ID_ENV.to_string(),
+            "contains spaces".to_string(),
+        );
+        assert_per_invocation_plan_denied(config, catalog, request, REQUESTED_INSTANCE_ID_ENV)
+            .await;
+
+        let (mut persistent_config, persistent_catalog, persistent_request) =
+            per_invocation_plan_test_fixture();
+        persistent_config.lifecycle_mode = ConnectorLifecycleMode::Persistent;
+        let persistent_registry =
+            per_invocation_plan_test_registry(persistent_config, persistent_catalog);
+        assert!(
+            persistent_registry
+                .per_invocation_execution_plan(&persistent_request)
+                .await
+                .expect("persistent plan query")
+                .is_none()
+        );
+        assert_eq!(NativeProxyOnlySandboxSupport::current(), support_before);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
+    async fn per_invocation_registry_is_metadata_only_until_owned_launch() {
+        let connector_id = "fcp.test.per-invocation-metadata:utility:1.0.0";
+        let mut config = dispatcher_test_config(connector_id);
+        config.lifecycle_mode = ConnectorLifecycleMode::PerInvocation;
+        config.binary = "/definitely/missing/per-invocation-sentinel".to_string();
+        config.launch_binding = Some(synthetic_launch_binding(&config.binary));
+
+        let registry = SubprocessRegistry::from_configs(vec![config.clone()], None)
+            .await
+            .expect("per-invocation inventory must not access the connector binary");
+        let key = ConnectorId::from_static(connector_id);
+
+        {
+            let state = registry.state.read().await;
+            let entry = state.connectors.get(&key).expect("connector registered");
+            let ConnectorRuntime::PerInvocation(connector) = &entry.connector else {
+                panic!("expected metadata-only per-invocation runtime");
+            };
+            let spec = connector
+                .launch_snapshot(true)
+                .expect("valid binding should construct an owned launch snapshot");
+            assert_eq!(spec.launcher_path, PathBuf::from(&config.binary));
+            assert!(spec.network_disabled);
+        }
+
+        let inventory = registry.inventory().await;
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(
+            inventory[0].lifecycle_mode,
+            ConnectorLifecycleMode::PerInvocation
+        );
+        assert_eq!(inventory[0].binary, config.binary);
+
+        let summaries = registry.list().await;
+        assert_eq!(summaries.len(), 1);
+        assert!(matches!(
+            &summaries[0].health,
+            ConnectorHealth::Unavailable { .. }
+        ));
+        assert!(summaries[0].last_health_check.is_none());
+
+        let summary = registry.get(&key).await.expect("summary");
+        assert!(matches!(
+            &summary.health,
+            ConnectorHealth::Unavailable { .. }
+        ));
+        assert!(summary.last_health_check.is_none());
+        assert!(registry.get_introspection(&key).await.is_none());
+
+        let invoke_error = registry
+            .invoke(runtime_network_test_request(connector_id, "test.echo"))
+            .await
+            .expect_err("per-invocation invoke must fail closed before owned launch support");
+        assert!(
+            invoke_error
+                .to_string()
+                .contains(PER_INVOCATION_PENDING_REASON)
+        );
+
+        let invoke_for_simulation = runtime_network_test_request(connector_id, "test.echo");
+        let simulate = SimulateRequest {
+            r#type: "simulate".to_string(),
+            id: invoke_for_simulation.id,
+            connector_id: invoke_for_simulation.connector_id,
+            operation: invoke_for_simulation.operation,
+            zone_id: invoke_for_simulation.zone_id,
+            input: invoke_for_simulation.input,
+            capability_token: invoke_for_simulation.capability_token,
+            estimate_cost: false,
+            check_availability: false,
+            context: invoke_for_simulation.context,
+            correlation_id: invoke_for_simulation.correlation_id,
+        };
+        let simulate_error = registry
+            .simulate(simulate)
+            .await
+            .expect_err("per-invocation simulate must fail closed before owned launch support");
+        assert!(
+            simulate_error
+                .to_string()
+                .contains(PER_INVOCATION_PENDING_REASON)
+        );
+
+        let report = registry
+            .self_check(&key)
+            .await
+            .expect("self-check report for registered connector");
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("self_check_runtime"));
+
+        let mut updated = config;
+        updated.name = Some("updated metadata".to_string());
+        let preview = registry
+            .preview_configs(vec![updated.clone()])
+            .await
+            .expect("metadata-only config preview");
+        assert_eq!(preview.updated, vec![connector_id.to_string()]);
+
+        let applied = registry
+            .apply_configs(vec![updated])
+            .await
+            .expect("metadata-only config apply");
+        assert_eq!(applied.updated, vec![connector_id.to_string()]);
+        assert_eq!(
+            registry.get(&key).await.expect("updated summary").name,
+            "updated metadata"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn per_invocation_missing_binding_is_unavailable_without_binary_access() {
+        let connector_id = "fcp.test.per-invocation-missing-binding:utility:1.0.0";
+        let mut config = dispatcher_test_config(connector_id);
+        config.lifecycle_mode = ConnectorLifecycleMode::PerInvocation;
+        config.binary = "/definitely/missing/per-invocation-binding-sentinel".to_string();
+
+        let registry = SubprocessRegistry::from_configs(vec![config], None)
+            .await
+            .expect("missing binding must remain metadata-only");
+        let key = ConnectorId::from_static(connector_id);
+        assert!(registry.get_introspection(&key).await.is_none());
+        let error = registry
+            .invoke(runtime_network_test_request(connector_id, "test.echo"))
+            .await
+            .expect_err("missing binding must fail closed before spawn");
+        assert!(
+            error
+                .to_string()
+                .contains(PER_INVOCATION_BINDING_INVALID_REASON)
+        );
+        assert!(!error.to_string().contains("/definitely/missing"));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn per_invocation_rejects_resident_prewarm_strategies_before_binary_access() {
+        let cases = [
+            (
+                "fcp.test.per-invocation-warm-pool:utility:1.0.0",
+                "warm_pool",
+                fcp_host::ConnectorPrewarmConfig::warm_pool(
+                    1,
+                    1,
+                    Duration::from_secs(30),
+                    Duration::from_millis(50),
+                ),
+            ),
+            (
+                "fcp.test.per-invocation-zygote:utility:1.0.0",
+                "zygote",
+                fcp_host::ConnectorPrewarmConfig {
+                    strategy: PrewarmStrategy::Zygote,
+                    min_idle: 1,
+                    max_idle: 1,
+                    max_age: Duration::from_secs(30),
+                    checkout_timeout: Duration::from_millis(50),
+                },
+            ),
+        ];
+
+        for (connector_id, strategy, prewarm) in cases {
+            let mut config = dispatcher_test_config(connector_id);
+            config.lifecycle_mode = ConnectorLifecycleMode::PerInvocation;
+            config.binary = format!("/definitely/missing/per-invocation-{strategy}");
+            config.prewarm = prewarm;
+
+            let error = match SubprocessRegistry::from_configs(vec![config], None).await {
+                Ok(_) => {
+                    panic!("per-invocation lifecycle must reject {strategy} before binary access")
+                }
+                Err(error) => error,
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains("per_invocation"),
+                "unexpected error: {message}"
+            );
+            assert!(message.contains(strategy), "unexpected error: {message}");
+            assert!(
+                !message.contains("/definitely/missing"),
+                "policy rejection must precede binary access: {message}"
+            );
+        }
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -18028,16 +20169,22 @@ deny_ptrace = true
     }
 
     async fn e99o6_gmail_refresh_retry_server() -> (SocketAddr, JoinHandle<Vec<String>>) {
+        e99o6_gmail_refresh_server(vec![
+            ("401 Unauthorized", r#"{"error":"invalid_token"}"#),
+            ("200 OK", r#"{"messages":[]}"#),
+        ])
+        .await
+    }
+
+    async fn e99o6_gmail_refresh_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (SocketAddr, JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind e99o6 Gmail loopback");
         let addr = listener.local_addr().expect("listener local addr");
         let task = task::spawn(async move {
             let mut observed = Vec::new();
-            let responses = [
-                ("401 Unauthorized", r#"{"error":"invalid_token"}"#),
-                ("200 OK", r#"{"messages":[]}"#),
-            ];
 
             for (status, body) in responses {
                 let (mut stream, _) = listener.accept().await.expect("accept Gmail egress");
@@ -18350,6 +20497,7 @@ deny_ptrace = true
         HostEgressContext {
             connector_id: connector_id.to_string(),
             operation_id: operation_id.to_string(),
+            resource_uri: "fcp-test://host-egress/resource".to_string(),
             zone_id: ZoneId::work().to_string(),
             request_id: request_id.to_string(),
             correlation_id: Some(correlation_id.to_string()),
@@ -19445,6 +21593,80 @@ deny_ptrace = true
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn nqm81_4_host_egress_separates_logical_resource_from_http_transport_policy() {
+        let connector_id = "fcp.test.nqm81-resource:utility:1.0.0";
+        let operation_id = "test.egress_http";
+        let resource_uri = "fcp-test://nqm81/projects";
+        let credential_id =
+            CredentialId::parse("10101010-1010-1010-1010-101010101010").expect("credential id");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            80,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused"}}),
+        )
+        .await;
+        let token = test_capability_token_with_constraints(
+            &signing_key,
+            "cap.test.egress",
+            operation_id,
+            ZoneId::work().as_str(),
+            &fcp_core::CapabilityConstraints {
+                resource_allow: vec![resource_uri.to_string()],
+                credential_allow: vec![credential_id],
+                ..Default::default()
+            },
+        );
+        let context = HostEgressContext {
+            connector_id: connector_id.to_string(),
+            operation_id: operation_id.to_string(),
+            resource_uri: resource_uri.to_string(),
+            zone_id: ZoneId::work().to_string(),
+            request_id: "req-nqm81-resource".to_string(),
+            correlation_id: Some("corr-nqm81-resource".to_string()),
+            capability_token_cbor_b64: capability_token_b64(&token).expect("token b64"),
+        };
+
+        authorize_host_egress_context(&state, &context, &context.resource_uri)
+            .await
+            .expect("matching canonical logical resource must authorize");
+
+        let mut mismatched_context = context.clone();
+        mismatched_context.resource_uri = "fcp-test://nqm81/other-project".to_string();
+        let mismatch = authorize_host_egress_context(
+            &state,
+            &mismatched_context,
+            &mismatched_context.resource_uri,
+        )
+        .await
+        .expect_err("mismatched logical resource must be denied");
+        assert!(
+            mismatch.to_string().contains("capability token rejected"),
+            "expected capability denial, got: {mismatch}"
+        );
+
+        let transport_denial = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context,
+                url: "http://127.0.0.2/v1/fixture".to_string(),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: Some(credential_id.to_string()),
+            }),
+        )
+        .await
+        .expect_err("disallowed transport must remain denied after resource authorization");
+        assert!(
+            transport_denial.1.contains("HostNotAllowed")
+                || transport_denial.1.contains("host not allowed"),
+            "expected transport policy denial, got: {transport_denial:?}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn br_d9us6_host_egress_http_loopback_injects_credential_without_echoing_secret() {
         let observed_request = Arc::new(StdMutex::new(None::<String>));
         let (addr, server_task) = d9us6_one_shot_http_server(Arc::clone(&observed_request)).await;
@@ -19483,6 +21705,7 @@ deny_ptrace = true
             context: HostEgressContext {
                 connector_id: connector_id.to_string(),
                 operation_id: operation_id.to_string(),
+                resource_uri: "fcp-test://host-egress/http".to_string(),
                 zone_id: ZoneId::work().to_string(),
                 request_id: "req-d9us6-http".to_string(),
                 correlation_id: Some("corr-d9us6-http".to_string()),
@@ -19518,6 +21741,267 @@ deny_ptrace = true
             !serialized.contains("redaction-sentinel-http-secret"),
             "host egress response must not echo injected HTTP credentials"
         );
+    }
+
+    fn nqm81_20_host_egress_http_request(
+        method: &str,
+        body: Option<fcp_manifest::Base64Bytes>,
+    ) -> HostEgressHttpRequest {
+        HostEgressHttpRequest {
+            context: HostEgressContext {
+                connector_id: "fcp.test.egress".to_string(),
+                operation_id: "test.egress_http".to_string(),
+                resource_uri: "https://api.example.test/resource".to_string(),
+                zone_id: ZoneId::work().as_str().to_string(),
+                request_id: "req-nqm81-20".to_string(),
+                correlation_id: Some("corr-nqm81-20".to_string()),
+                capability_token_cbor_b64: "redacted-token".to_string(),
+            },
+            url: "https://api.example.test/resource".to_string(),
+            method: method.to_string(),
+            headers: Vec::new(),
+            body,
+            credential_id: None,
+        }
+    }
+
+    fn nqm81_20_authorized_host_egress(total_timeout_ms: u32) -> AuthorizedHostEgress {
+        let mut managed = d9us6_loopback_constraints(443);
+        managed.total_timeout_ms = total_timeout_ms;
+        AuthorizedHostEgress {
+            connector_id: ConnectorId::from_static("fcp.test.egress"),
+            operation: OperationId::from_static("test.egress_http"),
+            zone_id: ZoneId::work(),
+            request_id: "req-nqm81-20".to_string(),
+            correlation_id: Some("corr-nqm81-20".to_string()),
+            idempotency: IdempotencyClass::Strict,
+            constraints: managed
+                .resolve(None)
+                .expect("nqm81.20 test constraints resolve"),
+            credential_allow: Vec::new(),
+        }
+    }
+
+    async fn nqm81_20_gmail_state_and_request(
+        gmail_addr: SocketAddr,
+        oauth_base_url: &str,
+        request_id: &'static str,
+    ) -> (Arc<AppState>, HostEgressHttpRequest) {
+        let connector_id = "fcp.gmail";
+        let operation_id = "gmail.list_messages";
+        let credential_id =
+            CredentialId::parse("e99e99e9-0001-4000-8000-000000000014").expect("credential id");
+        let mut oauth_method = OAuthAuthCodeAuth::confidential_client(
+            "gmail-client",
+            "gmail-client-secret",
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            format!("{oauth_base_url}/token"),
+            "http://127.0.0.1/oauth/gmail/callback",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            false,
+        )
+        .expect("valid Gmail auth-code profile");
+        oauth_method.apply_tokens(
+            OAuthTokens::bearer(
+                "access-gmail-old",
+                Some(Duration::from_secs(3600)),
+                Some("refresh-gmail-old"),
+                Some("https://www.googleapis.com/auth/gmail.readonly"),
+            )
+            .expect("valid Gmail token set"),
+        );
+        let profile = AuthProfile::new(
+            "gmail-primary",
+            "gmail",
+            AuthMethodKind::OAuthAuthCode(oauth_method),
+            "Gmail primary",
+            0,
+        )
+        .expect("valid Gmail auth profile");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            gmail_addr.port(),
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused-before-auth-profile"}}),
+        )
+        .await;
+        state
+            .credential_pools
+            .lock()
+            .await
+            .replace_payload_in_zone(
+                &ZoneId::work(),
+                credential_id,
+                CredentialPayload::auth_profile_with_allowed_hosts(profile, ["127.0.0.1"]),
+            )
+            .expect("install Gmail auth-profile credential payload");
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+        (
+            state,
+            HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    request_id,
+                    "corr-nqm81-20-gmail",
+                    &token,
+                ),
+                url: format!(
+                    "http://127.0.0.1:{}/gmail/v1/users/me/messages",
+                    gmail_addr.port()
+                ),
+                method: "GET".to_string(),
+                headers: vec![HostEgressHttpHeader {
+                    name: "x-fcp-credential-id".to_string(),
+                    value: credential_id.to_string(),
+                }],
+                body: None,
+                credential_id: Some(credential_id.to_string()),
+            },
+        )
+    }
+
+    #[test]
+    fn nqm81_20_refresh_replay_requires_strict_safe_read_without_any_body() {
+        for method in ["GET", "HEAD", "OPTIONS"] {
+            assert!(host_egress_allows_unauthorized_refresh_replay(
+                IdempotencyClass::Strict,
+                &nqm81_20_host_egress_http_request(method, None),
+            ));
+        }
+        for idempotency in [IdempotencyClass::None, IdempotencyClass::BestEffort] {
+            assert!(!host_egress_allows_unauthorized_refresh_replay(
+                idempotency,
+                &nqm81_20_host_egress_http_request("GET", None),
+            ));
+        }
+        assert!(!host_egress_allows_unauthorized_refresh_replay(
+            IdempotencyClass::Strict,
+            &nqm81_20_host_egress_http_request("POST", None),
+        ));
+        assert!(!host_egress_allows_unauthorized_refresh_replay(
+            IdempotencyClass::Strict,
+            &nqm81_20_host_egress_http_request(
+                "GET",
+                Some(fcp_manifest::Base64Bytes::from_vec(Vec::new())),
+            ),
+        ));
+    }
+
+    #[test]
+    fn nqm81_20_refresh_replay_uses_remaining_total_deadline() {
+        let authorized = nqm81_20_authorized_host_egress(1_000);
+        assert!(host_egress_remaining_timeout(&authorized, Instant::now()).is_some());
+
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .expect("nqm81.20 expired instant");
+        assert!(host_egress_remaining_timeout(&authorized, expired).is_none());
+
+        let mut exhausted = nqm81_20_authorized_host_egress(1_000);
+        exhausted.constraints.total_timeout_ms = 0;
+        assert!(host_egress_remaining_timeout(&exhausted, Instant::now()).is_none());
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn nqm81_20_refresh_deadline_exhaustion_fails_closed_before_oauth_transport() {
+        let (state, request) = nqm81_20_gmail_state_and_request(
+            "127.0.0.1:1".parse().expect("test socket address"),
+            "http://127.0.0.1:9",
+            "req-nqm81-20-refresh-timeout",
+        )
+        .await;
+        let mut authorized =
+            authorize_host_egress_context(&state, &request.context, &request.context.resource_uri)
+                .await
+                .expect("test host-egress context authorizes");
+        authorized.constraints.total_timeout_ms = 0;
+        let credential_id =
+            CredentialId::parse("e99e99e9-0001-4000-8000-000000000014").expect("credential id");
+        let lease = state
+            .credential_pools
+            .lock()
+            .await
+            .acquire_specific_in_zone(&ZoneId::work(), credential_id, Utc::now())
+            .expect("test Gmail credential lease");
+        let error = refresh_host_egress_credential_after_unauthorized(
+            &state,
+            &authorized,
+            &credential_id.to_string(),
+            &lease,
+            Instant::now(),
+        )
+        .await
+        .expect_err("expired operation must not start OAuth refresh");
+        assert!(
+            error
+                .to_string()
+                .contains("deadline exhausted before OAuth credential refresh")
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn nqm81_20_second_401_is_returned_after_one_refresh_replay() {
+        let (gmail_addr, gmail_task) = e99o6_gmail_refresh_server(vec![
+            ("401 Unauthorized", r#"{"error":"invalid_token"}"#),
+            ("401 Unauthorized", r#"{"error":"invalid_token"}"#),
+        ])
+        .await;
+        let oauth = HostOAuthLoopbackServer::start(vec![HostOAuthLoopbackExpectedRequest {
+            method: "POST",
+            path: "/token",
+            body_contains: vec![
+                "grant_type=refresh_token",
+                "refresh_token=refresh-gmail-old",
+            ],
+            response: json!({
+                "access_token": "access-gmail-new",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "refresh-gmail-new"
+            }),
+        }]);
+        let (state, request) =
+            nqm81_20_gmail_state_and_request(gmail_addr, &oauth.base_url, "req-nqm81-20-401").await;
+        let response = host_egress_http_handler(State(state), Json(request))
+            .await
+            .expect("second 401 should be returned, not replayed again")
+            .0;
+        assert_eq!(response.status, 401);
+        assert_eq!(gmail_task.await.expect("Gmail server task").len(), 2);
+        assert_eq!(oauth.join().len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn nqm81_20_refresh_failure_returns_error_without_second_provider_attempt() {
+        let (gmail_addr, gmail_task) =
+            e99o6_gmail_refresh_server(vec![("401 Unauthorized", r#"{"error":"invalid_token"}"#)])
+                .await;
+        let oauth = HostOAuthLoopbackServer::start(vec![HostOAuthLoopbackExpectedRequest {
+            method: "POST",
+            path: "/token",
+            body_contains: vec![
+                "grant_type=refresh_token",
+                "refresh_token=refresh-gmail-old",
+            ],
+            response: json!({
+                "error": "invalid_grant",
+                "error_description": "refresh rejected"
+            }),
+        }]);
+        let (state, request) = nqm81_20_gmail_state_and_request(
+            gmail_addr,
+            &oauth.base_url,
+            "req-nqm81-20-refresh-failure",
+        )
+        .await;
+        let error = host_egress_http_handler(State(state), Json(request))
+            .await
+            .expect_err("refresh failure must fail closed");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(gmail_task.await.expect("Gmail server task").len(), 1);
+        assert_eq!(oauth.join().len(), 1);
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -19736,6 +22220,7 @@ deny_ptrace = true
             context: HostEgressContext {
                 connector_id: connector_id.to_string(),
                 operation_id: operation_id.to_string(),
+                resource_uri: "fcp-test://host-egress/http-denied".to_string(),
                 zone_id: ZoneId::work().to_string(),
                 request_id: "req-d9us6-deny-host".to_string(),
                 correlation_id: Some("corr-d9us6-deny-host".to_string()),
@@ -19793,6 +22278,7 @@ deny_ptrace = true
             context: HostEgressContext {
                 connector_id: connector_id.to_string(),
                 operation_id: operation_id.to_string(),
+                resource_uri: "fcp-test://host-egress/tcp".to_string(),
                 zone_id: ZoneId::work().to_string(),
                 request_id: "req-d9us6-tcp".to_string(),
                 correlation_id: Some("corr-d9us6-tcp".to_string()),
@@ -20469,6 +22955,8 @@ deny_ptrace = true
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                 prewarm: Default::default(),
+                lifecycle_mode: Default::default(),
+                launch_binding: None,
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -21461,6 +23949,8 @@ deny_ptrace = true
                     enforce_empty_allow_lists: false,
                     runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                     prewarm: Default::default(),
+                    lifecycle_mode: Default::default(),
+                    launch_binding: None,
                     operation_network_constraints: BTreeMap::new(),
                 },
                 connector: ConnectorRuntime::Native(connector),
@@ -21468,7 +23958,10 @@ deny_ptrace = true
             },
         );
         let registry = Arc::new(SubprocessRegistry {
-            state: Arc::new(RwLock::new(RegistryState { connectors })),
+            state: Arc::new(RwLock::new(RegistryState {
+                connectors,
+                generation: 1,
+            })),
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
@@ -21675,6 +24168,8 @@ deny_ptrace = true
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                 prewarm: Default::default(),
+                lifecycle_mode: Default::default(),
+                launch_binding: None,
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -21870,6 +24365,8 @@ deny_ptrace = true
                     enforce_empty_allow_lists: false,
                     runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                     prewarm: Default::default(),
+                    lifecycle_mode: Default::default(),
+                    launch_binding: None,
                     operation_network_constraints: BTreeMap::new(),
                 },
                 connector: ConnectorRuntime::Native(connector),
@@ -21877,7 +24374,10 @@ deny_ptrace = true
             },
         );
         let registry = Arc::new(SubprocessRegistry {
-            state: Arc::new(RwLock::new(RegistryState { connectors })),
+            state: Arc::new(RwLock::new(RegistryState {
+                connectors,
+                generation: 1,
+            })),
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
@@ -22021,6 +24521,8 @@ deny_ptrace = true
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                 prewarm: Default::default(),
+                lifecycle_mode: Default::default(),
+                launch_binding: None,
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -25846,6 +28348,8 @@ done"#;
             enforce_empty_allow_lists: true,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             prewarm: Default::default(),
+            lifecycle_mode: Default::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
         };
         let registry =
@@ -27201,7 +29705,10 @@ done"#;
 
     fn empty_registry(version: u64) -> SubprocessRegistry {
         SubprocessRegistry {
-            state: Arc::new(RwLock::new(RegistryState::default())),
+            state: Arc::new(RwLock::new(RegistryState {
+                connectors: HashMap::new(),
+                generation: version,
+            })),
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(version)),
             capability_verifying_key: None,
@@ -27431,6 +29938,8 @@ done"#;
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             prewarm: Default::default(),
+            lifecycle_mode: Default::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
         };
         let dbg = format!("{config:?}");

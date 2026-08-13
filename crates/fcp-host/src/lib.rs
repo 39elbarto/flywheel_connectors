@@ -43,13 +43,16 @@ mod error;
 // health responses.
 #[allow(dead_code)]
 mod health;
+#[cfg(target_os = "linux")]
+mod inherited_egress;
 mod invoke_audit;
-mod migration_linux;
 mod local_mcp;
+mod migration_linux;
 #[cfg(target_os = "macos")]
 mod migration_macos;
 mod network_policy;
 mod output_capture;
+mod owned_invocation;
 mod progress;
 mod redaction;
 mod resilience;
@@ -73,13 +76,16 @@ pub use doctor::*;
 pub use emergency_revocation::*;
 pub use enforcement::*;
 pub use error::*;
+#[cfg(target_os = "linux")]
+pub use inherited_egress::*;
 pub use invoke_audit::*;
-pub use migration_linux::*;
 pub use local_mcp::*;
+pub use migration_linux::*;
 #[cfg(target_os = "macos")]
 pub use migration_macos::*;
 pub use network_policy::*;
 pub use output_capture::*;
+pub use owned_invocation::*;
 pub use progress::*;
 pub use redaction::*;
 pub use resilience::*;

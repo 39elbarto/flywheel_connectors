@@ -5591,6 +5591,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "ciborium",
  "fcp-async-core",
@@ -5895,11 +5896,14 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
+ "blake3",
  "chrono",
  "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",
  "hex",
@@ -6987,6 +6991,7 @@ dependencies = [
  "fcp-manifest",
  "fcp-policy",
  "fcp-prelude",
+ "fcp-sandbox",
  "fcp-store",
  "futures-util",
  "hex",
@@ -17523,83 +17528,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "fsqlite"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-ast"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-btree"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-core"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-error"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-ext-fts5"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-ext-icu"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-ext-json"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-ext-misc"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-ext-rtree"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-func"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-mvcc"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-observability"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-pager"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-parser"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-planner"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-types"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-vdbe"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-vfs"
-version = "0.1.19"
-
-[[patch.unused]]
-name = "fsqlite-wal"
-version = "0.1.19"

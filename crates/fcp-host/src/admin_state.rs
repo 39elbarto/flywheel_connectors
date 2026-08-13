@@ -33,6 +33,91 @@ use crate::{
 const HOST_ADMIN_STATE_SNAPSHOT_VERSION: u32 = 1;
 const REDACTED_CONFIG_VALUE: &str = "[REDACTED]";
 
+/// Process ownership policy for a managed connector.
+///
+/// This is intentionally separate from [`ConnectorPrewarmConfig`]. `Persistent`
+/// preserves the existing resident subprocess behavior, while `PerInvocation`
+/// keeps only trusted metadata in the registry until a single invocation can
+/// own the complete launch and teardown sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorLifecycleMode {
+    /// Keep the existing connector runtime resident after registry construction.
+    #[default]
+    Persistent,
+    /// Keep the connector metadata-only while idle; each launch owns its process lifecycle.
+    PerInvocation,
+}
+
+impl ConnectorLifecycleMode {
+    /// Whether this mode is the omission-compatible default.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Persistent)
+    }
+}
+
+/// Host-owned executable binding for a request-scoped connector launch.
+///
+/// These values are inventory/manifest policy produced by a trusted host
+/// provisioning path; they are never sourced from model input. The host only
+/// validates their shape here. `OwnedProcess` re-hashes the files immediately
+/// before a future launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorLaunchBinding {
+    /// Absolute launcher path; this must exactly equal `ManagedConnectorConfig::binary`.
+    pub launcher_path: String,
+    /// Raw lowercase 64-hex Blake3 digest of the launcher bytes.
+    pub launcher_digest: String,
+    /// Absolute runtime executable path expected after launcher exec.
+    pub runtime_executable: String,
+    /// Raw lowercase 64-hex Blake3 digest of the runtime executable bytes.
+    pub runtime_executable_digest: String,
+}
+
+impl ConnectorLaunchBinding {
+    /// Validate only the binding shape and its exact inventory-path join.
+    ///
+    /// No filesystem access or executable is performed here.
+    pub fn validate_for_binary(&self, binary: &str) -> Result<(), &'static str> {
+        if binary != self.launcher_path {
+            return Err("launcher path must exactly equal connector binary");
+        }
+        validate_absolute_binding_path(&self.launcher_path, "launcher_path")?;
+        validate_absolute_binding_path(&self.runtime_executable, "runtime_executable")?;
+        validate_binding_digest(&self.launcher_digest, "launcher_digest")?;
+        validate_binding_digest(&self.runtime_executable_digest, "runtime_executable_digest")?;
+        Ok(())
+    }
+}
+
+fn validate_absolute_binding_path(value: &str, field: &'static str) -> Result<(), &'static str> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || value.chars().any(char::is_control)
+        || !path.is_absolute()
+        || value
+            .split('/')
+            .skip(1)
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return Err(field);
+    }
+    Ok(())
+}
+
+fn validate_binding_digest(value: &str, field: &'static str) -> Result<(), &'static str> {
+    if value.len() != 64
+        || value
+            .chars()
+            .any(|ch| !ch.is_ascii_digit() && !matches!(ch, 'a'..='f'))
+    {
+        return Err(field);
+    }
+    Ok(())
+}
+
 /// Canonical connector inventory entry persisted and applied by the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedConnectorConfig {
@@ -141,6 +226,18 @@ pub struct ManagedConnectorConfig {
     /// on-demand startup path.
     #[serde(default, skip_serializing_if = "is_default_prewarm_config")]
     pub prewarm: ConnectorPrewarmConfig,
+    /// Host-owned process lifecycle mode. This is distinct from `prewarm`:
+    /// `persistent` retains the current resident runtime behavior, while
+    /// `per_invocation` stores metadata only and must not launch a child during
+    /// registry load, inventory preview/apply, discovery, or idle time.
+    #[serde(default, skip_serializing_if = "ConnectorLifecycleMode::is_default")]
+    pub lifecycle_mode: ConnectorLifecycleMode,
+    /// Optional host-owned executable binding for per-invocation launches.
+    /// This is trusted inventory/manifest policy, never model input. Persistent
+    /// connectors may omit it; per-invocation entries remain unavailable until
+    /// a valid binding is supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_binding: Option<ConnectorLaunchBinding>,
     /// Per-operation network policy used by the host runtime path.
     ///
     /// Keys are operation ids. Values are host-managed constraints that can
@@ -10460,6 +10557,11 @@ mod tests {
         assert!(config.args.is_empty());
         assert!(config.env.is_empty());
         assert_eq!(config.prewarm, ConnectorPrewarmConfig::default());
+        assert_eq!(config.lifecycle_mode, ConnectorLifecycleMode::Persistent);
+        assert!(config.launch_binding.is_none());
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert!(serialized.get("lifecycle_mode").is_none());
+        assert!(serialized.get("launch_binding").is_none());
     }
 
     #[test]
@@ -10481,6 +10583,8 @@ mod tests {
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             prewarm: ConnectorPrewarmConfig::default(),
+            lifecycle_mode: ConnectorLifecycleMode::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -10512,6 +10616,8 @@ mod tests {
                 std::time::Duration::from_secs(30),
                 std::time::Duration::from_millis(50),
             ),
+            lifecycle_mode: ConnectorLifecycleMode::default(),
+            launch_binding: None,
             operation_network_constraints: BTreeMap::new(),
         };
 
@@ -10519,6 +10625,74 @@ mod tests {
         assert_eq!(value["prewarm"]["strategy"], "warm_pool");
         let back: ManagedConnectorConfig = serde_json::from_value(value).unwrap();
         assert_eq!(back.prewarm, config.prewarm);
+    }
+
+    #[test]
+    fn managed_connector_config_explicit_per_invocation_lifecycle_mode_roundtrips() {
+        let config: ManagedConnectorConfig = serde_json::from_value(serde_json::json!({
+            "id": "test-connector",
+            "binary": "/usr/bin/test",
+            "lifecycle_mode": "per_invocation"
+        }))
+        .unwrap();
+        assert_eq!(config.lifecycle_mode, ConnectorLifecycleMode::PerInvocation);
+
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert_eq!(serialized["lifecycle_mode"], "per_invocation");
+    }
+
+    #[test]
+    fn managed_connector_config_launch_binding_roundtrips_and_validates_shape() {
+        let binding = ConnectorLaunchBinding {
+            launcher_path: "/opt/fcp/connectors/test".to_string(),
+            launcher_digest: "a".repeat(64),
+            runtime_executable: "/usr/bin/fcp-runtime".to_string(),
+            runtime_executable_digest: "b".repeat(64),
+        };
+        binding
+            .validate_for_binary("/opt/fcp/connectors/test")
+            .expect("synthetic binding shape should validate");
+        assert!(binding.validate_for_binary("/other/path").is_err());
+        let config = serde_json::from_value::<ManagedConnectorConfig>(serde_json::json!({
+            "id": "test-connector",
+            "binary": "/opt/fcp/connectors/test",
+            "launch_binding": binding.clone(),
+        }))
+        .expect("explicit launch binding should deserialize");
+        assert_eq!(config.launch_binding, Some(binding));
+    }
+
+    #[test]
+    fn connector_launch_binding_rejects_relative_uppercase_and_prefixed_digests() {
+        let mut binding = ConnectorLaunchBinding {
+            launcher_path: "relative/launcher".to_string(),
+            launcher_digest: "a".repeat(64),
+            runtime_executable: "/usr/bin/fcp-runtime".to_string(),
+            runtime_executable_digest: "b".repeat(64),
+        };
+        assert!(binding.validate_for_binary("relative/launcher").is_err());
+        binding.launcher_path = "/opt/fcp/launcher".to_string();
+        binding.launcher_digest = format!("A{}", "a".repeat(63));
+        assert!(binding.validate_for_binary("/opt/fcp/launcher").is_err());
+        binding.launcher_digest = format!("blake3:{}", "a".repeat(64));
+        assert!(binding.validate_for_binary("/opt/fcp/launcher").is_err());
+    }
+
+    #[test]
+    fn connector_launch_binding_rejects_dot_path_components() {
+        let mut binding = ConnectorLaunchBinding {
+            launcher_path: "/opt/../tmp/launcher".to_string(),
+            launcher_digest: "a".repeat(64),
+            runtime_executable: "/usr/bin/fcp-runtime".to_string(),
+            runtime_executable_digest: "b".repeat(64),
+        };
+        assert!(binding.validate_for_binary("/opt/../tmp/launcher").is_err());
+        binding.launcher_path = "/opt/./launcher".to_string();
+        assert!(binding.validate_for_binary("/opt/./launcher").is_err());
+        binding.launcher_path = "/opt//launcher".to_string();
+        assert!(binding.validate_for_binary("/opt//launcher").is_err());
+        binding.launcher_path = "/opt/launcher/".to_string();
+        assert!(binding.validate_for_binary("/opt/launcher/").is_err());
     }
 
     #[test]
@@ -10557,6 +10731,8 @@ mod tests {
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                 prewarm: ConnectorPrewarmConfig::default(),
+                lifecycle_mode: ConnectorLifecycleMode::default(),
+                launch_binding: None,
                 operation_network_constraints: BTreeMap::new(),
             },
         };

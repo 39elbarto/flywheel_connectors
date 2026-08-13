@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::net::UnixStream;
+
 use serde::{Deserialize, Serialize};
 
 /// A trusted launch description. The caller must obtain all values from fixed
@@ -24,6 +29,10 @@ pub struct ProcessSpec {
     pub fixed_env: BTreeMap<OsString, OsString>,
     pub network_disabled: bool,
 }
+
+/// Reserved child environment name for the inherited host-egress channel.
+#[cfg(target_os = "linux")]
+pub const FCP_HOST_EGRESS_FD: &str = "FCP_HOST_EGRESS_FD";
 
 /// Identity captured at launch and required for every later signal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,99 +104,140 @@ impl OwnedProcess {
 
         #[cfg(target_os = "linux")]
         {
-            if !spec.launcher_path.is_absolute()
-                || !spec.runtime_executable.is_absolute()
-                || spec.launcher_digest.len() != 64
-                || spec
-                    .launcher_digest
-                    .chars()
-                    .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
-                || spec.expected_runtime_executable_digest.len() != 64
-                || spec
-                    .expected_runtime_executable_digest
-                    .chars()
-                    .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
-            {
-                return Err(ProcessGroupError::InvalidSpec);
-            }
-            if digest_file(&spec.launcher_path)? != spec.launcher_digest {
-                return Err(ProcessGroupError::LauncherDigestMismatch);
-            }
+            Self::spawn_linux(spec, None)
+        }
+    }
 
-            use std::os::unix::process::CommandExt;
+    /// Spawn a Linux process with one host-owned, already-connected egress channel.
+    ///
+    /// The channel is passed by its current descriptor number through the fixed
+    /// [`FCP_HOST_EGRESS_FD`] environment variable. No descriptor is duplicated
+    /// to a caller-selected number, and all other descriptors are marked
+    /// close-on-exec in the child before this channel is made inheritable.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_with_host_egress_channel(
+        spec: &ProcessSpec,
+        child_endpoint: UnixStream,
+    ) -> Result<Self, ProcessGroupError> {
+        if !spec.network_disabled {
+            return Err(ProcessGroupError::InvalidSpec);
+        }
+        if spec
+            .fixed_env
+            .contains_key(std::ffi::OsStr::new(FCP_HOST_EGRESS_FD))
+        {
+            return Err(ProcessGroupError::InvalidSpec);
+        }
+        let channel_fd = validate_host_egress_channel(&child_endpoint)?;
+        let result = Self::spawn_linux(spec, Some(channel_fd));
+        drop(child_endpoint);
+        result
+    }
 
-            let network_disabled = spec.network_disabled;
-            let mut command = Command::new(&spec.launcher_path);
-            command
-                .args(&spec.fixed_args)
-                .env_clear()
-                .envs(&spec.fixed_env)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+    #[cfg(target_os = "linux")]
+    fn spawn_linux(
+        spec: &ProcessSpec,
+        host_egress_fd: Option<RawFd>,
+    ) -> Result<Self, ProcessGroupError> {
+        if !spec.launcher_path.is_absolute()
+            || !spec.runtime_executable.is_absolute()
+            || spec.launcher_digest.len() != 64
+            || spec
+                .launcher_digest
+                .chars()
+                .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
+            || spec.expected_runtime_executable_digest.len() != 64
+            || spec
+                .expected_runtime_executable_digest
+                .chars()
+                .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
+        {
+            return Err(ProcessGroupError::InvalidSpec);
+        }
+        if digest_file(&spec.launcher_path)? != spec.launcher_digest {
+            return Err(ProcessGroupError::LauncherDigestMismatch);
+        }
 
-            // SAFETY: the closure runs in the child between fork and exec and
-            // performs only async-signal-safe libc calls. It captures no Rust
-            // allocation that is mutated in the child.
-            unsafe {
-                command.pre_exec(move || {
-                    if libc::setsid() == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if network_disabled {
-                        install_network_deny_filter()?;
-                    }
-                    Ok(())
+        use std::os::unix::process::CommandExt;
+
+        let network_disabled = spec.network_disabled;
+        let mut command = Command::new(&spec.launcher_path);
+        command
+            .args(&spec.fixed_args)
+            .env_clear()
+            .envs(&spec.fixed_env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(host_egress_fd) = host_egress_fd {
+            command.env(FCP_HOST_EGRESS_FD, host_egress_fd.to_string());
+        }
+
+        // SAFETY: the closure runs in the child between fork and exec and
+        // performs only async-signal-safe libc calls. It captures no Rust
+        // allocation that is mutated in the child.
+        unsafe {
+            command.pre_exec(move || {
+                if let Some(host_egress_fd) = host_egress_fd {
+                    mark_fds_cloexec_from_three()?;
+                    clear_fd_cloexec(host_egress_fd)?;
+                }
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if network_disabled {
+                    install_network_deny_filter()?;
+                }
+                Ok(())
+            });
+        }
+
+        let mut child = command.spawn()?;
+        let pid = child.id();
+        let identity = match read_identity(
+            pid,
+            &spec.runtime_executable,
+            &spec.expected_runtime_executable_digest,
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                if let Ok(actual) = read_identity_unchecked(pid) {
+                    let mut owned = Self {
+                        child: Some(child),
+                        identity: actual,
+                        reaped: false,
+                        term_sent: false,
+                        kill_sent: false,
+                    };
+                    let _ = owned.terminate(Duration::from_secs(1));
+                } else {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err(match error {
+                    ProcessGroupError::Io(_) => ProcessGroupError::IdentityMismatch,
+                    other => other,
                 });
             }
-
-            let mut child = command.spawn()?;
-            let pid = child.id();
-            let identity = match read_identity(
-                pid,
-                &spec.runtime_executable,
-                &spec.expected_runtime_executable_digest,
-            ) {
-                Ok(identity) => identity,
-                Err(error) => {
-                    if let Ok(actual) = read_identity_unchecked(pid) {
-                        let mut owned = Self {
-                            child: Some(child),
-                            identity: actual,
-                            reaped: false,
-                            term_sent: false,
-                            kill_sent: false,
-                        };
-                        let _ = owned.terminate(Duration::from_secs(1));
-                    } else {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                    return Err(match error {
-                        ProcessGroupError::Io(_) => ProcessGroupError::IdentityMismatch,
-                        other => other,
-                    });
-                }
-            };
-            if identity.pgid != i32::try_from(pid).unwrap_or(i32::MAX) {
-                let mut owned = Self {
-                    child: Some(child),
-                    identity,
-                    reaped: false,
-                    term_sent: false,
-                    kill_sent: false,
-                };
-                let _ = owned.terminate(Duration::from_secs(1));
-                return Err(ProcessGroupError::IdentityMismatch);
-            }
-            Ok(Self {
+        };
+        if identity.pgid != i32::try_from(pid).unwrap_or(i32::MAX) {
+            let mut owned = Self {
                 child: Some(child),
                 identity,
                 reaped: false,
                 term_sent: false,
                 kill_sent: false,
-            })
+            };
+            let _ = owned.terminate(Duration::from_secs(1));
+            return Err(ProcessGroupError::IdentityMismatch);
         }
+        Ok(Self {
+            child: Some(child),
+            identity,
+            reaped: false,
+            term_sent: false,
+            kill_sent: false,
+        })
     }
 
     /// Return the immutable launch identity.
@@ -646,6 +696,160 @@ fn parse_kib_field(contents: &str, field: &str) -> Result<u64, ProcessGroupError
 }
 
 #[cfg(target_os = "linux")]
+/// Claim one inherited, connected Unix stream descriptor for connector use.
+///
+/// The descriptor is validated while borrowed, then consumed exactly once.
+/// The returned stream owns a close-on-exec duplicate; the launcher's original
+/// descriptor is closed before this function returns. Unsafe ownership and OS
+/// checks stay contained in this sandbox crate's explicitly allowed layer.
+pub fn claim_inherited_host_egress_channel(fd: RawFd) -> Result<UnixStream, ProcessGroupError> {
+    if fd < 3 {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+
+    let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if descriptor_flags < 0 {
+        return Err(ProcessGroupError::Io(std::io::Error::last_os_error()));
+    }
+
+    let mut domain: libc::c_int = 0;
+    let mut domain_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let domain_result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_DOMAIN,
+            (&mut domain as *mut libc::c_int).cast(),
+            &mut domain_len,
+        )
+    };
+    if domain_result != 0
+        || domain_len != std::mem::size_of::<libc::c_int>() as libc::socklen_t
+        || domain != libc::AF_UNIX
+    {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+
+    let mut socket_type: libc::c_int = 0;
+    let mut socket_type_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let socket_type_result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut socket_type as *mut libc::c_int).cast(),
+            &mut socket_type_len,
+        )
+    };
+    if socket_type_result != 0
+        || socket_type_len != std::mem::size_of::<libc::c_int>() as libc::socklen_t
+        || socket_type != libc::SOCK_STREAM
+    {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+
+    let mut peer_address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut peer_address_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    let peer_result = unsafe {
+        libc::getpeername(
+            fd,
+            (&mut peer_address as *mut libc::sockaddr_storage).cast(),
+            &mut peer_address_len,
+        )
+    };
+    if peer_result != 0 || peer_address.ss_family != libc::AF_UNIX as libc::sa_family_t {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+
+    // `F_DUPFD_CLOEXEC` is used by `OwnedFd::try_clone`; verify the returned
+    // descriptor keeps that invariant before closing the launcher's original.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    let cloexec = owned.try_clone().map_err(ProcessGroupError::Io)?;
+    let cloexec_flags = unsafe { libc::fcntl(cloexec.as_raw_fd(), libc::F_GETFD) };
+    if cloexec_flags < 0 {
+        return Err(ProcessGroupError::Io(std::io::Error::last_os_error()));
+    }
+    if cloexec_flags & libc::FD_CLOEXEC == 0 {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    drop(owned);
+
+    Ok(UnixStream::from(cloexec))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_host_egress_channel(stream: &UnixStream) -> Result<RawFd, ProcessGroupError> {
+    let fd = stream.as_raw_fd();
+    if fd < 3 {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+
+    let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if descriptor_flags < 0 || descriptor_flags & libc::FD_CLOEXEC == 0 {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+
+    let mut socket_type: libc::c_int = 0;
+    let mut socket_type_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let socket_type_result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut socket_type as *mut libc::c_int).cast(),
+            &mut socket_type_len,
+        )
+    };
+    if socket_type_result != 0 || socket_type != libc::SOCK_STREAM {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+
+    let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut address_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    let address_result = unsafe {
+        libc::getsockname(
+            fd,
+            (&mut address as *mut libc::sockaddr_storage).cast(),
+            &mut address_len,
+        )
+    };
+    if address_result != 0 || address.ss_family != libc::AF_UNIX as libc::sa_family_t {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+
+    stream
+        .peer_addr()
+        .map_err(|_| ProcessGroupError::InvalidSpec)?;
+    Ok(fd)
+}
+
+#[cfg(target_os = "linux")]
+fn mark_fds_cloexec_from_three() -> Result<(), std::io::Error> {
+    // close_range(2) gained CLOSE_RANGE_CLOEXEC in Linux 5.11. Use the raw
+    // syscall so an older libc cannot silently omit the fail-closed check.
+    const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+    let result =
+        unsafe { libc::syscall(libc::SYS_close_range, 3_u32, u32::MAX, CLOSE_RANGE_CLOEXEC) };
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clear_fd_cloexec(fd: RawFd) -> Result<(), std::io::Error> {
+    let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if descriptor_flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, descriptor_flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn install_network_deny_filter() -> Result<(), std::io::Error> {
     const BPF_LD_W_ABS: u16 = 0x20;
     const BPF_JMP_JEQ: u16 = 0x15;
@@ -792,6 +996,189 @@ fn digest_file(path: &Path) -> Result<String, ProcessGroupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    use std::io::{Read, Write};
+    #[cfg(target_os = "linux")]
+    use std::os::fd::{AsRawFd, FromRawFd};
+    #[cfg(target_os = "linux")]
+    use std::os::unix::net::UnixStream;
+
+    #[cfg(target_os = "linux")]
+    fn test_process_spec(test_filter: &str, marker: &str) -> ProcessSpec {
+        let executable = std::env::current_exe().expect("test executable");
+        let digest = digest_file(&executable).expect("test executable digest");
+        ProcessSpec {
+            launcher_path: executable.clone(),
+            launcher_digest: digest.clone(),
+            runtime_executable: executable,
+            expected_runtime_executable_digest: digest,
+            fixed_args: vec![test_filter.into(), "--nocapture".into()],
+            fixed_env: BTreeMap::from([(marker.into(), "1".into())]),
+            network_disabled: true,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_egress_channel_child_probe() {
+        if std::env::var_os("FCP_HOST_EGRESS_CHANNEL_CHILD").is_none() {
+            return;
+        }
+        let channel_fd = std::env::var(FCP_HOST_EGRESS_FD)
+            .expect("inherited channel fd environment")
+            .parse::<i32>()
+            .expect("numeric inherited channel fd");
+        let mut channel = unsafe { std::fs::File::from_raw_fd(channel_fd) };
+        let mut request = [0_u8; 4];
+        channel.read_exact(&mut request).expect("channel request");
+        assert_eq!(&request, b"ping");
+
+        let socket_errno = unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            if fd >= 0 {
+                libc::close(fd);
+                0
+            } else {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            }
+        };
+        let connect_errno = unsafe {
+            let result = libc::connect(channel.as_raw_fd(), std::ptr::null(), 0);
+            if result == 0 {
+                0
+            } else {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            }
+        };
+        let response = format!("{socket_errno}:{connect_errno}:pong");
+        channel
+            .write_all(response.as_bytes())
+            .expect("channel response");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_egress_channel_ambient_probe() {
+        if std::env::var_os("FCP_HOST_EGRESS_CHANNEL_AMBIENT").is_none() {
+            return;
+        }
+        let channel_fd = std::env::var(FCP_HOST_EGRESS_FD)
+            .expect("inherited channel fd environment")
+            .parse::<i32>()
+            .expect("numeric inherited channel fd");
+        let ambient_fd = std::env::var("FCP_HOST_EGRESS_AMBIENT_FD")
+            .expect("ambient fd environment")
+            .parse::<i32>()
+            .expect("numeric ambient fd");
+        let present = std::fs::read_link(format!("/proc/self/fd/{ambient_fd}")).is_ok();
+        let mut channel = unsafe { std::fs::File::from_raw_fd(channel_fd) };
+        channel
+            .write_all(if present { b"present" } else { b"absent" })
+            .expect("ambient probe response");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_egress_channel_rejects_reserved_env_and_invalid_streams() {
+        let (child_endpoint, _host_endpoint) = UnixStream::pair().expect("socketpair");
+        let mut reserved_spec = test_process_spec(
+            "host_egress_channel_child_probe",
+            "FCP_HOST_EGRESS_CHANNEL_CHILD",
+        );
+        reserved_spec.fixed_env.insert(
+            FCP_HOST_EGRESS_FD.into(),
+            "attacker-controlled-value".into(),
+        );
+        assert!(matches!(
+            OwnedProcess::spawn_with_host_egress_channel(&reserved_spec, child_endpoint),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+
+        let unconnected_fd =
+            unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(unconnected_fd >= 0, "unconnected Unix socket");
+        let unconnected = unsafe { UnixStream::from_raw_fd(unconnected_fd) };
+        let valid_spec = test_process_spec(
+            "host_egress_channel_child_probe",
+            "FCP_HOST_EGRESS_CHANNEL_CHILD",
+        );
+        assert!(matches!(
+            OwnedProcess::spawn_with_host_egress_channel(&valid_spec, unconnected),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+
+        let (non_cloexec, _peer) = UnixStream::pair().expect("socketpair");
+        let fd = non_cloexec.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "get descriptor flags");
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+            0
+        );
+        assert!(matches!(
+            OwnedProcess::spawn_with_host_egress_channel(&valid_spec, non_cloexec),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_egress_channel_is_inherited_at_actual_fd_and_network_is_denied() {
+        let (mut host_endpoint, child_endpoint) = UnixStream::pair().expect("socketpair");
+        let spec = test_process_spec(
+            "host_egress_channel_child_probe",
+            "FCP_HOST_EGRESS_CHANNEL_CHILD",
+        );
+        let mut process = OwnedProcess::spawn_with_host_egress_channel(&spec, child_endpoint)
+            .expect("spawn inherited channel child");
+        host_endpoint
+            .write_all(b"ping")
+            .expect("write channel request");
+        let expected = format!("{}:{}:pong", libc::EPERM, libc::EPERM);
+        let mut response = vec![0_u8; expected.len()];
+        host_endpoint
+            .read_exact(&mut response)
+            .expect("read channel response");
+        assert_eq!(response, expected.as_bytes());
+        let report = process
+            .terminate(Duration::from_secs(1))
+            .expect("terminate channel child");
+        assert!(report.group_absent);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_egress_channel_closes_ambient_non_cloexec_fds_at_exec() {
+        let (mut host_endpoint, child_endpoint) = UnixStream::pair().expect("socketpair");
+        let ambient = std::fs::File::open("/dev/null").expect("ambient descriptor");
+        let ambient_fd = ambient.as_raw_fd();
+        let flags = unsafe { libc::fcntl(ambient_fd, libc::F_GETFD) };
+        assert!(flags >= 0, "get ambient descriptor flags");
+        assert_eq!(
+            unsafe { libc::fcntl(ambient_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+            0
+        );
+        let mut spec = test_process_spec(
+            "host_egress_channel_ambient_probe",
+            "FCP_HOST_EGRESS_CHANNEL_AMBIENT",
+        );
+        spec.fixed_env.insert(
+            "FCP_HOST_EGRESS_AMBIENT_FD".into(),
+            ambient_fd.to_string().into(),
+        );
+        let mut process = OwnedProcess::spawn_with_host_egress_channel(&spec, child_endpoint)
+            .expect("spawn ambient-fd probe");
+        let mut response = [0_u8; 6];
+        host_endpoint
+            .read_exact(&mut response)
+            .expect("read ambient-fd probe");
+        assert_eq!(&response, b"absent");
+        let report = process
+            .terminate(Duration::from_secs(1))
+            .expect("terminate ambient-fd probe");
+        assert!(report.group_absent);
+    }
 
     #[test]
     fn invalid_digest_is_rejected_before_spawn() {

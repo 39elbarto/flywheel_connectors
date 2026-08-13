@@ -579,6 +579,7 @@ impl RateLimitTracker {
     /// # Panics
     /// Panics if the internal lock is poisoned (indicates a prior panic during pool access).
     pub fn add_pool(&self, pool: RateLimitPool) {
+        let mut pools = self.pools.write().expect("lock poisoned");
         let checkpoint = self
             .checkpoint_store
             .as_ref()
@@ -588,13 +589,8 @@ impl RateLimitTracker {
             Some(checkpoint) => PoolState::from_checkpoint(pool, &checkpoint),
             None => PoolState::new(pool),
         };
-        let checkpoint_file = {
-            let mut pools = self.pools.write().expect("lock poisoned");
-            pools.insert(pool_id, pool_state);
-            let checkpoint_file = self.checkpoint_file_for_locked(&pools);
-            drop(pools);
-            checkpoint_file
-        };
+        pools.insert(pool_id, pool_state);
+        let checkpoint_file = self.checkpoint_file_for_locked(&pools);
         self.persist_checkpoint_file(checkpoint_file);
     }
 
@@ -619,59 +615,58 @@ impl RateLimitTracker {
     /// Panics if the internal lock is poisoned.
     pub fn try_consume(&self, operation: &str, amount: u32) -> Option<RateLimitError> {
         let pool_ids = self.operation_map.get(operation)?;
-        let checkpoint_file = {
-            let mut pools = self.pools.write().expect("lock poisoned");
+        let mut pools = self.pools.write().expect("lock poisoned");
 
-            // Fail-closed guard: reject up-front if any referenced pool is
-            // missing, so the subsequent phases operate on a consistent set.
-            for pool_id in pool_ids {
-                if !pools.contains_key(pool_id) {
-                    return Some(RateLimitError {
-                        pool_id: pool_id.clone(),
-                        limit: 0,
-                        current: 0,
-                        retry_after_ms: 0,
-                        enforcement: RateLimitEnforcement::Hard,
-                        message: format!(
-                            "Rate limit pool '{pool_id}' referenced by operation \
-                             '{operation}' is not registered; rejecting fail-closed"
-                        ),
-                    });
-                }
+        // Fail-closed guard: reject up-front if any referenced pool is
+        // missing, so the subsequent phases operate on a consistent set.
+        for pool_id in pool_ids {
+            if !pools.contains_key(pool_id) {
+                return Some(RateLimitError {
+                    pool_id: pool_id.clone(),
+                    limit: 0,
+                    current: 0,
+                    retry_after_ms: 0,
+                    enforcement: RateLimitEnforcement::Hard,
+                    message: format!(
+                        "Rate limit pool '{pool_id}' referenced by operation \
+                         '{operation}' is not registered; rejecting fail-closed"
+                    ),
+                });
             }
+        }
 
-            // Phase 1: Check capacity (all-or-nothing)
-            for pool_id in pool_ids {
-                if let Some(pool_state) = pools.get_mut(pool_id) {
-                    if let Err(err) = pool_state.check_consume(amount) {
-                        if !err.is_soft() {
-                            return Some(err);
-                        }
+        // Phase 1: Check capacity (all-or-nothing)
+        for pool_id in pool_ids {
+            if let Some(pool_state) = pools.get_mut(pool_id) {
+                if let Err(err) = pool_state.check_consume(amount) {
+                    if !err.is_soft() {
+                        return Some(err);
                     }
                 }
             }
+        }
 
-            // Phase 2: Consume
-            for pool_id in pool_ids {
-                if let Some(pool_state) = pools.get_mut(pool_id) {
-                    if let Err(err) = pool_state.try_consume(amount) {
-                        if err.is_soft() {
-                            tracing::warn!(
-                                pool = %pool_id,
-                                operation = %operation,
-                                "Soft rate limit exceeded: {}",
-                                err.message
-                            );
-                            pool_state.force_consume(amount);
-                        }
+        // Phase 2: Consume
+        for pool_id in pool_ids {
+            if let Some(pool_state) = pools.get_mut(pool_id) {
+                if let Err(err) = pool_state.try_consume(amount) {
+                    if err.is_soft() {
+                        tracing::warn!(
+                            pool = %pool_id,
+                            operation = %operation,
+                            "Soft rate limit exceeded: {}",
+                            err.message
+                        );
+                        pool_state.force_consume(amount);
                     }
                 }
             }
+        }
 
-            let checkpoint_file = self.checkpoint_file_for_locked(&pools);
-            drop(pools);
-            checkpoint_file
-        };
+        // Keep the pool write lock until the corresponding snapshot has been
+        // persisted. Otherwise an older snapshot can acquire the I/O lock
+        // after a newer snapshot and regress the on-disk checkpoint state.
+        let checkpoint_file = self.checkpoint_file_for_locked(&pools);
         self.persist_checkpoint_file(checkpoint_file);
 
         None
@@ -745,17 +740,13 @@ impl RateLimitTracker {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn reset_all(&self) {
-        let checkpoint_file = {
-            let mut pools = self.pools.write().expect("lock poisoned");
-            for state in pools.values_mut() {
-                state.prev_count = 0;
-                state.curr_count = 0;
-                state.window_start = Instant::now();
-            }
-            let checkpoint_file = self.checkpoint_file_for_locked(&pools);
-            drop(pools);
-            checkpoint_file
-        };
+        let mut pools = self.pools.write().expect("lock poisoned");
+        for state in pools.values_mut() {
+            state.prev_count = 0;
+            state.curr_count = 0;
+            state.window_start = Instant::now();
+        }
+        let checkpoint_file = self.checkpoint_file_for_locked(&pools);
         self.persist_checkpoint_file(checkpoint_file);
     }
 
@@ -2747,7 +2738,9 @@ mod tests {
 
         let state_dir = unique_state_dir("concurrent-persist");
         let decls = RateLimitDeclarations {
-            limits: vec![test_pool("api", 1_000_000, 60)],
+            // This test targets persist ordering; keep the window longer than
+            // slow CI/storage runs so the fixture cannot roll over mid-test.
+            limits: vec![test_pool("api", 1_000_000, 86_400)],
             tool_pool_map: HashMap::from([("op".to_string(), vec!["api".to_string()])]),
         };
         let tracker = Arc::new(RateLimitTracker::from_declarations_with_state_dir(

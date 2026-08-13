@@ -525,6 +525,11 @@ pub const LOCAL_MCP_CATALOG_TOOLS: [&str; 7] = [
 /// stable even when `serde_json` is built with `preserve_order`. The digest is
 /// metadata only; the schema itself is never emitted by the adapter's receipts
 /// or logs.
+///
+/// # Panics
+///
+/// Panics only if `serde_json` cannot serialize a value that it previously
+/// represented as [`serde_json::Value`].
 #[must_use]
 pub fn local_mcp_schema_digest(schema: &serde_json::Value) -> String {
     blake3::hash(
@@ -538,7 +543,7 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(object) => {
             let mut entries: Vec<_> = object.iter().collect();
-            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_unstable_by_key(|(key, _)| *key);
             let mut canonical = serde_json::Map::new();
             for (key, child) in entries {
                 canonical.insert(key.clone(), canonical_json(child));
@@ -593,6 +598,10 @@ impl LocalMcpPolicy {
     ///
     /// # Errors
     /// Returns a manifest error for any drift from the fixed Linux MVP policy.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the fixed local MCP policy is validated as one fail-closed contract"
+    )]
     pub fn validate(&self) -> Result<(), ManifestError> {
         if self.package_id.is_empty()
             || self
@@ -3160,6 +3169,9 @@ impl Serialize for Base64Bytes {
 pub struct HostEgressContext {
     pub connector_id: String,
     pub operation_id: String,
+    /// Canonical logical FCP resource checked against the capability token.
+    /// This is distinct from the HTTP/TCP transport target.
+    pub resource_uri: String,
     pub zone_id: String,
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3253,6 +3265,138 @@ pub struct HostEgressTcpResponse {
     pub egress: HostEgressDecisionMetadata,
 }
 
+/// Version of the connector-to-host inherited-channel wire schema.
+pub const HOST_EGRESS_WIRE_SCHEMA_VERSION: u16 = 1;
+
+/// Maximum serialized frame size for the inherited host-egress wire channel.
+pub const HOST_EGRESS_WIRE_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Fixed host-egress route carried by an inherited-channel request.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HostEgressWireRoute {
+    /// Credential-bearing HTTP mediation.
+    Http,
+    /// Bounded TCP exchange mediation.
+    Tcp,
+}
+
+impl fmt::Debug for HostEgressWireRoute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Http => "HTTP",
+            Self::Tcp => "TCP",
+        })
+    }
+}
+
+/// Typed payload for a host-egress inherited-channel request.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "UPPERCASE",
+    deny_unknown_fields
+)]
+pub enum HostEgressWireRequestPayload {
+    /// HTTP proxy request payload.
+    Http(HostEgressHttpRequest),
+    /// TCP proxy request payload.
+    Tcp(HostEgressTcpRequest),
+}
+
+/// One bounded request on the inherited host-egress channel.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressWireRequest {
+    /// Wire schema version.
+    pub schema_version: u16,
+    /// Monotonic request identifier scoped to one channel.
+    pub request_id: u64,
+    /// Per-launch authentication material.
+    pub auth_token: String,
+    /// Fixed mediation route.
+    pub route: HostEgressWireRoute,
+    /// Route-specific typed payload.
+    pub payload: HostEgressWireRequestPayload,
+}
+
+impl fmt::Debug for HostEgressWireRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostEgressWireRequest")
+            .field("schema_version", &self.schema_version)
+            .field("request_id", &self.request_id)
+            .field("auth_token", &"[redacted]")
+            .field("route", &self.route)
+            .field("payload", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Typed response error code carried by an inherited-channel response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostEgressWireError {
+    /// The host denied the mediated operation.
+    Rejected,
+    /// The request envelope or route was invalid.
+    InvalidRequest,
+    /// The host could not complete the mediated operation.
+    Internal,
+}
+
+/// Typed body for a successful inherited-channel response.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "UPPERCASE",
+    deny_unknown_fields
+)]
+pub enum HostEgressWireResponseBody {
+    /// HTTP proxy response body.
+    Http(HostEgressHttpResponse),
+    /// TCP proxy response body.
+    Tcp(HostEgressTcpResponse),
+}
+
+/// One bounded response on the inherited host-egress channel.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressWireResponse {
+    /// Wire schema version.
+    pub schema_version: u16,
+    /// Echo of the request identifier.
+    pub request_id: u64,
+    /// Echo of the fixed mediation route.
+    pub route: HostEgressWireRoute,
+    /// Host mediation status.
+    pub status: u16,
+    /// Typed successful response body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<HostEgressWireResponseBody>,
+    /// Typed failure code for non-success statuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<HostEgressWireError>,
+}
+
+impl fmt::Debug for HostEgressWireResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostEgressWireResponse")
+            .field("schema_version", &self.schema_version)
+            .field("request_id", &self.request_id)
+            .field("route", &self.route)
+            .field("status", &self.status)
+            .field("body", &self.body.as_ref().map(|_| "[redacted]"))
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 /// Embed a connector manifest in the output binary (NORMATIVE).
 ///
 /// Connectors MUST embed the manifest in a platform-specific section so it can be extracted
@@ -3298,6 +3442,7 @@ mod tests {
             context: HostEgressContext {
                 connector_id: "fcp.test.egress:utility:1.0.0".to_string(),
                 operation_id: "test.http".to_string(),
+                resource_uri: "fcp-test://egress/http".to_string(),
                 zone_id: "z:work".to_string(),
                 request_id: "req-d9us6-contract".to_string(),
                 correlation_id: Some("corr-d9us6-contract".to_string()),
@@ -3319,6 +3464,18 @@ mod tests {
             serde_json::from_str(&json).expect("decode host egress request");
         assert_eq!(decoded.body.expect("body").as_bytes(), &[0_u8, 1, 2, 255]);
         assert_eq!(decoded.context.operation_id, "test.http");
+        assert_eq!(decoded.context.resource_uri, "fcp-test://egress/http");
+
+        let mut missing_resource =
+            serde_json::to_value(&request).expect("serialize strict host egress request");
+        missing_resource["context"]
+            .as_object_mut()
+            .expect("context object")
+            .remove("resource_uri");
+        assert!(
+            serde_json::from_value::<HostEgressHttpRequest>(missing_resource).is_err(),
+            "canonical logical resource must be required"
+        );
     }
 
     #[test]

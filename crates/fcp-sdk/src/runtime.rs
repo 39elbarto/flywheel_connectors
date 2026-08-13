@@ -31,7 +31,10 @@
 //! ```
 
 use std::collections::{VecDeque, hash_map::DefaultHasher};
+use std::fmt;
 use std::hash::{Hash, Hasher};
+#[cfg(feature = "connector-http")]
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -43,7 +46,10 @@ use fcp_manifest::{ConnectorManifest, ManifestTimeouts};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "connector-http")]
-use crate::migration::HostEgressProxyClient;
+use crate::migration::{
+    HostEgressLaunchValues, HostEgressProxyClient, HostEgressProxyConfigError,
+    HostEgressProxyLimits, validate_host_egress_launch_values,
+};
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_cbor::CanonicalSerializer;
 use fcp_prelude::{
@@ -96,7 +102,29 @@ pub struct ConnectorRuntime {
     request_ctx_root: ExecutionContext,
 }
 
+#[cfg(feature = "connector-http")]
+#[derive(Clone)]
+struct HostEgressUdsConfig {
+    socket_path: PathBuf,
+    auth_token: String,
+}
+
+#[cfg(feature = "connector-http")]
+#[derive(Clone)]
+struct HostEgressInheritedFdConfig {
+    client: Arc<HostEgressProxyClient>,
+}
+
 const MANIFEST_REQUEST_TIMEOUT_ENV_VAR: &str = "FCP_REQUEST_TIMEOUT_MS";
+/// Reserved host-launch transport selector for mediated egress.
+pub const HOST_EGRESS_TRANSPORT_ENV_VAR: &str = "FCP_HOST_EGRESS_TRANSPORT";
+/// Reserved host-launch Unix-domain-socket path for mediated egress.
+pub const HOST_EGRESS_SOCKET_ENV_VAR: &str = "FCP_HOST_EGRESS_SOCKET";
+/// Reserved host-launch auth token for mediated egress.
+pub const HOST_EGRESS_AUTH_TOKEN_ENV_VAR: &str = "FCP_HOST_EGRESS_AUTH_TOKEN";
+/// Reserved host-launch inherited connected-channel file descriptor.
+pub const HOST_EGRESS_FD_ENV_VAR: &str = "FCP_HOST_EGRESS_FD";
+/// Legacy/test-only URL environment variable. New launch loading never reads it.
 const HOST_EGRESS_PROXY_URL_ENV_VAR: &str = "FCP_HOST_EGRESS_PROXY_URL";
 const ALLOW_AMBIENT_TIMEOUT_OVERRIDE_ENV_VAR: &str = "FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE";
 
@@ -179,7 +207,7 @@ pub enum ConnectorRuntimeConfigError {
 }
 
 /// Configuration for [`ConnectorRuntime`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConnectorRuntimeConfig {
     /// Default timeout for request-scoped operations.
     pub request_timeout: Duration,
@@ -192,6 +220,51 @@ pub struct ConnectorRuntimeConfig {
     /// Connector-facing host egress endpoint. When present, SDK egress helpers
     /// use `/rpc/egress/*` instead of opening direct sockets.
     pub host_egress_proxy_url: Option<String>,
+    /// Total proxy upload/download wait budget.
+    pub host_egress_proxy_request_timeout: Duration,
+    /// Maximum outer proxy JSON envelope size. This is separate from and must
+    /// exceed connector-specific inner provider-body limits.
+    pub host_egress_proxy_max_outer_envelope_bytes: usize,
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    host_egress_uds: Option<HostEgressUdsConfig>,
+    #[cfg(feature = "connector-http")]
+    host_egress_inherited_fd: Option<HostEgressInheritedFdConfig>,
+}
+
+impl fmt::Debug for ConnectorRuntimeConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("ConnectorRuntimeConfig");
+        debug
+            .field("request_timeout", &self.request_timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("wall_clock_timeout", &self.wall_clock_timeout)
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .field(
+                "host_egress_proxy_url",
+                &self.host_egress_proxy_url.as_ref().map(|_| "[configured]"),
+            )
+            .field(
+                "host_egress_proxy_request_timeout",
+                &self.host_egress_proxy_request_timeout,
+            )
+            .field(
+                "host_egress_proxy_max_outer_envelope_bytes",
+                &self.host_egress_proxy_max_outer_envelope_bytes,
+            );
+        #[cfg(feature = "connector-http")]
+        debug.field(
+            "host_egress_uds",
+            &self.host_egress_uds.as_ref().map(|_| "[configured]"),
+        );
+        debug.field(
+            "host_egress_inherited_fd",
+            &self
+                .host_egress_inherited_fd
+                .as_ref()
+                .map(|_| "[configured]"),
+        );
+        debug.finish()
+    }
 }
 
 impl Default for ConnectorRuntimeConfig {
@@ -202,6 +275,12 @@ impl Default for ConnectorRuntimeConfig {
             wall_clock_timeout: Duration::from_secs(120),
             shutdown_timeout: Duration::from_secs(30),
             host_egress_proxy_url: None,
+            host_egress_proxy_request_timeout: Duration::from_secs(30),
+            host_egress_proxy_max_outer_envelope_bytes: 16 * 1024 * 1024,
+            #[cfg(feature = "connector-http")]
+            host_egress_uds: None,
+            #[cfg(feature = "connector-http")]
+            host_egress_inherited_fd: None,
         }
     }
 }
@@ -216,6 +295,12 @@ impl ConnectorRuntimeConfig {
             wall_clock_timeout: Duration::from_secs(60),
             shutdown_timeout: Duration::from_secs(30),
             host_egress_proxy_url: None,
+            host_egress_proxy_request_timeout: Duration::from_secs(30),
+            host_egress_proxy_max_outer_envelope_bytes: 16 * 1024 * 1024,
+            #[cfg(feature = "connector-http")]
+            host_egress_uds: None,
+            #[cfg(feature = "connector-http")]
+            host_egress_inherited_fd: None,
         }
     }
 
@@ -297,8 +382,26 @@ impl ConnectorRuntimeConfig {
         self
     }
 
-    /// Builder: read the host egress proxy base URL from the launch
-    /// environment the host gives strict host-proxy connectors.
+    /// Builder: set the total host-proxy request/response timeout.
+    #[must_use]
+    pub const fn with_host_egress_proxy_request_timeout(mut self, timeout: Duration) -> Self {
+        self.host_egress_proxy_request_timeout = timeout;
+        self
+    }
+
+    /// Builder: set the maximum outer host-proxy JSON envelope size.
+    #[must_use]
+    pub const fn with_host_egress_proxy_max_outer_envelope_bytes(
+        mut self,
+        max_bytes: usize,
+    ) -> Self {
+        self.host_egress_proxy_max_outer_envelope_bytes = max_bytes;
+        self
+    }
+
+    /// Legacy/test-only builder: read the loopback proxy URL from the launch
+    /// environment. Production launch code must use
+    /// [`Self::with_host_egress_uds_from_env`], which never reads this URL.
     #[must_use]
     pub fn with_host_egress_proxy_url_from_env(mut self) -> Self {
         if let Some(url) = std::env::var_os(HOST_EGRESS_PROXY_URL_ENV_VAR)
@@ -308,6 +411,95 @@ impl ConnectorRuntimeConfig {
             self.host_egress_proxy_url = Some(url);
         }
         self
+    }
+
+    /// Load the reserved production host-egress transport from host-launch variables.
+    ///
+    /// The loader recognizes `uds-v1` with a socket path or `inherited-fd-v1`
+    /// with a connected file descriptor. Both require
+    /// `FCP_HOST_EGRESS_AUTH_TOKEN`. It never reads the legacy
+    /// `FCP_HOST_EGRESS_PROXY_URL` variable and never falls back to that URL.
+    ///
+    /// # Errors
+    /// Returns a redaction-safe configuration error for incomplete, conflicting,
+    /// unsupported, or unsafe host-launch values.
+    #[cfg(feature = "connector-http")]
+    pub fn with_host_egress_from_env(self) -> Result<Self, HostEgressProxyConfigError> {
+        let transport = std::env::var_os(HOST_EGRESS_TRANSPORT_ENV_VAR)
+            .map(|value| value.to_string_lossy().into_owned());
+        let socket_path = std::env::var_os(HOST_EGRESS_SOCKET_ENV_VAR)
+            .map(|value| value.to_string_lossy().into_owned());
+        let auth_token = std::env::var_os(HOST_EGRESS_AUTH_TOKEN_ENV_VAR)
+            .map(|value| value.to_string_lossy().into_owned());
+        let inherited_fd = std::env::var_os(HOST_EGRESS_FD_ENV_VAR)
+            .map(|value| value.to_string_lossy().into_owned());
+        self.with_host_egress_values(
+            transport.as_deref(),
+            socket_path.as_deref(),
+            auth_token.as_deref(),
+            inherited_fd.as_deref(),
+        )
+    }
+
+    /// Omission-compatible name for the production host-launch loader.
+    #[cfg(feature = "connector-http")]
+    pub fn with_host_egress_uds_from_env(self) -> Result<Self, HostEgressProxyConfigError> {
+        self.with_host_egress_from_env()
+    }
+
+    #[cfg(feature = "connector-http")]
+    fn with_host_egress_values(
+        mut self,
+        transport: Option<&str>,
+        socket_path: Option<&str>,
+        auth_token: Option<&str>,
+        inherited_fd: Option<&str>,
+    ) -> Result<Self, HostEgressProxyConfigError> {
+        if transport.is_some()
+            && (self.host_egress_proxy_url.is_some()
+                || self.host_egress_uds.is_some()
+                || self.host_egress_inherited_fd.is_some())
+        {
+            return Err(HostEgressProxyConfigError::TransportConflict);
+        }
+        let launch_values =
+            validate_host_egress_launch_values(transport, socket_path, auth_token, inherited_fd)?;
+        match launch_values {
+            Some(HostEgressLaunchValues::UnixDomainSocket {
+                socket_path,
+                auth_token,
+            }) => {
+                self.host_egress_uds = Some(HostEgressUdsConfig {
+                    socket_path,
+                    auth_token,
+                });
+            }
+            Some(HostEgressLaunchValues::InheritedFd { fd, auth_token }) => {
+                let client = HostEgressProxyClient::from_inherited_fd(
+                    fd,
+                    &auth_token,
+                    HostEgressProxyLimits {
+                        request_timeout: self.host_egress_proxy_request_timeout,
+                        max_outer_envelope_bytes: self.host_egress_proxy_max_outer_envelope_bytes,
+                    },
+                )?;
+                self.host_egress_inherited_fd = Some(HostEgressInheritedFdConfig {
+                    client: Arc::new(client),
+                });
+            }
+            None => {}
+        }
+        Ok(self)
+    }
+
+    #[cfg(all(feature = "connector-http", test))]
+    fn with_host_egress_uds_values(
+        self,
+        transport: Option<&str>,
+        socket_path: Option<&str>,
+        auth_token: Option<&str>,
+    ) -> Result<Self, HostEgressProxyConfigError> {
+        self.with_host_egress_values(transport, socket_path, auth_token, None)
     }
 
     pub(crate) fn from_manifest_with_request_timeout_override(
@@ -428,10 +620,51 @@ impl ConnectorRuntime {
     ///
     /// The helper is only available with `connector-http`, matching the rest of
     /// the SDK HTTP client surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redaction-safe configuration error when the configured proxy
+    /// endpoint or transport limits fail closed validation.
     #[cfg(feature = "connector-http")]
-    #[must_use]
-    pub fn host_egress_proxy_client(&self) -> Option<HostEgressProxyClient> {
-        self.host_egress_proxy_url().map(HostEgressProxyClient::new)
+    pub fn host_egress_proxy_client(
+        &self,
+    ) -> Result<Option<HostEgressProxyClient>, HostEgressProxyConfigError> {
+        if let Some(inherited_fd) = self.config.host_egress_inherited_fd.as_ref() {
+            if self.config.host_egress_proxy_url.is_some() || self.config.host_egress_uds.is_some()
+            {
+                return Err(HostEgressProxyConfigError::TransportConflict);
+            }
+            return Ok(Some(inherited_fd.client.as_ref().clone()));
+        }
+        if let Some(uds) = self.config.host_egress_uds.as_ref() {
+            if self.config.host_egress_proxy_url.is_some() {
+                return Err(HostEgressProxyConfigError::TransportConflict);
+            }
+            return HostEgressProxyClient::from_unix_socket(
+                uds.socket_path.clone(),
+                &uds.auth_token,
+                HostEgressProxyLimits {
+                    request_timeout: self.config.host_egress_proxy_request_timeout,
+                    max_outer_envelope_bytes: self
+                        .config
+                        .host_egress_proxy_max_outer_envelope_bytes,
+                },
+            )
+            .map(Some);
+        }
+        self.host_egress_proxy_url()
+            .map(|url| {
+                HostEgressProxyClient::with_limits(
+                    url,
+                    HostEgressProxyLimits {
+                        request_timeout: self.config.host_egress_proxy_request_timeout,
+                        max_outer_envelope_bytes: self
+                            .config
+                            .host_egress_proxy_max_outer_envelope_bytes,
+                    },
+                )
+            })
+            .transpose()
     }
 }
 
@@ -3001,6 +3234,7 @@ deny_ptrace = true
         );
         let client = runtime
             .host_egress_proxy_client()
+            .expect("valid host egress proxy configuration")
             .expect("configured host egress proxy client");
         assert_eq!(
             client.http_endpoint(),
@@ -3010,6 +3244,298 @@ deny_ptrace = true
             client.tcp_endpoint(),
             "http://127.0.0.1:7878/rpc/egress/tcp"
         );
+    }
+
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn host_egress_runtime_rejects_unsafe_proxy_configuration() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default()
+                .with_host_egress_proxy_url("https://proxy.example.test"),
+        );
+        let error = runtime
+            .host_egress_proxy_client()
+            .expect_err("DNS proxy endpoint must fail closed");
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains("proxy.example.test"));
+    }
+
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn host_egress_uds_launch_loader_rejects_missing_or_ambient_values() {
+        let missing_socket = ConnectorRuntimeConfig::default()
+            .with_host_egress_uds_values(Some("uds-v1"), None, Some("token"))
+            .expect_err("UDS launch must require a socket path");
+        assert!(matches!(
+            missing_socket,
+            HostEgressProxyConfigError::MissingSocket
+        ));
+
+        let missing_token = ConnectorRuntimeConfig::default()
+            .with_host_egress_uds_values(Some("uds-v1"), Some("/tmp/egress.sock"), None)
+            .expect_err("UDS launch must require an auth token");
+        assert!(matches!(
+            missing_token,
+            HostEgressProxyConfigError::MissingAuthToken
+        ));
+
+        let invalid_token = ConnectorRuntimeConfig::default()
+            .with_host_egress_uds_values(Some("uds-v1"), Some("/tmp/egress.sock"), Some(""))
+            .expect_err("UDS launch must reject an empty auth token");
+        assert!(matches!(
+            invalid_token,
+            HostEgressProxyConfigError::InvalidAuthToken
+        ));
+
+        let ambient_socket_without_selector = ConnectorRuntimeConfig::default()
+            .with_host_egress_uds_values(None, Some("/tmp/egress.sock"), Some("token"))
+            .expect_err("reserved values without selector must fail closed");
+        assert!(matches!(
+            ambient_socket_without_selector,
+            HostEgressProxyConfigError::InvalidTransport
+        ));
+
+        let legacy = ConnectorRuntimeConfig::default()
+            .with_host_egress_proxy_url("http://127.0.0.1:7878/")
+            .with_host_egress_uds_values(None, None, None)
+            .expect("new loader must leave explicit legacy configuration untouched");
+        assert_eq!(
+            legacy.host_egress_proxy_url.as_deref(),
+            Some("http://127.0.0.1:7878/")
+        );
+    }
+
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn host_egress_uds_launch_loader_rejects_transport_conflicts_redacted() {
+        let config =
+            ConnectorRuntimeConfig::default().with_host_egress_proxy_url("http://127.0.0.1:7878/");
+        let error = config
+            .with_host_egress_uds_values(
+                Some("uds-v1"),
+                Some("/private/host-egress.sock"),
+                Some("secret-auth-token"),
+            )
+            .expect_err("UDS plus legacy URL must fail closed");
+        assert!(matches!(
+            error,
+            HostEgressProxyConfigError::TransportConflict
+        ));
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains("/private/host-egress.sock"));
+        assert!(!rendered.contains("secret-auth-token"));
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn host_egress_inherited_loader_rejects_partial_and_conflicting_values() {
+        let missing_fd = ConnectorRuntimeConfig::default()
+            .with_host_egress_values(Some("inherited-fd-v1"), None, Some("token"), None)
+            .expect_err("inherited transport must require an FD");
+        assert!(matches!(missing_fd, HostEgressProxyConfigError::MissingFd));
+
+        let missing_token = ConnectorRuntimeConfig::default()
+            .with_host_egress_values(Some("inherited-fd-v1"), None, None, Some("3"))
+            .expect_err("inherited transport must require auth");
+        assert!(matches!(
+            missing_token,
+            HostEgressProxyConfigError::MissingAuthToken
+        ));
+
+        let path_conflict = ConnectorRuntimeConfig::default()
+            .with_host_egress_values(
+                Some("inherited-fd-v1"),
+                Some("/private/egress.sock"),
+                Some("secret-auth-token"),
+                Some("3"),
+            )
+            .expect_err("inherited transport must reject socket-path mixing");
+        assert!(matches!(
+            path_conflict,
+            HostEgressProxyConfigError::TransportConflict
+        ));
+
+        for value in ["", "-1", "0", "2", "not-a-number", "4294967296"] {
+            let error = ConnectorRuntimeConfig::default()
+                .with_host_egress_values(Some("inherited-fd-v1"), None, Some("token"), Some(value))
+                .expect_err("invalid inherited FD must fail closed");
+            assert!(matches!(error, HostEgressProxyConfigError::InvalidFd));
+        }
+
+        let legacy_conflict = ConnectorRuntimeConfig::default()
+            .with_host_egress_proxy_url("http://127.0.0.1:7878/")
+            .with_host_egress_values(
+                Some("inherited-fd-v1"),
+                None,
+                Some("secret-auth-token"),
+                Some("3"),
+            )
+            .expect_err("inherited transport plus legacy URL must fail closed");
+        assert!(matches!(
+            legacy_conflict,
+            HostEgressProxyConfigError::TransportConflict
+        ));
+        let rendered = format!("{legacy_conflict:?} {legacy_conflict}");
+        assert!(!rendered.contains("secret-auth-token"));
+        assert!(!rendered.contains("3"));
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn host_egress_inherited_client_is_claimed_once_across_clones() {
+        use crate::migration::{
+            HOST_EGRESS_WIRE_SCHEMA_VERSION, HostEgressWireRequest, HostEgressWireRequestPayload,
+            HostEgressWireResponse, HostEgressWireResponseBody, HostEgressWireRoute,
+        };
+        use std::io::Read;
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream as StdUnixStream;
+        use std::thread;
+
+        let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
+        let raw_fd = client_stream.into_raw_fd();
+        let peer_handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let mut frame = Vec::new();
+                let mut byte = [0_u8; 1];
+                loop {
+                    peer.read_exact(&mut byte).expect("read request frame");
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    frame.push(byte[0]);
+                }
+                let request: HostEgressWireRequest =
+                    serde_json::from_slice(&frame).expect("decode request frame");
+                assert_eq!(request.route, HostEgressWireRoute::Http);
+                let HostEgressWireRequestPayload::Http(http_request) = request.payload else {
+                    panic!("expected HTTP request payload");
+                };
+                let context = http_request.context;
+                let egress = fcp_manifest::HostEgressDecisionMetadata {
+                    connector_id: context.connector_id.clone(),
+                    operation_id: context.operation_id.clone(),
+                    zone_id: context.zone_id.clone(),
+                    request_id: context.request_id.clone(),
+                    correlation_id: context.correlation_id.clone(),
+                    execution_mode: "host_egress_proxy".to_string(),
+                    constraint_source: "test".to_string(),
+                    decision: "allow".to_string(),
+                    resolved_host: "api.example.test".to_string(),
+                    resolved_port: 443,
+                    credential_injected: false,
+                    elapsed_ms: 1,
+                };
+                let response = HostEgressWireResponse {
+                    schema_version: HOST_EGRESS_WIRE_SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    route: HostEgressWireRoute::Http,
+                    status: 200,
+                    body: Some(HostEgressWireResponseBody::Http(
+                        fcp_manifest::HostEgressHttpResponse {
+                            status: 200,
+                            headers: Vec::new(),
+                            body: fcp_manifest::Base64Bytes::from_vec(b"ok".to_vec()),
+                            egress,
+                        },
+                    )),
+                    error: None,
+                };
+                let encoded = serde_json::to_vec(&response).expect("encode response frame");
+                peer.write_all(&encoded).expect("write response frame");
+                peer.write_all(b"\n").expect("write response delimiter");
+            }
+        });
+
+        let raw_fd_text = raw_fd.to_string();
+        let config = ConnectorRuntimeConfig::default()
+            .with_host_egress_values(
+                Some("inherited-fd-v1"),
+                None,
+                Some("claim-once-auth"),
+                Some(&raw_fd_text),
+            )
+            .expect("inherited FD loader claims the launch descriptor");
+        let config_clone = config.clone();
+        let reclaimed = HostEgressProxyClient::from_inherited_fd(
+            raw_fd,
+            "claim-once-auth",
+            HostEgressProxyLimits::default(),
+        )
+        .expect_err("original launch FD must not be reclaimable");
+        assert!(matches!(
+            reclaimed,
+            HostEgressProxyConfigError::InheritedFdUnavailable
+        ));
+
+        let runtime = ConnectorRuntime::new(config);
+        let cloned_runtime = ConnectorRuntime::new(config_clone);
+        let first = runtime
+            .host_egress_proxy_client()
+            .expect("first client lookup")
+            .expect("inherited client configured");
+        let second = cloned_runtime
+            .host_egress_proxy_client()
+            .expect("second client lookup")
+            .expect("inherited client configured");
+        let request = fcp_manifest::HostEgressHttpRequest {
+            context: fcp_manifest::HostEgressContext {
+                connector_id: "fcp.test.claim-once:utility:1.0.0".to_string(),
+                operation_id: "messages.create".to_string(),
+                resource_uri: "fcp-test://claim-once/messages.create".to_string(),
+                zone_id: "z:work".to_string(),
+                request_id: "req-claim-once".to_string(),
+                correlation_id: Some("corr-req-claim-once".to_string()),
+                capability_token_cbor_b64: "claim-once-capability".to_string(),
+            },
+            url: "https://api.example.test".to_string(),
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+            credential_id: None,
+        };
+        let (first_response, second_response) = fcp_async_core::runtime::block_on_sync(async {
+            let first_response = first.http(&request).await;
+            let second_response = second.http(&request).await;
+            (first_response, second_response)
+        })
+        .expect("runtime layer");
+        assert_eq!(first_response.expect("first exchange").status, 200);
+        assert_eq!(second_response.expect("second exchange").status, 200);
+        peer_handle.join().expect("wire peer thread");
+    }
+
+    #[cfg(all(feature = "connector-http", not(target_os = "linux")))]
+    #[test]
+    fn host_egress_inherited_loader_rejects_unsupported_platform() {
+        let error = ConnectorRuntimeConfig::default()
+            .with_host_egress_values(
+                Some("inherited-fd-v1"),
+                None,
+                Some("secret-auth-token"),
+                Some("3"),
+            )
+            .expect_err("inherited channel must fail closed on unsupported platforms");
+        assert!(matches!(
+            error,
+            HostEgressProxyConfigError::UnsupportedPlatform
+        ));
+    }
+
+    #[cfg(all(feature = "connector-http", not(target_os = "linux")))]
+    #[test]
+    fn host_egress_uds_launch_loader_rejects_unsupported_platform() {
+        let error = ConnectorRuntimeConfig::default()
+            .with_host_egress_uds_values(
+                Some("uds-v1"),
+                Some("/private/host-egress.sock"),
+                Some("secret-auth-token"),
+            )
+            .expect_err("UDS must fail closed on unsupported platforms");
+        assert!(matches!(
+            error,
+            HostEgressProxyConfigError::UnsupportedPlatform
+        ));
     }
 
     #[test]

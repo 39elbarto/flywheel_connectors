@@ -26,6 +26,7 @@ fcp-cbor = { path = "../fcp-cbor", optional = true }
 fcp-manifest = { path = "../fcp-manifest" }
 fcp-policy = { path = "../fcp-policy" }
 fcp-store = { path = "../fcp-store", optional = true }
+fcp-sandbox = { path = "../fcp-sandbox", optional = true }
 jsonschema.workspace = true
 reqwest = { workspace = true, optional = true }
 semver = { workspace = true, optional = true }
@@ -37,7 +38,7 @@ tracing.workspace = true
 
 [features]
 cursor-store-object-store = ["dep:fcp-store", "dep:fcp-cbor", "dep:semver"]
-connector-http = ["dep:reqwest"]
+connector-http = ["dep:fcp-sandbox", "dep:reqwest"]
 
 [dev-dependencies]
 asupersync = { version = "=0.3.4", default-features = false, features = ["tracing-integration", "tls", "tls-native-roots"] }

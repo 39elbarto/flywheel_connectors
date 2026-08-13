@@ -201,9 +201,14 @@ use std::time::Duration;
 use fcp_async_core::http::HttpClientError;
 use fcp_async_core::{AsyncError, ExecutionContext};
 #[cfg(feature = "connector-http")]
-use fcp_manifest::{
-    HostEgressHttpRequest, HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse,
+pub use fcp_manifest::{
+    HOST_EGRESS_WIRE_MAX_FRAME_BYTES, HOST_EGRESS_WIRE_SCHEMA_VERSION, HostEgressHttpRequest,
+    HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse, HostEgressWireError,
+    HostEgressWireRequest, HostEgressWireRequestPayload, HostEgressWireResponse,
+    HostEgressWireResponseBody, HostEgressWireRoute,
 };
+#[cfg(feature = "connector-http")]
+use serde::Serialize;
 use tracing::{debug, warn};
 
 use crate::FcpError;
@@ -211,39 +216,342 @@ use crate::error_mapping::ConnectorErrorMapping;
 pub use crate::error_mapping::map_async_to_fcp_error;
 use crate::retry::{RetryDecision, RetryPolicy};
 
-#[cfg(test)]
+#[cfg(feature = "connector-http")]
+use std::{
+    fmt,
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+use fcp_async_core::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UnixStream,
+};
+
+#[cfg(all(test, not(feature = "connector-http")))]
 use std::fmt;
 
 /// Connector-side client for the host egress proxy.
 #[cfg(feature = "connector-http")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HostEgressProxyClient {
-    base_url: String,
+    base_url: reqwest::Url,
     client: reqwest::Client,
+    max_outer_envelope_bytes: usize,
+    transport: HostEgressTransport,
+    auth_token: Option<String>,
+    socket_path: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    inherited_channel: Option<Arc<InheritedFdChannel>>,
+}
+
+/// Transport selected for a host-egress proxy client.
+#[cfg(feature = "connector-http")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostEgressTransport {
+    /// Host-launch-injected Unix-domain-socket transport.
+    UnixDomainSocket,
+    /// Host-launch-injected connected Unix-domain-socket file descriptor.
+    InheritedFd,
+    /// Explicit compatibility transport for tests and legacy callers.
+    LegacyLoopback,
+}
+
+#[cfg(feature = "connector-http")]
+impl fmt::Debug for HostEgressProxyClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let auth_token = self.auth_token.as_ref().map(|_| "[redacted]");
+        let socket_path = self.socket_path.as_ref().map(|_| "[redacted]");
+        #[cfg(target_os = "linux")]
+        let inherited_channel = self.inherited_channel.as_ref().map(|_| "[configured]");
+        let mut debug = formatter.debug_struct("HostEgressProxyClient");
+        debug
+            .field("base_url", &"[redacted]")
+            .field("client", &"[configured]")
+            .field("transport", &self.transport)
+            .field("max_outer_envelope_bytes", &self.max_outer_envelope_bytes)
+            .field("auth_token", &auth_token)
+            .field("socket_path", &socket_path);
+        #[cfg(target_os = "linux")]
+        {
+            debug.field("inherited_channel", &inherited_channel);
+        }
+        debug.finish()
+    }
+}
+
+/// Connector-side limits for the host-egress proxy transport.
+#[cfg(feature = "connector-http")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostEgressProxyLimits {
+    /// Total wait budget for proxy request upload plus response download.
+    pub request_timeout: Duration,
+    /// Maximum JSON envelope received from the proxy. This is intentionally
+    /// larger than the inner provider-body limit because base64 and JSON add
+    /// overhead around the provider payload.
+    pub max_outer_envelope_bytes: usize,
+}
+
+#[cfg(feature = "connector-http")]
+impl Default for HostEgressProxyLimits {
+    fn default() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(30),
+            max_outer_envelope_bytes: HOST_EGRESS_WIRE_MAX_FRAME_BYTES,
+        }
+    }
+}
+
+/// Safe configuration errors for [`HostEgressProxyClient`].
+#[cfg(feature = "connector-http")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HostEgressProxyConfigError {
+    /// Proxy URL was malformed or used a forbidden URL component.
+    #[error("invalid host egress proxy endpoint")]
+    InvalidEndpoint,
+    /// Proxy endpoint was not a literal loopback IP authority.
+    #[error("host egress proxy endpoint must use a literal loopback IP")]
+    NonLoopbackEndpoint,
+    /// Proxy transport limits were zero or otherwise unusable.
+    #[error("invalid host egress proxy limits")]
+    InvalidLimits,
+    /// The bounded reqwest client could not be constructed.
+    #[error("host egress proxy client configuration failed")]
+    ClientConfiguration,
+    /// The launch transport selector was missing or invalid.
+    #[error("invalid host egress transport selection")]
+    InvalidTransport,
+    /// The launch selector requested a transport unsupported by this target.
+    #[error("host egress transport is unsupported on this platform")]
+    UnsupportedPlatform,
+    /// The launch environment attempted to configure two transports.
+    #[error("host egress transport configuration conflicts")]
+    TransportConflict,
+    /// The launch environment did not provide a socket path.
+    #[error("host egress socket path is required")]
+    MissingSocket,
+    /// The socket path was not safe for host-mediated transport.
+    #[error("invalid host egress socket path")]
+    InvalidSocketPath,
+    /// The configured socket path does not exist.
+    #[error("host egress socket was not found")]
+    SocketNotFound,
+    /// The socket path could not be inspected safely.
+    #[error("host egress socket could not be inspected")]
+    SocketUnavailable,
+    /// The configured path is not a Unix socket.
+    #[error("host egress path is not a Unix socket")]
+    SocketNotSocket,
+    /// The configured socket or one of its path components is a symlink.
+    #[error("host egress socket path must not contain symlinks")]
+    SocketSymlink,
+    /// The socket or its parent directory has unsafe permissions.
+    #[error("host egress socket permissions are unsafe")]
+    SocketPermissions,
+    /// The launch environment did not provide an auth token.
+    #[error("host egress auth token is required")]
+    MissingAuthToken,
+    /// The auth token was empty, malformed, or exceeded the bound.
+    #[error("invalid host egress auth token")]
+    InvalidAuthToken,
+    /// The inherited channel file descriptor was not provided.
+    #[error("host egress inherited channel file descriptor is required")]
+    MissingFd,
+    /// The inherited channel file descriptor value was malformed or unsafe.
+    #[error("invalid host egress inherited channel file descriptor")]
+    InvalidFd,
+    /// The inherited channel file descriptor could not be claimed.
+    #[error("host egress inherited channel is unavailable")]
+    InheritedFdUnavailable,
+    /// The inherited descriptor was not a connected Unix stream.
+    #[error("host egress inherited channel is not a connected Unix stream")]
+    InheritedFdNotUnixStream,
 }
 
 #[cfg(feature = "connector-http")]
 impl HostEgressProxyClient {
-    /// Construct a host egress proxy client from a base URL such as
-    /// `http://127.0.0.1:7878`.
-    #[must_use]
-    pub fn new(base_url: impl Into<String>) -> Self {
-        Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
-            client: reqwest::Client::new(),
+    /// Construct a bounded legacy loopback client using conservative defaults.
+    ///
+    /// This is retained for existing callers and tests only. Production host
+    /// launches must use [`Self::from_unix_socket`] instead.
+    ///
+    /// # Errors
+    /// Returns a redaction-safe error when the endpoint is not an HTTP(S)
+    /// literal loopback origin or the client cannot be configured.
+    pub fn new(base_url: &str) -> Result<Self, HostEgressProxyConfigError> {
+        Self::legacy_loopback_with_limits(base_url, HostEgressProxyLimits::default())
+    }
+
+    /// Construct a bounded legacy loopback client with explicit limits.
+    ///
+    /// This compatibility API is intentionally URL-based and must not be used
+    /// by the host-launch production path.
+    ///
+    /// # Errors
+    /// Returns a redaction-safe error for invalid endpoints or limits.
+    pub fn with_limits(
+        base_url: &str,
+        limits: HostEgressProxyLimits,
+    ) -> Result<Self, HostEgressProxyConfigError> {
+        Self::legacy_loopback_with_limits(base_url, limits)
+    }
+
+    /// Construct a production client over a validated Unix-domain socket.
+    ///
+    /// Requests use reqwest's native `ClientBuilder::unix_socket` transport,
+    /// a fixed internal origin, and fixed `/rpc/egress/http` and
+    /// `/rpc/egress/tcp` routes. The socket path and auth token are never
+    /// included in this client's debug representation or returned errors.
+    ///
+    /// # Errors
+    /// Returns a redaction-safe error when the socket, token, limits, or
+    /// platform transport are invalid.
+    pub fn from_unix_socket(
+        socket_path: PathBuf,
+        auth_token: &str,
+        limits: HostEgressProxyLimits,
+    ) -> Result<Self, HostEgressProxyConfigError> {
+        if limits.request_timeout.is_zero() || limits.max_outer_envelope_bytes == 0 {
+            return Err(HostEgressProxyConfigError::InvalidLimits);
         }
+        let auth_token = validate_host_egress_auth_token(auth_token)?;
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = socket_path;
+            return Err(HostEgressProxyConfigError::UnsupportedPlatform);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            validate_unix_socket_path(&socket_path)?;
+            let base_url = fixed_unix_socket_origin()?;
+            let client = reqwest::Client::builder()
+                .timeout(limits.request_timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .unix_socket(socket_path.clone())
+                .build()
+                .map_err(|_| HostEgressProxyConfigError::ClientConfiguration)?;
+            Ok(Self {
+                base_url,
+                client,
+                max_outer_envelope_bytes: limits.max_outer_envelope_bytes,
+                transport: HostEgressTransport::UnixDomainSocket,
+                auth_token: Some(auth_token),
+                socket_path: Some(socket_path),
+                #[cfg(target_os = "linux")]
+                inherited_channel: None,
+            })
+        }
+    }
+
+    /// Construct the production client from one host-owned connected Unix
+    /// stream file descriptor. This constructor is crate-internal so a
+    /// connector cannot turn arbitrary model input into an FD capability;
+    /// production callers must use the reserved host-launch environment
+    /// loader.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_inherited_fd(
+        fd: i32,
+        auth_token: &str,
+        limits: HostEgressProxyLimits,
+    ) -> Result<Self, HostEgressProxyConfigError> {
+        if limits.request_timeout.is_zero() || limits.max_outer_envelope_bytes == 0 {
+            return Err(HostEgressProxyConfigError::InvalidLimits);
+        }
+        let auth_token = validate_host_egress_auth_token(auth_token)?;
+        let stream = claim_inherited_unix_stream(fd)?;
+        let base_url = fixed_unix_socket_origin()?;
+        let client = reqwest::Client::builder()
+            .timeout(limits.request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|_| HostEgressProxyConfigError::ClientConfiguration)?;
+        let inherited_channel = Arc::new(InheritedFdChannel::new(
+            stream,
+            auth_token.clone(),
+            limits.request_timeout,
+            limits.max_outer_envelope_bytes,
+        ));
+        Ok(Self {
+            base_url,
+            client,
+            max_outer_envelope_bytes: limits.max_outer_envelope_bytes,
+            transport: HostEgressTransport::InheritedFd,
+            auth_token: Some(auth_token),
+            socket_path: None,
+            inherited_channel: Some(inherited_channel),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn from_inherited_fd(
+        _fd: i32,
+        _auth_token: &str,
+        _limits: HostEgressProxyLimits,
+    ) -> Result<Self, HostEgressProxyConfigError> {
+        Err(HostEgressProxyConfigError::UnsupportedPlatform)
+    }
+
+    /// Construct an explicitly selected legacy loopback client.
+    ///
+    /// This is the only URL-based constructor. It accepts literal loopback
+    /// authorities only and is intended for compatibility and tests.
+    ///
+    /// # Errors
+    /// Returns a redaction-safe error when the endpoint or limits are invalid,
+    /// or the bounded client cannot be constructed.
+    pub fn legacy_loopback_with_limits(
+        base_url: &str,
+        limits: HostEgressProxyLimits,
+    ) -> Result<Self, HostEgressProxyConfigError> {
+        if limits.request_timeout.is_zero() || limits.max_outer_envelope_bytes == 0 {
+            return Err(HostEgressProxyConfigError::InvalidLimits);
+        }
+        let base_url = validate_host_egress_proxy_endpoint(base_url)?;
+        let client = reqwest::Client::builder()
+            .timeout(limits.request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|_| HostEgressProxyConfigError::ClientConfiguration)?;
+        Ok(Self {
+            base_url,
+            client,
+            max_outer_envelope_bytes: limits.max_outer_envelope_bytes,
+            transport: HostEgressTransport::LegacyLoopback,
+            auth_token: None,
+            socket_path: None,
+            #[cfg(target_os = "linux")]
+            inherited_channel: None,
+        })
+    }
+
+    /// Return the selected transport kind without exposing endpoint details.
+    #[must_use]
+    pub const fn transport(&self) -> HostEgressTransport {
+        self.transport
     }
 
     /// Absolute host RPC endpoint for mediated HTTP egress.
     #[must_use]
     pub fn http_endpoint(&self) -> String {
-        format!("{}/rpc/egress/http", self.base_url)
+        format!("{}rpc/egress/http", self.base_url)
     }
 
     /// Absolute host RPC endpoint for mediated TCP egress.
     #[must_use]
     pub fn tcp_endpoint(&self) -> String {
-        format!("{}/rpc/egress/tcp", self.base_url)
+        format!("{}rpc/egress/tcp", self.base_url)
     }
 
     /// Send an HTTP request through the host egress proxy.
@@ -256,25 +564,39 @@ impl HostEgressProxyClient {
         &self,
         request: &HostEgressHttpRequest,
     ) -> Result<HostEgressHttpResponse, HostEgressProxyError> {
+        #[cfg(target_os = "linux")]
+        if let Some(channel) = self.inherited_channel.as_ref() {
+            let response = channel
+                .exchange(
+                    HostEgressWireRoute::Http,
+                    HostEgressWireRequestPayload::Http(request.clone()),
+                )
+                .await?;
+            return decode_inherited_http_response(request, response);
+        }
+        let request_body = serialize_bounded_proxy_request(request)?;
         let response = self
-            .client
-            .post(self.http_endpoint())
-            .json(request)
+            .apply_auth(
+                self.client
+                    .post(self.http_endpoint())
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(request_body),
+            )
             .send()
             .await
             .map_err(HostEgressProxyError::Transport)?;
         let status = response.status();
+        let body = read_bounded_proxy_body(response, self.max_outer_envelope_bytes).await?;
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
             return Err(HostEgressProxyError::Rejected {
                 status: status.as_u16(),
-                body: redact_http_host_egress_rejection_body(request, body),
+                body: redact_http_host_egress_rejection_body(
+                    request,
+                    self.redact_transport_sensitive(String::from_utf8_lossy(&body).into_owned()),
+                ),
             });
         }
-        response
-            .json()
-            .await
-            .map_err(HostEgressProxyError::Transport)
+        serde_json::from_slice(&body).map_err(|_| HostEgressProxyError::MalformedEnvelope)
     }
 
     /// Send a bounded TCP exchange through the host egress proxy.
@@ -287,36 +609,593 @@ impl HostEgressProxyClient {
         &self,
         request: &HostEgressTcpRequest,
     ) -> Result<HostEgressTcpResponse, HostEgressProxyError> {
+        #[cfg(target_os = "linux")]
+        if let Some(channel) = self.inherited_channel.as_ref() {
+            let response = channel
+                .exchange(
+                    HostEgressWireRoute::Tcp,
+                    HostEgressWireRequestPayload::Tcp(request.clone()),
+                )
+                .await?;
+            return decode_inherited_tcp_response(request, response);
+        }
+        let request_body = serialize_bounded_proxy_request(request)?;
         let response = self
-            .client
-            .post(self.tcp_endpoint())
-            .json(request)
+            .apply_auth(
+                self.client
+                    .post(self.tcp_endpoint())
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(request_body),
+            )
             .send()
             .await
             .map_err(HostEgressProxyError::Transport)?;
         let status = response.status();
+        let body = read_bounded_proxy_body(response, self.max_outer_envelope_bytes).await?;
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
             return Err(HostEgressProxyError::Rejected {
                 status: status.as_u16(),
-                body: redact_tcp_host_egress_rejection_body(request, body),
+                body: redact_tcp_host_egress_rejection_body(
+                    request,
+                    self.redact_transport_sensitive(String::from_utf8_lossy(&body).into_owned()),
+                ),
             });
         }
-        response
-            .json()
-            .await
-            .map_err(HostEgressProxyError::Transport)
+        serde_json::from_slice(&body).map_err(|_| HostEgressProxyError::MalformedEnvelope)
+    }
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.auth_token.as_deref() {
+            Some(token) => request.header(HOST_EGRESS_AUTH_HEADER, token),
+            None => request,
+        }
+    }
+
+    fn redact_transport_sensitive(&self, mut body: String) -> String {
+        if let Some(token) = self.auth_token.as_deref() {
+            redact_exact_sensitive_fragment(&mut body, token);
+        }
+        if let Some(path) = self.socket_path.as_deref() {
+            let path = path.to_string_lossy();
+            redact_exact_sensitive_fragment(&mut body, &path);
+        }
+        body
     }
 }
 
 #[cfg(feature = "connector-http")]
-const HOST_EGRESS_REDACTION_MARKER: &str = "[redacted-host-egress-sensitive]";
+const HOST_EGRESS_AUTH_HEADER: &str = "X-FCP-Host-Egress-Auth";
+
 #[cfg(feature = "connector-http")]
-const HOST_EGRESS_REDACTION_MIN_FRAGMENT_LEN: usize = 4;
+const HOST_EGRESS_UDS_ORIGIN: &str = "http://fcp-host-egress.invalid/";
+
+#[cfg(feature = "connector-http")]
+const MAX_HOST_EGRESS_AUTH_TOKEN_BYTES: usize = 4096;
+
+#[cfg(feature = "connector-http")]
+const MAX_HOST_EGRESS_REQUEST_ENVELOPE_BYTES: usize = HOST_EGRESS_WIRE_MAX_FRAME_BYTES;
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+struct InheritedFdChannel {
+    state: fcp_async_core::sync::Mutex<InheritedFdChannelState>,
+    auth_token: String,
+    next_request_id: AtomicU64,
+    poisoned: std::sync::atomic::AtomicBool,
+    request_timeout: Duration,
+    max_envelope_bytes: usize,
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+struct InheritedFdChannelState {
+    stream: Option<UnixStream>,
+    retained_read_buffer: Vec<u8>,
+    poisoned: bool,
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+struct InheritedFdExchangeGuard<'a> {
+    channel: &'a InheritedFdChannel,
+    validated_response: bool,
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+impl Drop for InheritedFdExchangeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.validated_response {
+            self.channel.poisoned.store(true, Ordering::Release);
+            if let Ok(mut state) = self.channel.state.try_lock() {
+                state.poisoned = true;
+                let _ = state.stream.take();
+                state.retained_read_buffer.clear();
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+impl InheritedFdChannel {
+    fn new(
+        stream: UnixStream,
+        auth_token: String,
+        request_timeout: Duration,
+        max_envelope_bytes: usize,
+    ) -> Self {
+        Self {
+            state: fcp_async_core::sync::Mutex::new(InheritedFdChannelState {
+                stream: Some(stream),
+                retained_read_buffer: Vec::new(),
+                poisoned: false,
+            }),
+            auth_token,
+            next_request_id: AtomicU64::new(1),
+            poisoned: std::sync::atomic::AtomicBool::new(false),
+            request_timeout,
+            max_envelope_bytes,
+        }
+    }
+
+    async fn exchange(
+        &self,
+        route: HostEgressWireRoute,
+        payload: HostEgressWireRequestPayload,
+    ) -> Result<HostEgressWireResponse, HostEgressProxyError> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        if request_id == 0 {
+            return Err(HostEgressProxyError::InheritedChannel);
+        }
+        let request = HostEgressWireRequest {
+            schema_version: HOST_EGRESS_WIRE_SCHEMA_VERSION,
+            request_id,
+            auth_token: self.auth_token.clone(),
+            route,
+            payload,
+        };
+        let frame = serialize_bounded_wire_frame(&request, MAX_HOST_EGRESS_REQUEST_ENVELOPE_BYTES)?;
+
+        let mut state = self.state.lock().await;
+        if self.poisoned.load(Ordering::Acquire) || state.poisoned || state.stream.is_none() {
+            return Err(HostEgressProxyError::InheritedChannel);
+        }
+
+        // Arm cancellation poisoning only after this caller owns the
+        // serialization lock. Waiting for the lock is not an in-flight wire
+        // exchange and must not poison a healthy channel if that wait is
+        // cancelled by the surrounding runtime.
+        let mut exchange_guard = InheritedFdExchangeGuard {
+            channel: self,
+            validated_response: false,
+        };
+
+        let InheritedFdChannelState {
+            stream,
+            retained_read_buffer,
+            ..
+        } = &mut *state;
+        let operation = async {
+            let stream = stream.as_mut().ok_or(())?;
+            stream.write_all(&frame).await.map_err(|_| ())?;
+            let response =
+                read_bounded_wire_frame(stream, retained_read_buffer, self.max_envelope_bytes)
+                    .await
+                    .map_err(|_| ())?;
+            let response =
+                serde_json::from_slice::<HostEgressWireResponse>(&response).map_err(|_| ())?;
+            validate_inherited_wire_response(response, request_id, route).map_err(|_| ())
+        };
+
+        match fcp_async_core::time::timeout(self.request_timeout, operation).await {
+            Ok(Ok(response)) => {
+                exchange_guard.validated_response = true;
+                Ok(response)
+            }
+            Ok(Err(())) | Err(_) => Err(HostEgressProxyError::InheritedChannel),
+        }
+    }
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+fn serialize_bounded_wire_frame<T: Serialize>(
+    value: &T,
+    max_bytes: usize,
+) -> Result<Vec<u8>, HostEgressProxyError> {
+    let mut frame =
+        serde_json::to_vec(value).map_err(|_| HostEgressProxyError::MalformedRequestEnvelope)?;
+    if frame.len() >= max_bytes {
+        return Err(HostEgressProxyError::RequestEnvelopeTooLarge);
+    }
+    frame.push(b'\n');
+    Ok(frame)
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+async fn read_bounded_wire_frame(
+    stream: &mut UnixStream,
+    retained_read_buffer: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ()> {
+    loop {
+        if let Some(newline) = retained_read_buffer.iter().position(|byte| *byte == b'\n') {
+            let frame_len = newline + 1;
+            if frame_len > max_bytes || newline == 0 || retained_read_buffer.len() != frame_len {
+                return Err(());
+            }
+            let mut frame = retained_read_buffer.drain(..frame_len).collect::<Vec<_>>();
+            frame.pop();
+            if frame.contains(&b'\n') {
+                return Err(());
+            }
+            return Ok(frame);
+        }
+        if retained_read_buffer.len() >= max_bytes {
+            return Err(());
+        }
+        let remaining = max_bytes - retained_read_buffer.len();
+        let mut chunk = [0_u8; 1024];
+        let read_len = remaining.min(chunk.len());
+        let count = stream.read(&mut chunk[..read_len]).await.map_err(|_| ())?;
+        if count == 0 {
+            return Err(());
+        }
+        retained_read_buffer.extend_from_slice(&chunk[..count]);
+    }
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+fn validate_inherited_wire_response(
+    response: HostEgressWireResponse,
+    request_id: u64,
+    route: HostEgressWireRoute,
+) -> Result<HostEgressWireResponse, ()> {
+    if response.schema_version != HOST_EGRESS_WIRE_SCHEMA_VERSION
+        || response.request_id != request_id
+        || response.route != route
+    {
+        return Err(());
+    }
+    if (200..=299).contains(&response.status) {
+        if response.error.is_some() {
+            return Err(());
+        }
+        let body_matches = matches!(
+            (&route, response.body.as_ref()),
+            (
+                HostEgressWireRoute::Http,
+                Some(HostEgressWireResponseBody::Http(_)),
+            ) | (
+                HostEgressWireRoute::Tcp,
+                Some(HostEgressWireResponseBody::Tcp(_)),
+            )
+        );
+        if !body_matches {
+            return Err(());
+        }
+    } else if response.body.is_some() || response.error.is_none() {
+        return Err(());
+    }
+    Ok(response)
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+fn decode_inherited_http_response(
+    request: &HostEgressHttpRequest,
+    response: HostEgressWireResponse,
+) -> Result<HostEgressHttpResponse, HostEgressProxyError> {
+    if !(200..=299).contains(&response.status) {
+        return Err(HostEgressProxyError::Rejected {
+            status: response.status,
+            body: redact_http_host_egress_rejection_body(
+                request,
+                "host egress request rejected".to_string(),
+            ),
+        });
+    }
+    match response.body {
+        Some(HostEgressWireResponseBody::Http(body)) => Ok(body),
+        _ => Err(HostEgressProxyError::MalformedEnvelope),
+    }
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+fn decode_inherited_tcp_response(
+    request: &HostEgressTcpRequest,
+    response: HostEgressWireResponse,
+) -> Result<HostEgressTcpResponse, HostEgressProxyError> {
+    if !(200..=299).contains(&response.status) {
+        return Err(HostEgressProxyError::Rejected {
+            status: response.status,
+            body: redact_tcp_host_egress_rejection_body(
+                request,
+                "host egress request rejected".to_string(),
+            ),
+        });
+    }
+    match response.body {
+        Some(HostEgressWireResponseBody::Tcp(body)) => Ok(body),
+        _ => Err(HostEgressProxyError::MalformedEnvelope),
+    }
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+fn claim_inherited_unix_stream(fd: i32) -> Result<UnixStream, HostEgressProxyConfigError> {
+    if !(3..=i32::MAX).contains(&fd) {
+        return Err(HostEgressProxyConfigError::InvalidFd);
+    }
+    let stream = fcp_sandbox::claim_inherited_host_egress_channel(fd).map_err(|error| {
+        if matches!(error, fcp_sandbox::ProcessGroupError::InvalidSpec) {
+            HostEgressProxyConfigError::InheritedFdNotUnixStream
+        } else {
+            HostEgressProxyConfigError::InheritedFdUnavailable
+        }
+    })?;
+    UnixStream::from_std(stream).map_err(|_| HostEgressProxyConfigError::InheritedFdUnavailable)
+}
+
+#[cfg(feature = "connector-http")]
+fn fixed_unix_socket_origin() -> Result<reqwest::Url, HostEgressProxyConfigError> {
+    reqwest::Url::parse(HOST_EGRESS_UDS_ORIGIN)
+        .map_err(|_| HostEgressProxyConfigError::ClientConfiguration)
+}
+
+#[cfg(feature = "connector-http")]
+fn validate_host_egress_proxy_endpoint(
+    endpoint: &str,
+) -> Result<reqwest::Url, HostEgressProxyConfigError> {
+    let url =
+        reqwest::Url::parse(endpoint).map_err(|_| HostEgressProxyConfigError::InvalidEndpoint)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+        || url.port_or_known_default().is_none()
+    {
+        return Err(HostEgressProxyConfigError::InvalidEndpoint);
+    }
+    let host = url
+        .host_str()
+        .ok_or(HostEgressProxyConfigError::InvalidEndpoint)?;
+    let ip = host
+        .trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .map_err(|_| HostEgressProxyConfigError::NonLoopbackEndpoint)?;
+    if !ip.is_loopback() {
+        return Err(HostEgressProxyConfigError::NonLoopbackEndpoint);
+    }
+    Ok(url)
+}
+
+#[cfg(feature = "connector-http")]
+fn validate_host_egress_auth_token(token: &str) -> Result<String, HostEgressProxyConfigError> {
+    if token.is_empty()
+        || token.len() > MAX_HOST_EGRESS_AUTH_TOKEN_BYTES
+        || !token.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(HostEgressProxyConfigError::InvalidAuthToken);
+    }
+    Ok(token.to_owned())
+}
+
+#[cfg(feature = "connector-http")]
+fn validate_unix_socket_path(path: &Path) -> Result<(), HostEgressProxyConfigError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        return Err(HostEgressProxyConfigError::UnsupportedPlatform);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+        const UNIX_SOCKET_PATH_MAX: usize = 107;
+
+        if !path.is_absolute()
+            || path.as_os_str().is_empty()
+            || path.as_os_str().as_bytes().len() > UNIX_SOCKET_PATH_MAX
+            || path
+                .as_os_str()
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte == 0 || byte.is_ascii_control())
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err(HostEgressProxyConfigError::InvalidSocketPath);
+        }
+
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or(HostEgressProxyConfigError::InvalidSocketPath)?;
+
+        let mut component_path = PathBuf::from(OsStr::new("/"));
+        for component in path.components() {
+            let std::path::Component::Normal(part) = component else {
+                continue;
+            };
+            component_path.push(part);
+            if std::fs::symlink_metadata(&component_path)
+                .map_err(|_| HostEgressProxyConfigError::SocketNotFound)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(HostEgressProxyConfigError::SocketSymlink);
+            }
+        }
+
+        let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                HostEgressProxyConfigError::SocketNotFound
+            } else {
+                HostEgressProxyConfigError::SocketUnavailable
+            }
+        })?;
+        if parent_metadata.file_type().is_symlink() {
+            return Err(HostEgressProxyConfigError::SocketSymlink);
+        }
+        if !parent_metadata.is_dir() {
+            return Err(HostEgressProxyConfigError::SocketUnavailable);
+        }
+        if parent_metadata.permissions().mode() & 0o7777 != 0o700 {
+            return Err(HostEgressProxyConfigError::SocketPermissions);
+        }
+
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                HostEgressProxyConfigError::SocketNotFound
+            } else {
+                HostEgressProxyConfigError::SocketUnavailable
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(HostEgressProxyConfigError::SocketSymlink);
+        }
+        if !metadata.file_type().is_socket() {
+            return Err(HostEgressProxyConfigError::SocketNotSocket);
+        }
+        if metadata.permissions().mode() & 0o7777 != 0o600 {
+            return Err(HostEgressProxyConfigError::SocketPermissions);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "connector-http")]
+pub(crate) enum HostEgressLaunchValues {
+    UnixDomainSocket {
+        socket_path: PathBuf,
+        auth_token: String,
+    },
+    InheritedFd {
+        fd: i32,
+        auth_token: String,
+    },
+}
+
+#[cfg(feature = "connector-http")]
+pub(crate) fn validate_host_egress_launch_values(
+    transport: Option<&str>,
+    socket_path: Option<&str>,
+    auth_token: Option<&str>,
+    inherited_fd: Option<&str>,
+) -> Result<Option<HostEgressLaunchValues>, HostEgressProxyConfigError> {
+    let any_value = transport.is_some()
+        || socket_path.is_some()
+        || auth_token.is_some()
+        || inherited_fd.is_some();
+    match transport {
+        None if any_value => Err(HostEgressProxyConfigError::InvalidTransport),
+        None => Ok(None),
+        Some("uds-v1") => {
+            if inherited_fd.is_some() {
+                return Err(HostEgressProxyConfigError::TransportConflict);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(HostEgressProxyConfigError::UnsupportedPlatform);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let socket_path = socket_path.ok_or(HostEgressProxyConfigError::MissingSocket)?;
+                let auth_token = auth_token.ok_or(HostEgressProxyConfigError::MissingAuthToken)?;
+                let auth_token = validate_host_egress_auth_token(auth_token)?;
+                let socket_path = PathBuf::from(socket_path);
+                validate_unix_socket_path(&socket_path)?;
+                Ok(Some(HostEgressLaunchValues::UnixDomainSocket {
+                    socket_path,
+                    auth_token,
+                }))
+            }
+        }
+        Some("inherited-fd-v1") => {
+            if socket_path.is_some() {
+                return Err(HostEgressProxyConfigError::TransportConflict);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(HostEgressProxyConfigError::UnsupportedPlatform);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let inherited_fd = inherited_fd.ok_or(HostEgressProxyConfigError::MissingFd)?;
+                let auth_token = auth_token.ok_or(HostEgressProxyConfigError::MissingAuthToken)?;
+                let auth_token = validate_host_egress_auth_token(auth_token)?;
+                let fd = parse_inherited_fd(inherited_fd)?;
+                Ok(Some(HostEgressLaunchValues::InheritedFd { fd, auth_token }))
+            }
+        }
+        Some(_) => Err(HostEgressProxyConfigError::InvalidTransport),
+    }
+}
+
+#[cfg(all(feature = "connector-http", target_os = "linux"))]
+fn parse_inherited_fd(value: &str) -> Result<i32, HostEgressProxyConfigError> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| HostEgressProxyConfigError::InvalidFd)?;
+    if !(3..=i32::MAX as u64).contains(&parsed) {
+        return Err(HostEgressProxyConfigError::InvalidFd);
+    }
+    i32::try_from(parsed).map_err(|_| HostEgressProxyConfigError::InvalidFd)
+}
+
+#[cfg(feature = "connector-http")]
+fn redact_exact_sensitive_fragment(redacted: &mut String, fragment: &str) {
+    if !fragment.is_empty() && redacted.contains(fragment) {
+        *redacted = redacted.replace(fragment, HOST_EGRESS_REDACTION_MARKER);
+    }
+}
+
+#[cfg(feature = "connector-http")]
+async fn read_bounded_proxy_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, HostEgressProxyError> {
+    if response
+        .content_length()
+        .is_some_and(|length| usize::try_from(length).map_or(true, |length| length > max_bytes))
+    {
+        return Err(HostEgressProxyError::EnvelopeTooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(HostEgressProxyError::Transport)?
+    {
+        if chunk.len() > max_bytes.saturating_sub(body.len()) {
+            return Err(HostEgressProxyError::EnvelopeTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "connector-http")]
+fn serialize_bounded_proxy_request<T: Serialize>(
+    request: &T,
+) -> Result<Vec<u8>, HostEgressProxyError> {
+    let body =
+        serde_json::to_vec(request).map_err(|_| HostEgressProxyError::MalformedRequestEnvelope)?;
+    if body.len() > MAX_HOST_EGRESS_REQUEST_ENVELOPE_BYTES {
+        return Err(HostEgressProxyError::RequestEnvelopeTooLarge);
+    }
+    Ok(body)
+}
+
+#[cfg(feature = "connector-http")]
+const HOST_EGRESS_REDACTION_MARKER: &str = "[redacted-host-egress-sensitive]";
 
 #[cfg(feature = "connector-http")]
 fn redact_sensitive_fragment(redacted: &mut String, fragment: &str) {
-    if fragment.len() >= HOST_EGRESS_REDACTION_MIN_FRAGMENT_LEN && redacted.contains(fragment) {
+    if !fragment.is_empty() && redacted.contains(fragment) {
         *redacted = redacted.replace(fragment, HOST_EGRESS_REDACTION_MARKER);
     }
 }
@@ -340,6 +1219,7 @@ fn redact_header_value_fragments(redacted: &mut String, header_value: &str) {
 fn redact_http_host_egress_rejection_body(request: &HostEgressHttpRequest, body: String) -> String {
     let mut redacted = body;
     redact_sensitive_fragment(&mut redacted, &request.context.capability_token_cbor_b64);
+    redact_sensitive_fragment(&mut redacted, &request.context.resource_uri);
     redact_sensitive_fragment(&mut redacted, &request.url);
     if let Some(credential_id) = request.credential_id.as_deref() {
         redact_sensitive_fragment(&mut redacted, credential_id);
@@ -359,6 +1239,7 @@ fn redact_http_host_egress_rejection_body(request: &HostEgressHttpRequest, body:
 fn redact_tcp_host_egress_rejection_body(request: &HostEgressTcpRequest, body: String) -> String {
     let mut redacted = body;
     redact_sensitive_fragment(&mut redacted, &request.context.capability_token_cbor_b64);
+    redact_sensitive_fragment(&mut redacted, &request.context.resource_uri);
     if let Some(credential_id) = request.credential_id.as_deref() {
         redact_sensitive_fragment(&mut redacted, credential_id);
     }
@@ -372,11 +1253,26 @@ fn redact_tcp_host_egress_rejection_body(request: &HostEgressTcpRequest, body: S
 
 /// Errors returned by [`HostEgressProxyClient`].
 #[cfg(feature = "connector-http")]
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum HostEgressProxyError {
     /// The connector could not reach the host proxy or decode its response.
-    #[error("host egress proxy transport failed: {0}")]
+    #[error("host egress proxy transport failed")]
     Transport(reqwest::Error),
+    /// The inherited host channel was closed, poisoned, malformed, or timed out.
+    #[error("host egress inherited channel failed")]
+    InheritedChannel,
+    /// The serialized request exceeded the fixed connector-to-host cap.
+    #[error("host egress proxy request exceeded the configured envelope limit")]
+    RequestEnvelopeTooLarge,
+    /// The request could not be serialized into the host-egress envelope.
+    #[error("host egress proxy request envelope could not be serialized")]
+    MalformedRequestEnvelope,
+    /// The proxy response exceeded the configured outer-envelope limit.
+    #[error("host egress proxy response exceeded the configured envelope limit")]
+    EnvelopeTooLarge,
+    /// The successful proxy response was not a valid strict JSON envelope.
+    #[error("host egress proxy returned a malformed response envelope")]
+    MalformedEnvelope,
     /// The host proxy rejected the request before returning a contract payload.
     #[error("host egress proxy rejected request with HTTP {status}: {body}")]
     Rejected {
@@ -388,12 +1284,36 @@ pub enum HostEgressProxyError {
 }
 
 #[cfg(feature = "connector-http")]
+impl fmt::Debug for HostEgressProxyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(_) => formatter.write_str("Transport([redacted])"),
+            Self::InheritedChannel => formatter.write_str("InheritedChannel"),
+            Self::RequestEnvelopeTooLarge => formatter.write_str("RequestEnvelopeTooLarge"),
+            Self::MalformedRequestEnvelope => formatter.write_str("MalformedRequestEnvelope"),
+            Self::EnvelopeTooLarge => formatter.write_str("EnvelopeTooLarge"),
+            Self::MalformedEnvelope => formatter.write_str("MalformedEnvelope"),
+            Self::Rejected { status, body } => formatter
+                .debug_struct("Rejected")
+                .field("status", status)
+                .field("body", body)
+                .finish(),
+        }
+    }
+}
+
+#[cfg(feature = "connector-http")]
 impl HostEgressProxyError {
     /// HTTP status for host rejections, when the proxy returned one.
     #[must_use]
     pub const fn status(&self) -> Option<u16> {
         match self {
-            Self::Transport(_) => None,
+            Self::Transport(_)
+            | Self::InheritedChannel
+            | Self::RequestEnvelopeTooLarge
+            | Self::MalformedRequestEnvelope
+            | Self::EnvelopeTooLarge
+            | Self::MalformedEnvelope => None,
             Self::Rejected { status, .. } => Some(*status),
         }
     }
@@ -402,7 +1322,12 @@ impl HostEgressProxyError {
     #[must_use]
     pub fn rejection_body(&self) -> Option<&str> {
         match self {
-            Self::Transport(_) => None,
+            Self::Transport(_)
+            | Self::InheritedChannel
+            | Self::RequestEnvelopeTooLarge
+            | Self::MalformedRequestEnvelope
+            | Self::EnvelopeTooLarge
+            | Self::MalformedEnvelope => None,
             Self::Rejected { body, .. } => Some(body),
         }
     }
@@ -909,6 +1834,7 @@ mod tests {
         fcp_manifest::HostEgressContext {
             connector_id: "fcp.test.b0qqv:utility:1.0.0".to_string(),
             operation_id: operation_id.to_string(),
+            resource_uri: format!("fcp-test://b0qqv/{operation_id}"),
             zone_id: "z:work".to_string(),
             request_id: request_id.to_string(),
             correlation_id: Some(format!("corr-{request_id}")),
@@ -939,6 +1865,10 @@ mod tests {
             "fcp.test.b0qqv:utility:1.0.0"
         );
         assert_eq!(value["context"]["operation_id"], "messages.create");
+        assert_eq!(
+            value["context"]["resource_uri"],
+            "fcp-test://b0qqv/messages.create"
+        );
         assert_eq!(value["context"]["zone_id"], "z:work");
         assert_eq!(value["context"]["request_id"], "req-b0qqv-http");
         assert_eq!(value["context"]["correlation_id"], "corr-req-b0qqv-http");
@@ -973,6 +1903,10 @@ mod tests {
 
         let value = serde_json::to_value(&request).expect("serialize TCP host-egress request");
         assert_eq!(value["context"]["operation_id"], "socket.exchange");
+        assert_eq!(
+            value["context"]["resource_uri"],
+            "fcp-test://b0qqv/socket.exchange"
+        );
         assert_eq!(value["context"]["request_id"], "req-b0qqv-tcp");
         assert_eq!(value["host"], "api.example.test");
         assert_eq!(value["port"], 443);
@@ -1005,6 +1939,7 @@ mod tests {
             credential_id: Some("credential-redaction-sentinel".to_string()),
         };
         let echoed_body = "deny_reason=denied_host; capability-material-redaction-sentinel; \
+            fcp-test://b0qqv/messages.create; \
             https://api.example.test/v1/messages?proof_marker=url-redaction-sentinel; \
             Bearer header-redaction-sentinel; body-redaction-sentinel; \
             base64:Ym9keS1yZWRhY3Rpb24tc2VudGluZWw=; credential-redaction-sentinel";
@@ -1013,6 +1948,7 @@ mod tests {
         assert!(redacted.contains("deny_reason=denied_host"));
         for leaked in [
             "capability-material-redaction-sentinel",
+            "fcp-test://b0qqv/messages.create",
             "url-redaction-sentinel",
             "header-redaction-sentinel",
             "body-redaction-sentinel",
@@ -1024,6 +1960,9 @@ mod tests {
                 "redacted rejection body leaked {leaked}: {redacted}"
             );
         }
+        let mut short_fragment = "x".to_string();
+        redact_sensitive_fragment(&mut short_fragment, "x");
+        assert_eq!(short_fragment, HOST_EGRESS_REDACTION_MARKER);
 
         let error = HostEgressProxyError::Rejected {
             status: 403,
@@ -1036,6 +1975,374 @@ mod tests {
                 .expect("rejection body")
                 .contains("deny_reason=denied_host")
         );
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    fn inherited_test_response(request: &HostEgressWireRequest) -> HostEgressWireResponse {
+        let egress =
+            |context: &fcp_manifest::HostEgressContext| fcp_manifest::HostEgressDecisionMetadata {
+                connector_id: context.connector_id.clone(),
+                operation_id: context.operation_id.clone(),
+                zone_id: context.zone_id.clone(),
+                request_id: context.request_id.clone(),
+                correlation_id: context.correlation_id.clone(),
+                execution_mode: "host_egress_proxy".to_string(),
+                constraint_source: "test".to_string(),
+                decision: "allow".to_string(),
+                resolved_host: "api.example.test".to_string(),
+                resolved_port: 443,
+                credential_injected: true,
+                elapsed_ms: 1,
+            };
+        let body = match &request.payload {
+            HostEgressWireRequestPayload::Http(request) => {
+                HostEgressWireResponseBody::Http(fcp_manifest::HostEgressHttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: fcp_manifest::Base64Bytes::from_vec(b"ok".to_vec()),
+                    egress: egress(&request.context),
+                })
+            }
+            HostEgressWireRequestPayload::Tcp(request) => {
+                HostEgressWireResponseBody::Tcp(fcp_manifest::HostEgressTcpResponse {
+                    bytes_written: request
+                        .write
+                        .as_ref()
+                        .map_or(0, |bytes| bytes.as_bytes().len() as u64),
+                    bytes_read: 2,
+                    read: fcp_manifest::Base64Bytes::from_vec(b"ok".to_vec()),
+                    egress: egress(&request.context),
+                })
+            }
+        };
+        HostEgressWireResponse {
+            schema_version: HOST_EGRESS_WIRE_SCHEMA_VERSION,
+            request_id: request.request_id,
+            route: request.route,
+            status: 200,
+            body: Some(body),
+            error: None,
+        }
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    fn read_wire_test_frame(
+        stream: &mut std::os::unix::net::UnixStream,
+    ) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut frame = Vec::new();
+        let mut byte = [0_u8; 1];
+        loop {
+            stream.read_exact(&mut byte)?;
+            if byte[0] == b'\n' {
+                return Ok(frame);
+            }
+            frame.push(byte[0]);
+            if frame.len() > MAX_HOST_EGRESS_REQUEST_ENVELOPE_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "test frame too large",
+                ));
+            }
+        }
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn inherited_fd_channel_round_trips_http_tcp_and_auth_serially() {
+        use std::io::Write;
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream as StdUnixStream;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
+        let (sender, receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let frame = read_wire_test_frame(&mut peer).expect("read request frame");
+                let request: HostEgressWireRequest =
+                    serde_json::from_slice(&frame).expect("decode request frame");
+                assert_eq!(request.auth_token, "inherited-auth-test");
+                sender.send(request.clone()).expect("send captured request");
+                let response = serde_json::to_vec(&inherited_test_response(&request))
+                    .expect("encode response frame");
+                peer.write_all(&response).expect("write response payload");
+                peer.write_all(b"\n").expect("write response delimiter");
+            }
+        });
+        let client = HostEgressProxyClient::from_inherited_fd(
+            client_stream.into_raw_fd(),
+            "inherited-auth-test",
+            HostEgressProxyLimits::default(),
+        )
+        .expect("claim socketpair endpoint");
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("inherited-auth-test"));
+        let http = fcp_manifest::HostEgressHttpRequest {
+            context: br_b0qqv_host_egress_context("messages.create", "req-wire-http"),
+            url: "https://api.example.test".to_string(),
+            method: "POST".to_string(),
+            headers: Vec::new(),
+            body: None,
+            credential_id: None,
+        };
+        let tcp = fcp_manifest::HostEgressTcpRequest {
+            context: br_b0qqv_host_egress_context("socket.exchange", "req-wire-tcp"),
+            host: "api.example.test".to_string(),
+            port: 443,
+            tls: true,
+            sni_override: None,
+            write: None,
+            read_limit_bytes: Some(16),
+            credential_id: None,
+        };
+        fcp_async_core::runtime::block_on_sync(async {
+            let (http_response, tcp_response) =
+                futures_util::future::join(client.http(&http), client.tcp(&tcp)).await;
+            assert_eq!(http_response.expect("HTTP response").status, 200);
+            assert_eq!(tcp_response.expect("TCP response").read.as_bytes(), b"ok");
+        })
+        .expect("inherited channel calls must complete");
+        let first = receiver.recv().expect("capture HTTP request");
+        let second = receiver.recv().expect("capture TCP request");
+        assert_eq!(first.route, HostEgressWireRoute::Http);
+        assert_eq!(second.route, HostEgressWireRoute::Tcp);
+        handle.join().expect("wire peer thread");
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn inherited_fd_channel_poisoning_and_fd_validation_are_deterministic() {
+        use std::io::Write;
+        use std::os::fd::{AsRawFd, IntoRawFd};
+        use std::os::unix::net::UnixStream as StdUnixStream;
+        use std::thread;
+
+        for response in [b"not-json\n".to_vec(), b"{".to_vec()] {
+            let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
+            let handle = thread::spawn(move || {
+                let _ = read_wire_test_frame(&mut peer);
+                peer.write_all(&response).expect("write malformed response");
+            });
+            let client = HostEgressProxyClient::from_inherited_fd(
+                client_stream.into_raw_fd(),
+                "inherited-auth-test",
+                HostEgressProxyLimits::default(),
+            )
+            .expect("claim socketpair endpoint");
+            let request = fcp_manifest::HostEgressHttpRequest {
+                context: br_b0qqv_host_egress_context("messages.create", "req-wire-bad"),
+                url: "https://api.example.test".to_string(),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: None,
+            };
+            let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
+                .expect("runtime layer")
+                .expect_err("bad response must fail");
+            assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+            let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
+                .expect("runtime layer")
+                .expect_err("poisoned channel must stay closed");
+            assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+            handle.join().expect("wire peer thread");
+        }
+
+        let request = fcp_manifest::HostEgressHttpRequest {
+            context: br_b0qqv_host_egress_context("messages.create", "req-wire-bounds"),
+            url: "https://api.example.test".to_string(),
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+            credential_id: None,
+        };
+
+        let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
+        let handle = thread::spawn(move || {
+            let frame = read_wire_test_frame(&mut peer).expect("read request frame");
+            let request: HostEgressWireRequest =
+                serde_json::from_slice(&frame).expect("decode request frame");
+            let mut response = inherited_test_response(&request);
+            response.request_id = response.request_id.saturating_add(1);
+            let response = serde_json::to_vec(&response).expect("encode response frame");
+            peer.write_all(&response).expect("write response payload");
+            peer.write_all(b"\n").expect("write response delimiter");
+        });
+        let client = HostEgressProxyClient::from_inherited_fd(
+            client_stream.into_raw_fd(),
+            "inherited-auth-test",
+            HostEgressProxyLimits::default(),
+        )
+        .expect("claim socketpair endpoint");
+        let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
+            .expect("runtime layer")
+            .expect_err("wrong response id must fail closed");
+        assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+        handle.join().expect("wire peer thread");
+
+        let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
+        let handle = thread::spawn(move || {
+            let _ = read_wire_test_frame(&mut peer);
+            let _ = peer.write_all(&vec![b'x'; 65]);
+            let _ = peer.write_all(b"\n");
+        });
+        let client = HostEgressProxyClient::from_inherited_fd(
+            client_stream.into_raw_fd(),
+            "inherited-auth-test",
+            HostEgressProxyLimits {
+                request_timeout: Duration::from_secs(1),
+                max_outer_envelope_bytes: 64,
+            },
+        )
+        .expect("claim socketpair endpoint");
+        let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
+            .expect("runtime layer")
+            .expect_err("oversized response must fail closed");
+        assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+        handle.join().expect("wire peer thread");
+
+        let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
+        let handle = thread::spawn(move || {
+            let _ = read_wire_test_frame(&mut peer);
+            thread::sleep(Duration::from_millis(100));
+        });
+        let client = HostEgressProxyClient::from_inherited_fd(
+            client_stream.into_raw_fd(),
+            "inherited-auth-test",
+            HostEgressProxyLimits {
+                request_timeout: Duration::from_millis(10),
+                max_outer_envelope_bytes: 1024,
+            },
+        )
+        .expect("claim socketpair endpoint");
+        let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
+            .expect("runtime layer")
+            .expect_err("response timeout must poison channel");
+        assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+        handle.join().expect("wire peer thread");
+
+        let (closed, peer) = StdUnixStream::pair().expect("socketpair");
+        let closed_fd = closed.as_raw_fd();
+        drop(closed);
+        drop(peer);
+        let closed_error = HostEgressProxyClient::from_inherited_fd(
+            closed_fd,
+            "inherited-auth-test",
+            HostEgressProxyLimits::default(),
+        )
+        .expect_err("closed FD must fail");
+        assert!(matches!(
+            closed_error,
+            HostEgressProxyConfigError::InheritedFdUnavailable
+        ));
+
+        let file = std::fs::File::open("/dev/null").expect("open non-socket FD");
+        let non_socket_error = HostEgressProxyClient::from_inherited_fd(
+            file.as_raw_fd(),
+            "inherited-auth-test",
+            HostEgressProxyLimits::default(),
+        )
+        .expect_err("non-socket FD must fail");
+        assert!(matches!(
+            non_socket_error,
+            HostEgressProxyConfigError::InheritedFdNotUnixStream
+        ));
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind TCP listener");
+        let address = listener.local_addr().expect("listener address");
+        let tcp_client = std::net::TcpStream::connect(address).expect("connect TCP stream");
+        let (tcp_peer, _) = listener.accept().expect("accept TCP stream");
+        let tcp_error = HostEgressProxyClient::from_inherited_fd(
+            tcp_client.as_raw_fd(),
+            "inherited-auth-test",
+            HostEgressProxyLimits::default(),
+        )
+        .expect_err("connected non-UNIX stream must fail");
+        assert!(matches!(
+            tcp_error,
+            HostEgressProxyConfigError::InheritedFdNotUnixStream
+        ));
+        drop(tcp_peer);
+
+        let udp = std::net::UdpSocket::bind(("127.0.0.1", 0)).expect("bind UDP socket");
+        let udp_error = HostEgressProxyClient::from_inherited_fd(
+            udp.as_raw_fd(),
+            "inherited-auth-test",
+            HostEgressProxyLimits::default(),
+        )
+        .expect_err("wrong socket type must fail");
+        assert!(matches!(
+            udp_error,
+            HostEgressProxyConfigError::InheritedFdNotUnixStream
+        ));
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn inherited_fd_channel_cancellation_poisoning_is_deterministic() {
+        use futures_util::future::{AbortHandle, Abortable};
+        use std::io::Write;
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream as StdUnixStream;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
+        let (request_seen_sender, request_seen_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let peer_handle = thread::spawn(move || {
+            read_wire_test_frame(&mut peer).expect("read request before cancellation");
+            request_seen_sender
+                .send(())
+                .expect("signal request receipt");
+            release_receiver
+                .recv()
+                .expect("wait for cancelled caller to drop");
+            let _ = peer.write_all(b"late response must not be consumed\n");
+        });
+
+        let client = HostEgressProxyClient::from_inherited_fd(
+            client_stream.into_raw_fd(),
+            "inherited-auth-test",
+            HostEgressProxyLimits::default(),
+        )
+        .expect("claim socketpair endpoint");
+        let request = fcp_manifest::HostEgressHttpRequest {
+            context: br_b0qqv_host_egress_context("messages.create", "req-wire-cancel"),
+            url: "https://api.example.test".to_string(),
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+            credential_id: None,
+        };
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let call_client = client.clone();
+        let call_request = request.clone();
+        let call_handle = thread::spawn(move || {
+            fcp_async_core::runtime::block_on_sync(Abortable::new(
+                call_client.http(&call_request),
+                abort_registration,
+            ))
+        });
+
+        request_seen_receiver
+            .recv()
+            .expect("request must be in flight before abort");
+        abort_handle.abort();
+        let aborted = call_handle
+            .join()
+            .expect("cancelled call thread")
+            .expect("runtime layer");
+        assert!(matches!(aborted, Err(futures_util::future::Aborted)));
+        release_sender.send(()).expect("release peer thread");
+        peer_handle.join().expect("peer thread");
+
+        let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
+            .expect("runtime layer")
+            .expect_err("cancelled in-flight exchange must poison channel");
+        assert!(matches!(error, HostEgressProxyError::InheritedChannel));
     }
 
     // -- HttpRetryConfig tests ------------------------------------------------

@@ -253,6 +253,19 @@ fn ensure_before(deadline: std::time::Instant) -> Result<(), BridgeError> {
 }
 
 #[cfg(target_os = "linux")]
+fn operation_deadline_at(
+    request_deadline_at: std::time::Instant,
+) -> Result<std::time::Instant, BridgeError> {
+    let operation_deadline_at = request_deadline_at
+        .checked_sub(PROCESS_GRACE.saturating_mul(2))
+        .ok_or_else(|| BridgeError::new(BridgeErrorCode::Timeout))?;
+    if operation_deadline_at <= std::time::Instant::now() {
+        return Err(BridgeError::new(BridgeErrorCode::Timeout));
+    }
+    Ok(operation_deadline_at)
+}
+
+#[cfg(target_os = "linux")]
 impl fmt::Debug for ProcessOutput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -273,7 +286,6 @@ pub(super) fn run_process(
     credential: ZeroizingSecret,
     working_directory: &Path,
 ) -> Result<ProcessOutput, BridgeError> {
-    use std::io::Write;
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -303,14 +315,18 @@ pub(super) fn run_process(
     if deadline_ms == 0 {
         return Err(BridgeError::new(BridgeErrorCode::InvalidEnvelope));
     }
-    let deadline = Instant::now() + Duration::from_millis(deadline_ms);
+    let request_deadline_at = Instant::now()
+        .checked_add(Duration::from_millis(deadline_ms))
+        .ok_or_else(|| BridgeError::new(BridgeErrorCode::Timeout))?;
+    let operation_deadline_at = operation_deadline_at(request_deadline_at)?;
     let cancel = Arc::new(AtomicBool::new(false));
-    ensure_before(deadline)?;
+    ensure_before(operation_deadline_at)?;
 
     let frame = credential_frame(&credential)?;
-    ensure_before(deadline)?;
+    ensure_before(operation_deadline_at)?;
     let (mut host_endpoint, child_endpoint) =
         UnixStream::pair().map_err(|_| BridgeError::new(BridgeErrorCode::Channel))?;
+    ensure_before(operation_deadline_at)?;
     let mut process =
         fcp_sandbox::OwnedProcess::spawn_with_run_once_credential_channel_in_directory(
             spec,
@@ -319,21 +335,21 @@ pub(super) fn run_process(
         )
         .map_err(|_| BridgeError::new(BridgeErrorCode::ProcessSpawnFailed))?;
 
-    if Instant::now() >= deadline {
-        cleanup(&mut process, &cancel, Vec::new())?;
+    if Instant::now() >= operation_deadline_at {
+        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
         return Err(BridgeError::new(BridgeErrorCode::Timeout));
     }
 
     let Some(stdin) = process.take_stdin() else {
-        cleanup(&mut process, &cancel, Vec::new())?;
+        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
         return Err(BridgeError::new(BridgeErrorCode::StdinUnavailable));
     };
     let Some(stdout) = process.take_stdout() else {
-        cleanup(&mut process, &cancel, Vec::new())?;
+        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
         return Err(BridgeError::new(BridgeErrorCode::StdoutUnavailable));
     };
     let Some(stderr) = process.take_stderr() else {
-        cleanup(&mut process, &cancel, Vec::new())?;
+        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
         return Err(BridgeError::new(BridgeErrorCode::StderrUnavailable));
     };
 
@@ -341,40 +357,59 @@ pub(super) fn run_process(
         || fcp_sandbox::set_nonblocking(&stdout).is_err()
         || fcp_sandbox::set_nonblocking(&stderr).is_err()
     {
-        cleanup(&mut process, &cancel, Vec::new())?;
+        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
         return Err(BridgeError::new(BridgeErrorCode::OutputReadFailed));
     }
 
-    let mut workers = vec![
-        spawn_stdin_writer(stdin, envelope_bytes, cancel.clone(), deadline),
-        spawn_bounded_reader(stdout, MAX_OUTPUT_BYTES, cancel.clone(), deadline),
-        spawn_bounded_reader(stderr, MAX_STDERR_BYTES, cancel.clone(), deadline),
-    ];
+    let mut workers = Vec::with_capacity(3);
+    let Ok(stdin_worker) =
+        spawn_stdin_writer(stdin, envelope_bytes, cancel.clone(), operation_deadline_at)
+    else {
+        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+        return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
+    };
+    workers.push(stdin_worker);
+    let Ok(stdout_worker) = spawn_bounded_reader(
+        stdout,
+        MAX_OUTPUT_BYTES,
+        cancel.clone(),
+        operation_deadline_at,
+    ) else {
+        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+        return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
+    };
+    workers.push(stdout_worker);
+    let Ok(stderr_worker) = spawn_bounded_reader(
+        stderr,
+        MAX_STDERR_BYTES,
+        cancel.clone(),
+        operation_deadline_at,
+    ) else {
+        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+        return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
+    };
+    workers.push(stderr_worker);
 
-    let write_result = (|| {
-        let remaining = remaining(deadline)?;
-        host_endpoint
-            .set_write_timeout(Some(remaining))
-            .map_err(|_| BridgeError::new(BridgeErrorCode::CredentialWriteFailed))?;
-        frame
-            .with_bytes(|bytes| host_endpoint.write_all(bytes))
-            .map_err(|_| {
-                if Instant::now() >= deadline {
-                    BridgeError::new(BridgeErrorCode::Timeout)
-                } else {
-                    BridgeError::new(BridgeErrorCode::CredentialWriteFailed)
-                }
-            })
-    })();
+    let write_result = write_credential_frame(
+        &mut host_endpoint,
+        &frame,
+        cancel.as_ref(),
+        operation_deadline_at,
+    );
     drop(frame);
     drop(host_endpoint);
     if let Err(error) = write_result {
-        cleanup(&mut process, &cancel, workers)?;
+        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
         return Err(error);
     }
 
-    if let Err(error) = ensure_before(deadline) {
-        cleanup(&mut process, &cancel, std::mem::take(&mut workers))?;
+    if let Err(error) = ensure_before(operation_deadline_at) {
+        cleanup(
+            &mut process,
+            &cancel,
+            std::mem::take(&mut workers),
+            request_deadline_at,
+        )?;
         return Err(error);
     }
     let mut status = None;
@@ -382,7 +417,7 @@ pub(super) fn run_process(
     let mut stdout_result = None;
     let mut stderr_result = None;
     let mut failure = None;
-    while Instant::now() < deadline {
+    while Instant::now() < operation_deadline_at {
         if status.is_none() {
             match process.try_wait() {
                 Ok(child_status) => status = child_status,
@@ -419,7 +454,7 @@ pub(super) fn run_process(
         failure = Some(BridgeErrorCode::Timeout);
     }
     if let Some(code) = failure {
-        cleanup(&mut process, &cancel, workers)?;
+        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
         return Err(BridgeError::new(code));
     }
 
@@ -429,7 +464,7 @@ pub(super) fn run_process(
     let stderr =
         stderr_result.ok_or_else(|| BridgeError::new(BridgeErrorCode::OutputReadFailed))??;
     stdin_result.ok_or_else(|| BridgeError::new(BridgeErrorCode::StdinWriteFailed))??;
-    let termination = cleanup(&mut process, &cancel, workers)?;
+    let termination = cleanup(&mut process, &cancel, workers, request_deadline_at)?;
     if !status.success() {
         return Err(BridgeError::new(BridgeErrorCode::ChildFailed));
     }
@@ -470,25 +505,61 @@ fn credential_frame(secret: &ZeroizingSecret) -> Result<ZeroizingSecret, BridgeE
 }
 
 #[cfg(target_os = "linux")]
+fn write_credential_frame(
+    stream: &mut std::os::unix::net::UnixStream,
+    frame: &ZeroizingSecret,
+    cancel: &std::sync::atomic::AtomicBool,
+    deadline: std::time::Instant,
+) -> Result<(), BridgeError> {
+    use std::io::Write;
+
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| BridgeError::new(BridgeErrorCode::CredentialWriteFailed))?;
+    let write_result = frame.with_bytes(|bytes| {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            check_worker_deadline(cancel, deadline)?;
+            match stream.write(&bytes[offset..]) {
+                Ok(0) => return Err(BridgeError::new(BridgeErrorCode::CredentialWriteFailed)),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_for_worker_io(cancel, deadline)?;
+                }
+                Err(_) => return Err(BridgeError::new(BridgeErrorCode::CredentialWriteFailed)),
+            }
+        }
+        Ok(())
+    });
+    let restore_result = stream.set_nonblocking(false);
+    if restore_result.is_err() {
+        return Err(BridgeError::new(BridgeErrorCode::CredentialWriteFailed));
+    }
+    write_result
+}
+
+#[cfg(target_os = "linux")]
 fn spawn_stdin_writer(
     mut stdin: std::process::ChildStdin,
     envelope: Vec<u8>,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     deadline: std::time::Instant,
-) -> WorkerRecord {
+) -> Result<WorkerRecord, BridgeError> {
     use std::sync::mpsc;
-    use std::thread;
     let (sender, receiver) = mpsc::channel();
-    let join = thread::spawn(move || {
-        let result = write_nonblocking(&mut stdin, &envelope, &cancel, deadline);
-        drop(stdin);
-        let _ = sender.send(result.map(|()| Vec::new()));
-    });
-    WorkerRecord {
+    let join = std::thread::Builder::new()
+        .spawn(move || {
+            let result = write_nonblocking(&mut stdin, &envelope, &cancel, deadline);
+            drop(stdin);
+            let _ = sender.send(result.map(|()| Vec::new()));
+        })
+        .map_err(|_| BridgeError::new(BridgeErrorCode::IoWorkerFailed))?;
+    Ok(WorkerRecord {
         completion: receiver,
         handle: Some(join),
         completed: false,
-    }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -497,19 +568,20 @@ fn spawn_bounded_reader<R: std::io::Read + Send + 'static>(
     max_bytes: usize,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     deadline: std::time::Instant,
-) -> WorkerRecord {
+) -> Result<WorkerRecord, BridgeError> {
     use std::sync::mpsc;
-    use std::thread;
     let (sender, receiver) = mpsc::channel();
-    let join = thread::spawn(move || {
-        let result = read_bounded_nonblocking(&mut reader, max_bytes, &cancel, deadline);
-        let _ = sender.send(result);
-    });
-    WorkerRecord {
+    let join = std::thread::Builder::new()
+        .spawn(move || {
+            let result = read_bounded_nonblocking(&mut reader, max_bytes, &cancel, deadline);
+            let _ = sender.send(result);
+        })
+        .map_err(|_| BridgeError::new(BridgeErrorCode::IoWorkerFailed))?;
+    Ok(WorkerRecord {
         completion: receiver,
         handle: Some(join),
         completed: false,
-    }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -604,15 +676,15 @@ fn cleanup(
     process: &mut fcp_sandbox::OwnedProcess,
     cancel: &std::sync::atomic::AtomicBool,
     mut workers: Vec<WorkerRecord>,
+    request_deadline_at: std::time::Instant,
 ) -> Result<fcp_sandbox::TerminationReport, BridgeError> {
     use std::sync::atomic::Ordering;
 
     cancel.store(true, Ordering::Relaxed);
     let termination = process
-        .terminate(PROCESS_GRACE)
+        .terminate_until(fcp_async_core::Deadline::at(request_deadline_at))
         .map_err(|_| BridgeError::new(BridgeErrorCode::TeardownFailed));
-    let join_deadline = std::time::Instant::now() + PROCESS_GRACE.saturating_mul(2);
-    while std::time::Instant::now() < join_deadline
+    while std::time::Instant::now() < request_deadline_at
         && workers.iter().any(|worker| !worker.completed)
     {
         for worker in &mut workers {
@@ -628,7 +700,7 @@ fn cleanup(
     for worker in &mut workers {
         if worker.completed {
             if let Some(handle) = worker.handle.take() {
-                if handle.join().is_err() {
+                if !join_worker_until(handle, request_deadline_at) {
                     worker_failed = true;
                 }
             }
@@ -648,6 +720,18 @@ fn cleanup(
         return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
     }
     Ok(termination)
+}
+
+#[cfg(target_os = "linux")]
+fn join_worker_until(handle: std::thread::JoinHandle<()>, deadline: std::time::Instant) -> bool {
+    while !handle.is_finished() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(2)));
+    }
+    handle.join().is_ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -747,6 +831,89 @@ mod tests {
                 .code(),
             "output_invalid"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn credential_writer_transfers_the_fixed_frame_before_deadline() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Instant;
+
+        let (mut peer, mut stream) = UnixStream::pair().expect("credential socketpair");
+        let expected = b"FCPK\x01\x00\x00\x00\x01x".to_vec();
+        let frame = ZeroizingSecret::with_zeroize_drop(expected.clone());
+        let cancel = AtomicBool::new(false);
+        write_credential_frame(
+            &mut stream,
+            &frame,
+            &cancel,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("fixed credential frame should transfer");
+        let mut received = vec![0_u8; expected.len()];
+        peer.read_exact(&mut received)
+            .expect("read fixed credential frame");
+        assert_eq!(received, expected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn credential_writer_rejects_an_expired_deadline_before_writing() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Instant;
+
+        let (_peer, mut stream) = UnixStream::pair().expect("credential socketpair");
+        let frame = ZeroizingSecret::with_zeroize_drop(b"FCPK".to_vec());
+        let cancel = AtomicBool::new(false);
+        let error = write_credential_frame(&mut stream, &frame, &cancel, Instant::now())
+            .expect_err("expired credential deadline must fail closed");
+        assert_eq!(error.code(), "timeout");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn operation_deadline_reserves_the_teardown_budget() {
+        use std::time::Instant;
+
+        let request_deadline_at = Instant::now() + Duration::from_millis(500);
+        let operation_deadline_at =
+            super::operation_deadline_at(request_deadline_at).expect("operation budget");
+        let teardown_reserve = PROCESS_GRACE.saturating_mul(2);
+        assert!(
+            operation_deadline_at
+                <= request_deadline_at
+                    .checked_sub(teardown_reserve)
+                    .expect("reserved deadline")
+        );
+        assert!(operation_deadline_at > Instant::now());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn operation_deadline_rejects_too_short_request_before_spawn() {
+        use std::time::Instant;
+
+        let request_deadline_at = Instant::now() + PROCESS_GRACE.saturating_mul(2);
+        let error = super::operation_deadline_at(request_deadline_at)
+            .expect_err("teardown reservation leaves no operation budget");
+        assert_eq!(error.code(), "timeout");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_deadline_does_not_extend_the_request_deadline() {
+        use std::time::Instant;
+
+        let request_deadline_at = Instant::now() + Duration::from_millis(500);
+        let cleanup_deadline = fcp_async_core::Deadline::at(request_deadline_at);
+        let request_remaining_upper_bound =
+            request_deadline_at.saturating_duration_since(Instant::now());
+        let cleanup_remaining = cleanup_deadline.remaining();
+        assert!(cleanup_remaining <= request_remaining_upper_bound);
+        assert!(!cleanup_remaining.is_zero());
     }
 
     #[cfg(target_os = "linux")]

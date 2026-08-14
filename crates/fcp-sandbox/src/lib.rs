@@ -99,6 +99,9 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsAppContainerChild, WindowsSandbox};
 
+#[cfg(target_os = "linux")]
+pub use linux::apply_fixed_read_only_landlock;
+
 pub use cgroup::*;
 pub use egress::*;
 pub use process::*;

@@ -38,6 +38,7 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::ref_as_ptr)]
 
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 
 use tracing::{debug, info, warn};
@@ -1225,8 +1226,245 @@ const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
 const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
 const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
 const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 
 const LANDLOCK_RULE_PATH_BENEATH: i32 = 1;
+
+const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
+const FIXED_LANDLOCK_MIN_ABI: i32 = 5;
+const FIXED_LANDLOCK_ROOT_PATH: &[u8] = b"/\0";
+const FIXED_LANDLOCK_ROOT_ACCESS: u64 = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+const FIXED_LANDLOCK_HANDLED_ACCESS: u64 = LANDLOCK_ACCESS_FS_EXECUTE
+    | LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_READ_FILE
+    | LANDLOCK_ACCESS_FS_READ_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_FILE
+    | LANDLOCK_ACCESS_FS_MAKE_CHAR
+    | LANDLOCK_ACCESS_FS_MAKE_DIR
+    | LANDLOCK_ACCESS_FS_MAKE_REG
+    | LANDLOCK_ACCESS_FS_MAKE_SOCK
+    | LANDLOCK_ACCESS_FS_MAKE_FIFO
+    | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+    | LANDLOCK_ACCESS_FS_MAKE_SYM
+    | LANDLOCK_ACCESS_FS_REFER
+    | LANDLOCK_ACCESS_FS_TRUNCATE
+    | LANDLOCK_ACCESS_FS_IOCTL_DEV;
+
+const fn fixed_landlock_root_rule(parent_fd: i32) -> LandlockPathBeneathAttr {
+    LandlockPathBeneathAttr {
+        allowed_access: FIXED_LANDLOCK_ROOT_ACCESS,
+        parent_fd,
+    }
+}
+
+/// Apply the fixed Landlock boundary used by the supervised host path.
+///
+/// This helper intentionally accepts no caller-provided paths or write
+/// allowlist. It handles every filesystem access right through
+/// `LANDLOCK_ACCESS_FS_IOCTL_DEV` and grants exactly `READ_FILE` and
+/// `READ_DIR` beneath `/`. The required ABI floor is 5 so REFER, TRUNCATE,
+/// and IOCTL_DEV are all covered.
+///
+/// Security boundary: this blocks Landlock-covered path mutation and, with
+/// no inherited/open cgroup fd, prevents opening cgroupfs for writes. It is
+/// not an absolute claim that Linux metadata syscalls unsupported by Landlock
+/// (chmod/chown/setxattr/utime and similar) are impossible, and pre-opened
+/// descriptors are outside the path-open guarantee. The supervisor
+/// integration must prove that cgroup fds are CLOEXEC and closed before this
+/// helper is applied.
+pub fn apply_fixed_read_only_landlock() -> Result<(), SandboxError> {
+    let abi = query_landlock_abi()?;
+    require_fixed_landlock_abi(abi)?;
+    set_fixed_landlock_no_new_privs()?;
+
+    let ruleset_fd = create_fixed_landlock_ruleset()?;
+    let root_fd = match open_fixed_landlock_root() {
+        Ok(fd) => fd,
+        Err(error) => {
+            return Err(merge_fixed_landlock_error(
+                error,
+                close_fixed_landlock_fd(ruleset_fd, "ruleset cleanup"),
+            ));
+        }
+    };
+
+    let add_result = add_fixed_landlock_root_rule(ruleset_fd.as_raw_fd(), root_fd.as_raw_fd());
+    let root_close_result = close_fixed_landlock_fd(root_fd, "root rule fd");
+    if let Err(error) = add_result {
+        let error = merge_fixed_landlock_error(error, root_close_result);
+        return Err(merge_fixed_landlock_error(
+            error,
+            close_fixed_landlock_fd(ruleset_fd, "ruleset cleanup"),
+        ));
+    }
+    if let Err(error) = root_close_result {
+        return Err(merge_fixed_landlock_error(
+            error,
+            close_fixed_landlock_fd(ruleset_fd, "ruleset cleanup"),
+        ));
+    }
+
+    let restrict_result = restrict_fixed_landlock(ruleset_fd.as_raw_fd());
+    let ruleset_close_result = close_fixed_landlock_fd(ruleset_fd, "ruleset fd");
+    match restrict_result {
+        Ok(()) => ruleset_close_result,
+        Err(error) => Err(merge_fixed_landlock_error(error, ruleset_close_result)),
+    }
+}
+
+fn query_landlock_abi() -> Result<i32, SandboxError> {
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<LandlockRulesetAttr>(),
+            0,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(errno) if errno == libc::ENOSYS || errno == libc::EOPNOTSUPP => {
+                Err(SandboxError::UnsupportedPlatform(
+                    "Landlock ABI query unsupported by this kernel".into(),
+                ))
+            }
+            _ => Err(SandboxError::SyscallFailed(format!(
+                "Landlock ABI query failed: {error}"
+            ))),
+        };
+    }
+
+    i32::try_from(result)
+        .map_err(|_| SandboxError::SyscallFailed("Landlock ABI did not fit i32".into()))
+}
+
+fn require_fixed_landlock_abi(abi: i32) -> Result<(), SandboxError> {
+    if abi < FIXED_LANDLOCK_MIN_ABI {
+        return Err(SandboxError::UnsupportedPlatform(
+            "fixed Landlock boundary requires ABI 5 or newer".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn set_fixed_landlock_no_new_privs() -> Result<(), SandboxError> {
+    let result = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if result != 0 {
+        return Err(SandboxError::SyscallFailed(format!(
+            "prctl(PR_SET_NO_NEW_PRIVS) failed before fixed Landlock: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+fn create_fixed_landlock_ruleset() -> Result<OwnedFd, SandboxError> {
+    let attr = LandlockRulesetAttr {
+        handled_access_fs: FIXED_LANDLOCK_HANDLED_ACCESS,
+    };
+    let raw = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            &attr as *const LandlockRulesetAttr,
+            std::mem::size_of::<LandlockRulesetAttr>(),
+            0,
+        )
+    };
+    if raw < 0 {
+        return Err(SandboxError::SyscallFailed(format!(
+            "fixed Landlock ruleset creation failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let fd = i32::try_from(raw)
+        .map_err(|_| SandboxError::SyscallFailed("fixed Landlock fd did not fit i32".into()))?;
+    if fd < 0 {
+        return Err(SandboxError::SyscallFailed(
+            "fixed Landlock returned a negative fd".into(),
+        ));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn open_fixed_landlock_root() -> Result<OwnedFd, SandboxError> {
+    let path =
+        std::ffi::CString::new(&FIXED_LANDLOCK_ROOT_PATH[..FIXED_LANDLOCK_ROOT_PATH.len() - 1])
+            .map_err(|_| {
+                SandboxError::InvalidConfig("fixed Landlock root path is invalid".into())
+            })?;
+    let raw = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(SandboxError::SyscallFailed(format!(
+            "fixed Landlock root open failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+fn add_fixed_landlock_root_rule(ruleset_fd: i32, root_fd: i32) -> Result<(), SandboxError> {
+    let attr = fixed_landlock_root_rule(root_fd);
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset_fd,
+            LANDLOCK_RULE_PATH_BENEATH,
+            &attr as *const LandlockPathBeneathAttr,
+            0,
+        )
+    };
+    if result < 0 {
+        return Err(SandboxError::SyscallFailed(format!(
+            "fixed Landlock root rule failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+fn restrict_fixed_landlock(ruleset_fd: i32) -> Result<(), SandboxError> {
+    let result = unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, 0) };
+    if result < 0 {
+        return Err(SandboxError::SyscallFailed(format!(
+            "fixed Landlock restrict failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+fn close_fixed_landlock_fd(fd: OwnedFd, label: &str) -> Result<(), SandboxError> {
+    let raw = fd.into_raw_fd();
+    let result = unsafe { libc::close(raw) };
+    if result < 0 {
+        return Err(SandboxError::SyscallFailed(format!(
+            "fixed Landlock {label} close failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+fn merge_fixed_landlock_error(
+    primary: SandboxError,
+    cleanup: Result<(), SandboxError>,
+) -> SandboxError {
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => SandboxError::ApplyFailed(format!(
+            "fixed Landlock operation failed: {primary}; cleanup failed: {cleanup}"
+        )),
+    }
+}
 
 /// Apply Landlock filesystem restrictions.
 fn apply_landlock(policy: &CompiledPolicy) -> Result<(), SandboxError> {
@@ -1382,8 +1620,11 @@ mod tests {
     use super::*;
     use crate::sandbox::{CompiledPolicy, PlatformFlags};
     use fcp_manifest::SandboxProfile;
+    use std::fs::OpenOptions;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_policy() -> CompiledPolicy {
         CompiledPolicy {
@@ -1521,6 +1762,104 @@ mod tests {
         let last = filter.last().unwrap();
         assert_eq!(last.code, 0x06);
         assert_eq!(last.k, SECCOMP_RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn fixed_landlock_policy_constants_are_exact() {
+        assert_eq!(FIXED_LANDLOCK_HANDLED_ACCESS, 0xFFFF);
+        assert_eq!(FIXED_LANDLOCK_ROOT_PATH, b"/\0");
+        assert_eq!(FIXED_LANDLOCK_ROOT_ACCESS, 0b1100);
+        assert_eq!(
+            fixed_landlock_root_rule(37).allowed_access,
+            FIXED_LANDLOCK_ROOT_ACCESS
+        );
+        assert_eq!(fixed_landlock_root_rule(37).parent_fd, 37);
+        assert_eq!(
+            FIXED_LANDLOCK_ROOT_ACCESS & !FIXED_LANDLOCK_HANDLED_ACCESS,
+            0
+        );
+    }
+
+    #[test]
+    fn fixed_landlock_rejects_abi_below_five() {
+        assert!(matches!(
+            require_fixed_landlock_abi(FIXED_LANDLOCK_MIN_ABI - 1),
+            Err(SandboxError::UnsupportedPlatform(_))
+        ));
+        require_fixed_landlock_abi(FIXED_LANDLOCK_MIN_ABI).expect("ABI 5 is the fixed floor");
+    }
+
+    #[test]
+    fn fixed_read_only_landlock_subprocess_probe() {
+        if let Some(fixture_path) = std::env::var_os("FCP_FIXED_LANDLOCK_PROBE") {
+            let fixture_path = PathBuf::from(fixture_path);
+            assert!(
+                Path::new("/bin/true").exists(),
+                "the exec-denial probe requires /bin/true"
+            );
+
+            apply_fixed_read_only_landlock().expect("fixed Landlock probe setup");
+            assert_eq!(
+                std::fs::read(&fixture_path).expect("read-only fixture"),
+                b"fixed Landlock fixture"
+            );
+            assert!(
+                OpenOptions::new().write(true).open(&fixture_path).is_err(),
+                "write must be denied"
+            );
+            assert!(
+                OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&fixture_path)
+                    .is_err(),
+                "truncate must be denied"
+            );
+            assert!(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(fixture_path.with_file_name("created"))
+                    .is_err(),
+                "create must be denied"
+            );
+            let exec_denied = Command::new("/bin/true")
+                .status()
+                .map_or(true, |status| !status.success());
+            assert!(exec_denied, "a second exec must be denied");
+            return;
+        }
+
+        let abi = match query_landlock_abi() {
+            Ok(abi) => abi,
+            Err(SandboxError::UnsupportedPlatform(_)) => return,
+            Err(error) => panic!("Landlock ABI query failed: {error}"),
+        };
+        assert!(
+            abi >= FIXED_LANDLOCK_MIN_ABI,
+            "ABI below the fixed Landlock floor is a failure signal"
+        );
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let fixture_dir = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temp directory")
+            .join(format!("fcp-fixed-landlock-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&fixture_dir).expect("create fixture directory");
+        let fixture_path = fixture_dir.join("fixture");
+        std::fs::write(&fixture_path, b"fixed Landlock fixture").expect("write fixture");
+        let fixture_path = fixture_path.canonicalize().expect("canonical fixture");
+
+        let status = Command::new(std::env::current_exe().expect("test executable"))
+            .args(["fixed_read_only_landlock_subprocess_probe", "--nocapture"])
+            .env("FCP_FIXED_LANDLOCK_PROBE", &fixture_path)
+            .status()
+            .expect("run Landlock subprocess probe");
+        let cleanup = std::fs::remove_dir_all(&fixture_dir);
+        assert!(cleanup.is_ok(), "parent fixture cleanup failed");
+        assert!(status.success(), "Landlock subprocess probe failed");
     }
 
     // ── New tests ──

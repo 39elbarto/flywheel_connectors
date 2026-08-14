@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use fcp_async_core::Deadline;
+
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "linux")]
@@ -81,7 +83,7 @@ pub struct ProcessMemorySample {
     pub private_bytes: Option<u64>,
 }
 
-/// Result of the bounded TERM/KILL/reap sequence.
+/// Result of the best-effort TERM/KILL/reap sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminationReport {
     pub term_sent: bool,
@@ -512,22 +514,40 @@ impl OwnedProcess {
     }
 
     /// Send SIGTERM, wait for the whole owned group, then use SIGKILL only
-    /// after a second complete identity check.
+    /// after a second complete identity check. The compatibility wrapper
+    /// preserves the historical two-grace total budget.
     pub fn terminate(&mut self, grace: Duration) -> Result<TerminationReport, ProcessGroupError> {
+        self.terminate_until(Deadline::after(grace.saturating_mul(2)))
+    }
+
+    /// Best-effort deadline-aware TERM/KILL teardown.
+    ///
+    /// Polling and waits never create a cutoff later than the caller's
+    /// deadline, but `/proc` reads, identity checks, signal syscalls, and
+    /// reaping remain synchronous and non-preemptible. Hard wall-clock and
+    /// nested-descendant containment require the separately planned external
+    /// supervisor/cgroup layer.
+    pub fn terminate_until(
+        &mut self,
+        deadline: Deadline,
+    ) -> Result<TerminationReport, ProcessGroupError> {
         if self.teardown_state == TeardownState::TerminalFailure {
             return Err(ProcessGroupError::TeardownTerminal);
         }
-        let result = self.terminate_inner(grace);
+        let result = self.terminate_inner_until(deadline);
         if result.is_err() {
             self.teardown_state = TeardownState::TerminalFailure;
         }
         result
     }
 
-    fn terminate_inner(&mut self, grace: Duration) -> Result<TerminationReport, ProcessGroupError> {
+    fn terminate_inner_until(
+        &mut self,
+        deadline: Deadline,
+    ) -> Result<TerminationReport, ProcessGroupError> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = grace;
+            let _ = deadline;
             return Err(ProcessGroupError::UnsupportedPlatform);
         }
 
@@ -540,28 +560,36 @@ impl OwnedProcess {
             }
             let term_sent = self.send_verified_group_signal(libc::SIGTERM)?;
             self.term_sent |= term_sent;
-            let term_deadline = Instant::now() + grace;
-            while Instant::now() < term_deadline {
-                let _ = self.try_wait();
-                if self.verified_group_members()?.is_empty() {
-                    let _ = self.reap_if_needed()?;
-                    return Ok(self.termination_report(true));
-                }
-                std::thread::sleep(Duration::from_millis(10));
+            let term_deadline = Deadline::after(deadline.remaining() / 2);
+            if self.wait_for_group_until(term_deadline)? {
+                return Ok(self.termination_report(true));
             }
 
             let kill_sent = self.send_verified_group_signal(libc::SIGKILL)?;
             self.kill_sent |= kill_sent;
-            let kill_deadline = Instant::now() + grace;
-            while Instant::now() < kill_deadline {
-                let _ = self.try_wait();
-                if self.verified_group_members()?.is_empty() {
-                    let _ = self.reap_if_needed()?;
-                    return Ok(self.termination_report(true));
-                }
-                std::thread::sleep(Duration::from_millis(10));
+            if self.wait_for_group_until(deadline)? {
+                return Ok(self.termination_report(true));
             }
             Err(ProcessGroupError::TeardownTimeout)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_group_until(&mut self, deadline: Deadline) -> Result<bool, ProcessGroupError> {
+        loop {
+            if deadline.is_expired() {
+                return Ok(false);
+            }
+            let _ = self.try_wait();
+            if self.verified_group_members()?.is_empty() {
+                let _ = self.reap_if_needed()?;
+                return Ok(true);
+            }
+            let remaining = deadline.remaining();
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
         }
     }
 
@@ -1522,6 +1550,66 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn term_resistant_process_spec() -> ProcessSpec {
+        let runtime = std::fs::canonicalize("/bin/sh").expect("shell");
+        let digest = digest_file(&runtime).expect("shell digest");
+        ProcessSpec {
+            launcher_path: runtime.clone(),
+            launcher_digest: digest.clone(),
+            runtime_executable: runtime,
+            expected_runtime_executable_digest: digest,
+            fixed_args: vec![
+                "-c".into(),
+                "trap '' TERM; printf 'ready\\n'; while read line; do :; done".into(),
+            ],
+            fixed_env: BTreeMap::new(),
+            network_disabled: false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    const TERM_RESISTANT_REQUESTED_BUDGET: Duration = Duration::from_millis(300);
+
+    #[cfg(target_os = "linux")]
+    const TERM_RESISTANT_SCHEDULER_SLACK: Duration = Duration::from_millis(700);
+
+    #[cfg(target_os = "linux")]
+    const READY_MARKER_BUDGET: Duration = Duration::from_millis(500);
+
+    #[cfg(target_os = "linux")]
+    const PRECONSUMED_REQUESTED_BUDGET: Duration = Duration::from_millis(300);
+
+    #[cfg(target_os = "linux")]
+    const PRECONSUMED_SCHEDULER_SLACK: Duration = Duration::from_millis(250);
+
+    #[cfg(target_os = "linux")]
+    fn read_ready_marker(stdout: &mut ChildStdout) {
+        set_nonblocking(stdout).expect("mark term-resistant stdout nonblocking");
+        let deadline = Deadline::after(READY_MARKER_BUDGET);
+        let mut marker = [0_u8; 6];
+        let mut offset = 0;
+        while offset < marker.len() {
+            if deadline.is_expired() {
+                panic!("term-resistant ready marker deadline expired");
+            }
+            match stdout.read(&mut marker[offset..]) {
+                Ok(0) => panic!("term-resistant stdout reached EOF before ready marker"),
+                Ok(bytes) => offset += bytes,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    std::thread::sleep(deadline.remaining().min(Duration::from_millis(2)));
+                }
+                Err(error) => panic!("term-resistant ready marker read failed: {error}"),
+            }
+        }
+        assert_eq!(&marker, b"ready\n");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn refuses_pid_start_or_group_identity_drift_before_signal() {
         let spec = long_running_process_spec();
@@ -1562,6 +1650,61 @@ mod tests {
         ));
         assert_eq!(process.term_sent, term_sent);
         assert_eq!(process.kill_sent, kill_sent);
+        let child = process.child.as_mut().expect("owned child");
+        let _ = child.wait();
+        process.reaped = true;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_until_success_reports_reaped_and_absent_group() {
+        let mut process = OwnedProcess::spawn(&long_running_process_spec()).expect("process");
+        let report = process
+            .terminate_until(Deadline::after(Duration::from_secs(1)))
+            .expect("deadline-bounded teardown");
+        assert!(report.reaped);
+        assert!(report.group_absent);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_until_splits_budget_for_term_resistant_process() {
+        let mut process = OwnedProcess::spawn(&term_resistant_process_spec()).expect("process");
+        let mut stdout = process.take_stdout().expect("term-resistant stdout");
+        read_ready_marker(&mut stdout);
+        drop(stdout);
+        let started = Instant::now();
+        let report = process
+            .terminate_until(Deadline::after(TERM_RESISTANT_REQUESTED_BUDGET))
+            .expect("deadline-bounded TERM/KILL teardown");
+        assert!(report.term_sent);
+        assert!(report.kill_sent);
+        assert!(report.reaped);
+        assert!(report.group_absent);
+        assert!(
+            started.elapsed() < TERM_RESISTANT_REQUESTED_BUDGET + TERM_RESISTANT_SCHEDULER_SLACK
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_until_uses_one_total_budget_and_stays_terminal() {
+        let mut process = OwnedProcess::spawn(&long_running_process_spec()).expect("process");
+        let started = Instant::now();
+        let preconsumed_at = Instant::now()
+            .checked_sub(PRECONSUMED_REQUESTED_BUDGET)
+            .expect("pre-consumed deadline");
+        assert!(matches!(
+            process.terminate_until(Deadline::at(preconsumed_at)),
+            Err(ProcessGroupError::TeardownTimeout)
+        ));
+        assert!(started.elapsed() < PRECONSUMED_REQUESTED_BUDGET + PRECONSUMED_SCHEDULER_SLACK);
+        assert!(process.term_sent);
+        assert!(process.kill_sent);
+        assert!(matches!(
+            process.terminate_until(Deadline::after(Duration::from_secs(1))),
+            Err(ProcessGroupError::TeardownTerminal)
+        ));
         let child = process.child.as_mut().expect("owned child");
         let _ = child.wait();
         process.reaped = true;

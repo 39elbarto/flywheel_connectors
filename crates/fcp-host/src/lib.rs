@@ -50,6 +50,7 @@ mod local_mcp;
 mod migration_linux;
 #[cfg(target_os = "macos")]
 mod migration_macos;
+mod n8n_dispatch;
 mod network_policy;
 mod output_capture;
 mod owned_invocation;
@@ -83,6 +84,7 @@ pub use local_mcp::*;
 pub use migration_linux::*;
 #[cfg(target_os = "macos")]
 pub use migration_macos::*;
+pub use n8n_dispatch::*;
 pub use network_policy::*;
 pub use output_capture::*;
 pub use owned_invocation::*;

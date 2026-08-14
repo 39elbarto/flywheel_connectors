@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Linux owned per-invocation launch now supplies an authenticated inherited-FD host-egress channel and proves process-group teardown. `fcp-host n8n-run-once` accepts a closed nine-operation read-only envelope and consumes one request-scoped credential FD. The thin `fwc-n8n` wrapper derives that envelope for EEC or Hetzner, but the fixed artifact/KeePass launch bridge and local/official-MCP dispatch remain pending. Real-host narrow-token verification against EEC and Hetzner also remains pending.
+> **Status**: Linux owned per-invocation launch now supplies an authenticated inherited-FD host-egress channel and proves process-group teardown. `fcp-host n8n-run-once` accepts a closed nine-operation read-only envelope and consumes one request-scoped credential FD. The thin `fwc-n8n` wrapper derives that envelope for EEC or Hetzner. `fwc-n8n status` now verifies the fixed immutable release bundle and reports only `bundleAvailable`; the artifact/KeePass launch bridge and local/official-MCP dispatch remain pending. Real-host narrow-token verification against EEC and Hetzner also remains pending.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.21`
 > **Verification script**: none tracked; use the commands below
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -55,9 +55,17 @@ Important runtime truths:
   write capability fails closed. These are typed routing decisions only; the
   wrapper does not spawn a local provider, load a policy file, or dispatch REST
   or official MCP. All provider execution remains behind a host-owned boundary.
-- `fwc-n8n status` is intentionally request-process scoped. It reports the
-  wrapper's own idle state and does not scan, adopt, or stop unrelated Codex
-  profile processes.
+- `fwc-n8n status` is process-scan-free and reports only
+  `{"bundleAvailable":true|false}`. It derives the release root from the
+  canonical current executable and verifies the exact versioned bundle layout,
+  receipt, ownership/mode policy (including rejection of special mode bits),
+  link counts, and BLAKE3 digests. A dev/test executable safely reports
+  `false`. This is deliberately not named `bridgeInstalled`: it does not claim
+  that dispatch or KeePass integration is wired. Root ownership, restrictive
+  modes, and serialized atomic privileged updates are the current local trust
+  root; path-based verification does not defend against a concurrent malicious
+  root updater. This verifier also does not claim signature verification. The
+  future signed-installer/update receipt is a separate hardening step.
 - Runtime `BaseConnector` ID is `n8n`.
 - Manifest and reported connector ID are `fcp.n8n`.
 - The manifest interface hash is generated from the current operation surface; `fwc manifest fix connectors/n8n/manifest.toml --check --json` must report `changed=false` before release.

@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[path = "fwc_n8n_bundle.rs"]
+mod fwc_n8n_bundle;
+
 const MAX_INPUT_BYTES: usize = 256 * 1024;
 const HOST_RUN_ONCE_SCHEMA: &str = "fwc.n8n.host-run-once.v1";
 const HOST_RUN_ONCE_ZONE: &str = "z:work";
@@ -240,11 +243,7 @@ fn execute(cli: Cli) -> Result<Value, AppError> {
         }
         Command::RunOnce { operation } => run_once(&operation),
         Command::Status => Ok(json!({
-            "schema": "fwc.n8n.status.v1",
-            "scope": "request_process",
-            "idle": true,
-            "activeRuns": 0,
-            "providers": []
+            "bundleAvailable": fwc_n8n_bundle::verify_current_release_bundle().is_ok(),
         })),
     }
 }
@@ -1187,14 +1186,15 @@ mod tests {
     }
 
     #[test]
-    fn status_is_idle_and_does_not_scan_processes() {
+    fn status_reports_only_bundle_availability_without_process_scan() {
         let value = execute(Cli {
             command: Command::Status,
         })
         .expect("status");
-        assert_eq!(value["idle"], true);
-        assert_eq!(value["scope"], "request_process");
-        assert_eq!(value["activeRuns"], 0);
-        assert_eq!(value["providers"], json!([]));
+        assert_eq!(
+            value.get("bundleAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(value.as_object().expect("status object").len(), 1);
     }
 }

@@ -22,8 +22,17 @@ resource URI. It then fails closed with `bridge_not_wired`; it does not read
 KeePass or start a process. `fcp-host n8n-run-once` already verifies the same
 closed envelope, issues a one-call manifest-derived capability, consumes one
 request-scoped inherited-FD credential, and reuses owned connector teardown.
-The sandbox has the fixed inherited credential-channel spawn primitive, but
-the trusted artifact/KeePass parent bridge is not wired into `fwc-n8n` yet.
+The sandbox has the fixed inherited credential-channel spawn primitive. The
+`status` action now verifies a fixed immutable versioned release bundle derived
+from the canonical current executable and returns only
+`{"bundleAvailable":true|false}`; it performs no process scan, spawn, or secret
+read and does not claim that the bridge is wired. The trusted artifact/KeePass
+parent bridge is not wired into `fwc-n8n` yet. Bundle verification currently
+trusts root ownership, restrictive filesystem modes, and serialized atomic
+privileged updates locally. Its path-based checks do not defend against a
+concurrent malicious root updater, and it does not claim signature
+verification; a future signed installer/update receipt can strengthen that
+root of trust.
 `n8n.targets.resolve`, `n8n.capabilities.inspect`, `n8n.runtime.status`,
 `n8n.node_resources.explore`, `n8n.evaluations.manage`, and
 `n8n.mcp_access.reconcile` are not all representable by that enum yet. Local,

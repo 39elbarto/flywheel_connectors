@@ -21,6 +21,18 @@ const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 const PROCESS_GRACE: Duration = Duration::from_millis(100);
+#[cfg(target_os = "linux")]
+const SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
+#[cfg(target_os = "linux")]
+const SUPERVISOR_READY_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/READY";
+#[cfg(target_os = "linux")]
+const SUPERVISOR_GO_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/GO";
+#[cfg(target_os = "linux")]
+const SUPERVISOR_ABORT_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/ABORT";
+#[cfg(target_os = "linux")]
+const SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
+#[cfg(target_os = "linux")]
+const SUPERVISOR_START_FRAME_LEN: usize = SUPERVISOR_START_PREFIX.len() + 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BridgeErrorCode {
@@ -35,6 +47,8 @@ enum BridgeErrorCode {
     EnvelopeTooLarge,
     PathEncoding,
     Channel,
+    CgroupFailed,
+    SupervisorGateFailed,
     ProcessSpawnFailed,
     StdinUnavailable,
     StdoutUnavailable,
@@ -68,6 +82,8 @@ impl BridgeErrorCode {
             Self::EnvelopeTooLarge => "envelope_too_large",
             Self::PathEncoding => "bundle_invalid",
             Self::Channel => "credential_channel_failed",
+            Self::CgroupFailed => "request_cgroup_failed",
+            Self::SupervisorGateFailed => "supervisor_gate_failed",
             Self::ProcessSpawnFailed => "process_spawn_failed",
             Self::StdinUnavailable => "stdin_unavailable",
             Self::StdoutUnavailable => "stdout_unavailable",
@@ -198,7 +214,7 @@ fn process_spec(
         launcher_digest: host_digest.to_owned(),
         runtime_executable: host_path.to_path_buf(),
         expected_runtime_executable_digest: host_digest.to_owned(),
-        fixed_args: vec![OsString::from("n8n-run-once")],
+        fixed_args: vec![OsString::from("n8n-run-once-supervised")],
         fixed_env,
         network_disabled: false,
     })
@@ -266,6 +282,151 @@ fn operation_deadline_at(
 }
 
 #[cfg(target_os = "linux")]
+fn supervisor_start_frame(
+    deadline: std::time::Instant,
+) -> Result<[u8; SUPERVISOR_START_FRAME_LEN], BridgeError> {
+    let remaining_ms = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .as_millis();
+    let budget_ms = u64::try_from(remaining_ms)
+        .unwrap_or(u64::MAX)
+        .min(SUPERVISOR_MAX_BUDGET_MS);
+    if !(1..=SUPERVISOR_MAX_BUDGET_MS).contains(&budget_ms) {
+        return Err(BridgeError::new(BridgeErrorCode::Timeout));
+    }
+    let mut frame = [0_u8; SUPERVISOR_START_FRAME_LEN];
+    frame[..SUPERVISOR_START_PREFIX.len()].copy_from_slice(SUPERVISOR_START_PREFIX);
+    frame[SUPERVISOR_START_PREFIX.len()..].copy_from_slice(
+        &u32::try_from(budget_ms)
+            .map_err(|_| BridgeError::new(BridgeErrorCode::SupervisorGateFailed))?
+            .to_be_bytes(),
+    );
+    Ok(frame)
+}
+
+#[cfg(target_os = "linux")]
+const fn supervisor_control_error() -> BridgeError {
+    BridgeError::new(BridgeErrorCode::SupervisorGateFailed)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_supervisor_io(deadline: std::time::Instant) -> Result<(), BridgeError> {
+    ensure_before(deadline)?;
+    std::thread::sleep(
+        deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(Duration::from_millis(2)),
+    );
+    ensure_before(deadline)
+}
+
+#[cfg(target_os = "linux")]
+fn write_supervisor_control_exact(
+    stream: &mut std::os::unix::net::UnixStream,
+    bytes: &[u8],
+    deadline: std::time::Instant,
+) -> Result<(), BridgeError> {
+    use std::io::Write;
+
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| supervisor_control_error())?;
+    let result = (|| {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            ensure_before(deadline)?;
+            match stream.write(&bytes[offset..]) {
+                Ok(0) => return Err(supervisor_control_error()),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_for_supervisor_io(deadline)?;
+                }
+                Err(_) => return Err(supervisor_control_error()),
+            }
+        }
+        Ok(())
+    })();
+    if stream.set_nonblocking(false).is_err() {
+        return Err(supervisor_control_error());
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn read_supervisor_control_exact(
+    stream: &mut std::os::unix::net::UnixStream,
+    buffer: &mut [u8],
+    deadline: std::time::Instant,
+) -> Result<(), BridgeError> {
+    use std::io::Read;
+
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| supervisor_control_error())?;
+    let result = (|| {
+        let mut offset = 0;
+        while offset < buffer.len() {
+            ensure_before(deadline)?;
+            match stream.read(&mut buffer[offset..]) {
+                Ok(0) => return Err(supervisor_control_error()),
+                Ok(read) => offset += read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_for_supervisor_io(deadline)?;
+                }
+                Err(_) => return Err(supervisor_control_error()),
+            }
+        }
+        Ok(())
+    })();
+    if stream.set_nonblocking(false).is_err() {
+        return Err(supervisor_control_error());
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn reject_queued_supervisor_control_bytes(
+    stream: &mut std::os::unix::net::UnixStream,
+) -> Result<(), BridgeError> {
+    use std::io::Read;
+
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| supervisor_control_error())?;
+    let mut probe = [0_u8; 1];
+    let read_result = stream.read(&mut probe);
+    if stream.set_nonblocking(false).is_err() {
+        return Err(supervisor_control_error());
+    }
+    match read_result {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Ok(0) => Ok(()),
+        Ok(_) | Err(_) => Err(supervisor_control_error()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn best_effort_supervisor_abort(
+    stream: &mut std::os::unix::net::UnixStream,
+    deadline: std::time::Instant,
+) {
+    if std::time::Instant::now() < deadline {
+        let _ = write_supervisor_control_exact(stream, SUPERVISOR_ABORT_FRAME, deadline);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_supervisor_go_after_gate(
+    stream: &mut std::os::unix::net::UnixStream,
+    _gate: fcp_sandbox::SupervisorExecGate,
+    deadline: std::time::Instant,
+) -> Result<(), BridgeError> {
+    write_supervisor_control_exact(stream, SUPERVISOR_GO_FRAME, deadline)
+}
+
+#[cfg(target_os = "linux")]
 impl fmt::Debug for ProcessOutput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -324,32 +485,218 @@ pub(super) fn run_process(
 
     let frame = credential_frame(&credential)?;
     ensure_before(operation_deadline_at)?;
-    let (mut host_endpoint, child_endpoint) =
-        UnixStream::pair().map_err(|_| BridgeError::new(BridgeErrorCode::Channel))?;
-    ensure_before(operation_deadline_at)?;
-    let mut process =
-        fcp_sandbox::OwnedProcess::spawn_with_run_once_credential_channel_in_directory(
-            spec,
-            child_endpoint,
-            working_directory,
-        )
-        .map_err(|_| BridgeError::new(BridgeErrorCode::ProcessSpawnFailed))?;
+    let mut request_cgroup = fcp_sandbox::RequestCgroup::create()
+        .map_err(|_| BridgeError::new(BridgeErrorCode::CgroupFailed))?;
+    let Ok((attach_handle, attach_lease)) = request_cgroup.take_supervisor_attach_handle() else {
+        return Err(fail_empty_cgroup(
+            &mut request_cgroup,
+            request_deadline_at,
+            BridgeError::new(BridgeErrorCode::CgroupFailed),
+        ));
+    };
+    let mut attach_lease = Some(attach_lease);
+    let Ok((mut host_endpoint, child_endpoint)) = UnixStream::pair() else {
+        return Err(fail_empty_cgroup(
+            &mut request_cgroup,
+            request_deadline_at,
+            BridgeError::new(BridgeErrorCode::Channel),
+        ));
+    };
+    if let Err(error) = ensure_before(operation_deadline_at) {
+        return Err(fail_empty_cgroup(
+            &mut request_cgroup,
+            request_deadline_at,
+            error,
+        ));
+    }
+    let Ok((mut supervisor_endpoint, supervisor_child_endpoint)) = UnixStream::pair() else {
+        return Err(fail_empty_cgroup(
+            &mut request_cgroup,
+            request_deadline_at,
+            BridgeError::new(BridgeErrorCode::Channel),
+        ));
+    };
+    if let Err(error) = ensure_before(operation_deadline_at) {
+        return Err(fail_empty_cgroup(
+            &mut request_cgroup,
+            request_deadline_at,
+            error,
+        ));
+    }
+    let Ok(mut process) = fcp_sandbox::OwnedProcess::spawn_with_supervised_run_once_channels(
+        spec,
+        child_endpoint,
+        supervisor_child_endpoint,
+        attach_handle,
+        working_directory,
+    ) else {
+        return Err(fail_empty_cgroup(
+            &mut request_cgroup,
+            request_deadline_at,
+            BridgeError::new(BridgeErrorCode::ProcessSpawnFailed),
+        ));
+    };
+
+    let start_frame = match supervisor_start_frame(operation_deadline_at) {
+        Ok(frame) => frame,
+        Err(error) => {
+            best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+            return Err(fail_process(
+                &mut process,
+                &mut request_cgroup,
+                &cancel,
+                Vec::new(),
+                request_deadline_at,
+                error,
+            ));
+        }
+    };
+    if let Err(error) = write_supervisor_control_exact(
+        &mut supervisor_endpoint,
+        &start_frame,
+        operation_deadline_at,
+    ) {
+        best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+        return Err(fail_process(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+            error,
+        ));
+    }
+    let mut ready = [0_u8; SUPERVISOR_READY_FRAME.len()];
+    if let Err(error) =
+        read_supervisor_control_exact(&mut supervisor_endpoint, &mut ready, operation_deadline_at)
+    {
+        best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+        return Err(fail_process(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+            error,
+        ));
+    }
+    if ready != SUPERVISOR_READY_FRAME
+        || reject_queued_supervisor_control_bytes(&mut supervisor_endpoint).is_err()
+    {
+        best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+        return Err(fail_process(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+            supervisor_control_error(),
+        ));
+    }
+    let lease = attach_lease
+        .as_ref()
+        .ok_or_else(supervisor_control_error)
+        .map_err(|error| {
+            best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+            fail_process(
+                &mut process,
+                &mut request_cgroup,
+                &cancel,
+                Vec::new(),
+                request_deadline_at,
+                error,
+            )
+        })?;
+    let Ok(permit) = request_cgroup.verify_supervisor_membership(&process, lease) else {
+        best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+        return Err(fail_process(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+            BridgeError::new(BridgeErrorCode::SupervisorGateFailed),
+        ));
+    };
+    let Some(lease) = attach_lease.take() else {
+        best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+        return Err(fail_process(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+            supervisor_control_error(),
+        ));
+    };
+    let Ok(supervisor_exec_gate) = request_cgroup.consume_release_permit(permit, &process, lease)
+    else {
+        best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+        return Err(fail_process(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+            BridgeError::new(BridgeErrorCode::SupervisorGateFailed),
+        ));
+    };
+    if let Err(error) = write_supervisor_go_after_gate(
+        &mut supervisor_endpoint,
+        supervisor_exec_gate,
+        operation_deadline_at,
+    ) {
+        best_effort_supervisor_abort(&mut supervisor_endpoint, operation_deadline_at);
+        return Err(fail_process(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+            error,
+        ));
+    }
+    drop(supervisor_endpoint);
 
     if Instant::now() >= operation_deadline_at {
-        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
-        return Err(BridgeError::new(BridgeErrorCode::Timeout));
+        return Err(fail_process(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+            BridgeError::new(BridgeErrorCode::Timeout),
+        ));
     }
 
     let Some(stdin) = process.take_stdin() else {
-        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+        )?;
         return Err(BridgeError::new(BridgeErrorCode::StdinUnavailable));
     };
     let Some(stdout) = process.take_stdout() else {
-        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+        )?;
         return Err(BridgeError::new(BridgeErrorCode::StdoutUnavailable));
     };
     let Some(stderr) = process.take_stderr() else {
-        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+        )?;
         return Err(BridgeError::new(BridgeErrorCode::StderrUnavailable));
     };
 
@@ -357,7 +704,13 @@ pub(super) fn run_process(
         || fcp_sandbox::set_nonblocking(&stdout).is_err()
         || fcp_sandbox::set_nonblocking(&stderr).is_err()
     {
-        cleanup(&mut process, &cancel, Vec::new(), request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            Vec::new(),
+            request_deadline_at,
+        )?;
         return Err(BridgeError::new(BridgeErrorCode::OutputReadFailed));
     }
 
@@ -365,7 +718,13 @@ pub(super) fn run_process(
     let Ok(stdin_worker) =
         spawn_stdin_writer(stdin, envelope_bytes, cancel.clone(), operation_deadline_at)
     else {
-        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            workers,
+            request_deadline_at,
+        )?;
         return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
     };
     workers.push(stdin_worker);
@@ -375,7 +734,13 @@ pub(super) fn run_process(
         cancel.clone(),
         operation_deadline_at,
     ) else {
-        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            workers,
+            request_deadline_at,
+        )?;
         return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
     };
     workers.push(stdout_worker);
@@ -385,7 +750,13 @@ pub(super) fn run_process(
         cancel.clone(),
         operation_deadline_at,
     ) else {
-        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            workers,
+            request_deadline_at,
+        )?;
         return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
     };
     workers.push(stderr_worker);
@@ -399,13 +770,20 @@ pub(super) fn run_process(
     drop(frame);
     drop(host_endpoint);
     if let Err(error) = write_result {
-        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            workers,
+            request_deadline_at,
+        )?;
         return Err(error);
     }
 
     if let Err(error) = ensure_before(operation_deadline_at) {
         cleanup(
             &mut process,
+            &mut request_cgroup,
             &cancel,
             std::mem::take(&mut workers),
             request_deadline_at,
@@ -454,7 +832,13 @@ pub(super) fn run_process(
         failure = Some(BridgeErrorCode::Timeout);
     }
     if let Some(code) = failure {
-        cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+        cleanup(
+            &mut process,
+            &mut request_cgroup,
+            &cancel,
+            workers,
+            request_deadline_at,
+        )?;
         return Err(BridgeError::new(code));
     }
 
@@ -464,7 +848,13 @@ pub(super) fn run_process(
     let stderr =
         stderr_result.ok_or_else(|| BridgeError::new(BridgeErrorCode::OutputReadFailed))??;
     stdin_result.ok_or_else(|| BridgeError::new(BridgeErrorCode::StdinWriteFailed))??;
-    let termination = cleanup(&mut process, &cancel, workers, request_deadline_at)?;
+    let termination = cleanup(
+        &mut process,
+        &mut request_cgroup,
+        &cancel,
+        workers,
+        request_deadline_at,
+    )?;
     if !status.success() {
         return Err(BridgeError::new(BridgeErrorCode::ChildFailed));
     }
@@ -672,8 +1062,25 @@ fn receive_once(worker: &mut WorkerRecord, slot: &mut Option<Result<Vec<u8>, Bri
 }
 
 #[cfg(target_os = "linux")]
+fn cleanup_cgroup(
+    cgroup: &mut fcp_sandbox::RequestCgroup,
+    request_deadline_at: std::time::Instant,
+) -> Result<(), BridgeError> {
+    let kill_result = cgroup.abort_empty_until(fcp_async_core::Deadline::at(request_deadline_at));
+    let kill_evidence = kill_result.ok();
+    let remove_result = cgroup.remove_empty();
+    if kill_evidence.is_none_or(|evidence| !evidence.kill_requested() || !evidence.populated_zero())
+        || remove_result.is_err()
+    {
+        return Err(BridgeError::new(BridgeErrorCode::TeardownFailed));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn cleanup(
     process: &mut fcp_sandbox::OwnedProcess,
+    cgroup: &mut fcp_sandbox::RequestCgroup,
     cancel: &std::sync::atomic::AtomicBool,
     mut workers: Vec<WorkerRecord>,
     request_deadline_at: std::time::Instant,
@@ -681,9 +1088,9 @@ fn cleanup(
     use std::sync::atomic::Ordering;
 
     cancel.store(true, Ordering::Relaxed);
-    let termination = process
-        .terminate_until(fcp_async_core::Deadline::at(request_deadline_at))
-        .map_err(|_| BridgeError::new(BridgeErrorCode::TeardownFailed));
+    let cgroup_kill = cgroup.kill_until(fcp_async_core::Deadline::at(request_deadline_at));
+    let termination = process.terminate_until(fcp_async_core::Deadline::at(request_deadline_at));
+    let cgroup_remove = cgroup.remove_empty();
     while std::time::Instant::now() < request_deadline_at
         && workers.iter().any(|worker| !worker.completed)
     {
@@ -709,7 +1116,15 @@ fn cleanup(
             worker_failed = true;
         }
     }
-    let termination = termination?;
+    if cgroup_kill.is_err() || cgroup_remove.is_err() {
+        return Err(BridgeError::new(BridgeErrorCode::TeardownFailed));
+    }
+    let cgroup_evidence =
+        cgroup_kill.map_err(|_| BridgeError::new(BridgeErrorCode::TeardownFailed))?;
+    if !cgroup_evidence.kill_requested() || !cgroup_evidence.populated_zero() {
+        return Err(BridgeError::new(BridgeErrorCode::TeardownFailed));
+    }
+    let termination = termination.map_err(|_| BridgeError::new(BridgeErrorCode::TeardownFailed))?;
     if !termination.reaped {
         return Err(BridgeError::new(BridgeErrorCode::TeardownFailed));
     }
@@ -720,6 +1135,31 @@ fn cleanup(
         return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
     }
     Ok(termination)
+}
+
+#[cfg(target_os = "linux")]
+fn fail_empty_cgroup(
+    cgroup: &mut fcp_sandbox::RequestCgroup,
+    request_deadline_at: std::time::Instant,
+    operation_error: BridgeError,
+) -> BridgeError {
+    cleanup_cgroup(cgroup, request_deadline_at)
+        .err()
+        .unwrap_or(operation_error)
+}
+
+#[cfg(target_os = "linux")]
+fn fail_process(
+    process: &mut fcp_sandbox::OwnedProcess,
+    cgroup: &mut fcp_sandbox::RequestCgroup,
+    cancel: &std::sync::atomic::AtomicBool,
+    workers: Vec<WorkerRecord>,
+    request_deadline_at: std::time::Instant,
+    operation_error: BridgeError,
+) -> BridgeError {
+    cleanup(process, cgroup, cancel, workers, request_deadline_at)
+        .err()
+        .unwrap_or(operation_error)
 }
 
 #[cfg(target_os = "linux")]
@@ -767,7 +1207,10 @@ mod tests {
         assert_eq!(spec.runtime_executable, spec.launcher_path);
         assert_eq!(spec.launcher_digest, "a".repeat(64));
         assert_eq!(spec.expected_runtime_executable_digest, "a".repeat(64));
-        assert_eq!(spec.fixed_args, vec![OsString::from("n8n-run-once")]);
+        assert_eq!(
+            spec.fixed_args,
+            vec![OsString::from("n8n-run-once-supervised")]
+        );
         assert_eq!(spec.fixed_env.len(), 3);
         assert_eq!(
             spec.fixed_env
@@ -871,6 +1314,71 @@ mod tests {
         let error = write_credential_frame(&mut stream, &frame, &cancel, Instant::now())
             .expect_err("expired credential deadline must fail closed");
         assert_eq!(error.code(), "timeout");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervisor_start_frame_is_exact_and_bounded() {
+        use std::time::Instant;
+
+        let frame = supervisor_start_frame(Instant::now() + Duration::from_millis(250))
+            .expect("start frame within budget");
+        assert_eq!(
+            &frame[..SUPERVISOR_START_PREFIX.len()],
+            SUPERVISOR_START_PREFIX
+        );
+        let budget = u32::from_be_bytes(
+            frame[SUPERVISOR_START_PREFIX.len()..]
+                .try_into()
+                .expect("fixed budget suffix"),
+        );
+        assert!((1..=u32::try_from(SUPERVISOR_MAX_BUDGET_MS).expect("max fits")).contains(&budget));
+        let clamped = supervisor_start_frame(Instant::now() + Duration::from_secs(120))
+            .expect("large deadline clamps");
+        assert_eq!(
+            u32::from_be_bytes(
+                clamped[SUPERVISOR_START_PREFIX.len()..]
+                    .try_into()
+                    .expect("fixed budget suffix")
+            ),
+            u32::try_from(SUPERVISOR_MAX_BUDGET_MS).expect("max fits")
+        );
+        assert!(supervisor_start_frame(Instant::now()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_ready_payload(payload: &[u8]) -> Result<(), BridgeError> {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::time::Instant;
+
+        let (mut peer, mut stream) = UnixStream::pair().expect("supervisor socketpair");
+        peer.write_all(payload).expect("write ready fixture");
+        drop(peer);
+        let mut ready = [0_u8; SUPERVISOR_READY_FRAME.len()];
+        read_supervisor_control_exact(
+            &mut stream,
+            &mut ready,
+            Instant::now() + Duration::from_secs(1),
+        )?;
+        if ready != SUPERVISOR_READY_FRAME {
+            return Err(supervisor_control_error());
+        }
+        reject_queued_supervisor_control_bytes(&mut stream)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervisor_ready_parser_rejects_malformed_short_eof_and_trailing() {
+        let mut short = SUPERVISOR_READY_FRAME.to_vec();
+        short.pop();
+        let mut trailing = SUPERVISOR_READY_FRAME.to_vec();
+        trailing.push(b'!');
+        assert!(read_ready_payload(SUPERVISOR_READY_FRAME).is_ok());
+        assert!(read_ready_payload(&short).is_err());
+        assert!(read_ready_payload(b"").is_err());
+        assert!(read_ready_payload(b"FCP-HOST-RUN-ONCE/v1/REJECT").is_err());
+        assert!(read_ready_payload(&trailing).is_err());
     }
 
     #[cfg(target_os = "linux")]

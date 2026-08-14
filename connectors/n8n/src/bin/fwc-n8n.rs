@@ -573,13 +573,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     use fcp_sandbox::{
         FCP_HOST_RUN_ONCE_CREDENTIAL_FD, FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
-        FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE, ProcessSpec, TerminationReport,
-        claim_inherited_host_egress_channel,
+        FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE, FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD,
+        ProcessSpec, TerminationReport, claim_inherited_host_egress_channel,
     };
     #[cfg(target_os = "linux")]
     use std::collections::BTreeMap;
     #[cfg(target_os = "linux")]
-    use std::io::Read;
+    use std::io::{Read, Write};
     #[cfg(target_os = "linux")]
     use std::process::ExitStatus;
 
@@ -587,6 +587,14 @@ mod tests {
     const FAKE_CHILD_ENV: &str = "FWC_N8N_FAKE_CHILD";
     #[cfg(target_os = "linux")]
     const FAKE_CHILD_OUTPUT_MARKER: &str = "FWC_N8N_FAKE_JSON:";
+    #[cfg(target_os = "linux")]
+    const SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
+    #[cfg(target_os = "linux")]
+    const SUPERVISOR_READY_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/READY";
+    #[cfg(target_os = "linux")]
+    const SUPERVISOR_GO_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/GO";
+    #[cfg(target_os = "linux")]
+    const SUPERVISOR_MAX_BUDGET_MS: u32 = 60_000;
 
     #[cfg(target_os = "linux")]
     #[derive(Debug)]
@@ -733,6 +741,58 @@ mod tests {
             return;
         }
         let result = (|| -> Result<(), ()> {
+            let control_fd = std::env::var(FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD)
+                .map_err(|_| ())?
+                .parse::<i32>()
+                .map_err(|_| ())?;
+            if control_fd < 3 {
+                return Err(());
+            }
+            let mut control = claim_inherited_host_egress_channel(control_fd).map_err(|_| ())?;
+            let mut start = [0_u8; SUPERVISOR_START_PREFIX.len() + 4];
+            control.read_exact(&mut start).map_err(|_| ())?;
+            if &start[..SUPERVISOR_START_PREFIX.len()] != SUPERVISOR_START_PREFIX {
+                return Err(());
+            }
+            let budget = u32::from_be_bytes(
+                start[SUPERVISOR_START_PREFIX.len()..]
+                    .try_into()
+                    .map_err(|_| ())?,
+            );
+            if !(1..=SUPERVISOR_MAX_BUDGET_MS).contains(&budget) {
+                return Err(());
+            }
+            control.set_nonblocking(true).map_err(|_| ())?;
+            let mut extra = [0_u8; 1];
+            let start_probe = control.read(&mut extra);
+            let start_restore = control.set_nonblocking(false);
+            let start_has_extra = match start_probe {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(_) => true,
+            };
+            if start_restore.is_err() || start_has_extra {
+                return Err(());
+            }
+            control.write_all(SUPERVISOR_READY_FRAME).map_err(|_| ())?;
+            let mut decision = [0_u8; SUPERVISOR_GO_FRAME.len()];
+            control.read_exact(&mut decision).map_err(|_| ())?;
+            if decision != SUPERVISOR_GO_FRAME {
+                return Err(());
+            }
+            control.set_nonblocking(true).map_err(|_| ())?;
+            let mut trailing = [0_u8; 1];
+            let decision_probe = control.read(&mut trailing);
+            let decision_restore = control.set_nonblocking(false);
+            let decision_has_extra = match decision_probe {
+                Ok(0) => false,
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(_) => true,
+            };
+            if decision_restore.is_err() || decision_has_extra {
+                return Err(());
+            }
             let mut stdin = std::io::stdin().lock();
             let envelope = read_bounded_child_input(&mut stdin, MAX_INPUT_BYTES)?;
             drop(stdin);
@@ -815,6 +875,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[ignore = "requires separately approved delegated cgroup-v2 live integration"]
     #[test]
     fn run_once_fake_parent_bridge_roundtrip_is_bounded_and_group_owned() {
         let operation = HostRunOnceOperation::parse("n8n.workflows.get").expect("operation");

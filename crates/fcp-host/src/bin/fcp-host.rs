@@ -132,7 +132,7 @@ use fcp_prelude::{
     CorrelationId, CostEstimateConfidence, CredentialId, Decision, InstanceId, Lease as CoreLease,
     LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
     ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject, TailscaleNodeId, TransportMode,
-    UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject, simulate_policy_decision,
+    UsageMetric, UsageMetricKind, Uuid, ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{
@@ -331,6 +331,7 @@ impl HybridOwnerProductionVerifier {
 enum CliAction {
     Run,
     RunOnce,
+    N8nReadOnlyRunOnce,
     PrintHelp,
     PrintVersion,
 }
@@ -412,7 +413,7 @@ struct N8nReadOnlyRunOncePlan {
     resource_uri: String,
     input: Value,
     deadline_ms: u64,
-    correlation_id: Option<String>,
+    correlation_id: Option<CorrelationId>,
     credential_binding: RunOnceCredentialBinding,
 }
 
@@ -6051,6 +6052,7 @@ where
     match remaining.as_slice() {
         [] => Ok(CliAction::Run),
         [arg] if arg == OsStr::new("run-once") => Ok(CliAction::RunOnce),
+        [arg] if arg == OsStr::new("n8n-run-once") => Ok(CliAction::N8nReadOnlyRunOnce),
         [arg] if arg == OsStr::new("-h") || arg == OsStr::new("--help") => Ok(CliAction::PrintHelp),
         [arg] if arg == OsStr::new("-V") || arg == OsStr::new("--version") => {
             Ok(CliAction::PrintVersion)
@@ -6076,6 +6078,7 @@ fcp-host {}
 Usage:
   fcp-host
   fcp-host run-once
+  fcp-host n8n-run-once
   fcp-host --help
   fcp-host --version
 
@@ -6096,6 +6099,10 @@ Startup configuration is supplied via environment variables:
 run-once reads exactly one bounded InvokeRequest JSON value from stdin and
 writes one InvokeResponse JSON value to stdout. It uses only a selected
 per-invocation connector from the trusted inventory and never binds a listener.
+
+n8n-run-once reads the closed fwc.n8n.host-run-once.v1 read-only envelope,
+issues a request-scoped capability from trusted manifest metadata, and uses the
+same per-invocation connector path without binding a listener.
 ",
         env!("CARGO_PKG_VERSION")
     );
@@ -9095,6 +9102,18 @@ fn read_run_once_request_from_stdin() -> HostResult<InvokeRequest> {
     parse_run_once_request(&input)
 }
 
+fn read_n8n_read_only_run_once_input_from_stdin() -> HostResult<N8nReadOnlyRunOnceInput> {
+    let mut input = Vec::new();
+    let stdin = std::io::stdin();
+    let mut limited = stdin
+        .lock()
+        .take(u64::try_from(RUN_ONCE_MAX_INPUT_BYTES + 1).unwrap_or(u64::MAX));
+    limited.read_to_end(&mut input).map_err(|_| {
+        HostError::InvalidFilter("n8n read-only run-once stdin could not be read".to_string())
+    })?;
+    parse_n8n_read_only_run_once_input(&input)
+}
+
 fn parse_run_once_request(input: &[u8]) -> HostResult<InvokeRequest> {
     if input.len() > RUN_ONCE_MAX_INPUT_BYTES {
         return Err(HostError::InvalidFilter(
@@ -9303,13 +9322,16 @@ fn build_n8n_read_only_run_once_plan(
             "n8n read-only run-once deadline is invalid".to_string(),
         ));
     }
-    if input.correlation_id.as_ref().is_some_and(|value| {
-        value.is_empty() || value.len() > 128 || !value.bytes().all(|byte| byte.is_ascii_graphic())
-    }) {
-        return Err(HostError::InvalidFilter(
-            "n8n read-only run-once correlation id is invalid".to_string(),
-        ));
-    }
+    let correlation_id = input
+        .correlation_id
+        .map(|value| {
+            Uuid::parse_str(&value).map(CorrelationId).map_err(|_| {
+                HostError::InvalidFilter(
+                    "n8n read-only run-once correlation id is invalid".to_string(),
+                )
+            })
+        })
+        .transpose()?;
     validate_n8n_read_only_resource_uri(input.server_id, &input.resource_uri)?;
     let credential_binding = run_once_n8n_credential_binding_for_zone(config, &zone_id)?;
     if credential_binding.server_id != input.server_id.as_str() {
@@ -9325,7 +9347,7 @@ fn build_n8n_read_only_run_once_plan(
         resource_uri: input.resource_uri,
         input: input.input,
         deadline_ms,
-        correlation_id: input.correlation_id,
+        correlation_id,
         credential_binding,
     })
 }
@@ -9599,10 +9621,19 @@ fn read_run_once_credential_bootstrap(
     config: &ManagedConnectorConfig,
     request: &InvokeRequest,
 ) -> HostResult<Option<RunOnceN8nCredential>> {
+    if run_once_credential_fd_from_env()?.is_none() {
+        return Ok(None);
+    }
+    let binding = run_once_n8n_credential_binding(config, request)?;
+    read_run_once_credential_bootstrap_for_binding(binding)
+}
+
+fn read_run_once_credential_bootstrap_for_binding(
+    binding: RunOnceCredentialBinding,
+) -> HostResult<Option<RunOnceN8nCredential>> {
     let Some(fd) = run_once_credential_fd_from_env()? else {
         return Ok(None);
     };
-    let binding = run_once_n8n_credential_binding(config, request)?;
 
     #[cfg(not(target_os = "linux"))]
     {
@@ -9706,11 +9737,111 @@ async fn async_run_once(telemetry_config: TelemetryConfig) -> HostResult<InvokeR
         .map_err(|(status, _)| run_once_invoke_error(status))
 }
 
+fn build_n8n_read_only_invoke_request(
+    plan: N8nReadOnlyRunOncePlan,
+    capability_token: fcp_core::CapabilityToken,
+) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId::random(),
+        connector_id: ConnectorId::from_static("fcp.n8n"),
+        operation: plan.operation,
+        zone_id: plan.zone_id,
+        input: plan.input,
+        capability_token,
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: Some(plan.deadline_ms),
+        correlation_id: Some(plan.correlation_id.unwrap_or_default()),
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }
+}
+
+async fn async_n8n_read_only_run_once(
+    telemetry_config: TelemetryConfig,
+) -> HostResult<InvokeResponse> {
+    let high_level_input = read_n8n_read_only_run_once_input_from_stdin()?;
+    let connector_id = ConnectorId::from_static("fcp.n8n");
+    let loaded_configs =
+        select_run_once_connector_config(load_connector_configs()?, &connector_id)?;
+    let selected_config = loaded_configs.configs.first().cloned().ok_or_else(|| {
+        HostError::ConnectorNotFound(
+            "n8n read-only run-once connector is not configured".to_string(),
+        )
+    })?;
+    let plan = build_n8n_read_only_run_once_plan(high_level_input, &selected_config)?;
+    let credential =
+        read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())?
+            .ok_or_else(|| {
+                HostError::PreflightFailed(
+                    "n8n read-only run-once credential bootstrap is required".to_string(),
+                )
+            })?;
+
+    let truth_precedence_boot = current_truth_precedence_boot_resolution().map_err(|error| {
+        emit_truth_precedence_boot_error(&error);
+        HostError::InvalidFilter("truth precedence configuration is invalid".to_string())
+    })?;
+    emit_boot_log(&truth_precedence_boot.classification);
+    emit_operational_model_selection_log(&truth_precedence_boot.selection);
+    let zone_policies = load_zone_policies()?;
+
+    let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+    let state = build_app_state(
+        telemetry_config,
+        loaded_configs,
+        Some(signing_key.verifying_key()),
+        None,
+        zone_policies,
+    )
+    .await?;
+    let introspection = state
+        .registry
+        .get_introspection(&connector_id)
+        .await
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n read-only run-once trusted manifest introspection is unavailable".to_string(),
+            )
+        })?;
+    let trusted_operation = introspection
+        .operations
+        .iter()
+        .find(|operation| operation.id == plan.operation)
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n read-only run-once operation is absent from the trusted manifest".to_string(),
+            )
+        })?;
+    seed_run_once_credential(&state, credential, &plan.zone_id, &plan.operation).await?;
+    let issuance = build_n8n_read_only_capability_issuance(&plan, trusted_operation)?.into_inner();
+    let issued = state
+        .lifecycle
+        .issue_capability_token(&issuance, &signing_key)
+        .await
+        .map_err(map_lifecycle_host_error)?;
+    let token_b64 = issued.token_cbor_b64.ok_or_else(|| {
+        HostError::Internal("n8n read-only run-once capability issuance failed".to_string())
+    })?;
+    let capability_token =
+        capability_token_from_cbor_b64(&token_b64, "n8n read-only run-once capability")?;
+    let request = build_n8n_read_only_invoke_request(plan, capability_token);
+
+    invoke_handler(State(state), HeaderMap::new(), Json(request))
+        .await
+        .map(|Json(response)| response)
+        .map_err(|(status, _)| run_once_invoke_error(status))
+}
+
 fn main() -> HostResult<()> {
     let action = parse_cli_action()?;
     match action {
         CliAction::Run => {}
         CliAction::RunOnce => {}
+        CliAction::N8nReadOnlyRunOnce => {}
         CliAction::PrintHelp => {
             print_cli_help();
             return Ok(());
@@ -9722,7 +9853,7 @@ fn main() -> HostResult<()> {
     }
     let telemetry_config = match init_host_telemetry() {
         Ok(config) => config,
-        Err(_error) if matches!(action, CliAction::RunOnce) => {
+        Err(_error) if matches!(action, CliAction::RunOnce | CliAction::N8nReadOnlyRunOnce) => {
             return print_run_once_response(Err(HostError::Internal(
                 "run-once telemetry initialization failed".to_string(),
             )));
@@ -9744,6 +9875,17 @@ fn main() -> HostResult<()> {
                     Ok(result) => result,
                     Err(_) => Err(HostError::Internal("run-once runtime failed".to_string())),
                 };
+            print_run_once_response(result)
+        }
+        CliAction::N8nReadOnlyRunOnce => {
+            let result = match fcp_async_core::runtime::block_on_sync(async_n8n_read_only_run_once(
+                telemetry_config,
+            )) {
+                Ok(result) => result,
+                Err(_) => Err(HostError::Internal(
+                    "n8n read-only run-once runtime failed".to_string(),
+                )),
+            };
             print_run_once_response(result)
         }
         CliAction::PrintHelp | CliAction::PrintVersion => unreachable!("handled above"),
@@ -28141,6 +28283,13 @@ done"#;
     }
 
     #[test]
+    fn parse_cli_action_accepts_n8n_run_once_without_wrapper_arguments() {
+        let action = parse_cli_action_from_args(["fcp-host", "n8n-run-once"])
+            .expect("n8n-run-once should parse");
+        assert_eq!(action, CliAction::N8nReadOnlyRunOnce);
+    }
+
+    #[test]
     fn parse_run_once_request_rejects_empty_malformed_and_trailing_input() {
         assert!(parse_run_once_request(b" \n\t").is_err());
         assert!(parse_run_once_request(b"not-json").is_err());
@@ -28267,7 +28416,7 @@ done"#;
             resource_uri: resource_uri.to_string(),
             input,
             deadline_ms: None,
-            correlation_id: Some("corr-test-1".to_string()),
+            correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
         }
     }
 
@@ -28348,6 +28497,10 @@ done"#;
         wrong_zone.zone_id = ZoneId::work().to_string();
         assert!(build_n8n_read_only_run_once_plan(wrong_zone, &config).is_err());
 
+        let mut invalid_correlation = n8n_read_only_test_input("n8n.workflows.get");
+        invalid_correlation.correlation_id = Some("not-a-uuid".to_string());
+        assert!(build_n8n_read_only_run_once_plan(invalid_correlation, &config).is_err());
+
         let mut server_mismatch = n8n_read_only_test_input("n8n.workflows.get");
         server_mismatch.server_id = N8nReadOnlyServerId::Hetzner;
         server_mismatch.resource_uri = "fwc-n8n://hetzner/workflows/workflow%2D1".to_string();
@@ -28388,7 +28541,13 @@ done"#;
             build_n8n_read_only_run_once_plan(input, &config).expect("valid read-only launch plan");
         assert_eq!(plan.server_id, N8nReadOnlyServerId::Eec);
         assert_eq!(plan.deadline_ms, N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS);
-        assert_eq!(plan.correlation_id.as_deref(), Some("corr-test-1"));
+        assert_eq!(
+            plan.correlation_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("11111111-2222-4333-8444-555555555555")
+        );
         assert_eq!(plan.input["marker"], "PRIVATE-PAYLOAD-CANARY");
 
         let trusted_operation =
@@ -28431,6 +28590,34 @@ done"#;
         .next()
         .expect("test operation");
         assert!(build_n8n_read_only_capability_issuance(&plan, &wrong_trusted_operation).is_err());
+
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let request = build_n8n_read_only_invoke_request(
+            plan,
+            test_capability_token(
+                &signing_key,
+                "n8n.workflows.read",
+                "n8n.workflows.get",
+                ZoneId::private().as_str(),
+            ),
+        );
+        assert_eq!(request.connector_id.as_str(), "fcp.n8n");
+        assert_eq!(request.operation.as_str(), "n8n.workflows.get");
+        assert_eq!(request.zone_id, ZoneId::private());
+        assert_eq!(
+            request
+                .correlation_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("11111111-2222-4333-8444-555555555555")
+        );
+        assert_eq!(
+            request.deadline_ms,
+            Some(N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS)
+        );
+        assert!(request.idempotency_key.is_none());
+        assert!(request.approval_tokens.is_empty());
     }
 
     #[test]

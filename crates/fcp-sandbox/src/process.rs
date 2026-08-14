@@ -34,6 +34,30 @@ pub struct ProcessSpec {
 #[cfg(target_os = "linux")]
 pub const FCP_HOST_EGRESS_FD: &str = "FCP_HOST_EGRESS_FD";
 
+/// Fixed transport marker for the host run-once credential channel.
+#[cfg(target_os = "linux")]
+pub const FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT: &str = "FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT";
+/// Reserved child environment name for the host run-once credential channel.
+#[cfg(target_os = "linux")]
+pub const FCP_HOST_RUN_ONCE_CREDENTIAL_FD: &str = "FCP_HOST_RUN_ONCE_CREDENTIAL_FD";
+/// Only supported host run-once credential transport.
+#[cfg(target_os = "linux")]
+pub const FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE: &str = "inherited-fd-v1";
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+enum InheritedChannelKind {
+    HostEgress,
+    RunOnceCredential,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+struct InheritedChannel {
+    fd: RawFd,
+    kind: InheritedChannelKind,
+}
+
 /// Identity captured at launch and required for every later signal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessIdentity {
@@ -122,14 +146,46 @@ impl OwnedProcess {
         if !spec.network_disabled {
             return Err(ProcessGroupError::InvalidSpec);
         }
-        if spec
-            .fixed_env
-            .contains_key(std::ffi::OsStr::new(FCP_HOST_EGRESS_FD))
-        {
+        if has_reserved_inherited_channel_env(spec) {
             return Err(ProcessGroupError::InvalidSpec);
         }
         let channel_fd = validate_host_egress_channel(&child_endpoint)?;
-        let result = Self::spawn_linux(spec, Some(channel_fd));
+        let result = Self::spawn_linux(
+            spec,
+            Some(InheritedChannel {
+                fd: channel_fd,
+                kind: InheritedChannelKind::HostEgress,
+            }),
+        );
+        drop(child_endpoint);
+        result
+    }
+
+    /// Spawn a Linux host process with one inherited run-once credential channel.
+    ///
+    /// The transport name and descriptor environment variables are fixed by
+    /// this API. The caller supplies only an already-connected Unix stream;
+    /// every other inherited descriptor is marked close-on-exec before the
+    /// selected channel is made inheritable. This is intentionally a
+    /// network-enabled host launch: the caller must pin the exact `fcp-host`
+    /// artifact and fixed one-shot arguments. Network-denied connector children
+    /// continue to use [`Self::spawn_with_host_egress_channel`].
+    #[cfg(target_os = "linux")]
+    pub fn spawn_with_run_once_credential_channel(
+        spec: &ProcessSpec,
+        child_endpoint: UnixStream,
+    ) -> Result<Self, ProcessGroupError> {
+        if spec.network_disabled || has_reserved_inherited_channel_env(spec) {
+            return Err(ProcessGroupError::InvalidSpec);
+        }
+        let channel_fd = validate_host_egress_channel(&child_endpoint)?;
+        let result = Self::spawn_linux(
+            spec,
+            Some(InheritedChannel {
+                fd: channel_fd,
+                kind: InheritedChannelKind::RunOnceCredential,
+            }),
+        );
         drop(child_endpoint);
         result
     }
@@ -137,7 +193,7 @@ impl OwnedProcess {
     #[cfg(target_os = "linux")]
     fn spawn_linux(
         spec: &ProcessSpec,
-        host_egress_fd: Option<RawFd>,
+        inherited_channel: Option<InheritedChannel>,
     ) -> Result<Self, ProcessGroupError> {
         if !spec.launcher_path.is_absolute()
             || !spec.runtime_executable.is_absolute()
@@ -169,18 +225,16 @@ impl OwnedProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if let Some(host_egress_fd) = host_egress_fd {
-            command.env(FCP_HOST_EGRESS_FD, host_egress_fd.to_string());
-        }
+        configure_inherited_channel_environment(&mut command, inherited_channel);
 
         // SAFETY: the closure runs in the child between fork and exec and
         // performs only async-signal-safe libc calls. It captures no Rust
         // allocation that is mutated in the child.
         unsafe {
             command.pre_exec(move || {
-                if let Some(host_egress_fd) = host_egress_fd {
+                if let Some(channel) = inherited_channel {
                     mark_fds_cloexec_from_three()?;
-                    clear_fd_cloexec(host_egress_fd)?;
+                    clear_fd_cloexec(channel.fd)?;
                 }
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
@@ -577,6 +631,28 @@ struct ProcSnapshot {
 }
 
 #[cfg(target_os = "linux")]
+fn configure_inherited_channel_environment(
+    command: &mut Command,
+    inherited_channel: Option<InheritedChannel>,
+) {
+    let Some(channel) = inherited_channel else {
+        return;
+    };
+    match channel.kind {
+        InheritedChannelKind::HostEgress => {
+            command.env(FCP_HOST_EGRESS_FD, channel.fd.to_string());
+        }
+        InheritedChannelKind::RunOnceCredential => {
+            command.env(
+                FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
+                FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE,
+            );
+            command.env(FCP_HOST_RUN_ONCE_CREDENTIAL_FD, channel.fd.to_string());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn read_identity(
     pid: u32,
     expected_executable: &Path,
@@ -775,6 +851,17 @@ pub fn claim_inherited_host_egress_channel(fd: RawFd) -> Result<UnixStream, Proc
     drop(owned);
 
     Ok(UnixStream::from(cloexec))
+}
+
+#[cfg(target_os = "linux")]
+fn has_reserved_inherited_channel_env(spec: &ProcessSpec) -> bool {
+    [
+        FCP_HOST_EGRESS_FD,
+        FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
+        FCP_HOST_RUN_ONCE_CREDENTIAL_FD,
+    ]
+    .iter()
+    .any(|key| spec.fixed_env.contains_key(std::ffi::OsStr::new(key)))
 }
 
 #[cfg(target_os = "linux")]
@@ -1059,6 +1146,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn run_once_credential_channel_child_probe() {
+        if std::env::var_os("FCP_HOST_RUN_ONCE_CREDENTIAL_CHANNEL_CHILD").is_none() {
+            return;
+        }
+        assert_eq!(
+            std::env::var(FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT)
+                .expect("credential transport environment"),
+            FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE
+        );
+        let channel_fd = std::env::var(FCP_HOST_RUN_ONCE_CREDENTIAL_FD)
+            .expect("credential channel fd environment")
+            .parse::<i32>()
+            .expect("numeric credential channel fd");
+        let mut channel = unsafe { std::fs::File::from_raw_fd(channel_fd) };
+        let mut request = [0_u8; 4];
+        channel
+            .read_exact(&mut request)
+            .expect("credential channel request");
+        assert_eq!(&request, b"ping");
+        channel
+            .write_all(b"pong")
+            .expect("credential channel response");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn host_egress_channel_ambient_probe() {
         if std::env::var_os("FCP_HOST_EGRESS_CHANNEL_AMBIENT").is_none() {
             return;
@@ -1145,6 +1258,68 @@ mod tests {
             .terminate(Duration::from_secs(1))
             .expect("terminate channel child");
         assert!(report.group_absent);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_once_credential_channel_uses_fixed_env_and_owned_teardown() {
+        let (mut host_endpoint, child_endpoint) = UnixStream::pair().expect("socketpair");
+        let mut spec = test_process_spec(
+            "run_once_credential_channel_child_probe",
+            "FCP_HOST_RUN_ONCE_CREDENTIAL_CHANNEL_CHILD",
+        );
+        spec.network_disabled = false;
+        let mut process =
+            OwnedProcess::spawn_with_run_once_credential_channel(&spec, child_endpoint)
+                .expect("spawn credential channel child");
+        host_endpoint
+            .write_all(b"ping")
+            .expect("write credential channel request");
+        let mut response = [0_u8; 4];
+        host_endpoint
+            .read_exact(&mut response)
+            .expect("read credential channel response");
+        assert_eq!(&response, b"pong");
+        let report = process
+            .terminate(Duration::from_secs(1))
+            .expect("terminate credential channel child");
+        assert!(report.group_absent);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_once_credential_channel_rejects_reserved_env() {
+        let (child_endpoint, _host_endpoint) = UnixStream::pair().expect("socketpair");
+        let network_denied_spec = test_process_spec(
+            "run_once_credential_channel_child_probe",
+            "FCP_HOST_RUN_ONCE_CREDENTIAL_CHANNEL_CHILD",
+        );
+        assert!(matches!(
+            OwnedProcess::spawn_with_run_once_credential_channel(
+                &network_denied_spec,
+                child_endpoint
+            ),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+
+        for key in [
+            FCP_HOST_EGRESS_FD,
+            FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
+            FCP_HOST_RUN_ONCE_CREDENTIAL_FD,
+        ] {
+            let (child_endpoint, _host_endpoint) = UnixStream::pair().expect("socketpair");
+            let mut spec = test_process_spec(
+                "run_once_credential_channel_child_probe",
+                "FCP_HOST_RUN_ONCE_CREDENTIAL_CHANNEL_CHILD",
+            );
+            spec.network_disabled = false;
+            spec.fixed_env
+                .insert(key.into(), "attacker-controlled-value".into());
+            assert!(matches!(
+                OwnedProcess::spawn_with_run_once_credential_channel(&spec, child_endpoint),
+                Err(ProcessGroupError::InvalidSpec)
+            ));
+        }
     }
 
     #[cfg(target_os = "linux")]

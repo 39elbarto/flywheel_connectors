@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Linux owned per-invocation launch now supplies an authenticated inherited-FD host-egress channel and proves process-group teardown. The thin `fwc-n8n` wrapper resolves and routes typed operations; local, REST, and official-MCP provider dispatch remain pending host-owned wiring. Real-host narrow-token verification against EEC and Hetzner also remains pending.
+> **Status**: Linux owned per-invocation launch now supplies an authenticated inherited-FD host-egress channel and proves process-group teardown. `fcp-host n8n-run-once` accepts a closed nine-operation read-only envelope and consumes one request-scoped credential FD. The thin `fwc-n8n` wrapper derives that envelope for EEC or Hetzner, but the fixed artifact/KeePass launch bridge and local/official-MCP dispatch remain pending. Real-host narrow-token verification against EEC and Hetzner also remains pending.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.21`
 > **Verification script**: none tracked; use the commands below
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -31,10 +31,14 @@ Important runtime truths:
 
 - Package and binary name are `fcp-n8n`.
 - The crate also builds the operator wrapper `fwc-n8n`. Its current commands are
-  `resolve`, `route <public-operation>`, `run-once <public-operation>`, and
-  `status`. `run-once` validates only the currently router-covered public
-  operation names and returns `provider_not_wired` before reading operation
-  input; provider dispatch is host-owned and not part of this wrapper.
+  `resolve`, `route <public-operation>`, `run-once <host-read-operation>`, and
+  `status`. `run-once` accepts exactly the nine Phase-1 host reads, a strict
+  EEC-or-Hetzner payload, bounded deadline, and optional UUID correlation ID.
+  It derives the fixed `z:work` host envelope and canonical resource URI, then
+  returns `bridge_not_wired`; it does not yet read KeePass or start a process.
+  Per-operation input keys and scalar bounds mirror the manifest, so arbitrary
+  headers, credentials, tokens, URLs, commands, paths, or nested payloads
+  cannot enter the future host-launch request.
   `n8n.targets.resolve`, `n8n.capabilities.inspect`, `n8n.runtime.status`,
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and
   `n8n.mcp_access.reconcile` still need dedicated routing intents or host-local
@@ -61,6 +65,7 @@ Important runtime truths:
 - Direct API-key mode is usable only against loopback test fixtures. Production direct provider egress fails before DNS or HTTP.
 - `credential_id` is only a host-managed reference. Every advertised read operation constructs a bounded host-egress request whose context carries the already-verified canonical resource separately from the HTTPS transport URL. The connector never resolves, stores, or sends the API key itself.
 - In the Linux owned per-invocation path, the host creates a connected Unix socketpair, passes only the child endpoint as an inherited file descriptor, and binds the channel to a fresh per-launch authentication token. Connector configuration and operation input cannot select or redirect this transport.
+- The sandbox process supervisor also exposes a separate fixed-name inherited-FD channel for a future trusted parent to deliver one `fcp-host n8n-run-once` credential frame. It marks every ambient descriptor close-on-exec, makes only the selected channel inheritable, rejects reserved environment overrides, and retains exact process-group ownership. The `fwc-n8n` wrapper does not use this primitive yet.
 - The host compares the connector's selected-operation introspection with trusted manifest metadata before activating egress, binds every egress frame to connector, operation, zone, request, correlation, and capability-token context, and proves child reap plus process-group absence before returning.
 - `credential_id` must be a valid UUID.
 - `base_url` is required and canonicalized to the `/api/v1` root.

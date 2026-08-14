@@ -15,9 +15,15 @@ No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
 Current implementation boundary: `fwc-n8n` is a thin typed CLI for `resolve`,
-`route`, and `status`. Its `run-once` command validates the public operation
-names represented by the current `OperationIntent` enum and fails closed with
-`provider_not_wired` before reading an operation payload.
+`route`, `run-once`, and `status`. `run-once` accepts exactly nine Phase-1
+host-read operations, requires EEC or Hetzner, validates operation-specific
+scalar input, and derives the fixed `z:work` host envelope plus canonical
+resource URI. It then fails closed with `bridge_not_wired`; it does not read
+KeePass or start a process. `fcp-host n8n-run-once` already verifies the same
+closed envelope, issues a one-call manifest-derived capability, consumes one
+request-scoped inherited-FD credential, and reuses owned connector teardown.
+The sandbox has the fixed inherited credential-channel spawn primitive, but
+the trusted artifact/KeePass parent bridge is not wired into `fwc-n8n` yet.
 `n8n.targets.resolve`, `n8n.capabilities.inspect`, `n8n.runtime.status`,
 `n8n.node_resources.explore`, `n8n.evaluations.manage`, and
 `n8n.mcp_access.reconcile` are not all representable by that enum yet. Local,

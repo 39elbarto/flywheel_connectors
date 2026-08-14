@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 #[cfg(target_os = "linux")]
 use std::net::Shutdown;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -327,9 +327,12 @@ impl HybridOwnerProductionVerifier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CliAction {
     Run,
+    RunOnce,
     PrintHelp,
     PrintVersion,
 }
+
+const RUN_ONCE_MAX_INPUT_BYTES: usize = 256 * 1024;
 
 fn connector_summary_from_config(config: &ConnectorConfig) -> HostResult<ConnectorSummary> {
     let connector_id: ConnectorId = config.id.parse().map_err(|err| {
@@ -5937,6 +5940,7 @@ where
 
     match remaining.as_slice() {
         [] => Ok(CliAction::Run),
+        [arg] if arg == OsStr::new("run-once") => Ok(CliAction::RunOnce),
         [arg] if arg == OsStr::new("-h") || arg == OsStr::new("--help") => Ok(CliAction::PrintHelp),
         [arg] if arg == OsStr::new("-V") || arg == OsStr::new("--version") => {
             Ok(CliAction::PrintVersion)
@@ -5961,6 +5965,7 @@ fcp-host {}
 
 Usage:
   fcp-host
+  fcp-host run-once
   fcp-host --help
   fcp-host --version
 
@@ -5977,6 +5982,10 @@ Startup configuration is supplied via environment variables:
   FCP_HOST_HRW_LEASE_LOCAL_NODE
   FCP_HOST_HRW_LEASE_NODES
   FCP_HOST_HRW_LEASE_CURRENT_SEQ
+
+run-once reads exactly one bounded InvokeRequest JSON value from stdin and
+writes one InvokeResponse JSON value to stdout. It uses only a selected
+per-invocation connector from the trusted inventory and never binds a listener.
 ",
         env!("CARGO_PKG_VERSION")
     );
@@ -8964,9 +8973,169 @@ fn prepare_unix_socket_path(path: &FsPath) -> HostResult<()> {
     Ok(())
 }
 
+fn read_run_once_request_from_stdin() -> HostResult<InvokeRequest> {
+    let mut input = Vec::new();
+    let stdin = std::io::stdin();
+    let mut limited = stdin
+        .lock()
+        .take(u64::try_from(RUN_ONCE_MAX_INPUT_BYTES + 1).unwrap_or(u64::MAX));
+    limited
+        .read_to_end(&mut input)
+        .map_err(|_| HostError::InvalidFilter("run-once stdin could not be read".to_string()))?;
+    parse_run_once_request(&input)
+}
+
+fn parse_run_once_request(input: &[u8]) -> HostResult<InvokeRequest> {
+    if input.len() > RUN_ONCE_MAX_INPUT_BYTES {
+        return Err(HostError::InvalidFilter(
+            "run-once input exceeds the maximum size".to_string(),
+        ));
+    }
+    if input.iter().all(u8::is_ascii_whitespace) {
+        return Err(HostError::InvalidFilter(
+            "run-once input is empty".to_string(),
+        ));
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(input);
+    let request = InvokeRequest::deserialize(&mut deserializer).map_err(|_| {
+        HostError::InvalidFilter(
+            "run-once input must be one valid InvokeRequest JSON value".to_string(),
+        )
+    })?;
+    deserializer.end().map_err(|_| {
+        HostError::InvalidFilter("run-once input must contain exactly one JSON value".to_string())
+    })?;
+    Ok(request)
+}
+
+fn select_run_once_connector_config(
+    loaded_configs: LoadedConnectorConfigs,
+    connector_id: &ConnectorId,
+) -> HostResult<LoadedConnectorConfigs> {
+    let target_id = connector_id.to_string();
+    let mut selected = loaded_configs
+        .configs
+        .into_iter()
+        .filter(|config| config.id == target_id);
+    let Some(config) = selected.next() else {
+        return Err(HostError::ConnectorNotFound(
+            "run-once connector is not configured".to_string(),
+        ));
+    };
+    if selected.next().is_some() {
+        return Err(HostError::InvalidFilter(
+            "run-once connector inventory contains duplicate entries".to_string(),
+        ));
+    }
+    if config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation {
+        return Err(HostError::InvalidFilter(
+            "run-once requires a per-invocation connector configuration".to_string(),
+        ));
+    }
+    Ok(LoadedConnectorConfigs {
+        configs: vec![config],
+        connectors_file: loaded_configs.connectors_file,
+    })
+}
+
+fn run_once_invoke_error(status: StatusCode) -> HostError {
+    if status == StatusCode::BAD_REQUEST {
+        HostError::InvalidFilter("run-once request was rejected".to_string())
+    } else if status == StatusCode::FORBIDDEN {
+        HostError::PreflightFailed("run-once request was denied".to_string())
+    } else if status == StatusCode::NOT_FOUND {
+        HostError::ConnectorNotFound("run-once connector was not found".to_string())
+    } else if status == StatusCode::SERVICE_UNAVAILABLE {
+        HostError::Unavailable("run-once connector was unavailable".to_string())
+    } else {
+        HostError::Internal("run-once invocation failed".to_string())
+    }
+}
+
+fn run_once_error_code(error: &HostError) -> &'static str {
+    match error {
+        HostError::ConnectorNotFound(_) => "connector_not_found",
+        HostError::InvalidFilter(_) => "invalid_input",
+        HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => "preflight_denied",
+        HostError::Unavailable(_) => "connector_unavailable",
+        HostError::ConnectorFrameLimit { .. } => "connector_frame_limit",
+        HostError::RegistryError(_) | HostError::CacheError(_) | HostError::Internal(_) => {
+            "internal"
+        }
+    }
+}
+
+fn encode_run_once_response(result: &HostResult<InvokeResponse>) -> (String, bool) {
+    match result {
+        Ok(response) => match serde_json::to_string(response) {
+            Ok(encoded) => (encoded, false),
+            Err(_) => (
+                json!({"type":"error","error":{"code":"internal"}}).to_string(),
+                true,
+            ),
+        },
+        Err(error) => (
+            json!({
+                "type": "error",
+                "error": {"code": run_once_error_code(error)},
+            })
+            .to_string(),
+            true,
+        ),
+    }
+}
+
+fn print_run_once_response(result: HostResult<InvokeResponse>) -> HostResult<()> {
+    let (encoded, failed) = encode_run_once_response(&result);
+    println!("{encoded}");
+    if failed {
+        Err(HostError::Internal("run-once request failed".to_string()))
+    } else {
+        Ok(())
+    }
+}
+
+async fn async_run_once(telemetry_config: TelemetryConfig) -> HostResult<InvokeResponse> {
+    let request = read_run_once_request_from_stdin()?;
+    let capability_verifying_key = resolve_verifying_key(
+        "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+        "FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE",
+    )?;
+    let approval_verifying_key = resolve_verifying_key(
+        "FCP_HOST_APPROVAL_PUBLIC_KEY",
+        "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE",
+    )?
+    .or_else(|| capability_verifying_key.clone());
+    let loaded_configs =
+        select_run_once_connector_config(load_connector_configs()?, &request.connector_id)?;
+    let truth_precedence_boot = current_truth_precedence_boot_resolution().map_err(|error| {
+        emit_truth_precedence_boot_error(&error);
+        HostError::InvalidFilter("truth precedence configuration is invalid".to_string())
+    })?;
+    emit_boot_log(&truth_precedence_boot.classification);
+    emit_operational_model_selection_log(&truth_precedence_boot.selection);
+    let zone_policies = load_zone_policies()?;
+    let state = build_app_state(
+        telemetry_config,
+        loaded_configs,
+        capability_verifying_key,
+        approval_verifying_key,
+        zone_policies,
+    )
+    .await?;
+
+    invoke_handler(State(state), HeaderMap::new(), Json(request))
+        .await
+        .map(|Json(response)| response)
+        .map_err(|(status, _)| run_once_invoke_error(status))
+}
+
 fn main() -> HostResult<()> {
-    match parse_cli_action()? {
+    let action = parse_cli_action()?;
+    match action {
         CliAction::Run => {}
+        CliAction::RunOnce => {}
         CliAction::PrintHelp => {
             print_cli_help();
             return Ok(());
@@ -8976,12 +9145,33 @@ fn main() -> HostResult<()> {
             return Ok(());
         }
     }
-    let telemetry_config = init_host_telemetry()?;
-    match fcp_async_core::runtime::block_on_sync(async_main(telemetry_config)) {
-        Ok(result) => result,
-        Err(err) => Err(HostError::Internal(format!(
-            "runtime bootstrap failed: {err}"
-        ))),
+    let telemetry_config = match init_host_telemetry() {
+        Ok(config) => config,
+        Err(_error) if matches!(action, CliAction::RunOnce) => {
+            return print_run_once_response(Err(HostError::Internal(
+                "run-once telemetry initialization failed".to_string(),
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    match action {
+        CliAction::Run => {
+            match fcp_async_core::runtime::block_on_sync(async_main(telemetry_config)) {
+                Ok(result) => result,
+                Err(err) => Err(HostError::Internal(format!(
+                    "runtime bootstrap failed: {err}"
+                ))),
+            }
+        }
+        CliAction::RunOnce => {
+            let result =
+                match fcp_async_core::runtime::block_on_sync(async_run_once(telemetry_config)) {
+                    Ok(result) => result,
+                    Err(_) => Err(HostError::Internal("run-once runtime failed".to_string())),
+                };
+            print_run_once_response(result)
+        }
+        CliAction::PrintHelp | CliAction::PrintVersion => unreachable!("handled above"),
     }
 }
 
@@ -9037,32 +9227,16 @@ fn init_host_telemetry() -> HostResult<TelemetryConfig> {
     Ok(config)
 }
 
-async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
-    let bind_target = resolve_bind_target()?;
-    let capability_verifying_key = resolve_verifying_key(
-        "FCP_HOST_CAPABILITY_PUBLIC_KEY",
-        "FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE",
-    )?;
-    let approval_verifying_key = resolve_verifying_key(
-        "FCP_HOST_APPROVAL_PUBLIC_KEY",
-        "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE",
-    )?
-    .or_else(|| capability_verifying_key.clone());
-
-    let loaded_configs = load_connector_configs()?;
+async fn build_app_state(
+    telemetry_config: TelemetryConfig,
+    loaded_configs: LoadedConnectorConfigs,
+    capability_verifying_key: Option<Ed25519VerifyingKey>,
+    approval_verifying_key: Option<Ed25519VerifyingKey>,
+    zone_policies: HashMap<ZoneId, ZonePolicyObject>,
+) -> HostResult<Arc<AppState>> {
     if loaded_configs.configs.is_empty() {
         tracing::warn!("no connectors configured; doctor self-checks will fail");
     }
-    let truth_precedence_boot = match current_truth_precedence_boot_resolution() {
-        Ok(resolution) => resolution,
-        Err(error) => {
-            emit_truth_precedence_boot_error(&error);
-            std::process::exit(TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE);
-        }
-    };
-    emit_boot_log(&truth_precedence_boot.classification);
-    emit_operational_model_selection_log(&truth_precedence_boot.selection);
-    let zone_policies = load_zone_policies()?;
 
     let registry = Arc::new(
         SubprocessRegistry::from_configs(
@@ -9098,7 +9272,7 @@ async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
     ));
     let hybrid_owner_verifier = resolve_hybrid_owner_production_verifier()?;
     let cancellation = Arc::new(CancellationController::new());
-    let state = Arc::new(AppState {
+    Ok(Arc::new(AppState {
         registry,
         doctor,
         budget,
@@ -9118,7 +9292,40 @@ async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
         telemetry_config,
         invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
         started_at: Instant::now(),
-    });
+    }))
+}
+
+async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
+    let bind_target = resolve_bind_target()?;
+    let capability_verifying_key = resolve_verifying_key(
+        "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+        "FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE",
+    )?;
+    let approval_verifying_key = resolve_verifying_key(
+        "FCP_HOST_APPROVAL_PUBLIC_KEY",
+        "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE",
+    )?
+    .or_else(|| capability_verifying_key.clone());
+
+    let loaded_configs = load_connector_configs()?;
+    let truth_precedence_boot = match current_truth_precedence_boot_resolution() {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            emit_truth_precedence_boot_error(&error);
+            std::process::exit(TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE);
+        }
+    };
+    emit_boot_log(&truth_precedence_boot.classification);
+    emit_operational_model_selection_log(&truth_precedence_boot.selection);
+    let zone_policies = load_zone_policies()?;
+    let state = build_app_state(
+        telemetry_config,
+        loaded_configs,
+        capability_verifying_key,
+        approval_verifying_key,
+        zone_policies,
+    )
+    .await?;
 
     let protected_routes = Router::new()
         .route(
@@ -27349,6 +27556,96 @@ done"#;
         let action = parse_cli_action_from_args(["fcp-host", "--version"])
             .expect("version flag should parse");
         assert_eq!(action, CliAction::PrintVersion);
+    }
+
+    #[test]
+    fn parse_cli_action_accepts_run_once_without_wrapper_arguments() {
+        let action =
+            parse_cli_action_from_args(["fcp-host", "run-once"]).expect("run-once should parse");
+        assert_eq!(action, CliAction::RunOnce);
+    }
+
+    #[test]
+    fn parse_run_once_request_rejects_empty_malformed_and_trailing_input() {
+        assert!(parse_run_once_request(b" \n\t").is_err());
+        assert!(parse_run_once_request(b"not-json").is_err());
+
+        let encoded = serde_json::to_vec(&owner_single_host_test_request())
+            .expect("test invoke request should serialize");
+        let mut trailing = encoded;
+        trailing.extend_from_slice(b" {}");
+        let error = parse_run_once_request(&trailing).expect_err("trailing value must fail");
+        assert!(error.to_string().contains("exactly one JSON value"));
+    }
+
+    #[test]
+    fn parse_run_once_request_rejects_oversized_input() {
+        let oversized = vec![b' '; RUN_ONCE_MAX_INPUT_BYTES + 1];
+        let error = parse_run_once_request(&oversized).expect_err("oversized input must fail");
+        assert!(error.to_string().contains("maximum size"));
+    }
+
+    #[test]
+    fn run_once_response_encoder_marks_success_and_redacts_failure() {
+        let success: HostResult<InvokeResponse> = Ok(invoke_response_with_metrics(Vec::new()));
+        let (encoded, failed) = encode_run_once_response(&success);
+        assert!(!failed);
+        assert!(encoded.contains("\"type\":\"response\""));
+
+        let failure: HostResult<InvokeResponse> =
+            Err(HostError::Internal("PRIVATE-RUN-ONCE-CANARY".to_string()));
+        let (encoded, failed) = encode_run_once_response(&failure);
+        assert!(failed);
+        assert!(encoded.contains("\"code\":\"internal\""));
+        assert!(!encoded.contains("PRIVATE-RUN-ONCE-CANARY"));
+    }
+
+    #[test]
+    fn run_once_rejects_persistent_selected_config_before_registry_construction() {
+        let connector_id = "fcp.test.run-once:utility:1.0.0";
+        let mut config = subprocess_test_connector_config(connector_id);
+        config.lifecycle_mode = ConnectorLifecycleMode::Persistent;
+        let loaded_configs = LoadedConnectorConfigs {
+            configs: vec![config],
+            connectors_file: None,
+        };
+
+        let error = match select_run_once_connector_config(
+            loaded_configs,
+            &ConnectorId::from_static(connector_id),
+        ) {
+            Ok(_) => panic!("persistent config must be rejected before registry construction"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("per-invocation connector configuration")
+        );
+    }
+
+    #[test]
+    fn run_once_selects_only_target_per_invocation_config() {
+        let target_id = "fcp.test.run-once-target:utility:1.0.0";
+        let other_id = "fcp.test.run-once-other:utility:1.0.0";
+        let mut target = subprocess_test_connector_config(target_id);
+        target.lifecycle_mode = ConnectorLifecycleMode::PerInvocation;
+        let mut other = subprocess_test_connector_config(other_id);
+        other.lifecycle_mode = ConnectorLifecycleMode::Persistent;
+        let selected = select_run_once_connector_config(
+            LoadedConnectorConfigs {
+                configs: vec![target, other],
+                connectors_file: None,
+            },
+            &ConnectorId::from_static(target_id),
+        )
+        .expect("target per-invocation config should be selected");
+        assert_eq!(selected.configs.len(), 1);
+        assert_eq!(selected.configs[0].id, target_id);
+        assert_eq!(
+            selected.configs[0].lifecycle_mode,
+            ConnectorLifecycleMode::PerInvocation
+        );
     }
 
     #[test]

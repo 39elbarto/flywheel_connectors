@@ -8,11 +8,13 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Read;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
+use fcp_crypto::ZeroizingSecret;
 use fcp_prelude::{CredentialId, ZoneId};
-use fcp_provider_auth::{AuthMethod, AuthProfile};
+use fcp_provider_auth::{ApiKeyAuth, AuthMethod, AuthMethodKind, AuthProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -20,6 +22,199 @@ use thiserror::Error;
 const DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL: u32 = 5;
 const DEFAULT_RATE_LIMIT_COOLDOWN_SECS: i64 = 60;
 const DEFAULT_QUOTA_COOLDOWN_SECS: i64 = 600;
+
+/// Transport marker for the one-shot host credential bootstrap.
+pub const RUN_ONCE_CREDENTIAL_TRANSPORT_ENV: &str = "FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT";
+/// Inherited descriptor carrying the one-shot host credential bootstrap.
+pub const RUN_ONCE_CREDENTIAL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_CREDENTIAL_FD";
+/// Fixed bootstrap transport marker.
+pub const RUN_ONCE_CREDENTIAL_TRANSPORT: &str = "inherited-fd-v1";
+/// Maximum raw API-key bytes accepted in one bootstrap frame.
+pub const RUN_ONCE_CREDENTIAL_MAX_SECRET_BYTES: usize = 4096;
+const RUN_ONCE_CREDENTIAL_MAGIC: [u8; 4] = *b"FCPK";
+const RUN_ONCE_CREDENTIAL_VERSION: u8 = 1;
+const RUN_ONCE_CREDENTIAL_HEADER_BYTES: usize = 4 + 1 + 4;
+const RUN_ONCE_N8N_PROVIDER: &str = "n8n";
+const RUN_ONCE_N8N_API_KEY_HEADER: &str = "X-N8N-API-KEY";
+
+/// Trusted binding derived from the selected `fcp.n8n` connector config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOnceCredentialBinding {
+    /// The only credential id permitted for this invocation.
+    pub credential_id: CredentialId,
+    /// Exact destination hostname derived from the trusted base URL.
+    pub host_allow: String,
+    /// Trusted n8n server selector for redacted operational telemetry.
+    pub server_id: String,
+}
+
+/// Redacted, stable failures for one-shot credential bootstrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RunOnceCredentialBootstrapError {
+    /// The fixed frame magic or version was not accepted.
+    #[error("run-once credential bootstrap frame is invalid")]
+    InvalidFrame,
+    /// The frame ended before its fixed header or secret completed.
+    #[error("run-once credential bootstrap frame is truncated")]
+    Truncated,
+    /// The declared secret exceeded the protocol bound.
+    #[error("run-once credential bootstrap frame is oversized")]
+    Oversized,
+    /// The frame contained no secret bytes.
+    #[error("run-once credential bootstrap secret is empty")]
+    Empty,
+    /// The raw secret was not valid UTF-8.
+    #[error("run-once credential bootstrap secret is not valid UTF-8")]
+    InvalidUtf8,
+    /// The secret cannot be used as an HTTP header value.
+    #[error("run-once credential bootstrap secret is not a valid header value")]
+    InvalidHeaderValue,
+    /// A second frame or trailing byte was present.
+    #[error("run-once credential bootstrap stream has trailing data")]
+    TrailingData,
+    /// The inherited stream could not be read.
+    #[error("run-once credential bootstrap stream could not be read")]
+    Io,
+    /// The fixed n8n credential profile could not be constructed.
+    #[error("run-once n8n credential profile is invalid")]
+    InvalidCredential,
+}
+
+/// Secret-bearing credential material read from one inherited bootstrap frame.
+pub struct RunOnceN8nCredential {
+    binding: RunOnceCredentialBinding,
+    api_key: ZeroizingSecret,
+}
+
+impl fmt::Debug for RunOnceN8nCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RunOnceN8nCredential([redacted])")
+    }
+}
+
+impl RunOnceN8nCredential {
+    /// Borrow the trusted configured credential id.
+    #[must_use]
+    pub const fn credential_id(&self) -> CredentialId {
+        self.binding.credential_id
+    }
+
+    /// Borrow the trusted n8n server selector for operational telemetry.
+    #[must_use]
+    pub fn server_id(&self) -> &str {
+        &self.binding.server_id
+    }
+
+    /// Convert the material to the fixed, host-internal n8n pool entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted bootstrap error when the fixed n8n API-key profile
+    /// cannot be constructed from the validated secret material.
+    pub fn into_pooled_credential(
+        self,
+    ) -> Result<PooledCredential, RunOnceCredentialBootstrapError> {
+        let key = self.api_key.with_bytes(|bytes| {
+            String::from_utf8(bytes.to_vec())
+                .map_err(|_| RunOnceCredentialBootstrapError::InvalidUtf8)
+        })?;
+        let method = ApiKeyAuth::new(key, RUN_ONCE_N8N_API_KEY_HEADER, None::<String>)
+            .map_err(|_| RunOnceCredentialBootstrapError::InvalidCredential)?;
+        let profile = AuthProfile::new(
+            self.binding.credential_id.to_string(),
+            RUN_ONCE_N8N_PROVIDER,
+            AuthMethodKind::ApiKey(method),
+            "run-once n8n credential",
+            0,
+        )
+        .map_err(|_| RunOnceCredentialBootstrapError::InvalidCredential)?;
+        let payload =
+            CredentialPayload::auth_profile_with_allowed_hosts(profile, [self.binding.host_allow]);
+        Ok(PooledCredential::new(
+            self.binding.credential_id,
+            CredentialSource::CustomPool("run-once".to_string()),
+            0,
+            "run-once n8n credential",
+            payload,
+        ))
+    }
+}
+
+/// Read exactly one bounded binary n8n credential frame and require EOF.
+///
+/// # Errors
+///
+/// Returns a redacted bootstrap error for malformed, truncated, oversized,
+/// non-header-safe, trailing, or unreadable frame data.
+pub fn read_run_once_n8n_credential_frame<R: Read>(
+    reader: &mut R,
+    binding: RunOnceCredentialBinding,
+) -> Result<RunOnceN8nCredential, RunOnceCredentialBootstrapError> {
+    let mut header = [0_u8; RUN_ONCE_CREDENTIAL_HEADER_BYTES];
+    reader
+        .read_exact(&mut header)
+        .map_err(|_| RunOnceCredentialBootstrapError::Truncated)?;
+    if header[..RUN_ONCE_CREDENTIAL_MAGIC.len()] != RUN_ONCE_CREDENTIAL_MAGIC
+        || header[RUN_ONCE_CREDENTIAL_MAGIC.len()] != RUN_ONCE_CREDENTIAL_VERSION
+    {
+        return Err(RunOnceCredentialBootstrapError::InvalidFrame);
+    }
+    let length_offset = RUN_ONCE_CREDENTIAL_MAGIC.len() + 1;
+    let length = u32::from_be_bytes(
+        header[length_offset..]
+            .try_into()
+            .map_err(|_| RunOnceCredentialBootstrapError::InvalidFrame)?,
+    ) as usize;
+    if length == 0 {
+        return Err(RunOnceCredentialBootstrapError::Empty);
+    }
+    if length > RUN_ONCE_CREDENTIAL_MAX_SECRET_BYTES {
+        return Err(RunOnceCredentialBootstrapError::Oversized);
+    }
+
+    let mut secret_bytes = vec![0_u8; length];
+    if reader.read_exact(&mut secret_bytes).is_err() {
+        drop(ZeroizingSecret::with_zeroize_drop(secret_bytes));
+        return Err(RunOnceCredentialBootstrapError::Truncated);
+    }
+    let secret = ZeroizingSecret::with_zeroize_drop(secret_bytes);
+    secret.with_bytes(|bytes| {
+        let value =
+            std::str::from_utf8(bytes).map_err(|_| RunOnceCredentialBootstrapError::InvalidUtf8)?;
+        if value.is_empty()
+            || value.trim() != value
+            || bytes
+                .iter()
+                .any(|byte| !byte.is_ascii() || byte.is_ascii_control())
+        {
+            return Err(RunOnceCredentialBootstrapError::InvalidHeaderValue);
+        }
+        Ok::<(), RunOnceCredentialBootstrapError>(())
+    })?;
+
+    let mut trailing = [0_u8; 1];
+    match reader.read(&mut trailing) {
+        Ok(0) => {}
+        Ok(_) => return Err(RunOnceCredentialBootstrapError::TrailingData),
+        Err(_) => return Err(RunOnceCredentialBootstrapError::Io),
+    }
+
+    Ok(RunOnceN8nCredential {
+        binding,
+        api_key: secret,
+    })
+}
+
+/// Encode a one-shot credential frame for deterministic tests and trusted launchers.
+#[cfg(test)]
+fn encode_run_once_n8n_credential_frame(secret: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(RUN_ONCE_CREDENTIAL_HEADER_BYTES + secret.len());
+    frame.extend_from_slice(&RUN_ONCE_CREDENTIAL_MAGIC);
+    frame.push(RUN_ONCE_CREDENTIAL_VERSION);
+    frame.extend_from_slice(&(secret.len() as u32).to_be_bytes());
+    frame.extend_from_slice(secret);
+    frame
+}
 
 /// Upper bound on any credential cooldown window (7 days).
 ///
@@ -2061,6 +2256,116 @@ mod tests {
             label,
             serde_json::json!({"api_key": format!("updated-secret-{byte}")}),
         )
+    }
+
+    #[test]
+    fn run_once_n8n_frame_is_bounded_fixed_and_redacted() {
+        let canary = format!("N8N-{}", "CANARY");
+        let binding = RunOnceCredentialBinding {
+            credential_id: cred(0x44),
+            host_allow: "n8n.example.test".to_string(),
+            server_id: "eec".to_string(),
+        };
+        let mut valid = encode_run_once_n8n_credential_frame(canary.as_bytes());
+        let credential = read_run_once_n8n_credential_frame(
+            &mut std::io::Cursor::new(valid.clone()),
+            binding.clone(),
+        )
+        .expect("valid frame");
+        let pooled = credential.into_pooled_credential().expect("fixed profile");
+        let rendered = format!("{pooled:?}");
+        assert!(!rendered.contains(&canary));
+        let profile = pooled.payload.as_auth_profile().expect("auth profile");
+        assert_eq!(profile.provider, "n8n");
+        let AuthMethodKind::ApiKey(method) = &profile.method else {
+            panic!("expected fixed api key auth");
+        };
+        assert_eq!(method.header_name, "X-N8N-API-KEY");
+        assert_eq!(method.value_prefix, None);
+        assert_eq!(
+            pooled.payload.auth_profile_host_allow(),
+            Some(["n8n.example.test".to_string()].as_slice())
+        );
+
+        valid.push(0);
+        let error = read_run_once_n8n_credential_frame(&mut std::io::Cursor::new(valid), binding)
+            .expect_err("trailing frame data");
+        assert_eq!(error, RunOnceCredentialBootstrapError::TrailingData);
+        assert!(!error.to_string().contains(&canary));
+    }
+
+    #[test]
+    fn run_once_n8n_frame_rejects_each_malformed_class() {
+        let binding = RunOnceCredentialBinding {
+            credential_id: cred(0x55),
+            host_allow: "n8n.example.test".to_string(),
+            server_id: "hetzner".to_string(),
+        };
+        let canary = [b'c', b'a', b'n', b'a', b'r', b'y'];
+        let mut bad_magic = encode_run_once_n8n_credential_frame(&canary);
+        bad_magic[0] = b'X';
+        assert_eq!(
+            read_run_once_n8n_credential_frame(
+                &mut std::io::Cursor::new(bad_magic),
+                binding.clone()
+            )
+            .expect_err("bad magic"),
+            RunOnceCredentialBootstrapError::InvalidFrame
+        );
+        assert_eq!(
+            read_run_once_n8n_credential_frame(
+                &mut std::io::Cursor::new(vec![b'F', b'C']),
+                binding.clone()
+            )
+            .expect_err("truncated header"),
+            RunOnceCredentialBootstrapError::Truncated
+        );
+        assert_eq!(
+            read_run_once_n8n_credential_frame(
+                &mut std::io::Cursor::new(encode_run_once_n8n_credential_frame(&[])),
+                binding.clone()
+            )
+            .expect_err("empty secret"),
+            RunOnceCredentialBootstrapError::Empty
+        );
+        assert_eq!(
+            read_run_once_n8n_credential_frame(
+                &mut std::io::Cursor::new(encode_run_once_n8n_credential_frame(&vec![
+                    b'a';
+                    RUN_ONCE_CREDENTIAL_MAX_SECRET_BYTES
+                        + 1
+                ],)),
+                binding.clone()
+            )
+            .expect_err("oversized secret"),
+            RunOnceCredentialBootstrapError::Oversized
+        );
+        assert_eq!(
+            read_run_once_n8n_credential_frame(
+                &mut std::io::Cursor::new(encode_run_once_n8n_credential_frame(&[0xff])),
+                binding.clone()
+            )
+            .expect_err("invalid utf8"),
+            RunOnceCredentialBootstrapError::InvalidUtf8
+        );
+        assert_eq!(
+            read_run_once_n8n_credential_frame(
+                &mut std::io::Cursor::new(encode_run_once_n8n_credential_frame(&[0xc3, 0xa9])),
+                binding.clone()
+            )
+            .expect_err("non-ascii header value"),
+            RunOnceCredentialBootstrapError::InvalidHeaderValue
+        );
+        assert_eq!(
+            read_run_once_n8n_credential_frame(
+                &mut std::io::Cursor::new(encode_run_once_n8n_credential_frame(&[
+                    b' ', canary[0], canary[1], canary[2], canary[3], canary[4], canary[5]
+                ],)),
+                binding,
+            )
+            .expect_err("header whitespace"),
+            RunOnceCredentialBootstrapError::InvalidHeaderValue
+        );
     }
 
     fn three_entry_pool(strategy: CredentialPoolStrategy) -> CredentialPool {

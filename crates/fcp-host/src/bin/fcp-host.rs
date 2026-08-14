@@ -87,21 +87,24 @@ use fcp_host::{
     PlacementOperationClass, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
     PreflightResponse, PrewarmCheckoutDecision, PrewarmCheckoutObservation, PrewarmCredentialState,
     PrewarmHealthState, PrewarmManifestState, PrewarmPoolState, PrewarmSandboxState,
-    PrewarmStrategy, PrewarmZoneBinding, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse,
-    ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer, RevocationCascadeVerifier,
-    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
-    RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
-    SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
-    SimulateReceiptQueryResponse, SimulateResourceAvailability, StartupReconciliationReport,
-    StickyCredentialPolicy, SupplyChainGate, SupplyChainGateConfig,
+    PrewarmStrategy, PrewarmZoneBinding, ProviderKey, RUN_ONCE_CREDENTIAL_FD_ENV,
+    RUN_ONCE_CREDENTIAL_TRANSPORT, RUN_ONCE_CREDENTIAL_TRANSPORT_ENV, ReceiptQueryRequest,
+    ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer,
+    RevocationCascadeVerifier, RolloutController, RolloutDecision, RolloutObservation,
+    RolloutOutcome, RunOnceCredentialBinding, RunOnceCredentialBootstrapError,
+    RunOnceN8nCredential, RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig,
+    SimulateCostConfidence, SimulateCostEstimate, SimulatePhase, SimulateReceipt,
+    SimulateReceiptQueryRequest, SimulateReceiptQueryResponse, SimulateResourceAvailability,
+    StartupReconciliationReport, StickyCredentialPolicy, SupplyChainGate, SupplyChainGateConfig,
     TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE, ToolDescriptor, TruthPrecedenceBootError,
     TruthPrecedenceBootResolution, TruthPrecedenceBootSelection, V2_DEFAULT_GRADUATED_ENV,
     V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV, V2_MIN_HEALTHY_MESH_PEERS_ENV, WARM_POOL_EVIDENCE_EVENT,
     WarmPoolEntrySnapshot, WarmPoolKey, WarmPoolPressureSnapshot, admit_safety_tier,
     capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
     emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
-    native_proxy_only_sandbox_decision, resolve_truth_precedence_boot_resolution,
-    validate_runtime_network_claim, wasi_config_for_operation_network_policy,
+    native_proxy_only_sandbox_decision, read_run_once_n8n_credential_frame,
+    resolve_truth_precedence_boot_resolution, validate_runtime_network_claim,
+    wasi_config_for_operation_network_policy,
 };
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 #[cfg(target_os = "linux")]
@@ -1569,12 +1572,14 @@ struct UnavailableNativeProxyOnlyConnector {
 const PER_INVOCATION_PENDING_REASON: &str =
     "per-invocation launch is unavailable until owned launch teardown is implemented";
 const PER_INVOCATION_BINDING_INVALID_REASON: &str = "per-invocation launch is unavailable because its host-owned launch binding is missing or invalid";
-const PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS: [&str; 5] = [
+const PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS: [&str; 7] = [
     "FCP_HOST_EGRESS_FD",
     "FCP_HOST_EGRESS_TRANSPORT",
     "FCP_HOST_EGRESS_AUTH_TOKEN",
     "FCP_HOST_EGRESS_SOCKET",
     "FCP_HOST_EGRESS_PROXY_URL",
+    RUN_ONCE_CREDENTIAL_TRANSPORT_ENV,
+    RUN_ONCE_CREDENTIAL_FD_ENV,
 ];
 
 #[derive(Clone, Debug)]
@@ -9096,6 +9101,215 @@ fn print_run_once_response(result: HostResult<InvokeResponse>) -> HostResult<()>
     }
 }
 
+fn run_once_n8n_credential_binding(
+    config: &ManagedConnectorConfig,
+    request: &InvokeRequest,
+) -> HostResult<RunOnceCredentialBinding> {
+    if config.id != "fcp.n8n" {
+        return Err(HostError::InvalidFilter(
+            "run-once credential bootstrap requires the fcp.n8n connector".to_string(),
+        ));
+    }
+    if config.allowed_zones.is_empty()
+        || !config
+            .allowed_zones
+            .iter()
+            .any(|zone| zone == request.zone_id.as_str())
+    {
+        return Err(HostError::PreflightFailed(
+            "run-once credential bootstrap zone is not configured".to_string(),
+        ));
+    }
+    let Some(Value::Object(config)) = config.config.as_ref() else {
+        return Err(HostError::InvalidFilter(
+            "run-once fcp.n8n credential config is invalid".to_string(),
+        ));
+    };
+    if config.len() != 3
+        || config
+            .keys()
+            .any(|key| !matches!(key.as_str(), "credential_id" | "base_url" | "server_id"))
+    {
+        return Err(HostError::InvalidFilter(
+            "run-once fcp.n8n credential config is invalid".to_string(),
+        ));
+    }
+    let credential_id = config
+        .get("credential_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("run-once fcp.n8n credential config is invalid".to_string())
+        })
+        .and_then(|raw| {
+            CredentialId::parse(raw).map_err(|_| {
+                HostError::InvalidFilter(
+                    "run-once fcp.n8n credential config is invalid".to_string(),
+                )
+            })
+        })?;
+    let base_url = config
+        .get("base_url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.trim() == *value)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("run-once fcp.n8n credential config is invalid".to_string())
+        })?;
+    let parsed = url::Url::parse(base_url).map_err(|_| {
+        HostError::InvalidFilter("run-once fcp.n8n credential config is invalid".to_string())
+    })?;
+    let host = parsed.host_str().ok_or_else(|| {
+        HostError::InvalidFilter("run-once fcp.n8n credential config is invalid".to_string())
+    })?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(HostError::InvalidFilter(
+            "run-once fcp.n8n credential config is invalid".to_string(),
+        ));
+    }
+    let server_id = config
+        .get("server_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("run-once fcp.n8n credential config is invalid".to_string())
+        })?;
+    if !matches!(server_id, "eec" | "hetzner") {
+        return Err(HostError::InvalidFilter(
+            "run-once fcp.n8n credential config is invalid".to_string(),
+        ));
+    }
+    Ok(RunOnceCredentialBinding {
+        credential_id,
+        host_allow: host.to_ascii_lowercase(),
+        server_id: server_id.to_string(),
+    })
+}
+
+fn run_once_credential_fd_from_env() -> HostResult<Option<i32>> {
+    let transport = std::env::var_os(RUN_ONCE_CREDENTIAL_TRANSPORT_ENV);
+    let fd = std::env::var_os(RUN_ONCE_CREDENTIAL_FD_ENV);
+    match (transport, fd) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(HostError::InvalidFilter(
+            "run-once credential bootstrap requires both transport and fd".to_string(),
+        )),
+        (Some(transport), Some(fd)) => {
+            if transport.to_str() != Some(RUN_ONCE_CREDENTIAL_TRANSPORT) {
+                return Err(HostError::InvalidFilter(
+                    "run-once credential bootstrap transport is unsupported".to_string(),
+                ));
+            }
+            let fd = fd
+                .to_str()
+                .and_then(|value| value.parse::<i32>().ok())
+                .filter(|fd| *fd >= 3)
+                .ok_or_else(|| {
+                    HostError::InvalidFilter(
+                        "run-once credential bootstrap fd is invalid".to_string(),
+                    )
+                })?;
+            Ok(Some(fd))
+        }
+    }
+}
+
+fn run_once_credential_bootstrap_error_code(
+    error: RunOnceCredentialBootstrapError,
+) -> &'static str {
+    match error {
+        RunOnceCredentialBootstrapError::InvalidFrame => "invalid_frame",
+        RunOnceCredentialBootstrapError::Truncated => "truncated",
+        RunOnceCredentialBootstrapError::Oversized => "oversized",
+        RunOnceCredentialBootstrapError::Empty => "empty",
+        RunOnceCredentialBootstrapError::InvalidUtf8 => "invalid_utf8",
+        RunOnceCredentialBootstrapError::InvalidHeaderValue => "invalid_header_value",
+        RunOnceCredentialBootstrapError::TrailingData => "trailing_data",
+        RunOnceCredentialBootstrapError::Io => "io",
+        RunOnceCredentialBootstrapError::InvalidCredential => "invalid_credential",
+    }
+}
+
+fn run_once_credential_bootstrap_error(error: RunOnceCredentialBootstrapError) -> HostError {
+    tracing::warn!(
+        event = "run_once_credential_bootstrap_rejected",
+        code = run_once_credential_bootstrap_error_code(error),
+        "run-once credential bootstrap rejected"
+    );
+    HostError::PreflightFailed("run-once credential bootstrap rejected".to_string())
+}
+
+fn read_run_once_credential_bootstrap(
+    config: &ManagedConnectorConfig,
+    request: &InvokeRequest,
+) -> HostResult<Option<RunOnceN8nCredential>> {
+    let Some(fd) = run_once_credential_fd_from_env()? else {
+        return Ok(None);
+    };
+    let binding = run_once_n8n_credential_binding(config, request)?;
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (fd, binding);
+        return Err(HostError::PreflightFailed(
+            "run-once credential bootstrap requires Linux".to_string(),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut stream = fcp_sandbox::claim_inherited_host_egress_channel(fd).map_err(|_| {
+            HostError::PreflightFailed("run-once credential bootstrap fd is invalid".to_string())
+        })?;
+        read_run_once_n8n_credential_frame(&mut stream, binding)
+            .map(Some)
+            .map_err(run_once_credential_bootstrap_error)
+    }
+}
+
+async fn seed_run_once_credential(
+    state: &Arc<AppState>,
+    credential: RunOnceN8nCredential,
+    zone_id: &ZoneId,
+    operation: &OperationId,
+) -> HostResult<()> {
+    let server_id = credential.server_id().to_string();
+    let pooled = credential
+        .into_pooled_credential()
+        .map_err(run_once_credential_bootstrap_error)?;
+    let provider = ProviderKey::new("n8n").map_err(|_| {
+        HostError::PreflightFailed("run-once credential bootstrap is unavailable".to_string())
+    })?;
+    let key = CredentialPoolKey::new(provider, zone_id.clone());
+    let mut pools = state.credential_pools.lock().await;
+    pools
+        .add_credential(
+            key.clone(),
+            CredentialPoolStrategy::Priority,
+            pooled,
+            CredentialUpsertMode::RejectExisting,
+        )
+        .map_err(|_| {
+            HostError::PreflightFailed("run-once credential bootstrap rejected".to_string())
+        })?;
+    pools
+        .set_max_concurrent_per_credential(&key, 1)
+        .map_err(|_| {
+            HostError::PreflightFailed("run-once credential bootstrap rejected".to_string())
+        })?;
+    tracing::debug!(
+        event = "run_once_credential_bootstrap_seeded",
+        provider = "n8n",
+        server_id = %server_id,
+        zone_id = %zone_id.as_str(),
+        operation = %operation.as_str(),
+        "seeded request-scoped run-once credential"
+    );
+    Ok(())
+}
+
 async fn async_run_once(telemetry_config: TelemetryConfig) -> HostResult<InvokeResponse> {
     let request = read_run_once_request_from_stdin()?;
     let capability_verifying_key = resolve_verifying_key(
@@ -9116,6 +9330,10 @@ async fn async_run_once(telemetry_config: TelemetryConfig) -> HostResult<InvokeR
     emit_boot_log(&truth_precedence_boot.classification);
     emit_operational_model_selection_log(&truth_precedence_boot.selection);
     let zone_policies = load_zone_policies()?;
+    let selected_config = loaded_configs.configs.first().cloned().ok_or_else(|| {
+        HostError::ConnectorNotFound("run-once connector is not configured".to_string())
+    })?;
+    let run_once_credential = read_run_once_credential_bootstrap(&selected_config, &request)?;
     let state = build_app_state(
         telemetry_config,
         loaded_configs,
@@ -9124,6 +9342,9 @@ async fn async_run_once(telemetry_config: TelemetryConfig) -> HostResult<InvokeR
         zone_policies,
     )
     .await?;
+    if let Some(credential) = run_once_credential {
+        seed_run_once_credential(&state, credential, &request.zone_id, &request.operation).await?;
+    }
 
     invoke_handler(State(state), HeaderMap::new(), Json(request))
         .await
@@ -27646,6 +27867,53 @@ done"#;
             selected.configs[0].lifecycle_mode,
             ConnectorLifecycleMode::PerInvocation
         );
+    }
+
+    fn run_once_n8n_test_config() -> ManagedConnectorConfig {
+        let mut config = subprocess_test_connector_config("fcp.n8n");
+        config.allowed_zones = vec![ZoneId::private().to_string()];
+        config.config = Some(json!({
+            "credential_id": "11111111-1111-1111-1111-111111111111",
+            "base_url": "https://n8n.example.test",
+            "server_id": "eec"
+        }));
+        config
+    }
+
+    #[test]
+    fn run_once_n8n_binding_requires_exact_trusted_config() {
+        let config = run_once_n8n_test_config();
+        let request = owner_single_host_test_request();
+        let binding = run_once_n8n_credential_binding(&config, &request)
+            .expect("valid n8n credential binding");
+        assert_eq!(binding.host_allow, "n8n.example.test");
+        assert_eq!(
+            binding.credential_id.to_string(),
+            "11111111-1111-1111-1111-111111111111"
+        );
+
+        let mut inline_secret = config.clone();
+        let inline_canary = ["runtime", "canary"].concat();
+        inline_secret
+            .config
+            .as_mut()
+            .expect("config")
+            .as_object_mut()
+            .expect("object")
+            .insert("api_key".to_string(), json!(inline_canary));
+        let error = run_once_n8n_credential_binding(&inline_secret, &request)
+            .expect_err("inline api key must be rejected");
+        assert!(!error.to_string().contains("canary"));
+
+        let mut legacy_server = config;
+        legacy_server
+            .config
+            .as_mut()
+            .expect("config")
+            .as_object_mut()
+            .expect("object")
+            .insert("server_id".to_string(), json!("legacy"));
+        assert!(run_once_n8n_credential_binding(&legacy_server, &request).is_err());
     }
 
     #[test]

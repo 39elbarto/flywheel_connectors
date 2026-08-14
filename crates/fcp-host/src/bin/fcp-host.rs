@@ -61,7 +61,7 @@ use fcp_host::{
     BatchInvokeResponse, BatchOperation, BatchOperationError, BatchOptions, BatchScheduleHint,
     BatchScheduleReport, BatchSchedulerMode, BatchStatus, BudgetAction, BudgetPolicyEngine,
     BudgetReportRequest, BudgetReportResponse, CacheMetadata, CacheValidator,
-    CancellationController, CancellationRequest, CancellationResponse,
+    CancellationController, CancellationRequest, CancellationResponse, CapabilityIssuanceRequest,
     CapabilityTokenVerifyRequest, ConfigRevisionRecord, ConnectorAdminState, ConnectorAdminStatus,
     ConnectorArchetype, ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
     ConnectorArtifactRegistrationResponse, ConnectorConfigApplyRequest,
@@ -336,6 +336,111 @@ enum CliAction {
 }
 
 const RUN_ONCE_MAX_INPUT_BYTES: usize = 256 * 1024;
+const N8N_READ_ONLY_RUN_ONCE_SCHEMA: &str = "fwc.n8n.host-run-once.v1";
+const N8N_READ_ONLY_RUN_ONCE_TTL_SECS: u64 = 60;
+const N8N_READ_ONLY_RUN_ONCE_MAX_DEADLINE_MS: u64 = 60_000;
+const N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
+const N8N_READ_ONLY_RUN_ONCE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
+    "n8n.credentials.list",
+    "n8n.executions.get",
+    "n8n.executions.list",
+    "n8n.folders.get",
+    "n8n.folders.list",
+    "n8n.projects.list",
+    "n8n.tags.list",
+    "n8n.workflows.get",
+    "n8n.workflows.list",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum N8nReadOnlyServerId {
+    Eec,
+    Hetzner,
+}
+
+impl N8nReadOnlyServerId {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eec => "eec",
+            Self::Hetzner => "hetzner",
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct N8nReadOnlyRunOnceInput {
+    schema: String,
+    server_id: N8nReadOnlyServerId,
+    operation: String,
+    zone_id: String,
+    resource_uri: String,
+    input: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deadline_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    correlation_id: Option<String>,
+}
+
+impl fmt::Debug for N8nReadOnlyRunOnceInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("N8nReadOnlyRunOnceInput")
+            .field("schema", &self.schema)
+            .field("server_id", &self.server_id)
+            .field("operation", &self.operation)
+            .field("zone_id", &self.zone_id)
+            .field("resource_uri", &self.resource_uri)
+            .field("input", &"[REDACTED]")
+            .field("deadline_ms", &self.deadline_ms)
+            .field(
+                "correlation_id",
+                &self.correlation_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+#[allow(dead_code)] // Consumed by the next host-owned n8n one-shot wiring packet.
+#[derive(Clone)]
+struct N8nReadOnlyRunOncePlan {
+    server_id: N8nReadOnlyServerId,
+    operation: OperationId,
+    zone_id: ZoneId,
+    resource_uri: String,
+    input: Value,
+    deadline_ms: u64,
+    correlation_id: Option<String>,
+    credential_binding: RunOnceCredentialBinding,
+}
+
+#[allow(dead_code)] // Consumed by the next host-owned n8n one-shot wiring packet.
+struct N8nReadOnlyCapabilityIssuance {
+    request: CapabilityIssuanceRequest,
+}
+
+impl fmt::Debug for N8nReadOnlyCapabilityIssuance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("N8nReadOnlyCapabilityIssuance")
+            .field("connector_id", &self.request.connector_id)
+            .field("capability_id", &self.request.capability_id)
+            .field("zone_id", &self.request.zone_id)
+            .field("operations", &self.request.operations)
+            .field("resource_allow", &"[REDACTED]")
+            .field("credential_allow", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[allow(dead_code)] // Consumed immediately by trusted host state; never log the inner request.
+impl N8nReadOnlyCapabilityIssuance {
+    fn into_inner(self) -> CapabilityIssuanceRequest {
+        self.request
+    }
+}
 
 fn connector_summary_from_config(config: &ConnectorConfig) -> HostResult<ConnectorSummary> {
     let connector_id: ConnectorId = config.id.parse().map_err(|err| {
@@ -9014,6 +9119,248 @@ fn parse_run_once_request(input: &[u8]) -> HostResult<InvokeRequest> {
     Ok(request)
 }
 
+#[allow(dead_code)] // Consumed by the next host-owned n8n one-shot wiring packet.
+fn parse_n8n_read_only_run_once_input(input: &[u8]) -> HostResult<N8nReadOnlyRunOnceInput> {
+    if input.len() > RUN_ONCE_MAX_INPUT_BYTES {
+        return Err(HostError::InvalidFilter(
+            "n8n read-only run-once input exceeds the maximum size".to_string(),
+        ));
+    }
+    if input.iter().all(u8::is_ascii_whitespace) {
+        return Err(HostError::InvalidFilter(
+            "n8n read-only run-once input is empty".to_string(),
+        ));
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(input);
+    let request = N8nReadOnlyRunOnceInput::deserialize(&mut deserializer).map_err(|_| {
+        HostError::InvalidFilter(
+            "n8n read-only run-once input must match the closed schema".to_string(),
+        )
+    })?;
+    deserializer.end().map_err(|_| {
+        HostError::InvalidFilter(
+            "n8n read-only run-once input must contain exactly one JSON value".to_string(),
+        )
+    })?;
+    Ok(request)
+}
+
+fn validate_n8n_read_only_resource_uri(
+    server_id: N8nReadOnlyServerId,
+    resource_uri: &str,
+) -> HostResult<()> {
+    if resource_uri.is_empty() || resource_uri.trim() != resource_uri || resource_uri.contains('*')
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n read-only resource URI is invalid".to_string(),
+        ));
+    }
+    let parsed = url::Url::parse(resource_uri).map_err(|_| {
+        HostError::InvalidFilter("n8n read-only resource URI is invalid".to_string())
+    })?;
+    if parsed.scheme() != "fwc-n8n"
+        || parsed.host_str() != Some(server_id.as_str())
+        || parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n read-only resource URI is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn n8n_read_only_input_id<'a>(input: &'a Value, field: &str) -> HostResult<&'a str> {
+    let value = input
+        .as_object()
+        .and_then(|object| object.get(field))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.trim() == *value && value.len() <= 4096)
+        .ok_or_else(|| {
+            HostError::InvalidFilter(
+                "n8n read-only run-once resource identifier is invalid".to_string(),
+            )
+        })?;
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('&')
+        || value.contains('=')
+        || value.contains('%')
+        || value.chars().any(char::is_control)
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n read-only run-once resource identifier is invalid".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
+fn encode_n8n_resource_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+fn expected_n8n_read_only_resource_uri(
+    server_id: N8nReadOnlyServerId,
+    operation: &str,
+    input: &Value,
+) -> HostResult<String> {
+    let root = format!("fwc-n8n://{}", server_id.as_str());
+    match operation {
+        "n8n.credentials.list"
+        | "n8n.executions.list"
+        | "n8n.projects.list"
+        | "n8n.tags.list"
+        | "n8n.workflows.list" => Ok(root),
+        "n8n.workflows.get" => Ok(format!(
+            "{root}/workflows/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
+        )),
+        "n8n.executions.get" => Ok(format!(
+            "{root}/workflows/{}/executions/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "workflow_id")?),
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
+        )),
+        "n8n.folders.list" => Ok(format!(
+            "{root}/projects/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "project_id")?)
+        )),
+        "n8n.folders.get" => Ok(format!(
+            "{root}/folders/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "folder_id")?)
+        )),
+        _ => Err(HostError::InvalidFilter(
+            "n8n read-only run-once operation is not allowed".to_string(),
+        )),
+    }
+}
+
+#[allow(dead_code)] // Consumed by the next host-owned n8n one-shot wiring packet.
+fn build_n8n_read_only_run_once_plan(
+    input: N8nReadOnlyRunOnceInput,
+    config: &ManagedConnectorConfig,
+) -> HostResult<N8nReadOnlyRunOncePlan> {
+    if input.schema != N8N_READ_ONLY_RUN_ONCE_SCHEMA
+        || !N8N_READ_ONLY_OPERATIONS.contains(&input.operation.as_str())
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n read-only run-once operation is not allowed".to_string(),
+        ));
+    }
+    let expected_resource_uri =
+        expected_n8n_read_only_resource_uri(input.server_id, &input.operation, &input.input)?;
+    if input.resource_uri != expected_resource_uri {
+        return Err(HostError::PreflightFailed(
+            "n8n read-only run-once resource binding was denied".to_string(),
+        ));
+    }
+    let operation = OperationId::new(input.operation).map_err(|_| {
+        HostError::InvalidFilter("n8n read-only run-once operation is invalid".to_string())
+    })?;
+    if config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation {
+        return Err(HostError::PreflightFailed(
+            "n8n read-only run-once requires a per-invocation connector configuration".to_string(),
+        ));
+    }
+    if config.allowed_operations.is_empty()
+        || !config
+            .allowed_operations
+            .iter()
+            .any(|allowed| allowed == operation.as_str())
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n read-only run-once operation is not admitted by trusted configuration".to_string(),
+        ));
+    }
+    let zone_id = input.zone_id.parse::<ZoneId>().map_err(|_| {
+        HostError::InvalidFilter("n8n read-only run-once zone is invalid".to_string())
+    })?;
+    let deadline_ms = input
+        .deadline_ms
+        .unwrap_or(N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS);
+    if deadline_ms == 0 || deadline_ms > N8N_READ_ONLY_RUN_ONCE_MAX_DEADLINE_MS {
+        return Err(HostError::InvalidFilter(
+            "n8n read-only run-once deadline is invalid".to_string(),
+        ));
+    }
+    if input.correlation_id.as_ref().is_some_and(|value| {
+        value.is_empty() || value.len() > 128 || !value.bytes().all(|byte| byte.is_ascii_graphic())
+    }) {
+        return Err(HostError::InvalidFilter(
+            "n8n read-only run-once correlation id is invalid".to_string(),
+        ));
+    }
+    validate_n8n_read_only_resource_uri(input.server_id, &input.resource_uri)?;
+    let credential_binding = run_once_n8n_credential_binding_for_zone(config, &zone_id)?;
+    if credential_binding.server_id != input.server_id.as_str() {
+        return Err(HostError::PreflightFailed(
+            "n8n read-only run-once server binding was denied".to_string(),
+        ));
+    }
+
+    Ok(N8nReadOnlyRunOncePlan {
+        server_id: input.server_id,
+        operation,
+        zone_id,
+        resource_uri: input.resource_uri,
+        input: input.input,
+        deadline_ms,
+        correlation_id: input.correlation_id,
+        credential_binding,
+    })
+}
+
+#[allow(dead_code)] // Consumed by the next host-owned n8n one-shot wiring packet.
+fn build_n8n_read_only_capability_issuance(
+    plan: &N8nReadOnlyRunOncePlan,
+    trusted_operation: &OperationInfo,
+) -> HostResult<N8nReadOnlyCapabilityIssuance> {
+    if trusted_operation.id != plan.operation {
+        return Err(HostError::PreflightFailed(
+            "n8n read-only capability does not match the trusted operation".to_string(),
+        ));
+    }
+    Ok(N8nReadOnlyCapabilityIssuance {
+        request: CapabilityIssuanceRequest {
+            connector_id: "fcp.n8n".to_string(),
+            capability_id: trusted_operation.capability.to_string(),
+            zone_id: plan.zone_id.to_string(),
+            principal_id: "agent:fwc-n8n".to_string(),
+            operations: vec![plan.operation.to_string()],
+            ttl_secs: N8N_READ_ONLY_RUN_ONCE_TTL_SECS,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![plan.resource_uri.clone()],
+            resource_deny: Vec::new(),
+            max_calls: Some(1),
+            max_bytes: Some(N8N_READ_ONLY_RUN_ONCE_MAX_BYTES),
+            credential_allow: vec![plan.credential_binding.credential_id],
+            dry_run: false,
+        },
+    })
+}
+
 fn select_run_once_connector_config(
     loaded_configs: LoadedConnectorConfigs,
     connector_id: &ConnectorId,
@@ -9105,6 +9452,13 @@ fn run_once_n8n_credential_binding(
     config: &ManagedConnectorConfig,
     request: &InvokeRequest,
 ) -> HostResult<RunOnceCredentialBinding> {
+    run_once_n8n_credential_binding_for_zone(config, &request.zone_id)
+}
+
+fn run_once_n8n_credential_binding_for_zone(
+    config: &ManagedConnectorConfig,
+    zone_id: &ZoneId,
+) -> HostResult<RunOnceCredentialBinding> {
     if config.id != "fcp.n8n" {
         return Err(HostError::InvalidFilter(
             "run-once credential bootstrap requires the fcp.n8n connector".to_string(),
@@ -9114,7 +9468,7 @@ fn run_once_n8n_credential_binding(
         || !config
             .allowed_zones
             .iter()
-            .any(|zone| zone == request.zone_id.as_str())
+            .any(|zone| zone == zone_id.as_str())
     {
         return Err(HostError::PreflightFailed(
             "run-once credential bootstrap zone is not configured".to_string(),
@@ -27871,13 +28225,212 @@ done"#;
 
     fn run_once_n8n_test_config() -> ManagedConnectorConfig {
         let mut config = subprocess_test_connector_config("fcp.n8n");
+        config.lifecycle_mode = ConnectorLifecycleMode::PerInvocation;
         config.allowed_zones = vec![ZoneId::private().to_string()];
+        config.allowed_operations = N8N_READ_ONLY_OPERATIONS
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         config.config = Some(json!({
             "credential_id": "11111111-1111-1111-1111-111111111111",
             "base_url": "https://n8n.example.test",
             "server_id": "eec"
         }));
         config
+    }
+
+    fn n8n_read_only_test_input(operation: &str) -> N8nReadOnlyRunOnceInput {
+        let (resource_uri, input) = match operation {
+            "n8n.workflows.get" => (
+                "fwc-n8n://eec/workflows/workflow%2D1",
+                json!({"id": "workflow-1"}),
+            ),
+            "n8n.executions.get" => (
+                "fwc-n8n://eec/workflows/workflow%2D1/executions/execution%2D1",
+                json!({"workflow_id": "workflow-1", "id": "execution-1"}),
+            ),
+            "n8n.folders.list" => (
+                "fwc-n8n://eec/projects/project%2D1",
+                json!({"project_id": "project-1"}),
+            ),
+            "n8n.folders.get" => (
+                "fwc-n8n://eec/folders/folder%2D1",
+                json!({"project_id": "project-1", "folder_id": "folder-1"}),
+            ),
+            _ => ("fwc-n8n://eec", json!({})),
+        };
+        N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: operation.to_string(),
+            zone_id: ZoneId::private().to_string(),
+            resource_uri: resource_uri.to_string(),
+            input,
+            deadline_ms: None,
+            correlation_id: Some("corr-test-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn n8n_read_only_contract_rejects_unknown_fields_and_trailing_values() {
+        let injected = json!({
+            "schema": N8N_READ_ONLY_RUN_ONCE_SCHEMA,
+            "server_id": "eec",
+            "operation": "n8n.workflows.get",
+            "zone_id": ZoneId::private().to_string(),
+            "resource_uri": "fwc-n8n://eec/workflows/workflow-1",
+            "input": {"id": "workflow-1"},
+            "executable": "/tmp/PRIVATE-PATH-CANARY"
+        });
+        let error = parse_n8n_read_only_run_once_input(injected.to_string().as_bytes())
+            .expect_err("injected executable must be rejected");
+        assert!(!error.to_string().contains("PRIVATE-PATH-CANARY"));
+
+        let mut trailing = serde_json::to_vec(&n8n_read_only_test_input("n8n.workflows.get"))
+            .expect("serialize test input");
+        trailing.extend_from_slice(b" {}");
+        assert!(parse_n8n_read_only_run_once_input(&trailing).is_err());
+    }
+
+    #[test]
+    fn n8n_read_only_contract_has_a_closed_operation_and_server_surface() {
+        let config = run_once_n8n_test_config();
+        for operation in N8N_READ_ONLY_OPERATIONS {
+            build_n8n_read_only_run_once_plan(n8n_read_only_test_input(operation), &config)
+                .expect("declared read-only operation must be admitted");
+        }
+
+        for operation in ["n8n.workflows.activate", "n8n.workflows.delete"] {
+            assert!(
+                build_n8n_read_only_run_once_plan(n8n_read_only_test_input(operation), &config)
+                    .is_err(),
+                "write or unknown operation must be denied"
+            );
+        }
+
+        let legacy = json!({
+            "schema": N8N_READ_ONLY_RUN_ONCE_SCHEMA,
+            "server_id": "legacy",
+            "operation": "n8n.workflows.get",
+            "zone_id": ZoneId::private().to_string(),
+            "resource_uri": "fwc-n8n://legacy/workflows/workflow-1",
+            "input": {"id": "workflow-1"}
+        });
+        assert!(
+            parse_n8n_read_only_run_once_input(legacy.to_string().as_bytes()).is_err(),
+            "legacy must not enter the Phase-1 contract"
+        );
+    }
+
+    #[test]
+    fn n8n_read_only_contract_binds_resource_server_zone_and_config() {
+        let config = run_once_n8n_test_config();
+
+        let mut wrong_resource = n8n_read_only_test_input("n8n.workflows.get");
+        wrong_resource.resource_uri = "fwc-n8n://hetzner/workflows/workflow%2D1".to_string();
+        assert!(build_n8n_read_only_run_once_plan(wrong_resource, &config).is_err());
+
+        let mut wildcard = n8n_read_only_test_input("n8n.workflows.get");
+        wildcard.resource_uri = "fwc-n8n://eec/workflows/*".to_string();
+        assert!(build_n8n_read_only_run_once_plan(wildcard, &config).is_err());
+
+        let mut mismatched_id = n8n_read_only_test_input("n8n.workflows.get");
+        mismatched_id.input = json!({"id": "workflow-2"});
+        assert!(build_n8n_read_only_run_once_plan(mismatched_id, &config).is_err());
+
+        for invalid_id in ["id/../admin", "id\\admin", "id%2Fadmin", "id?query"] {
+            let mut invalid = n8n_read_only_test_input("n8n.workflows.get");
+            invalid.input = json!({"id": invalid_id});
+            assert!(build_n8n_read_only_run_once_plan(invalid, &config).is_err());
+        }
+
+        let mut wrong_zone = n8n_read_only_test_input("n8n.workflows.get");
+        wrong_zone.zone_id = ZoneId::work().to_string();
+        assert!(build_n8n_read_only_run_once_plan(wrong_zone, &config).is_err());
+
+        let mut server_mismatch = n8n_read_only_test_input("n8n.workflows.get");
+        server_mismatch.server_id = N8nReadOnlyServerId::Hetzner;
+        server_mismatch.resource_uri = "fwc-n8n://hetzner/workflows/workflow%2D1".to_string();
+        assert!(build_n8n_read_only_run_once_plan(server_mismatch, &config).is_err());
+
+        let mut persistent = config.clone();
+        persistent.lifecycle_mode = ConnectorLifecycleMode::Persistent;
+        assert!(
+            build_n8n_read_only_run_once_plan(
+                n8n_read_only_test_input("n8n.workflows.get"),
+                &persistent,
+            )
+            .is_err()
+        );
+
+        let mut operation_denied = config;
+        operation_denied.allowed_operations = vec!["n8n.workflows.list".to_string()];
+        assert!(
+            build_n8n_read_only_run_once_plan(
+                n8n_read_only_test_input("n8n.workflows.get"),
+                &operation_denied,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn n8n_read_only_capability_request_is_exact_and_debug_redacts_payload() {
+        let config = run_once_n8n_test_config();
+        let mut input = n8n_read_only_test_input("n8n.workflows.get");
+        let payload_canary = ["PRIVATE", "PAYLOAD", "CANARY"].join("-");
+        input.input = json!({"id": "workflow-1", "marker": payload_canary});
+        let debug = format!("{input:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("PRIVATE-PAYLOAD-CANARY"));
+
+        let plan =
+            build_n8n_read_only_run_once_plan(input, &config).expect("valid read-only launch plan");
+        assert_eq!(plan.server_id, N8nReadOnlyServerId::Eec);
+        assert_eq!(plan.deadline_ms, N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS);
+        assert_eq!(plan.correlation_id.as_deref(), Some("corr-test-1"));
+        assert_eq!(plan.input["marker"], "PRIVATE-PAYLOAD-CANARY");
+
+        let trusted_operation =
+            dispatcher_introspection("n8n.workflows.get", "n8n.workflows.read", SafetyTier::Safe)
+                .operations
+                .into_iter()
+                .next()
+                .expect("test operation");
+        let issuance = build_n8n_read_only_capability_issuance(&plan, &trusted_operation)
+            .expect("exact capability issuance request");
+        let issuance_debug = format!("{issuance:?}");
+        assert!(issuance_debug.contains("[REDACTED]"));
+        assert!(!issuance_debug.contains("11111111-1111-1111-1111-111111111111"));
+        assert!(!issuance_debug.contains("fwc-n8n://eec/workflows/workflow%2D1"));
+        let issuance = issuance.into_inner();
+        assert_eq!(issuance.connector_id, "fcp.n8n");
+        assert_eq!(issuance.capability_id, "n8n.workflows.read");
+        assert_eq!(issuance.operations, vec!["n8n.workflows.get"]);
+        assert_eq!(issuance.zone_id, ZoneId::private().to_string());
+        assert_eq!(issuance.resource_allow, vec![plan.resource_uri.clone()]);
+        assert_eq!(issuance.max_calls, Some(1));
+        assert_eq!(issuance.max_bytes, Some(N8N_READ_ONLY_RUN_ONCE_MAX_BYTES));
+        assert_eq!(issuance.ttl_secs, N8N_READ_ONLY_RUN_ONCE_TTL_SECS);
+        assert_eq!(issuance.credential_allow.len(), 1);
+        assert_eq!(
+            issuance.credential_allow[0].to_string(),
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert!(issuance.holder_node.is_none());
+        assert_eq!(issuance.max_delegation_depth, 0);
+        assert!(!issuance.dry_run);
+
+        let wrong_trusted_operation = dispatcher_introspection(
+            "n8n.workflows.list",
+            "n8n.workflows.write",
+            SafetyTier::Safe,
+        )
+        .operations
+        .into_iter()
+        .next()
+        .expect("test operation");
+        assert!(build_n8n_read_only_capability_issuance(&plan, &wrong_trusted_operation).is_err());
     }
 
     #[test]

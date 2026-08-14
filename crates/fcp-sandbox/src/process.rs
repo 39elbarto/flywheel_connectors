@@ -128,7 +128,7 @@ impl OwnedProcess {
 
         #[cfg(target_os = "linux")]
         {
-            Self::spawn_linux(spec, None)
+            Self::spawn_linux(spec, None, None)
         }
     }
 
@@ -156,6 +156,7 @@ impl OwnedProcess {
                 fd: channel_fd,
                 kind: InheritedChannelKind::HostEgress,
             }),
+            None,
         );
         drop(child_endpoint);
         result
@@ -185,6 +186,35 @@ impl OwnedProcess {
                 fd: channel_fd,
                 kind: InheritedChannelKind::RunOnceCredential,
             }),
+            None,
+        );
+        drop(child_endpoint);
+        result
+    }
+
+    /// Spawn a host run-once process with one trusted, fixed working directory.
+    ///
+    /// The directory must already be absolute, canonical, and a non-symlink
+    /// directory.  This narrow variant exists so one-shot hosts cannot inherit
+    /// a caller's cwd and accidentally read or write cwd-relative state.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_with_run_once_credential_channel_in_directory(
+        spec: &ProcessSpec,
+        child_endpoint: UnixStream,
+        working_directory: &Path,
+    ) -> Result<Self, ProcessGroupError> {
+        if spec.network_disabled || has_reserved_inherited_channel_env(spec) {
+            return Err(ProcessGroupError::InvalidSpec);
+        }
+        let working_directory = validate_working_directory(working_directory)?;
+        let channel_fd = validate_host_egress_channel(&child_endpoint)?;
+        let result = Self::spawn_linux(
+            spec,
+            Some(InheritedChannel {
+                fd: channel_fd,
+                kind: InheritedChannelKind::RunOnceCredential,
+            }),
+            Some(&working_directory),
         );
         drop(child_endpoint);
         result
@@ -194,6 +224,7 @@ impl OwnedProcess {
     fn spawn_linux(
         spec: &ProcessSpec,
         inherited_channel: Option<InheritedChannel>,
+        working_directory: Option<&Path>,
     ) -> Result<Self, ProcessGroupError> {
         if !spec.launcher_path.is_absolute()
             || !spec.runtime_executable.is_absolute()
@@ -225,6 +256,9 @@ impl OwnedProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(working_directory) = working_directory {
+            command.current_dir(working_directory);
+        }
         configure_inherited_channel_environment(&mut command, inherited_channel);
 
         // SAFETY: the closure runs in the child between fork and exec and
@@ -650,6 +684,44 @@ fn configure_inherited_channel_environment(
             command.env(FCP_HOST_RUN_ONCE_CREDENTIAL_FD, channel.fd.to_string());
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_working_directory(path: &Path) -> Result<PathBuf, ProcessGroupError> {
+    if !path.is_absolute() {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(ProcessGroupError::Io)?;
+    if !metadata.file_type().is_dir() {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    let canonical = std::fs::canonicalize(path).map_err(ProcessGroupError::Io)?;
+    if canonical != path {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    Ok(canonical)
+}
+
+/// Mark one owned Unix pipe/socket descriptor nonblocking.
+#[cfg(target_os = "linux")]
+pub fn set_nonblocking<F: std::os::fd::AsFd>(source: &F) -> Result<(), ProcessGroupError> {
+    use std::os::fd::AsRawFd;
+
+    let fd = source.as_fd().as_raw_fd();
+    // SAFETY: `fd` is borrowed from the caller-owned descriptor and both
+    // operations are confined to fcntl's integer flag interface.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(ProcessGroupError::Io(std::io::Error::last_os_error()));
+    }
+    if flags & libc::O_NONBLOCK != 0 {
+        return Ok(());
+    }
+    // SAFETY: the descriptor remains borrowed for the duration of this call.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(ProcessGroupError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1370,6 +1442,36 @@ mod tests {
             OwnedProcess::spawn(&spec),
             Err(ProcessGroupError::InvalidSpec)
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_once_working_directory_requires_canonical_absolute_directory() {
+        let executable = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical test executable");
+        let directory = executable.parent().expect("test executable parent");
+        assert_eq!(
+            validate_working_directory(directory).expect("canonical directory"),
+            directory
+        );
+        assert!(matches!(
+            validate_working_directory(Path::new("relative")),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+        assert!(matches!(
+            validate_working_directory(&executable),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_stdio_can_be_marked_nonblocking() {
+        let (stream, _peer) = UnixStream::pair().expect("socketpair");
+        set_nonblocking(&stream).expect("set nonblocking");
+        let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
     }
 
     #[cfg(target_os = "linux")]

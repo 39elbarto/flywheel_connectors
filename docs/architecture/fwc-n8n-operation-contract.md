@@ -26,8 +26,13 @@ The sandbox has the fixed inherited credential-channel spawn primitive. The
 `status` action now verifies a fixed immutable versioned release bundle derived
 from the canonical current executable and returns only
 `{"bundleAvailable":true|false}`; it performs no process scan, spawn, or secret
-read and does not claim that the bridge is wired. The trusted artifact/KeePass
-parent bridge is not wired into `fwc-n8n` yet. Bundle verification currently
+read and does not claim that the bridge is wired. The verified producer-neutral
+host runner is implemented internally with a fixed verified-release working
+directory, in-memory lifecycle state, and cancelable bounded stdio workers, but
+it is not wired into `fwc-n8n` yet and has no credential producer. Public wiring
+remains NO-GO pending synchronous spawn/hash deadline enforcement, whole-CLI
+stdin framing/deadline enforcement, nested connector teardown proof, and a
+reviewed credential producer. Bundle verification currently
 trusts root ownership, restrictive filesystem modes, and serialized atomic
 privileged updates locally. Its path-based checks do not defend against a
 concurrent malicious root updater, and it does not claim signature

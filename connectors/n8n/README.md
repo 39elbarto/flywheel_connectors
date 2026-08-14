@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Linux owned per-invocation launch now supplies an authenticated inherited-FD host-egress channel and proves process-group teardown. `fcp-host n8n-run-once` accepts a closed nine-operation read-only envelope and consumes one request-scoped credential FD. The thin `fwc-n8n` wrapper derives that envelope for EEC or Hetzner. `fwc-n8n status` now verifies the fixed immutable release bundle and reports only `bundleAvailable`; the artifact/KeePass launch bridge and local/official-MCP dispatch remain pending. Real-host narrow-token verification against EEC and Hetzner also remains pending.
+> **Status**: Linux owned per-invocation launch now supplies a host-owned inherited-FD host-egress channel and proves process-group teardown. `fcp-host n8n-run-once` accepts a closed nine-operation read-only envelope and consumes one request-scoped credential FD. The thin `fwc-n8n` wrapper derives that envelope for EEC or Hetzner. `fwc-n8n status` now verifies the fixed immutable release bundle and reports only `bundleAvailable`; an internal producer-neutral verified host runner now uses only the verified release `fcp-host` directory as cwd, forces an empty `FCP_HOST_LIFECYCLE_STATE_FILE`, and uses cancelable bounded stdio workers. The credential producer, public dispatch wiring, and local/official-MCP dispatch remain pending. Real-host narrow-token verification against EEC and Hetzner also remains pending.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.21`
 > **Verification script**: none tracked; use the commands below
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -36,6 +36,13 @@ Important runtime truths:
   EEC-or-Hetzner payload, bounded deadline, and optional UUID correlation ID.
   It derives the fixed `z:work` host envelope and canonical resource URI, then
   returns `bridge_not_wired`; it does not yet read KeePass or start a process.
+  The private bridge runner can launch only a verified fixed `fcp-host` bundle
+  with the selected EEC/Hetzner inventory, fixed zone policy, one-shot argument,
+  bounded response/deadline, inherited credential frame, fixed release cwd, and
+  in-memory lifecycle state. Stdin/stdout/stderr are nonblocking and share one
+  cancellation/deadline budget; teardown errors take precedence over worker
+  errors. It is intentionally not called by this public command until a separate
+  credential producer and invocation gate are approved.
   Per-operation input keys and scalar bounds mirror the manifest, so arbitrary
   headers, credentials, tokens, URLs, commands, paths, or nested payloads
   cannot enter the future host-launch request.
@@ -74,6 +81,7 @@ Important runtime truths:
 - `credential_id` is only a host-managed reference. Every advertised read operation constructs a bounded host-egress request whose context carries the already-verified canonical resource separately from the HTTPS transport URL. The connector never resolves, stores, or sends the API key itself.
 - In the Linux owned per-invocation path, the host creates a connected Unix socketpair, passes only the child endpoint as an inherited file descriptor, and binds the channel to a fresh per-launch authentication token. Connector configuration and operation input cannot select or redirect this transport.
 - The sandbox process supervisor also exposes a separate fixed-name inherited-FD channel for a future trusted parent to deliver one `fcp-host n8n-run-once` credential frame. It marks every ambient descriptor close-on-exec, makes only the selected channel inheritable, rejects reserved environment overrides, and retains exact process-group ownership. The `fwc-n8n` wrapper does not use this primitive yet.
+- The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The public wrapper remains fail-closed: wiring still needs synchronous spawn/hash deadline enforcement, whole-CLI stdin framing/deadline enforcement, nested connector teardown proof, and a reviewed credential producer.
 - The host compares the connector's selected-operation introspection with trusted manifest metadata before activating egress, binds every egress frame to connector, operation, zone, request, correlation, and capability-token context, and proves child reap plus process-group absence before returning.
 - `credential_id` must be a valid UUID.
 - `base_url` is required and canonicalized to the `/api/v1` root.

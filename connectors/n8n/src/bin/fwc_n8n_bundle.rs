@@ -146,8 +146,72 @@ impl fmt::Debug for BundleArtifact {
     }
 }
 
+/// The only bundle facts that the internal host runner may consume.
+///
+/// Every path is derived from the canonical current executable and every
+/// digest was checked against the immutable receipt before this value was
+/// constructed.  This type intentionally exposes no release-root or caller
+/// supplied path and never reveals its contents through `Debug`.
+pub(super) struct VerifiedBundle {
+    fcp_host_path: PathBuf,
+    fcp_host_digest: String,
+    inventory_eec_path: PathBuf,
+    inventory_eec_digest: String,
+    inventory_hetzner_path: PathBuf,
+    inventory_hetzner_digest: String,
+    zone_policy_path: PathBuf,
+    zone_policy_digest: String,
+}
+
+impl fmt::Debug for VerifiedBundle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedBundle")
+            .field("artifact_count", &4)
+            .field("digests", &"<redacted>")
+            .finish()
+    }
+}
+
+impl VerifiedBundle {
+    pub(super) fn fcp_host(&self) -> (&Path, &str) {
+        (&self.fcp_host_path, &self.fcp_host_digest)
+    }
+
+    pub(super) fn inventory_eec(&self) -> (&Path, &str) {
+        (&self.inventory_eec_path, &self.inventory_eec_digest)
+    }
+
+    pub(super) fn inventory_hetzner(&self) -> (&Path, &str) {
+        (&self.inventory_hetzner_path, &self.inventory_hetzner_digest)
+    }
+
+    pub(super) fn zone_policy(&self) -> (&Path, &str) {
+        (&self.zone_policy_path, &self.zone_policy_digest)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_fixture() -> Self {
+        Self {
+            fcp_host_path: PathBuf::from("/release/bin/fcp-host"),
+            fcp_host_digest: "a".repeat(64),
+            inventory_eec_path: PathBuf::from("/release/inventory/eec.json"),
+            inventory_eec_digest: "b".repeat(64),
+            inventory_hetzner_path: PathBuf::from("/release/inventory/hetzner.json"),
+            inventory_hetzner_digest: "c".repeat(64),
+            zone_policy_path: PathBuf::from("/release/policy/zone-policies.json"),
+            zone_policy_digest: "d".repeat(64),
+        }
+    }
+}
+
 /// Verify the fixed release bundle selected by the canonical current binary.
 pub fn verify_current_release_bundle() -> Result<(), BundleError> {
+    verify_current_release_bundle_for_bridge().map(|_| ())
+}
+
+/// Verify and return the fixed facts needed by the internal host runner.
+pub(super) fn verify_current_release_bundle_for_bridge() -> Result<VerifiedBundle, BundleError> {
     #[cfg(not(unix))]
     {
         Err(BundleError::new(BundleErrorCode::UnsupportedPlatform))
@@ -162,7 +226,10 @@ pub fn verify_current_release_bundle() -> Result<(), BundleError> {
 }
 
 #[cfg(unix)]
-fn verify_release_bundle(executable: &Path, expected_owner: u32) -> Result<(), BundleError> {
+fn verify_release_bundle(
+    executable: &Path,
+    expected_owner: u32,
+) -> Result<VerifiedBundle, BundleError> {
     let executable = verify_file(executable, expected_owner, true)?;
     if executable.file_name().and_then(|name| name.to_str()) != Some("fwc-n8n") {
         return Err(BundleError::new(BundleErrorCode::NotBundleExecutable));
@@ -186,6 +253,7 @@ fn verify_release_bundle(executable: &Path, expected_owner: u32) -> Result<(), B
     let receipt = read_receipt(&receipt_path)?;
     validate_receipt_shape(&receipt, root)?;
 
+    let mut verified_artifacts = Vec::with_capacity(EXPECTED_ARTIFACTS.len());
     for relative_path in EXPECTED_ARTIFACTS {
         let artifact_path = root.join(relative_path);
         let artifact = verify_file(
@@ -202,16 +270,42 @@ fn verify_release_bundle(executable: &Path, expected_owner: u32) -> Result<(), B
             .find(|entry| entry.path == relative_path)
             .map(|entry| entry.digest.as_str())
             .ok_or_else(|| BundleError::new(BundleErrorCode::ArtifactSet))?;
-        if hash_file(&artifact)? != expected_digest {
+        let actual_digest = hash_file(&artifact)?;
+        if actual_digest != expected_digest {
             return Err(BundleError::new(BundleErrorCode::Digest));
         }
+        verified_artifacts.push((relative_path, artifact, actual_digest));
     }
-    Ok(())
+
+    let artifact = |relative_path: &str| {
+        verified_artifacts
+            .iter()
+            .find(|(path, _, _)| *path == relative_path)
+            .map(|(_, path, digest)| (path.clone(), digest.clone()))
+            .ok_or_else(|| BundleError::new(BundleErrorCode::ArtifactSet))
+    };
+    let (fcp_host_path, fcp_host_digest) = artifact("bin/fcp-host")?;
+    let (inventory_eec_path, inventory_eec_digest) = artifact("inventory/eec.json")?;
+    let (inventory_hetzner_path, inventory_hetzner_digest) = artifact("inventory/hetzner.json")?;
+    let (zone_policy_path, zone_policy_digest) = artifact("policy/zone-policies.json")?;
+    Ok(VerifiedBundle {
+        fcp_host_path,
+        fcp_host_digest,
+        inventory_eec_path,
+        inventory_eec_digest,
+        inventory_hetzner_path,
+        inventory_hetzner_digest,
+        zone_policy_path,
+        zone_policy_digest,
+    })
 }
 
 #[cfg(not(unix))]
 #[allow(dead_code)]
-fn verify_release_bundle(_executable: &Path, _expected_owner: u32) -> Result<(), BundleError> {
+fn verify_release_bundle(
+    _executable: &Path,
+    _expected_owner: u32,
+) -> Result<VerifiedBundle, BundleError> {
     Err(BundleError::new(BundleErrorCode::UnsupportedPlatform))
 }
 
@@ -220,7 +314,7 @@ fn verify_release_bundle(_executable: &Path, _expected_owner: u32) -> Result<(),
 fn verify_release_bundle_for_owner(
     executable: &Path,
     expected_owner: u32,
-) -> Result<(), BundleError> {
+) -> Result<VerifiedBundle, BundleError> {
     verify_release_bundle(executable, expected_owner)
 }
 

@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 use std::io::{Cursor, Read};
 #[cfg(target_os = "linux")]
 use std::net::Shutdown;
@@ -332,6 +334,7 @@ enum CliAction {
     Run,
     RunOnce,
     N8nReadOnlyRunOnce,
+    N8nSupervisedReadOnlyRunOnce,
     PrintHelp,
     PrintVersion,
 }
@@ -342,6 +345,21 @@ const N8N_READ_ONLY_RUN_ONCE_TTL_SECS: u64 = 60;
 const N8N_READ_ONLY_RUN_ONCE_MAX_DEADLINE_MS: u64 = 60_000;
 const N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const N8N_READ_ONLY_RUN_ONCE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const N8N_SUPERVISED_RUN_ONCE_TOKEN: &str = "n8n-run-once-supervised";
+#[cfg(target_os = "linux")]
+const N8N_SUPERVISOR_CONTROL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD";
+#[cfg(target_os = "linux")]
+const N8N_SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
+#[cfg(target_os = "linux")]
+const N8N_SUPERVISOR_READY_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/READY";
+#[cfg(target_os = "linux")]
+const N8N_SUPERVISOR_GO_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/GO";
+#[cfg(target_os = "linux")]
+const N8N_SUPERVISOR_ABORT_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/ABORT";
+#[cfg(target_os = "linux")]
+const N8N_SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
+#[cfg(target_os = "linux")]
+const N8N_SUPERVISOR_START_FRAME_LEN: usize = N8N_SUPERVISOR_START_PREFIX.len() + 4;
 const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
     "n8n.credentials.list",
     "n8n.executions.get",
@@ -6053,6 +6071,9 @@ where
         [] => Ok(CliAction::Run),
         [arg] if arg == OsStr::new("run-once") => Ok(CliAction::RunOnce),
         [arg] if arg == OsStr::new("n8n-run-once") => Ok(CliAction::N8nReadOnlyRunOnce),
+        [arg] if arg == OsStr::new(N8N_SUPERVISED_RUN_ONCE_TOKEN) => {
+            Ok(CliAction::N8nSupervisedReadOnlyRunOnce)
+        }
         [arg] if arg == OsStr::new("-h") || arg == OsStr::new("--help") => Ok(CliAction::PrintHelp),
         [arg] if arg == OsStr::new("-V") || arg == OsStr::new("--version") => {
             Ok(CliAction::PrintVersion)
@@ -9760,6 +9781,184 @@ fn build_n8n_read_only_invoke_request(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn n8n_supervisor_gate_error() -> HostError {
+    HostError::PreflightFailed("n8n supervised run-once control gate rejected".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn n8n_supervisor_control_timeout(deadline: Instant) -> HostResult<Duration> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(n8n_supervisor_gate_error());
+    }
+    Ok(deadline.duration_since(now))
+}
+
+#[cfg(target_os = "linux")]
+fn read_n8n_supervisor_control_exact(
+    stream: &mut StdUnixStream,
+    buffer: &mut [u8],
+    deadline: Instant,
+) -> HostResult<()> {
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let timeout = n8n_supervisor_control_timeout(deadline)?;
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|_| n8n_supervisor_gate_error())?;
+        match stream.read(&mut buffer[offset..]) {
+            Ok(0) => return Err(n8n_supervisor_gate_error()),
+            Ok(read) => offset += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err(n8n_supervisor_gate_error());
+            }
+            Err(_) => return Err(n8n_supervisor_gate_error()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_n8n_supervisor_control_exact(
+    stream: &mut StdUnixStream,
+    buffer: &[u8],
+    deadline: Instant,
+) -> HostResult<()> {
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let timeout = n8n_supervisor_control_timeout(deadline)?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|_| n8n_supervisor_gate_error())?;
+        match stream.write(&buffer[offset..]) {
+            Ok(0) => return Err(n8n_supervisor_gate_error()),
+            Ok(written) => offset += written,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err(n8n_supervisor_gate_error());
+            }
+            Err(_) => return Err(n8n_supervisor_gate_error()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn reject_queued_n8n_supervisor_control_bytes(stream: &mut StdUnixStream) -> HostResult<()> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|_| n8n_supervisor_gate_error())?;
+    let mut probe = [0_u8; 1];
+    let read_result = stream.read(&mut probe);
+    let restore_result = stream.set_nonblocking(false);
+    if restore_result.is_err() {
+        return Err(n8n_supervisor_gate_error());
+    }
+    match read_result {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(n8n_supervisor_gate_error()),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Err(_) => Err(n8n_supervisor_gate_error()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_n8n_supervisor_start_budget(
+    frame: &[u8; N8N_SUPERVISOR_START_FRAME_LEN],
+) -> HostResult<u64> {
+    if &frame[..N8N_SUPERVISOR_START_PREFIX.len()] != N8N_SUPERVISOR_START_PREFIX {
+        return Err(n8n_supervisor_gate_error());
+    }
+    let budget_bytes: [u8; 4] = frame[N8N_SUPERVISOR_START_PREFIX.len()..]
+        .try_into()
+        .map_err(|_| n8n_supervisor_gate_error())?;
+    let budget_ms = u64::from(u32::from_be_bytes(budget_bytes));
+    if !(1..=N8N_SUPERVISOR_MAX_BUDGET_MS).contains(&budget_ms) {
+        return Err(n8n_supervisor_gate_error());
+    }
+    Ok(budget_ms)
+}
+
+#[cfg(target_os = "linux")]
+fn read_n8n_supervisor_decision(stream: &mut StdUnixStream, deadline: Instant) -> HostResult<()> {
+    let mut received = [0_u8; N8N_SUPERVISOR_ABORT_FRAME.len()];
+    let mut length = 0;
+    loop {
+        let prefix = &received[..length];
+        if prefix == N8N_SUPERVISOR_GO_FRAME {
+            reject_queued_n8n_supervisor_control_bytes(stream)?;
+            return Ok(());
+        }
+        if prefix == N8N_SUPERVISOR_ABORT_FRAME {
+            reject_queued_n8n_supervisor_control_bytes(stream)?;
+            return Err(n8n_supervisor_gate_error());
+        }
+        if length == received.len()
+            || (!N8N_SUPERVISOR_GO_FRAME.starts_with(prefix)
+                && !N8N_SUPERVISOR_ABORT_FRAME.starts_with(prefix))
+        {
+            return Err(n8n_supervisor_gate_error());
+        }
+        read_n8n_supervisor_control_exact(stream, &mut received[length..length + 1], deadline)?;
+        length += 1;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_n8n_supervisor_gate_on_stream(mut stream: StdUnixStream) -> HostResult<()> {
+    let bootstrap_deadline = Instant::now()
+        .checked_add(Duration::from_millis(N8N_SUPERVISOR_MAX_BUDGET_MS))
+        .ok_or_else(n8n_supervisor_gate_error)?;
+    let mut start_frame = [0_u8; N8N_SUPERVISOR_START_FRAME_LEN];
+    read_n8n_supervisor_control_exact(&mut stream, &mut start_frame, bootstrap_deadline)?;
+    let budget_ms = parse_n8n_supervisor_start_budget(&start_frame)?;
+    let requested_deadline = Instant::now()
+        .checked_add(Duration::from_millis(budget_ms))
+        .ok_or_else(n8n_supervisor_gate_error)?;
+    let deadline = if requested_deadline < bootstrap_deadline {
+        requested_deadline
+    } else {
+        bootstrap_deadline
+    };
+    reject_queued_n8n_supervisor_control_bytes(&mut stream)?;
+    write_n8n_supervisor_control_exact(&mut stream, N8N_SUPERVISOR_READY_FRAME, deadline)?;
+    read_n8n_supervisor_decision(&mut stream, deadline)
+}
+
+#[cfg(target_os = "linux")]
+fn claim_n8n_supervisor_control_from_env() -> HostResult<StdUnixStream> {
+    let fd = std::env::var_os(N8N_SUPERVISOR_CONTROL_FD_ENV)
+        .and_then(|value| value.to_str().and_then(|value| value.parse::<i32>().ok()))
+        .filter(|fd| *fd >= 3)
+        .ok_or_else(n8n_supervisor_gate_error)?;
+    fcp_sandbox::claim_inherited_host_egress_channel(fd).map_err(|_| n8n_supervisor_gate_error())
+}
+
+#[cfg(target_os = "linux")]
+fn run_n8n_supervisor_gate_before_telemetry() -> HostResult<()> {
+    let stream = claim_n8n_supervisor_control_from_env()?;
+    run_n8n_supervisor_gate_on_stream(stream)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_n8n_supervisor_gate_before_telemetry() -> HostResult<()> {
+    Err(HostError::Unavailable(
+        "n8n supervised run-once is unsupported on this platform".to_string(),
+    ))
+}
+
 async fn async_n8n_read_only_run_once(
     telemetry_config: TelemetryConfig,
 ) -> HostResult<InvokeResponse> {
@@ -9842,6 +10041,7 @@ fn main() -> HostResult<()> {
         CliAction::Run => {}
         CliAction::RunOnce => {}
         CliAction::N8nReadOnlyRunOnce => {}
+        CliAction::N8nSupervisedReadOnlyRunOnce => {}
         CliAction::PrintHelp => {
             print_cli_help();
             return Ok(());
@@ -9851,9 +10051,27 @@ fn main() -> HostResult<()> {
             return Ok(());
         }
     }
+    if matches!(action, CliAction::N8nSupervisedReadOnlyRunOnce) {
+        if let Err(error) = run_n8n_supervisor_gate_before_telemetry() {
+            return print_run_once_response(Err(error));
+        }
+        #[cfg(target_os = "linux")]
+        if fcp_sandbox::apply_fixed_read_only_landlock().is_err() {
+            return print_run_once_response(Err(HostError::PreflightFailed(
+                "n8n supervised run-once sandbox admission rejected".to_string(),
+            )));
+        }
+    }
     let telemetry_config = match init_host_telemetry() {
         Ok(config) => config,
-        Err(_error) if matches!(action, CliAction::RunOnce | CliAction::N8nReadOnlyRunOnce) => {
+        Err(_error)
+            if matches!(
+                action,
+                CliAction::RunOnce
+                    | CliAction::N8nReadOnlyRunOnce
+                    | CliAction::N8nSupervisedReadOnlyRunOnce
+            ) =>
+        {
             return print_run_once_response(Err(HostError::Internal(
                 "run-once telemetry initialization failed".to_string(),
             )));
@@ -9884,6 +10102,17 @@ fn main() -> HostResult<()> {
                 Ok(result) => result,
                 Err(_) => Err(HostError::Internal(
                     "n8n read-only run-once runtime failed".to_string(),
+                )),
+            };
+            print_run_once_response(result)
+        }
+        CliAction::N8nSupervisedReadOnlyRunOnce => {
+            let result = match fcp_async_core::runtime::block_on_sync(async_n8n_read_only_run_once(
+                telemetry_config,
+            )) {
+                Ok(result) => result,
+                Err(_) => Err(HostError::Internal(
+                    "n8n supervised run-once runtime failed".to_string(),
                 )),
             };
             print_run_once_response(result)
@@ -28287,6 +28516,109 @@ done"#;
         let action = parse_cli_action_from_args(["fcp-host", "n8n-run-once"])
             .expect("n8n-run-once should parse");
         assert_eq!(action, CliAction::N8nReadOnlyRunOnce);
+    }
+
+    #[test]
+    fn parse_cli_action_accepts_only_the_hidden_supervised_token() {
+        let action = parse_cli_action_from_args(["fcp-host", N8N_SUPERVISED_RUN_ONCE_TOKEN])
+            .expect("hidden supervised token should parse");
+        assert_eq!(action, CliAction::N8nSupervisedReadOnlyRunOnce);
+        assert!(
+            parse_cli_action_from_args(["fcp-host", N8N_SUPERVISED_RUN_ONCE_TOKEN, "extra"])
+                .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn supervisor_test_start_frame(budget_ms: u32) -> Vec<u8> {
+        let mut frame = N8N_SUPERVISOR_START_PREFIX.to_vec();
+        frame.extend_from_slice(&budget_ms.to_be_bytes());
+        frame
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_supervisor_gate_with_preface(preface: &[u8]) -> HostResult<()> {
+        let (mut peer, child) = StdUnixStream::pair().expect("supervisor socketpair");
+        peer.write_all(preface).expect("write supervisor preface");
+        drop(peer);
+        run_n8n_supervisor_gate_on_stream(child)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_supervisor_gate_with_decision(decision: &[u8]) -> HostResult<()> {
+        let (mut peer, child) = StdUnixStream::pair().expect("supervisor socketpair");
+        let handle = thread::spawn(move || run_n8n_supervisor_gate_on_stream(child));
+        peer.write_all(&supervisor_test_start_frame(100))
+            .expect("write supervisor start");
+        let mut ready = vec![0_u8; N8N_SUPERVISOR_READY_FRAME.len()];
+        peer.read_exact(&mut ready).expect("read supervisor ready");
+        assert_eq!(ready, N8N_SUPERVISOR_READY_FRAME);
+        peer.write_all(decision).expect("write supervisor decision");
+        handle.join().expect("join supervisor gate")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_gate_accepts_go_and_closes_control_fd() {
+        let (mut peer, child) = StdUnixStream::pair().expect("supervisor socketpair");
+        let handle = thread::spawn(move || run_n8n_supervisor_gate_on_stream(child));
+        peer.write_all(&supervisor_test_start_frame(1_000))
+            .expect("write supervisor start");
+        let mut ready = vec![0_u8; N8N_SUPERVISOR_READY_FRAME.len()];
+        peer.read_exact(&mut ready).expect("read supervisor ready");
+        assert_eq!(ready, N8N_SUPERVISOR_READY_FRAME);
+        peer.write_all(N8N_SUPERVISOR_GO_FRAME)
+            .expect("write supervisor go");
+        assert!(handle.join().expect("join supervisor gate").is_ok());
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set close probe timeout");
+        let mut closed = [0_u8; 1];
+        assert_eq!(peer.read(&mut closed).expect("read close probe"), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_gate_rejects_abort_unknown_extra_and_short_decisions() {
+        assert!(run_supervisor_gate_with_decision(N8N_SUPERVISOR_ABORT_FRAME).is_err());
+        assert!(run_supervisor_gate_with_decision(b"UNKNOWN").is_err());
+        let mut extra = N8N_SUPERVISOR_GO_FRAME.to_vec();
+        extra.push(b'!');
+        assert!(run_supervisor_gate_with_decision(&extra).is_err());
+        assert!(run_supervisor_gate_with_decision(b"FCP-HOST-RUN-ONCE/v1/G").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_gate_rejects_eof_short_start_extra_start_and_bad_budget() {
+        assert!(run_supervisor_gate_with_preface(&[]).is_err());
+        assert!(run_supervisor_gate_with_preface(b"FCP-HOST-RUN-ONCE/v1/ST").is_err());
+        let mut extra = supervisor_test_start_frame(1_000);
+        extra.push(b'!');
+        assert!(run_supervisor_gate_with_preface(&extra).is_err());
+        assert!(run_supervisor_gate_with_preface(&supervisor_test_start_frame(0)).is_err());
+        assert!(run_supervisor_gate_with_preface(&supervisor_test_start_frame(60_001)).is_err());
+        assert!(run_supervisor_gate_with_preface(b"bad-start-frame").is_err());
+
+        let (mut peer, child) = StdUnixStream::pair().expect("supervisor socketpair");
+        let handle = thread::spawn(move || run_n8n_supervisor_gate_on_stream(child));
+        peer.write_all(&supervisor_test_start_frame(100))
+            .expect("write supervisor start");
+        let mut ready = vec![0_u8; N8N_SUPERVISOR_READY_FRAME.len()];
+        peer.read_exact(&mut ready).expect("read supervisor ready");
+        drop(peer);
+        assert!(handle.join().expect("join supervisor gate").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_gate_rejects_timeout_before_go() {
+        let (mut peer, child) = StdUnixStream::pair().expect("supervisor socketpair");
+        let handle = thread::spawn(move || run_n8n_supervisor_gate_on_stream(child));
+        peer.write_all(&supervisor_test_start_frame(50))
+            .expect("write supervisor start");
+        let mut ready = vec![0_u8; N8N_SUPERVISOR_READY_FRAME.len()];
+        peer.read_exact(&mut ready).expect("read supervisor ready");
+        assert!(handle.join().expect("join supervisor gate").is_err());
     }
 
     #[test]

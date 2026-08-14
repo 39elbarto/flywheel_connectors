@@ -105,6 +105,14 @@ pub enum ProcessGroupError {
     IdentityMismatch,
     #[error("local provider process group did not stop before deadline")]
     TeardownTimeout,
+    #[error("local provider process teardown is already terminal; retry disabled")]
+    TeardownTerminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeardownState {
+    Active,
+    TerminalFailure,
 }
 
 /// A spawned Linux process with owned stdio and exact group identity.
@@ -115,6 +123,7 @@ pub struct OwnedProcess {
     reaped: bool,
     term_sent: bool,
     kill_sent: bool,
+    teardown_state: TeardownState,
 }
 
 impl OwnedProcess {
@@ -296,6 +305,7 @@ impl OwnedProcess {
                         reaped: false,
                         term_sent: false,
                         kill_sent: false,
+                        teardown_state: TeardownState::Active,
                     };
                     let _ = owned.terminate(Duration::from_secs(1));
                 } else {
@@ -315,6 +325,7 @@ impl OwnedProcess {
                 reaped: false,
                 term_sent: false,
                 kill_sent: false,
+                teardown_state: TeardownState::Active,
             };
             let _ = owned.terminate(Duration::from_secs(1));
             return Err(ProcessGroupError::IdentityMismatch);
@@ -325,6 +336,7 @@ impl OwnedProcess {
             reaped: false,
             term_sent: false,
             kill_sent: false,
+            teardown_state: TeardownState::Active,
         })
     }
 
@@ -502,6 +514,17 @@ impl OwnedProcess {
     /// Send SIGTERM, wait for the whole owned group, then use SIGKILL only
     /// after a second complete identity check.
     pub fn terminate(&mut self, grace: Duration) -> Result<TerminationReport, ProcessGroupError> {
+        if self.teardown_state == TeardownState::TerminalFailure {
+            return Err(ProcessGroupError::TeardownTerminal);
+        }
+        let result = self.terminate_inner(grace);
+        if result.is_err() {
+            self.teardown_state = TeardownState::TerminalFailure;
+        }
+        result
+    }
+
+    fn terminate_inner(&mut self, grace: Duration) -> Result<TerminationReport, ProcessGroupError> {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = grace;
@@ -648,7 +671,7 @@ impl OwnedProcess {
 
 impl Drop for OwnedProcess {
     fn drop(&mut self) {
-        if self.child.is_some() {
+        if self.child.is_some() && self.teardown_state == TeardownState::Active {
             let _ = self.terminate(Duration::from_secs(1));
         }
     }
@@ -1484,18 +1507,24 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn refuses_pid_start_or_group_identity_drift_before_signal() {
+    fn long_running_process_spec() -> ProcessSpec {
         let runtime = std::fs::canonicalize("/bin/sleep").expect("sleep");
-        let spec = ProcessSpec {
+        let digest = digest_file(&runtime).expect("sleep digest");
+        ProcessSpec {
             launcher_path: runtime.clone(),
-            launcher_digest: digest_file(&runtime).expect("launcher digest"),
-            runtime_executable: runtime.clone(),
-            expected_runtime_executable_digest: digest_file(&runtime).expect("runtime digest"),
-            fixed_args: vec!["5".into()],
+            launcher_digest: digest.clone(),
+            runtime_executable: runtime,
+            expected_runtime_executable_digest: digest,
+            fixed_args: vec!["30".into()],
             fixed_env: BTreeMap::new(),
             network_disabled: false,
-        };
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refuses_pid_start_or_group_identity_drift_before_signal() {
+        let spec = long_running_process_spec();
         let mut process = OwnedProcess::spawn(&spec).expect("process");
         let original = process.identity.clone();
         process.identity.pgid += 1;
@@ -1503,10 +1532,78 @@ mod tests {
             process.terminate(Duration::from_millis(50)),
             Err(ProcessGroupError::IdentityMismatch)
         ));
+        assert_eq!(process.teardown_state, TeardownState::TerminalFailure);
         process.identity = original;
-        let report = process
-            .terminate(Duration::from_secs(1))
-            .expect("restored identity teardown");
-        assert!(report.group_absent);
+        let child = process.child.as_mut().expect("owned child");
+        child.kill().expect("direct test cleanup");
+        child.wait().expect("reap direct test child");
+        process.reaped = true;
+        assert!(matches!(
+            process.terminate(Duration::from_secs(1)),
+            Err(ProcessGroupError::TeardownTerminal)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_timeout_preserves_signal_evidence_and_disables_drop_retry() {
+        let mut process = OwnedProcess::spawn(&long_running_process_spec()).expect("process");
+        assert!(matches!(
+            process.terminate(Duration::ZERO),
+            Err(ProcessGroupError::TeardownTimeout)
+        ));
+        assert_eq!(process.teardown_state, TeardownState::TerminalFailure);
+        assert!(process.term_sent);
+        let term_sent = process.term_sent;
+        let kill_sent = process.kill_sent;
+        assert!(matches!(
+            process.terminate(Duration::from_secs(1)),
+            Err(ProcessGroupError::TeardownTerminal)
+        ));
+        assert_eq!(process.term_sent, term_sent);
+        assert_eq!(process.kill_sent, kill_sent);
+        let child = process.child.as_mut().expect("owned child");
+        let _ = child.wait();
+        process.reaped = true;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn drop_does_not_retry_after_identity_mismatch() {
+        let mut process = OwnedProcess::spawn(&long_running_process_spec()).expect("process");
+        let original = process.identity.clone();
+        let pid = original.pid;
+        process.identity.pgid += 1;
+        assert!(matches!(
+            process.terminate(Duration::from_millis(50)),
+            Err(ProcessGroupError::IdentityMismatch)
+        ));
+        assert_eq!(process.teardown_state, TeardownState::TerminalFailure);
+        process.identity = original;
+        drop(process);
+
+        let snapshot = read_proc_stat(pid).expect("exact child survived Drop");
+        assert_ne!(snapshot.state, b'Z');
+        let pid = i32::try_from(pid).expect("Linux PID fits pid_t");
+
+        // SAFETY: `pid` is the exact direct-child PID captured before Drop;
+        // this test intentionally kills and reaps only that child, never by name.
+        let kill_result = unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert_eq!(kill_result, 0, "kill exact still-live child");
+        let mut status = 0;
+        // SAFETY: the exact PID remains our direct child after OwnedProcess
+        // drops its handle, so waitpid reaps that child and avoids a zombie.
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(waited, pid);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn normal_drop_cleanup_remains_bounded() {
+        let started = Instant::now();
+        {
+            let _process = OwnedProcess::spawn(&long_running_process_spec()).expect("process");
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 }

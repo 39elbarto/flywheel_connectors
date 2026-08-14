@@ -953,7 +953,9 @@ fn map_process_error(error: ProcessGroupError, phase: ProcessPhase) -> LocalMcpE
             LocalMcpError::ProcessStart
         }
         ProcessGroupError::IdentityMismatch => LocalMcpError::ProcessIdentity,
-        ProcessGroupError::TeardownTimeout => LocalMcpError::ProcessStop,
+        ProcessGroupError::TeardownTimeout | ProcessGroupError::TeardownTerminal => {
+            LocalMcpError::ProcessStop
+        }
         ProcessGroupError::Io(_) => match phase {
             ProcessPhase::Spawn => LocalMcpError::ProcessStart,
             ProcessPhase::Stop => LocalMcpError::ProcessStop,

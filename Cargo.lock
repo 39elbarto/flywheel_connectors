@@ -5906,6 +5906,7 @@ dependencies = [
  "fcp-crypto",
  "fcp-manifest",
  "fcp-prelude",
+ "fcp-sandbox",
  "fcp-sdk",
  "hex",
  "percent-encoding",

@@ -566,6 +566,414 @@ mod tests {
     use super::*;
     use fcp_n8n::router::{Provider, ProviderCapability, ServerId};
 
+    #[cfg(target_os = "linux")]
+    use fcp_crypto::ZeroizingSecret;
+    #[cfg(target_os = "linux")]
+    use fcp_sandbox::{
+        FCP_HOST_RUN_ONCE_CREDENTIAL_FD, FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
+        FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE, OwnedProcess, ProcessSpec, TerminationReport,
+        claim_inherited_host_egress_channel,
+    };
+    #[cfg(target_os = "linux")]
+    use std::collections::BTreeMap;
+    #[cfg(target_os = "linux")]
+    use std::io::{Read, Write};
+    #[cfg(target_os = "linux")]
+    use std::os::unix::net::UnixStream;
+    #[cfg(target_os = "linux")]
+    use std::process::{ChildStderr, ChildStdin, ChildStdout, ExitStatus};
+    #[cfg(target_os = "linux")]
+    use std::sync::mpsc::{self, Receiver};
+    #[cfg(target_os = "linux")]
+    use std::thread::{self, JoinHandle};
+    #[cfg(target_os = "linux")]
+    use std::time::{Duration, Instant};
+
+    #[cfg(target_os = "linux")]
+    const FAKE_CHILD_ENV: &str = "FWC_N8N_FAKE_CHILD";
+    #[cfg(target_os = "linux")]
+    const FAKE_CHILD_OUTPUT_MARKER: &str = "FWC_N8N_FAKE_JSON:";
+    #[cfg(target_os = "linux")]
+    const MAX_BRIDGE_OUTPUT_BYTES: usize = 64 * 1024;
+    #[cfg(target_os = "linux")]
+    const MAX_BRIDGE_STDERR_BYTES: usize = 16 * 1024;
+
+    #[cfg(target_os = "linux")]
+    #[derive(Debug)]
+    struct BridgeObservation {
+        envelope_bytes: usize,
+        credential_bytes: usize,
+        stdout_bytes: usize,
+        stderr_bytes: usize,
+        child_status: ExitStatus,
+        termination: TerminationReport,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn validate_fake_credential(secret: &[u8]) -> Result<(), AppError> {
+        if secret.is_empty() {
+            return Err(AppError::new("credential_empty"));
+        }
+        if secret.len() > 4096 {
+            return Err(AppError::new("credential_oversized"));
+        }
+        let value =
+            std::str::from_utf8(secret).map_err(|_| AppError::new("credential_invalid_utf8"))?;
+        if value.trim() != value
+            || secret
+                .iter()
+                .any(|byte| !byte.is_ascii() || byte.is_ascii_control())
+        {
+            return Err(AppError::new("credential_invalid_header"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn encode_fake_credential_frame(secret: &[u8]) -> Result<ZeroizingSecret, AppError> {
+        validate_fake_credential(secret)?;
+        let mut frame = Vec::with_capacity(9 + secret.len());
+        frame.extend_from_slice(b"FCPK");
+        frame.push(1);
+        let length =
+            u32::try_from(secret.len()).map_err(|_| AppError::new("credential_oversized"))?;
+        frame.extend_from_slice(&length.to_be_bytes());
+        frame.extend_from_slice(secret);
+        Ok(ZeroizingSecret::with_zeroize_drop(frame))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fake_child_process_spec() -> ProcessSpec {
+        let executable =
+            std::fs::canonicalize(std::env::current_exe().expect("current test executable"))
+                .expect("canonical test executable");
+        let digest = blake3::hash(&std::fs::read(&executable).expect("test executable bytes"))
+            .to_hex()
+            .to_string();
+        let mut fixed_env = BTreeMap::new();
+        fixed_env.insert(FAKE_CHILD_ENV.into(), "1".into());
+        ProcessSpec {
+            launcher_path: executable.clone(),
+            launcher_digest: digest.clone(),
+            runtime_executable: executable,
+            expected_runtime_executable_digest: digest,
+            fixed_args: vec![
+                "--exact".into(),
+                "tests::run_once_bridge_child_probe".into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
+            ],
+            fixed_env,
+            network_disabled: false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_bounded_reader<R: Read + Send + 'static>(
+        mut reader: R,
+        max_bytes: usize,
+    ) -> (Receiver<Result<Vec<u8>, AppError>>, JoinHandle<()>) {
+        let (sender, receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let mut output = Vec::with_capacity(max_bytes.min(4096));
+            let mut buffer = [0_u8; 4096];
+            let result = loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break Ok(output),
+                    Ok(bytes) => {
+                        if output.len().saturating_add(bytes) > max_bytes {
+                            break Err(AppError::new("bridge_output_too_large"));
+                        }
+                        output.extend_from_slice(&buffer[..bytes]);
+                    }
+                    Err(_) => break Err(AppError::new("bridge_output_read_failed")),
+                }
+            };
+            let _ = sender.send(result);
+        });
+        (receiver, join)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_stdin_writer(
+        mut stdin: ChildStdin,
+        envelope: Vec<u8>,
+    ) -> (Receiver<Result<(), AppError>>, JoinHandle<()>) {
+        let (sender, receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let result = stdin
+                .write_all(&envelope)
+                .map_err(|_| AppError::new("bridge_stdin_write_failed"));
+            drop(stdin);
+            let _ = sender.send(result);
+        });
+        (receiver, join)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_fake_process(
+        process: &mut OwnedProcess,
+        workers: Vec<JoinHandle<()>>,
+    ) -> Result<TerminationReport, AppError> {
+        let termination = process
+            .terminate(Duration::from_millis(100))
+            .map_err(|_| AppError::new("bridge_teardown_failed"))?;
+        if !termination.group_absent {
+            return Err(AppError::new("bridge_group_present"));
+        }
+        for worker in workers {
+            worker
+                .join()
+                .map_err(|_| AppError::new("bridge_io_worker_failed"))?;
+        }
+        Ok(termination)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn parse_fake_child_output(
+        stdout: &[u8],
+        expected_envelope_bytes: usize,
+        expected_credential_bytes: usize,
+    ) -> Result<(), AppError> {
+        let text =
+            std::str::from_utf8(stdout).map_err(|_| AppError::new("bridge_output_invalid_utf8"))?;
+        let payload = text
+            .lines()
+            .find_map(|line| {
+                line.split_once(FAKE_CHILD_OUTPUT_MARKER)
+                    .map(|(_, value)| value)
+            })
+            .ok_or_else(|| AppError::new("bridge_output_missing"))?;
+        let value: Value = serde_json::from_str(payload)
+            .map_err(|_| AppError::new("bridge_output_invalid_json"))?;
+        if value.get("status").and_then(Value::as_str) != Some("ok")
+            || value.get("envelopeBytes").and_then(Value::as_u64)
+                != Some(expected_envelope_bytes as u64)
+            || value.get("credentialBytes").and_then(Value::as_u64)
+                != Some(expected_credential_bytes as u64)
+        {
+            return Err(AppError::new("bridge_output_mismatch"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_lines)] // Keeps the test-only launch lifecycle visible in one place.
+    fn run_fake_bridge(
+        envelope: &HostRunOnceEnvelope,
+        secret: &[u8],
+        timeout: Duration,
+    ) -> Result<BridgeObservation, AppError> {
+        let envelope_bytes = serde_json::to_vec(envelope)
+            .map_err(|_| AppError::new("bridge_envelope_encode_failed"))?;
+        if envelope_bytes.len() > MAX_INPUT_BYTES {
+            return Err(AppError::new("bridge_envelope_too_large"));
+        }
+        let credential_frame = encode_fake_credential_frame(secret)?;
+        let credential_bytes = secret.len();
+        let (mut host_endpoint, child_endpoint) =
+            UnixStream::pair().map_err(|_| AppError::new("bridge_channel_failed"))?;
+        let mut process = OwnedProcess::spawn_with_run_once_credential_channel(
+            &fake_child_process_spec(),
+            child_endpoint,
+        )
+        .map_err(|_| AppError::new("bridge_spawn_failed"))?;
+        let stdin = process
+            .take_stdin()
+            .ok_or_else(|| AppError::new("bridge_stdin_unavailable"))?;
+        let stdout: ChildStdout = process
+            .take_stdout()
+            .ok_or_else(|| AppError::new("bridge_stdout_unavailable"))?;
+        let stderr: ChildStderr = process
+            .take_stderr()
+            .ok_or_else(|| AppError::new("bridge_stderr_unavailable"))?;
+        let (stdin_rx, stdin_join) = spawn_stdin_writer(stdin, envelope_bytes.clone());
+        let (stdout_rx, stdout_join) = spawn_bounded_reader(stdout, MAX_BRIDGE_OUTPUT_BYTES);
+        let (stderr_rx, stderr_join) = spawn_bounded_reader(stderr, MAX_BRIDGE_STDERR_BYTES);
+        let workers = vec![stdin_join, stdout_join, stderr_join];
+
+        let write_result = credential_frame.with_bytes(|frame| host_endpoint.write_all(frame));
+        drop(credential_frame);
+        drop(host_endpoint);
+        if write_result.is_err() {
+            cleanup_fake_process(&mut process, workers)?;
+            return Err(AppError::new("bridge_credential_write_failed"));
+        }
+
+        let deadline = Instant::now() + timeout;
+        let mut child_status = None;
+        let mut stdin_result = None;
+        let mut stdout_result = None;
+        let mut stderr_result = None;
+        let mut failure = None;
+        while Instant::now() < deadline {
+            if child_status.is_none() {
+                match process.try_wait() {
+                    Ok(status) => child_status = status,
+                    Err(_) => failure = Some("bridge_wait_failed"),
+                }
+            }
+            if stdin_result.is_none() {
+                if let Ok(result) = stdin_rx.try_recv() {
+                    stdin_result = Some(result);
+                }
+            }
+            if stdout_result.is_none() {
+                if let Ok(result) = stdout_rx.try_recv() {
+                    stdout_result = Some(result);
+                }
+            }
+            if stderr_result.is_none() {
+                if let Ok(result) = stderr_rx.try_recv() {
+                    stderr_result = Some(result);
+                }
+            }
+            if failure.is_some()
+                || stdin_result.as_ref().is_some_and(Result::is_err)
+                || stdout_result.as_ref().is_some_and(Result::is_err)
+                || stderr_result.as_ref().is_some_and(Result::is_err)
+            {
+                failure = failure.or(Some("bridge_io_failed"));
+                break;
+            }
+            if child_status.is_some()
+                && stdin_result.is_some()
+                && stdout_result.is_some()
+                && stderr_result.is_some()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        if child_status.is_none()
+            || stdin_result.is_none()
+            || stdout_result.is_none()
+            || stderr_result.is_none()
+        {
+            failure = failure.or(Some("bridge_timeout"));
+        }
+        if let Some(code) = failure {
+            cleanup_fake_process(&mut process, workers)?;
+            return Err(AppError::new(code));
+        }
+
+        let status = child_status.expect("child status after bounded wait");
+        let stdout = stdout_result
+            .expect("stdout result after bounded wait")
+            .expect("stdout read success");
+        let stderr = stderr_result
+            .expect("stderr result after bounded wait")
+            .expect("stderr read success");
+        stdin_result
+            .expect("stdin result after bounded wait")
+            .expect("stdin write success");
+        let termination = cleanup_fake_process(&mut process, workers)?;
+        if !status.success() {
+            return Err(AppError::new("bridge_child_failed"));
+        }
+        parse_fake_child_output(&stdout, envelope_bytes.len(), credential_bytes)?;
+        Ok(BridgeObservation {
+            envelope_bytes: envelope_bytes.len(),
+            credential_bytes,
+            stdout_bytes: stdout.len(),
+            stderr_bytes: stderr.len(),
+            child_status: status,
+            termination,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_bounded_child_input<R: Read>(reader: &mut R, max_bytes: usize) -> Result<Vec<u8>, ()> {
+        let mut input = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let bytes = reader.read(&mut buffer).map_err(|_| ())?;
+            if bytes == 0 {
+                return Ok(input);
+            }
+            if input.len().saturating_add(bytes) > max_bytes {
+                return Err(());
+            }
+            input.extend_from_slice(&buffer[..bytes]);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_once_bridge_child_probe() {
+        if std::env::var_os(FAKE_CHILD_ENV).is_none() {
+            return;
+        }
+        let result = (|| -> Result<(), ()> {
+            let mut stdin = std::io::stdin().lock();
+            let envelope = read_bounded_child_input(&mut stdin, MAX_INPUT_BYTES)?;
+            drop(stdin);
+            let envelope_value: Value = serde_json::from_slice(&envelope).map_err(|_| ())?;
+            if envelope_value.get("schema").and_then(Value::as_str) != Some(HOST_RUN_ONCE_SCHEMA)
+                || envelope_value.get("zone_id").and_then(Value::as_str) != Some(HOST_RUN_ONCE_ZONE)
+                || envelope_value.get("server_id").and_then(Value::as_str) != Some("eec")
+                || envelope_value.get("operation").and_then(Value::as_str)
+                    != Some("n8n.workflows.get")
+                || envelope_value.get("resource_uri").and_then(Value::as_str)
+                    != Some("fwc-n8n://eec/workflows/workflow%2D1")
+                || envelope_value
+                    .get("input")
+                    .and_then(|input| input.get("id"))
+                    .and_then(Value::as_str)
+                    != Some("workflow-1")
+                || envelope_value.get("deadline_ms").and_then(Value::as_u64)
+                    != Some(HOST_RUN_ONCE_DEFAULT_DEADLINE_MS)
+                || envelope_value.get("correlation_id").is_some()
+            {
+                return Err(());
+            }
+            let transport =
+                std::env::var(FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT).map_err(|_| ())?;
+            if transport != FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE {
+                return Err(());
+            }
+            let fd = std::env::var(FCP_HOST_RUN_ONCE_CREDENTIAL_FD)
+                .map_err(|_| ())?
+                .parse::<i32>()
+                .map_err(|_| ())?;
+            if fd < 3 {
+                return Err(());
+            }
+            let mut credential = claim_inherited_host_egress_channel(fd).map_err(|_| ())?;
+            let mut header = [0_u8; 9];
+            credential.read_exact(&mut header).map_err(|_| ())?;
+            if &header[..4] != b"FCPK" || header[4] != 1 {
+                return Err(());
+            }
+            let length = u32::from_be_bytes(header[5..9].try_into().map_err(|_| ())?) as usize;
+            if length == 0 || length > 4096 {
+                return Err(());
+            }
+            let mut secret_bytes = vec![0_u8; length];
+            credential.read_exact(&mut secret_bytes).map_err(|_| ())?;
+            let secret = ZeroizingSecret::with_zeroize_drop(secret_bytes);
+            secret
+                .with_bytes(validate_fake_credential)
+                .map_err(|_| ())?;
+            let mut trailing = [0_u8; 1];
+            if credential.read(&mut trailing).map_err(|_| ())? != 0 {
+                return Err(());
+            }
+            println!(
+                "{FAKE_CHILD_OUTPUT_MARKER}{}",
+                json!({
+                    "schema": "fwc.n8n.fake-child.v1",
+                    "status": "ok",
+                    "envelopeBytes": envelope.len(),
+                    "credentialBytes": length,
+                })
+            );
+            Ok(())
+        })();
+        assert!(result.is_ok(), "fake child protocol failure");
+    }
+
     #[test]
     fn upstream_tool_name_is_not_a_public_operation() {
         let error = public_operation_intent("n8n_delete_workflow").expect_err("must deny");
@@ -577,6 +985,54 @@ mod tests {
         let error = run_once_from_bytes("n8n.workflows.list", br#"{"server_id":"eec","input":{}}"#)
             .expect_err("must remain host-owned");
         assert_eq!(error.code, "bridge_not_wired");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_once_fake_parent_bridge_roundtrip_is_bounded_and_group_owned() {
+        let operation = HostRunOnceOperation::parse("n8n.workflows.get").expect("operation");
+        let envelope = build_host_run_once_envelope(
+            operation,
+            host_input(HostRunOnceServerId::Eec, json!({"id": "workflow-1"})),
+        )
+        .expect("validated envelope");
+        let observation = run_fake_bridge(
+            &envelope,
+            b"FAKE-ROUNDTRIP-API-KEY",
+            Duration::from_secs(10),
+        )
+        .expect("fake parent bridge roundtrip");
+        assert_eq!(
+            observation.envelope_bytes,
+            serde_json::to_vec(&envelope).unwrap().len()
+        );
+        assert_eq!(
+            observation.credential_bytes,
+            b"FAKE-ROUNDTRIP-API-KEY".len()
+        );
+        assert!(observation.stdout_bytes > 0);
+        assert_eq!(observation.stderr_bytes, 0);
+        assert!(observation.child_status.success());
+        assert!(observation.termination.group_absent);
+        assert!(observation.termination.reaped);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_once_fake_credential_frame_rejects_malformed_material_before_spawn() {
+        for (secret, expected) in [
+            (&b""[..], "credential_empty"),
+            (&b" leading"[..], "credential_invalid_header"),
+            (&b"trailing "[..], "credential_invalid_header"),
+            (&b"line\nfeed"[..], "credential_invalid_header"),
+            (&[0xff_u8][..], "credential_invalid_utf8"),
+        ] {
+            let error = encode_fake_credential_frame(secret).expect_err("invalid secret");
+            assert_eq!(error.code, expected);
+        }
+        let oversized = vec![b'a'; 4097];
+        let error = encode_fake_credential_frame(&oversized).expect_err("oversized secret");
+        assert_eq!(error.code, "credential_oversized");
     }
 
     fn host_input(server_id: HostRunOnceServerId, input: Value) -> HostRunOnceInput {

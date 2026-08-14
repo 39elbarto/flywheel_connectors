@@ -50,4 +50,5 @@ uuid.workspace = true
 ciborium.workspace = true
 chrono.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-sandbox = { path = "../../crates/fcp-sandbox" }
 wiremock.workspace = true

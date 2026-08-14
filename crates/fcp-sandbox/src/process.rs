@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use fcp_async_core::Deadline;
 
 #[cfg(target_os = "linux")]
+use crate::cgroup::SupervisorAttachHandle;
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
@@ -45,12 +47,16 @@ pub const FCP_HOST_RUN_ONCE_CREDENTIAL_FD: &str = "FCP_HOST_RUN_ONCE_CREDENTIAL_
 /// Only supported host run-once credential transport.
 #[cfg(target_os = "linux")]
 pub const FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE: &str = "inherited-fd-v1";
+/// Reserved child environment name for the fixed supervisor control channel.
+#[cfg(target_os = "linux")]
+pub const FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD: &str = "FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD";
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy)]
 enum InheritedChannelKind {
     HostEgress,
     RunOnceCredential,
+    SupervisorControl,
 }
 
 #[cfg(target_os = "linux")]
@@ -139,7 +145,7 @@ impl OwnedProcess {
 
         #[cfg(target_os = "linux")]
         {
-            Self::spawn_linux(spec, None, None)
+            Self::spawn_linux(spec, None, None, None, None)
         }
     }
 
@@ -167,6 +173,8 @@ impl OwnedProcess {
                 fd: channel_fd,
                 kind: InheritedChannelKind::HostEgress,
             }),
+            None,
+            None,
             None,
         );
         drop(child_endpoint);
@@ -198,6 +206,8 @@ impl OwnedProcess {
                 kind: InheritedChannelKind::RunOnceCredential,
             }),
             None,
+            None,
+            None,
         );
         drop(child_endpoint);
         result
@@ -226,8 +236,58 @@ impl OwnedProcess {
                 kind: InheritedChannelKind::RunOnceCredential,
             }),
             Some(&working_directory),
+            None,
+            None,
         );
         drop(child_endpoint);
+        result
+    }
+
+    /// Spawn the fixed supervised run-once path with credential and control channels.
+    ///
+    /// The caller supplies child endpoints for exactly the two fixed Unix
+    /// streams and a one-shot cgroup handle from the request-cgroup substrate. The child
+    /// writes literal `0` to its inherited cgroup.procs descriptor in
+    /// pre-exec, keeps that descriptor close-on-exec, and exposes only the
+    /// credential/control descriptor numbers through fixed environment names.
+    /// The caller must supply a fixed-policy-derived canonical cwd; this API
+    /// adds no new unvalidated or arbitrary selector for the cwd, executable,
+    /// arguments, environment, or descriptor numbers.
+    #[cfg(target_os = "linux")]
+    pub fn spawn_with_supervised_run_once_channels(
+        spec: &ProcessSpec,
+        credential_endpoint: UnixStream,
+        supervisor_control_endpoint: UnixStream,
+        supervisor_attach_handle: SupervisorAttachHandle,
+        working_directory: &Path,
+    ) -> Result<Self, ProcessGroupError> {
+        if spec.network_disabled || has_reserved_inherited_channel_env(spec) {
+            return Err(ProcessGroupError::InvalidSpec);
+        }
+        let working_directory = validate_working_directory(working_directory)?;
+        let credential_fd = validate_host_egress_channel(&credential_endpoint)?;
+        let supervisor_control_fd = validate_host_egress_channel(&supervisor_control_endpoint)?;
+        let supervisor_attach_fd = supervisor_attach_handle.into_inherited_fd();
+        validate_supervised_descriptor_set(
+            credential_fd,
+            supervisor_control_fd,
+            supervisor_attach_fd.as_raw_fd(),
+        )?;
+        let result = Self::spawn_linux(
+            spec,
+            Some(InheritedChannel {
+                fd: credential_fd,
+                kind: InheritedChannelKind::RunOnceCredential,
+            }),
+            Some(&working_directory),
+            Some(InheritedChannel {
+                fd: supervisor_control_fd,
+                kind: InheritedChannelKind::SupervisorControl,
+            }),
+            Some(supervisor_attach_fd),
+        );
+        drop(credential_endpoint);
+        drop(supervisor_control_endpoint);
         result
     }
 
@@ -236,25 +296,15 @@ impl OwnedProcess {
         spec: &ProcessSpec,
         inherited_channel: Option<InheritedChannel>,
         working_directory: Option<&Path>,
+        supervisor_control: Option<InheritedChannel>,
+        supervisor_attach_fd: Option<OwnedFd>,
     ) -> Result<Self, ProcessGroupError> {
-        if !spec.launcher_path.is_absolute()
-            || !spec.runtime_executable.is_absolute()
-            || spec.launcher_digest.len() != 64
-            || spec
-                .launcher_digest
-                .chars()
-                .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
-            || spec.expected_runtime_executable_digest.len() != 64
-            || spec
-                .expected_runtime_executable_digest
-                .chars()
-                .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
-        {
-            return Err(ProcessGroupError::InvalidSpec);
-        }
-        if digest_file(&spec.launcher_path)? != spec.launcher_digest {
-            return Err(ProcessGroupError::LauncherDigestMismatch);
-        }
+        validate_supervised_spawn_pair(
+            inherited_channel,
+            supervisor_control,
+            supervisor_attach_fd.is_some(),
+        )?;
+        validate_process_spec(spec)?;
 
         use std::os::unix::process::CommandExt;
 
@@ -270,16 +320,37 @@ impl OwnedProcess {
         if let Some(working_directory) = working_directory {
             command.current_dir(working_directory);
         }
-        configure_inherited_channel_environment(&mut command, inherited_channel);
+        configure_inherited_channel_environment(
+            &mut command,
+            inherited_channel,
+            supervisor_control,
+        );
+
+        let inherited_fd = inherited_channel.map(|channel| channel.fd);
+        let supervisor_control_fd = supervisor_control.map(|channel| channel.fd);
+        let supervisor_attach_raw_fd = supervisor_attach_fd
+            .as_ref()
+            .map(std::os::fd::AsRawFd::as_raw_fd);
 
         // SAFETY: the closure runs in the child between fork and exec and
         // performs only async-signal-safe libc calls. It captures no Rust
         // allocation that is mutated in the child.
         unsafe {
             command.pre_exec(move || {
-                if let Some(channel) = inherited_channel {
+                if inherited_fd.is_some()
+                    || supervisor_control_fd.is_some()
+                    || supervisor_attach_raw_fd.is_some()
+                {
                     mark_fds_cloexec_from_three()?;
-                    clear_fd_cloexec(channel.fd)?;
+                }
+                if let Some(fd) = inherited_fd {
+                    clear_fd_cloexec(fd)?;
+                }
+                if let Some(fd) = supervisor_control_fd {
+                    clear_fd_cloexec(fd)?;
+                }
+                if let Some(fd) = supervisor_attach_raw_fd {
+                    write_literal_zero(fd)?;
                 }
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
@@ -291,7 +362,17 @@ impl OwnedProcess {
             });
         }
 
-        let mut child = command.spawn()?;
+        let spawn_result = command.spawn();
+        drop(supervisor_attach_fd);
+        let child = spawn_result?;
+        Self::finish_spawned_child(child, spec)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish_spawned_child(
+        mut child: std::process::Child,
+        spec: &ProcessSpec,
+    ) -> Result<Self, ProcessGroupError> {
         let pid = child.id();
         let identity = match read_identity(
             pid,
@@ -719,21 +800,37 @@ struct ProcSnapshot {
 fn configure_inherited_channel_environment(
     command: &mut Command,
     inherited_channel: Option<InheritedChannel>,
+    supervisor_control: Option<InheritedChannel>,
 ) {
-    let Some(channel) = inherited_channel else {
-        return;
-    };
-    match channel.kind {
-        InheritedChannelKind::HostEgress => {
-            command.env(FCP_HOST_EGRESS_FD, channel.fd.to_string());
+    if let Some(channel) = inherited_channel {
+        match channel.kind {
+            InheritedChannelKind::HostEgress => {
+                command.env(FCP_HOST_EGRESS_FD, channel.fd.to_string());
+            }
+            InheritedChannelKind::RunOnceCredential => {
+                command.env(
+                    FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
+                    FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE,
+                );
+                command.env(FCP_HOST_RUN_ONCE_CREDENTIAL_FD, channel.fd.to_string());
+            }
+            InheritedChannelKind::SupervisorControl => {
+                command.env(
+                    FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD,
+                    channel.fd.to_string(),
+                );
+            }
         }
-        InheritedChannelKind::RunOnceCredential => {
-            command.env(
-                FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
-                FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE,
-            );
-            command.env(FCP_HOST_RUN_ONCE_CREDENTIAL_FD, channel.fd.to_string());
-        }
+    }
+    if let Some(channel) = supervisor_control {
+        debug_assert!(matches!(
+            channel.kind,
+            InheritedChannelKind::SupervisorControl
+        ));
+        command.env(
+            FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD,
+            channel.fd.to_string(),
+        );
     }
 }
 
@@ -751,6 +848,53 @@ fn validate_working_directory(path: &Path) -> Result<PathBuf, ProcessGroupError>
         return Err(ProcessGroupError::InvalidSpec);
     }
     Ok(canonical)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_supervised_spawn_pair(
+    inherited_channel: Option<InheritedChannel>,
+    supervisor_control: Option<InheritedChannel>,
+    supervisor_attach_present: bool,
+) -> Result<(), ProcessGroupError> {
+    let supervised_mode = supervisor_control.is_some() || supervisor_attach_present;
+    if supervised_mode
+        && (supervisor_control.is_none()
+            || !supervisor_attach_present
+            || !matches!(
+                supervisor_control.map(|channel| channel.kind),
+                Some(InheritedChannelKind::SupervisorControl)
+            )
+            || !matches!(
+                inherited_channel.map(|channel| channel.kind),
+                Some(InheritedChannelKind::RunOnceCredential)
+            ))
+    {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_process_spec(spec: &ProcessSpec) -> Result<(), ProcessGroupError> {
+    if !spec.launcher_path.is_absolute()
+        || !spec.runtime_executable.is_absolute()
+        || spec.launcher_digest.len() != 64
+        || spec
+            .launcher_digest
+            .chars()
+            .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
+        || spec.expected_runtime_executable_digest.len() != 64
+        || spec
+            .expected_runtime_executable_digest
+            .chars()
+            .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
+    {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    if digest_file(&spec.launcher_path)? != spec.launcher_digest {
+        return Err(ProcessGroupError::LauncherDigestMismatch);
+    }
+    Ok(())
 }
 
 /// Mark one owned Unix pipe/socket descriptor nonblocking.
@@ -982,6 +1126,7 @@ fn has_reserved_inherited_channel_env(spec: &ProcessSpec) -> bool {
         FCP_HOST_EGRESS_FD,
         FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
         FCP_HOST_RUN_ONCE_CREDENTIAL_FD,
+        FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD,
     ]
     .iter()
     .any(|key| spec.fixed_env.contains_key(std::ffi::OsStr::new(key)))
@@ -1034,6 +1179,37 @@ fn validate_host_egress_channel(stream: &UnixStream) -> Result<RawFd, ProcessGro
 }
 
 #[cfg(target_os = "linux")]
+fn validate_supervised_descriptor_set(
+    credential_fd: RawFd,
+    supervisor_control_fd: RawFd,
+    supervisor_attach_fd: RawFd,
+) -> Result<(), ProcessGroupError> {
+    if credential_fd < 3
+        || supervisor_control_fd < 3
+        || supervisor_attach_fd < 3
+        || credential_fd == supervisor_control_fd
+        || credential_fd == supervisor_attach_fd
+        || supervisor_control_fd == supervisor_attach_fd
+    {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    validate_supervisor_attach_fd(supervisor_attach_fd)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_supervisor_attach_fd(fd: RawFd) -> Result<(), ProcessGroupError> {
+    let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if descriptor_flags < 0 || descriptor_flags & libc::FD_CLOEXEC == 0 {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    let status_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if status_flags < 0 || status_flags & libc::O_ACCMODE == libc::O_RDONLY {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn mark_fds_cloexec_from_three() -> Result<(), std::io::Error> {
     // close_range(2) gained CLOSE_RANGE_CLOEXEC in Linux 5.11. Use the raw
     // syscall so an older libc cannot silently omit the fail-closed check.
@@ -1057,6 +1233,30 @@ fn clear_fd_cloexec(fd: RawFd) -> Result<(), std::io::Error> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_literal_zero(fd: RawFd) -> Result<(), std::io::Error> {
+    let byte = b"0";
+    loop {
+        // SAFETY: the fixed supervisor owns this inherited descriptor during
+        // pre-exec; the buffer is one immutable byte and remains valid.
+        let result = unsafe { libc::write(fd, byte.as_ptr().cast(), byte.len()) };
+        if result == 1 {
+            return Ok(());
+        }
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(error);
+        }
+        if result == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+        return Err(std::io::Error::from_raw_os_error(libc::EIO));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1210,7 +1410,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::io::{Read, Write};
     #[cfg(target_os = "linux")]
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     #[cfg(target_os = "linux")]
     use std::os::unix::net::UnixStream;
 
@@ -1291,6 +1491,50 @@ mod tests {
         channel
             .write_all(b"pong")
             .expect("credential channel response");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_run_once_child_probe() {
+        if std::env::var_os("FCP_HOST_SUPERVISED_RUN_ONCE_CHILD").is_none() {
+            return;
+        }
+        assert_eq!(
+            std::env::var(FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT)
+                .expect("credential transport environment"),
+            FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT_VALUE
+        );
+        let credential_fd = std::env::var(FCP_HOST_RUN_ONCE_CREDENTIAL_FD)
+            .expect("credential channel fd environment")
+            .parse::<i32>()
+            .expect("numeric credential channel fd");
+        let supervisor_control_fd = std::env::var(FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD)
+            .expect("supervisor control fd environment")
+            .parse::<i32>()
+            .expect("numeric supervisor control fd");
+        let expected_cwd = std::env::var("FCP_HOST_SUPERVISED_RUN_ONCE_EXPECTED_CWD")
+            .expect("expected working directory environment");
+        assert_eq!(
+            std::env::current_dir().expect("child working directory"),
+            PathBuf::from(expected_cwd)
+        );
+
+        let mut credential = unsafe { std::fs::File::from_raw_fd(credential_fd) };
+        let mut supervisor_control = unsafe { std::fs::File::from_raw_fd(supervisor_control_fd) };
+        let mut credential_request = [0_u8; 4];
+        credential
+            .read_exact(&mut credential_request)
+            .expect("credential request");
+        assert_eq!(&credential_request, b"cred");
+        let mut control_request = [0_u8; 4];
+        supervisor_control
+            .read_exact(&mut control_request)
+            .expect("supervisor control request");
+        assert_eq!(&control_request, b"ctrl");
+        credential.write_all(b"cred").expect("credential response");
+        supervisor_control
+            .write_all(b"ctrl")
+            .expect("supervisor control response");
     }
 
     #[cfg(target_os = "linux")]
@@ -1429,6 +1673,7 @@ mod tests {
             FCP_HOST_EGRESS_FD,
             FCP_HOST_RUN_ONCE_CREDENTIAL_TRANSPORT,
             FCP_HOST_RUN_ONCE_CREDENTIAL_FD,
+            FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD,
         ] {
             let (child_endpoint, _host_endpoint) = UnixStream::pair().expect("socketpair");
             let mut spec = test_process_spec(
@@ -1443,6 +1688,183 @@ mod tests {
                 Err(ProcessGroupError::InvalidSpec)
             ));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_run_once_rejects_duplicate_and_invalid_descriptors() {
+        let (credential, _credential_peer) = UnixStream::pair().expect("credential socketpair");
+        let (supervisor_control, _control_peer) =
+            UnixStream::pair().expect("supervisor control socketpair");
+        let credential_fd = validate_host_egress_channel(&credential).expect("credential fd");
+        let supervisor_control_fd =
+            validate_host_egress_channel(&supervisor_control).expect("supervisor control fd");
+
+        assert!(matches!(
+            validate_supervised_descriptor_set(credential_fd, credential_fd, supervisor_control_fd),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+        assert!(matches!(
+            validate_supervised_descriptor_set(credential_fd, supervisor_control_fd, credential_fd),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+        assert!(matches!(
+            validate_supervised_descriptor_set(credential_fd, supervisor_control_fd, -1),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+
+        let mut raw_pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(raw_pipe.as_mut_ptr()) }, 0);
+        let _pipe_read = unsafe { OwnedFd::from_raw_fd(raw_pipe[0]) };
+        let pipe_write = unsafe { OwnedFd::from_raw_fd(raw_pipe[1]) };
+        assert!(matches!(
+            validate_supervised_descriptor_set(
+                credential_fd,
+                supervisor_control_fd,
+                pipe_write.as_raw_fd()
+            ),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_run_once_rejects_partial_supervisor_pairing() {
+        let spec = test_process_spec(
+            "supervised_run_once_child_probe",
+            "FCP_HOST_SUPERVISED_RUN_ONCE_CHILD",
+        );
+        let (credential, _credential_peer) = UnixStream::pair().expect("credential socketpair");
+        let (supervisor_control, _control_peer) =
+            UnixStream::pair().expect("supervisor control socketpair");
+        let credential_fd = validate_host_egress_channel(&credential).expect("credential fd");
+        let supervisor_control_fd =
+            validate_host_egress_channel(&supervisor_control).expect("supervisor control fd");
+
+        assert!(matches!(
+            OwnedProcess::spawn_linux(
+                &spec,
+                Some(InheritedChannel {
+                    fd: credential_fd,
+                    kind: InheritedChannelKind::RunOnceCredential,
+                }),
+                None,
+                Some(InheritedChannel {
+                    fd: supervisor_control_fd,
+                    kind: InheritedChannelKind::SupervisorControl,
+                }),
+                None,
+            ),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+
+        let mut attach_pipe = [0; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(attach_pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let _attach_read = unsafe { OwnedFd::from_raw_fd(attach_pipe[0]) };
+        let attach_write = unsafe { OwnedFd::from_raw_fd(attach_pipe[1]) };
+        assert!(matches!(
+            OwnedProcess::spawn_linux(
+                &spec,
+                Some(InheritedChannel {
+                    fd: credential_fd,
+                    kind: InheritedChannelKind::RunOnceCredential,
+                }),
+                None,
+                None,
+                Some(attach_write),
+            ),
+            Err(ProcessGroupError::InvalidSpec)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_run_once_writes_zero_inherits_fixed_channels_and_closes_attach_fd() {
+        let executable = std::fs::canonicalize(std::env::current_exe().expect("test executable"))
+            .expect("canonical test executable");
+        let working_directory = executable.parent().expect("test executable parent");
+        let mut spec = test_process_spec(
+            "supervised_run_once_child_probe",
+            "FCP_HOST_SUPERVISED_RUN_ONCE_CHILD",
+        );
+        spec.network_disabled = false;
+        spec.fixed_env.insert(
+            "FCP_HOST_SUPERVISED_RUN_ONCE_EXPECTED_CWD".into(),
+            working_directory.as_os_str().into(),
+        );
+
+        let (mut credential_host, credential_child) = UnixStream::pair().expect("credential pair");
+        let (mut supervisor_control_host, supervisor_control_child) =
+            UnixStream::pair().expect("supervisor control pair");
+        let mut attach_pipe = [0; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(attach_pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let mut attach_read = unsafe { std::fs::File::from_raw_fd(attach_pipe[0]) };
+        let attach_write = unsafe { OwnedFd::from_raw_fd(attach_pipe[1]) };
+        let credential_fd = validate_host_egress_channel(&credential_child).expect("credential fd");
+        let supervisor_control_fd =
+            validate_host_egress_channel(&supervisor_control_child).expect("supervisor control fd");
+        validate_supervised_descriptor_set(
+            credential_fd,
+            supervisor_control_fd,
+            attach_write.as_raw_fd(),
+        )
+        .expect("supervised descriptors");
+
+        let mut process = OwnedProcess::spawn_linux(
+            &spec,
+            Some(InheritedChannel {
+                fd: credential_fd,
+                kind: InheritedChannelKind::RunOnceCredential,
+            }),
+            Some(working_directory),
+            Some(InheritedChannel {
+                fd: supervisor_control_fd,
+                kind: InheritedChannelKind::SupervisorControl,
+            }),
+            Some(attach_write),
+        )
+        .expect("spawn supervised child");
+        drop(credential_child);
+        drop(supervisor_control_child);
+
+        let mut attached = [0_u8; 1];
+        attach_read
+            .read_exact(&mut attached)
+            .expect("read self-attach marker");
+        assert_eq!(&attached, b"0");
+        let mut after_exec = [0_u8; 1];
+        assert_eq!(
+            attach_read.read(&mut after_exec).expect("read attach eof"),
+            0
+        );
+
+        credential_host
+            .write_all(b"cred")
+            .expect("credential request");
+        supervisor_control_host
+            .write_all(b"ctrl")
+            .expect("supervisor control request");
+        let mut credential_response = [0_u8; 4];
+        credential_host
+            .read_exact(&mut credential_response)
+            .expect("credential response");
+        assert_eq!(&credential_response, b"cred");
+        let mut control_response = [0_u8; 4];
+        supervisor_control_host
+            .read_exact(&mut control_response)
+            .expect("supervisor control response");
+        assert_eq!(&control_response, b"ctrl");
+
+        let report = process
+            .terminate(Duration::from_secs(1))
+            .expect("terminate supervised child");
+        assert!(report.group_absent);
     }
 
     #[cfg(target_os = "linux")]

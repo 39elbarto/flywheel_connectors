@@ -81,6 +81,7 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::borrow_as_ptr)]
 
+mod cgroup;
 mod egress;
 mod process;
 mod sandbox;
@@ -98,6 +99,7 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{WindowsAppContainerChild, WindowsSandbox};
 
+pub use cgroup::*;
 pub use egress::*;
 pub use process::*;
 pub use sandbox::*;

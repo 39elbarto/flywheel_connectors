@@ -1,15 +1,20 @@
 //! Compact, provider-neutral n8n entry point.
 //!
-//! The thin wrapper resolves and routes typed operations. Provider execution
-//! remains host-owned and fails closed until that dispatch is wired.
+//! The thin wrapper resolves and routes typed operations. Read-only provider
+//! execution uses a fixed one-shot credential broker and verified host bridge.
 
-use std::{fmt, io, io::Read};
+use std::{
+    fmt, io,
+    io::Read,
+    time::{Duration, Instant},
+};
 
 use clap::{Parser, Subcommand};
 use fcp_n8n::router::{
     CapabilitySnapshot, OperationIntent, ProviderRouter, ResolvedTarget, TargetQuery,
     TargetResolution, TargetResolver,
 };
+use fcp_n8n_broker_protocol::{BrokerClient, BrokerRequest, BrokerServer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -21,6 +26,7 @@ mod fwc_n8n_bridge;
 mod fwc_n8n_bundle;
 
 const MAX_INPUT_BYTES: usize = 256 * 1024;
+const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const HOST_RUN_ONCE_SCHEMA: &str = "fwc.n8n.host-run-once.v1";
 const HOST_RUN_ONCE_ZONE: &str = "z:work";
 const HOST_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
@@ -252,20 +258,141 @@ fn execute(cli: Cli) -> Result<Value, AppError> {
 }
 
 fn run_once(operation: &str) -> Result<Value, AppError> {
-    let mut bytes = Vec::new();
-    io::stdin()
-        .take((MAX_INPUT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| AppError::new("input_read_failed"))?;
-    run_once_from_bytes(operation, &bytes)
+    let request_started_at = Instant::now();
+    let input_deadline = request_started_at
+        .checked_add(STDIN_READ_TIMEOUT)
+        .ok_or_else(|| AppError::new("input_read_timeout"))?;
+    let bytes = read_input_until(io::stdin(), input_deadline)?;
+    run_once_from_bytes_at(operation, &bytes, request_started_at, execute_host_run_once)
 }
 
-fn run_once_from_bytes(operation: &str, bytes: &[u8]) -> Result<Value, AppError> {
+fn read_input_until<R>(reader: R, deadline: Instant) -> Result<Vec<u8>, AppError>
+where
+    R: Read + Send + 'static,
+{
+    if Instant::now() >= deadline {
+        return Err(AppError::new("input_read_timeout"));
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("fwc-n8n-stdin".to_owned())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let result = reader
+                .take((MAX_INPUT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes);
+            let _ = sender.send(result);
+        })
+        .map_err(|_| AppError::new("input_read_failed"))?;
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(AppError::new("input_read_timeout"));
+    }
+    match receiver.recv_timeout(remaining) {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(AppError::new("input_read_failed"))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(AppError::new("input_read_timeout")),
+    }
+}
+
+fn run_once_from_bytes_at<F>(
+    operation: &str,
+    bytes: &[u8],
+    request_started_at: Instant,
+    dispatch: F,
+) -> Result<Value, AppError>
+where
+    F: FnOnce(HostRunOnceEnvelope, Instant) -> Result<Value, AppError>,
+{
     let operation = HostRunOnceOperation::parse(operation)?;
     let input = parse_host_run_once_input(bytes)?;
     let envelope = build_host_run_once_envelope(operation, input)?;
-    serde_json::to_value(envelope).map_err(|_| AppError::new("output_encoding_failed"))?;
-    Err(AppError::new("bridge_not_wired"))
+    let deadline_ms = envelope
+        .deadline_ms
+        .ok_or_else(|| AppError::new("invalid_deadline"))?;
+    let request_deadline_at = request_started_at
+        .checked_add(std::time::Duration::from_millis(deadline_ms))
+        .ok_or_else(|| AppError::new("deadline_exceeded"))?;
+    ensure_request_deadline(request_deadline_at)?;
+    dispatch(envelope, request_deadline_at)
+}
+
+fn execute_host_run_once(
+    mut envelope: HostRunOnceEnvelope,
+    request_deadline_at: Instant,
+) -> Result<Value, AppError> {
+    let bundle = fwc_n8n_bundle::verify_current_release_bundle_for_bridge()
+        .map_err(|_| AppError::new("bundle_unavailable"))?;
+    ensure_request_deadline(request_deadline_at)?;
+
+    let server = match envelope.server_id {
+        HostRunOnceServerId::Eec => BrokerServer::Eec,
+        HostRunOnceServerId::Hetzner => BrokerServer::Hetzner,
+    };
+    let client = BrokerClient::fixed();
+    #[cfg(unix)]
+    let credential = {
+        let mut transport = client
+            .connect(request_deadline_at)
+            .map_err(map_broker_error)?;
+        client
+            .request(
+                &mut transport,
+                BrokerRequest { server },
+                request_deadline_at,
+            )
+            .map_err(map_broker_error)?
+    };
+    #[cfg(not(unix))]
+    let credential = {
+        let _ = (client, server);
+        return Err(AppError::new("credential_broker_unavailable"));
+    };
+
+    envelope.deadline_ms = Some(remaining_deadline_ms(request_deadline_at)?);
+    fwc_n8n_bridge::run_verified_host_bridge(&bundle, &envelope, credential, request_deadline_at)
+        .map_err(|error| AppError::new(error.code()))
+}
+
+fn ensure_request_deadline(deadline: Instant) -> Result<(), AppError> {
+    if Instant::now() >= deadline {
+        Err(AppError::new("deadline_exceeded"))
+    } else {
+        Ok(())
+    }
+}
+
+fn remaining_deadline_ms(deadline: Instant) -> Result<u64, AppError> {
+    ensure_request_deadline(deadline)?;
+    u64::try_from(
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis(),
+    )
+    .ok()
+    .filter(|milliseconds| *milliseconds > 0)
+    .ok_or_else(|| AppError::new("deadline_exceeded"))
+}
+
+fn map_broker_error(error: fcp_n8n_broker_protocol::BrokerError) -> AppError {
+    let code = match error.code() {
+        "deadline_exceeded" => "deadline_exceeded",
+        "socket_rejected" => "credential_broker_rejected",
+        "backend_unavailable" => "credential_broker_unavailable",
+        "backend_failed" => "credential_backend_failed",
+        "empty_secret" => "credential_empty",
+        "oversized_secret" => "credential_oversized",
+        "invalid_secret" => "credential_invalid",
+        "invalid_request" | "request_oversized" => "credential_broker_protocol_failed",
+        "response_invalid" | "response_oversized" => "credential_broker_response_invalid",
+        _ => "credential_broker_io_failed",
+    };
+    AppError::new(code)
 }
 
 fn parse_host_run_once_input(bytes: &[u8]) -> Result<HostRunOnceInput, AppError> {
@@ -512,11 +639,10 @@ fn read_stdin_json<T>() -> Result<T, AppError>
 where
     T: for<'de> Deserialize<'de>,
 {
-    let mut bytes = Vec::new();
-    io::stdin()
-        .take((MAX_INPUT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| AppError::new("input_read_failed"))?;
+    let deadline = Instant::now()
+        .checked_add(STDIN_READ_TIMEOUT)
+        .ok_or_else(|| AppError::new("input_read_timeout"))?;
+    let bytes = read_input_until(io::stdin(), deadline)?;
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(AppError::new("input_too_large"));
     }
@@ -705,6 +831,7 @@ mod tests {
             envelope,
             ZeroizingSecret::from(secret),
             &fake_child_working_directory(),
+            Instant::now() + std::time::Duration::from_secs(30),
         )
         .map_err(|error| AppError::new(error.code()))?;
         let credential_bytes = secret.len();
@@ -886,11 +1013,66 @@ mod tests {
         assert_eq!(error.code, "unknown_public_operation");
     }
 
+    struct DelayedEof(std::time::Duration);
+
+    impl std::io::Read for DelayedEof {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(self.0);
+            Ok(0)
+        }
+    }
+
     #[test]
-    fn run_once_fails_closed_after_strict_validation() {
-        let error = run_once_from_bytes("n8n.workflows.list", br#"{"server_id":"eec","input":{}}"#)
-            .expect_err("must remain host-owned");
-        assert_eq!(error.code, "bridge_not_wired");
+    fn public_input_read_is_bounded_without_eof() {
+        let error = read_input_until(
+            DelayedEof(std::time::Duration::from_millis(50)),
+            Instant::now() + std::time::Duration::from_millis(5),
+        )
+        .expect_err("input reader must not pin the public wrapper");
+        assert_eq!(error.code, "input_read_timeout");
+    }
+
+    #[test]
+    fn public_input_read_returns_bounded_bytes_after_eof() {
+        let bytes = read_input_until(
+            std::io::Cursor::new(b"bounded".to_vec()),
+            Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .expect("bounded input");
+        assert_eq!(bytes, b"bounded");
+    }
+
+    #[test]
+    fn run_once_dispatches_validated_envelope_under_one_absolute_deadline() {
+        let started = Instant::now();
+        let value = run_once_from_bytes_at(
+            "n8n.workflows.list",
+            br#"{"server_id":"eec","input":{},"deadline_ms":1000}"#,
+            started,
+            |envelope, deadline| {
+                assert_eq!(envelope.server_id, HostRunOnceServerId::Eec);
+                assert_eq!(envelope.operation, HostRunOnceOperation::WorkflowsList);
+                assert_eq!(envelope.deadline_ms, Some(1000));
+                assert!(deadline > Instant::now());
+                assert!(deadline <= started + std::time::Duration::from_millis(1000));
+                Ok(json!({"status": "ok"}))
+            },
+        )
+        .expect("validated request must reach the fixed dispatch seam");
+        assert_eq!(value.get("status").and_then(Value::as_str), Some("ok"));
+    }
+
+    #[test]
+    fn run_once_deadline_includes_time_before_dispatch() {
+        let started = Instant::now() - std::time::Duration::from_millis(10);
+        let error = run_once_from_bytes_at(
+            "n8n.workflows.list",
+            br#"{"server_id":"eec","input":{},"deadline_ms":1}"#,
+            started,
+            |_, _| panic!("expired request must not dispatch"),
+        )
+        .expect_err("expired request");
+        assert_eq!(error.code, "deadline_exceeded");
     }
 
     #[cfg(target_os = "linux")]
@@ -944,6 +1126,7 @@ mod tests {
                 &envelope,
                 ZeroizingSecret::from(secret),
                 &working_directory,
+                Instant::now() + std::time::Duration::from_secs(30),
             )
             .expect_err("invalid secret");
             assert_eq!(error.code(), expected);
@@ -954,6 +1137,7 @@ mod tests {
             &envelope,
             ZeroizingSecret::from(oversized.as_slice()),
             &working_directory,
+            Instant::now() + std::time::Duration::from_secs(30),
         )
         .expect_err("oversized secret");
         assert_eq!(error.code(), "credential_oversized");
@@ -1083,9 +1267,11 @@ mod tests {
             .expect("valid envelope");
         assert!(!format!("{envelope:?}").contains(canary));
 
-        let error = run_once_from_bytes(
+        let error = run_once_from_bytes_at(
             "n8n.workflows.get",
             br#"{"server_id":"eec","input":{"id":"workflow-1","marker":"PRIVATE-HOST-DTO-CANARY"}}"#,
+            Instant::now(),
+            |_, _| panic!("invalid request must not dispatch"),
         )
         .expect_err("bridge remains fail-closed");
         assert!(!format!("{error:?}").contains(canary));

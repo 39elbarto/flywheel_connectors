@@ -16,6 +16,8 @@ members = [
     "crates/fcp-crypto",
     "crates/fcp-crypto-hw",
     "crates/fcp-crypto-pq",
+    "crates/fcp-secret",
+    "crates/fcp-n8n-broker-protocol",
     "crates/fcp-e2e",
     "crates/fcp-google-discovery",
     "crates/fcp-graphql",
@@ -226,6 +228,8 @@ members = [
     "connectors/tlon",
 ]
 
+exclude = ["crates/fwc-n8n-secret-broker"]
+
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).
 default-members = [
     "crates/fcp-async-core",
@@ -256,7 +260,7 @@ default-members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.85.1"
 license = "MIT"
 repository = "https://github.com/flywheel/flywheel_connectors"
 authors = ["Flywheel Core Team <core@flywheel.dev>"]

@@ -34,18 +34,21 @@ Important runtime truths:
   `resolve`, `route <public-operation>`, `run-once <host-read-operation>`, and
   `status`. `run-once` accepts exactly the nine Phase-1 host reads, a strict
   EEC-or-Hetzner payload, bounded deadline, and optional UUID correlation ID.
-  It derives the fixed `z:work` host envelope and canonical resource URI, then
-  returns `bridge_not_wired`; it does not yet read KeePass or start a process.
-  The private bridge runner can launch only a verified fixed `fcp-host` bundle
+  CLI framing has a fixed five-second maximum, and the operation deadline is
+  measured from before that read. It derives the fixed `z:work` host envelope
+  and canonical resource URI, verifies the immutable release bundle, requests
+  one credential from the fixed EEC/Hetzner broker, and passes only a
+  `ZeroizingSecret` to the bridge without retry. The bridge runner can launch
+  only a verified fixed `fcp-host` bundle
   with the selected EEC/Hetzner inventory, fixed zone policy, one-shot argument,
   bounded response/deadline, inherited credential frame, fixed release cwd, and
   in-memory lifecycle state. Stdin/stdout/stderr are nonblocking and share one
   cancellation/deadline budget; teardown errors take precedence over worker
-  errors. It is intentionally not called by this public command until a separate
-  credential producer and invocation gate are approved.
+  errors. In the current repository-only state, missing owner-gated broker or
+  release installation fails closed before provider access.
   Per-operation input keys and scalar bounds mirror the manifest, so arbitrary
   headers, credentials, tokens, URLs, commands, paths, or nested payloads
-  cannot enter the future host-launch request.
+  cannot enter the host-launch request.
   `n8n.targets.resolve`, `n8n.capabilities.inspect`, `n8n.runtime.status`,
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and
   `n8n.mcp_access.reconcile` still need dedicated routing intents or host-local
@@ -68,10 +71,11 @@ Important runtime truths:
   receipt, ownership/mode policy (including rejection of special mode bits),
   link counts, and BLAKE3 digests. A dev/test executable safely reports
   `false`. This is deliberately not named `bridgeInstalled`: it does not claim
-  that dispatch or KeePass integration is wired. Root ownership, restrictive
-  modes, and serialized atomic privileged updates are the current local trust
-  root; path-based verification does not defend against a concurrent malicious
-  root updater. This verifier also does not claim signature verification. The
+  that the owner-gated broker, units, or live acceptance are installed. Root
+  ownership, restrictive modes, and serialized atomic privileged updates are
+  the current local trust root; path-based verification does not defend against
+  a concurrent malicious root updater. This verifier also does not claim
+  signature verification. The
   future signed-installer/update receipt is a separate hardening step.
 - Runtime `BaseConnector` ID is `n8n`.
 - Manifest and reported connector ID are `fcp.n8n`.
@@ -80,8 +84,8 @@ Important runtime truths:
 - Direct API-key mode is usable only against loopback test fixtures. Production direct provider egress fails before DNS or HTTP.
 - `credential_id` is only a host-managed reference. Every advertised read operation constructs a bounded host-egress request whose context carries the already-verified canonical resource separately from the HTTPS transport URL. The connector never resolves, stores, or sends the API key itself.
 - In the Linux owned per-invocation path, the host creates a connected Unix socketpair, passes only the child endpoint as an inherited file descriptor, and binds the channel to a fresh per-launch authentication token. Connector configuration and operation input cannot select or redirect this transport.
-- The sandbox process supervisor also exposes a separate fixed-name inherited-FD channel for a future trusted parent to deliver one `fcp-host n8n-run-once` credential frame. It marks every ambient descriptor close-on-exec, makes only the selected channel inheritable, rejects reserved environment overrides, and retains exact process-group ownership. The `fwc-n8n` wrapper does not use this primitive yet.
-- The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The public wrapper remains fail-closed: wiring still needs synchronous spawn/hash deadline enforcement, whole-CLI stdin framing/deadline enforcement, nested connector teardown proof, and a reviewed credential producer.
+- The sandbox process supervisor exposes a fixed-name inherited-FD channel for the verified `fwc-n8n` bridge to deliver one `fcp-host n8n-run-once` credential frame. It marks every ambient descriptor close-on-exec, makes only the selected channel inheritable, rejects reserved environment overrides, and retains exact process-group ownership.
+- The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The code path has synchronous bundle/hash checks, whole-CLI stdin/deadline enforcement, nested process-group teardown proof, and the reviewed fixed credential broker. Deployment still fails closed until the separate owner gate installs and accepts those artifacts.
 - The host compares the connector's selected-operation introspection with trusted manifest metadata before activating egress, binds every egress frame to connector, operation, zone, request, correlation, and capability-token context, and proves child reap plus process-group absence before returning.
 - `credential_id` must be a valid UUID.
 - `base_url` is required and canonicalized to the `/api/v1` root.
@@ -92,6 +96,75 @@ Important runtime truths:
 - Activation additionally requires exactly one semantically matching execution approval; malformed entries fail closed. The host remains authoritative for approval signature verification.
 - Reconfigure and shutdown clear client, verifier, zone, session, configured, and handshaken state.
 - `self_check()` performs its read-only probe only on the loopback test path; production direct egress fails before provider traffic.
+
+## Standalone secret broker (owner-gated; not installed)
+
+The repository carries a zero-idle systemd socket-activation template for the
+standalone `fwc-n8n-secret-broker` binary:
+
+- [`fwc-n8n-secret-broker.socket`](../../deploy/systemd/fwc-n8n-secret-broker.socket)
+  listens only on the fixed `/run/fwc/fwc-n8n-secret-broker.sock` path with
+  `Accept=yes`. The tracked
+  [`fwc-n8n-secret-broker.conf`](../../deploy/tmpfiles.d/fwc-n8n-secret-broker.conf)
+  establishes the runtime directory as root-owned with mode `0750`; the
+  socket is root-owned with mode `0660` and the owner-approved
+  `fwc-n8n-broker` group is the only non-root access path. That group is a
+  deployment placeholder and is not provisioned by this repository. The
+  broker's metadata check requires the socket GID to match the runtime-directory
+  GID before serving a request.
+- [`fwc-n8n-secret-broker@.service`](../../deploy/systemd/fwc-n8n-secret-broker@.service)
+  runs one request per accepted connection from the fixed absolute
+  `/usr/local/libexec/fwc-n8n-secret-broker` path. It receives the bidirectional
+  Unix stream on fd 0 (`StandardInput=socket`), discards stdout
+  (`StandardOutput=null`), logs only redacted diagnostics to the journal, and
+  enforces a bounded `RuntimeMaxSec=30s`. The broker exits after one bounded
+  request; it is not a daemon and has no caller-selected executable, path,
+  environment, or shell.
+- The packaged live-backend build uses only the fixed KeePass mappings
+  `services/n8n-eec` and `services/n8n-hetzner`. The legacy mapping is excluded;
+  secret values and source paths are never placed in unit files or environment
+  variables.
+- The fixed KDBX trust assumption is mode `0600` with owner UID equal to the
+  connecting peer UID. Only the age identity and encrypted master files are
+  root-owned mode `0600`. With keepass `0.13.20`, parsed entry fields are a map,
+  so duplicate raw XML `Password` keys cannot be distinguished after parsing.
+  Canonical KeePass/KeePassXC files expose one field; the broker additionally
+  requires exactly one `services` group, one exact service subgroup, one
+  exact-title entry, and a protected `Password`. Non-canonical or manually
+  generated KDBX files are unsupported; this contract must not be read as raw
+  duplicate-field detection.
+
+These unit files are repository templates only. Existing opt-in Codex MCP
+profiles remain the fallback until the owner accepts the broker preflight,
+installs the exact binary and units, provisions the authorized group, and
+completes a narrow readback. None of those owner actions has been executed.
+
+Owner-approved future commands (all **NOT EXECUTED** here):
+
+The binary source below is a placeholder for a previously built and verified
+standalone live-backend artifact. This runbook does not prescribe an ambiguous
+root-workspace `target/release` path.
+
+```text
+getent group fwc-n8n-broker
+install -o root -g root -m 0755 /path/to/verified/fwc-n8n-secret-broker /usr/local/libexec/fwc-n8n-secret-broker
+install -o root -g root -m 0644 deploy/tmpfiles.d/fwc-n8n-secret-broker.conf /etc/tmpfiles.d/fwc-n8n-secret-broker.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/fwc-n8n-secret-broker.conf
+install -o root -g root -m 0644 deploy/systemd/fwc-n8n-secret-broker.socket /etc/systemd/system/fwc-n8n-secret-broker.socket
+install -o root -g root -m 0644 deploy/systemd/fwc-n8n-secret-broker@.service /etc/systemd/system/fwc-n8n-secret-broker@.service
+systemd-analyze verify /etc/systemd/system/fwc-n8n-secret-broker.socket /etc/systemd/system/fwc-n8n-secret-broker@.service
+systemctl daemon-reload
+systemctl enable --now fwc-n8n-secret-broker.socket
+stat -c '%U %G %a %F %n' /run/fwc /run/fwc/fwc-n8n-secret-broker.sock /usr/local/libexec/fwc-n8n-secret-broker
+# Acceptance readback: verify the socket GID equals the /run/fwc GID.
+systemctl status fwc-n8n-secret-broker.socket
+journalctl -u 'fwc-n8n-secret-broker@*' --since=-5m --no-pager
+systemctl disable --now fwc-n8n-secret-broker.socket
+systemctl daemon-reload
+```
+
+The rollback commands are likewise owner-approved and not executed; until that
+gate is explicitly accepted, use the existing MCP fallback profiles.
 
 ## Declarative Versus Mechanical Enforcement
 

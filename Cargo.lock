@@ -3495,6 +3495,7 @@ dependencies = [
  "fcp-auth-schema",
  "fcp-bench",
  "fcp-cbor",
+ "fcp-secret",
  "ff",
  "frost-ed25519",
  "getrandom 0.3.4",
@@ -5905,6 +5906,7 @@ dependencies = [
  "fcp-core",
  "fcp-crypto",
  "fcp-manifest",
+ "fcp-n8n-broker-protocol",
  "fcp-prelude",
  "fcp-sandbox",
  "fcp-sdk",
@@ -5919,6 +5921,14 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-n8n-broker-protocol"
+version = "0.2.0"
+dependencies = [
+ "fcp-secret",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -7033,6 +7043,14 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-secret"
+version = "0.2.0"
+dependencies = [
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]

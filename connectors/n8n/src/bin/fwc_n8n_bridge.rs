@@ -1,15 +1,16 @@
 //! Producer-neutral, fail-closed bridge to the verified `fcp-host` launcher.
 //!
-//! This module deliberately accepts a caller-supplied, already validated
-//! `ZeroizingSecret`; it does not know how credentials are produced.  The
-//! public wrapper remains disconnected until a separately reviewed producer
-//! and invocation policy are available.
+//! This module deliberately accepts an already validated `ZeroizingSecret` and
+//! one caller-owned absolute deadline; credential production remains isolated
+//! in the fixed one-shot broker.
 
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use fcp_prelude::ZeroizingSecret;
+use fcp_crypto::{
+    CredentialFrameError, ZeroizingSecret, encode_credential_frame, validate_credential_secret,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -112,7 +113,7 @@ impl fmt::Debug for BridgeErrorCode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct BridgeError {
+pub struct BridgeError {
     code: BridgeErrorCode,
 }
 
@@ -121,8 +122,7 @@ impl BridgeError {
         Self { code }
     }
 
-    #[cfg(test)]
-    pub(super) const fn code(self) -> &'static str {
+    pub const fn code(self) -> &'static str {
         self.code.as_str()
     }
 }
@@ -144,16 +144,16 @@ impl fmt::Display for BridgeError {
 
 impl std::error::Error for BridgeError {}
 
-/// Run the verified host bridge without connecting it to the public command.
-#[allow(dead_code)]
-pub(super) fn run_verified_host_bridge(
+/// Run the verified host bridge with a broker-produced credential.
+pub fn run_verified_host_bridge(
     bundle: &VerifiedBundle,
     envelope: &HostRunOnceEnvelope,
     credential: ZeroizingSecret,
+    request_deadline_at: Instant,
 ) -> Result<Value, BridgeError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (bundle, envelope, credential);
+        let _ = (bundle, envelope, credential, request_deadline_at);
         Err(BridgeError::new(BridgeErrorCode::UnsupportedPlatform))
     }
 
@@ -161,7 +161,13 @@ pub(super) fn run_verified_host_bridge(
     {
         let spec = process_spec(bundle, envelope.server_id)?;
         let working_directory = bundle_working_directory(bundle)?;
-        let output = run_process(&spec, envelope, credential, working_directory)?;
+        let output = run_process(
+            &spec,
+            envelope,
+            credential,
+            working_directory,
+            request_deadline_at,
+        )?;
         parse_response(&output.stdout)
     }
 }
@@ -221,12 +227,12 @@ fn process_spec(
 }
 
 #[cfg(target_os = "linux")]
-pub(super) struct ProcessOutput {
-    pub(super) stdout: Vec<u8>,
+pub struct ProcessOutput {
+    pub stdout: Vec<u8>,
     #[allow(dead_code)]
-    pub(super) stderr: Vec<u8>,
-    pub(super) status: std::process::ExitStatus,
-    pub(super) termination: fcp_sandbox::TerminationReport,
+    pub stderr: Vec<u8>,
+    pub status: std::process::ExitStatus,
+    pub termination: fcp_sandbox::TerminationReport,
 }
 
 #[cfg(target_os = "linux")]
@@ -441,17 +447,20 @@ impl fmt::Debug for ProcessOutput {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn run_process(
+// The explicit phases intentionally remain together so all cancellation,
+// zeroization, and process-group cleanup exits are auditable in one place.
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+pub fn run_process(
     spec: &fcp_sandbox::ProcessSpec,
     envelope: &HostRunOnceEnvelope,
     credential: ZeroizingSecret,
     working_directory: &Path,
+    request_deadline_at: Instant,
 ) -> Result<ProcessOutput, BridgeError> {
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use std::thread;
-    use std::time::Instant;
 
     let envelope_bytes = serde_json::to_vec(envelope)
         .map_err(|_| BridgeError::new(BridgeErrorCode::EnvelopeEncodeFailed))?;
@@ -476,9 +485,9 @@ pub(super) fn run_process(
     if deadline_ms == 0 {
         return Err(BridgeError::new(BridgeErrorCode::InvalidEnvelope));
     }
-    let request_deadline_at = Instant::now()
-        .checked_add(Duration::from_millis(deadline_ms))
-        .ok_or_else(|| BridgeError::new(BridgeErrorCode::Timeout))?;
+    if Instant::now() >= request_deadline_at {
+        return Err(BridgeError::new(BridgeErrorCode::Timeout));
+    }
     let operation_deadline_at = operation_deadline_at(request_deadline_at)?;
     let cancel = Arc::new(AtomicBool::new(false));
     ensure_before(operation_deadline_at)?;
@@ -868,30 +877,27 @@ pub(super) fn run_process(
 
 #[cfg(target_os = "linux")]
 fn validate_credential(secret: &ZeroizingSecret) -> Result<(), BridgeError> {
-    secret.with_bytes(|bytes| {
-        let value = std::str::from_utf8(bytes)
-            .map_err(|_| BridgeError::new(BridgeErrorCode::CredentialInvalidUtf8))?;
-        if value.trim() != value
-            || bytes
-                .iter()
-                .any(|byte| !byte.is_ascii() || byte.is_ascii_control())
-        {
-            return Err(BridgeError::new(BridgeErrorCode::CredentialInvalidHeader));
-        }
-        Ok(())
-    })
+    validate_credential_secret(secret).map_err(map_credential_frame_error)
 }
 
 #[cfg(target_os = "linux")]
 fn credential_frame(secret: &ZeroizingSecret) -> Result<ZeroizingSecret, BridgeError> {
-    let mut frame = Vec::with_capacity(9 + secret.len());
-    frame.extend_from_slice(b"FCPK");
-    frame.push(1);
-    let length = u32::try_from(secret.len())
-        .map_err(|_| BridgeError::new(BridgeErrorCode::CredentialOversized))?;
-    frame.extend_from_slice(&length.to_be_bytes());
-    secret.with_bytes(|bytes| frame.extend_from_slice(bytes));
-    Ok(ZeroizingSecret::with_zeroize_drop(frame))
+    encode_credential_frame(secret).map_err(map_credential_frame_error)
+}
+
+#[cfg(target_os = "linux")]
+const fn map_credential_frame_error(error: CredentialFrameError) -> BridgeError {
+    let code = match error {
+        CredentialFrameError::InvalidFrame
+        | CredentialFrameError::Truncated
+        | CredentialFrameError::InvalidHeaderValue
+        | CredentialFrameError::TrailingData
+        | CredentialFrameError::Io => BridgeErrorCode::CredentialInvalidHeader,
+        CredentialFrameError::Oversized => BridgeErrorCode::CredentialOversized,
+        CredentialFrameError::Empty => BridgeErrorCode::CredentialEmpty,
+        CredentialFrameError::InvalidUtf8 => BridgeErrorCode::CredentialInvalidUtf8,
+    };
+    BridgeError::new(code)
 }
 
 #[cfg(target_os = "linux")]
@@ -987,7 +993,7 @@ fn write_nonblocking<W: std::io::Write>(
         match writer.write(&bytes[offset..]) {
             Ok(0) => return Err(BridgeError::new(BridgeErrorCode::StdinWriteFailed)),
             Ok(written) => offset += written,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 wait_for_worker_io(cancel, deadline)?;
             }
@@ -1016,7 +1022,7 @@ fn read_bounded_nonblocking<R: std::io::Read>(
                 }
                 output.extend_from_slice(&buffer[..bytes]);
             }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 wait_for_worker_io(cancel, deadline)?;
             }

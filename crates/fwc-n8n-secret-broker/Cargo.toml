@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "fwc-n8n-secret-broker"
+description = "Fixed-path one-shot n8n credential broker"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85.1"
+license = "MIT"
+repository = "https://github.com/flywheel/flywheel_connectors"
+authors = ["Flywheel Core Team <core@flywheel.dev>"]
+autobins = false
+
+[features]
+default = []
+live-backend = ["dep:age", "dep:age-kem-compat", "dep:keepass"]
+
+[lib]
+name = "fwc_n8n_secret_broker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fwc-n8n-secret-broker"
+path = "src/bin/fwc-n8n-secret-broker.rs"
+required-features = ["live-backend"]
+
+[dependencies]
+fcp-n8n-broker-protocol = { path = "../fcp-n8n-broker-protocol" }
+age = { version = "=0.12.1", default-features = false, optional = true }
+# age 0.12.1's ml-kem 0.2 integration targets the pre-release kem API.
+# Pin it explicitly so the workspace's stable kem 0.3 dependency cannot be
+# unified into that incompatible edge.
+age-kem-compat = { package = "kem", version = "=0.3.0-pre.0", optional = true }
+keepass = { version = "=0.13.20", default-features = false, optional = true }
+rustix = { version = "1.1", features = ["fs", "process", "net"] }

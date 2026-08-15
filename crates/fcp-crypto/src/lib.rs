@@ -110,6 +110,11 @@ pub mod vector_commit;
 pub mod x25519;
 pub mod xwing;
 
+// Keep the historical module path while sharing the implementation with
+// protocol crates that must not depend on the full crypto crate.
+pub use fcp_secret::ZeroizingSecret;
+pub use fcp_secret::credential_frame;
+
 // Re-export commonly used types at crate root
 pub use aead::{
     AeadKey, ChaCha20Nonce, ChaCha20Poly1305Cipher, XChaCha20Nonce, XChaCha20Poly1305Cipher,
@@ -121,6 +126,10 @@ pub use bls::{
 };
 pub use canonicalize::{Signable, canonical_signing_bytes, schema_hash};
 pub use cose::{CapabilityTokenBuilder, CoseToken, CwtClaims};
+pub use credential_frame::{
+    CredentialFrameError, encode as encode_credential_frame, parse as parse_credential_frame,
+    read as read_credential_frame, validate_secret as validate_credential_secret,
+};
 pub use ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, OwnerSigner};
 pub use error::{CryptoError, CryptoResult};
 pub use frost::{
@@ -157,8 +166,8 @@ pub use secret_fetch::{
     SecretFetchHook,
 };
 pub use shamir::{
-    SealedShamirShare, ShamirError, ShamirResult, ShamirShare, ZeroizingSecret, open_share,
-    reconstruct_secret, seal_share, split_and_seal, split_secret, split_secret_with_rng,
+    SealedShamirShare, ShamirError, ShamirResult, ShamirShare, open_share, reconstruct_secret,
+    seal_share, split_and_seal, split_secret, split_secret_with_rng,
 };
 pub use x25519::{X25519PublicKey, X25519SecretKey, X25519SharedSecret};
 pub use xwing::{

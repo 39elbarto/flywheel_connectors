@@ -12,7 +12,7 @@ use std::io::Read;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
-use fcp_crypto::ZeroizingSecret;
+use fcp_crypto::{CredentialFrameError, ZeroizingSecret, read_credential_frame};
 use fcp_prelude::{CredentialId, ZoneId};
 use fcp_provider_auth::{ApiKeyAuth, AuthMethod, AuthMethodKind, AuthProfile};
 use serde::{Deserialize, Serialize};
@@ -31,9 +31,6 @@ pub const RUN_ONCE_CREDENTIAL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_CREDENTIAL_FD";
 pub const RUN_ONCE_CREDENTIAL_TRANSPORT: &str = "inherited-fd-v1";
 /// Maximum raw API-key bytes accepted in one bootstrap frame.
 pub const RUN_ONCE_CREDENTIAL_MAX_SECRET_BYTES: usize = 4096;
-const RUN_ONCE_CREDENTIAL_MAGIC: [u8; 4] = *b"FCPK";
-const RUN_ONCE_CREDENTIAL_VERSION: u8 = 1;
-const RUN_ONCE_CREDENTIAL_HEADER_BYTES: usize = 4 + 1 + 4;
 const RUN_ONCE_N8N_PROVIDER: &str = "n8n";
 const RUN_ONCE_N8N_API_KEY_HEADER: &str = "X-N8N-API-KEY";
 
@@ -150,67 +147,34 @@ pub fn read_run_once_n8n_credential_frame<R: Read>(
     reader: &mut R,
     binding: RunOnceCredentialBinding,
 ) -> Result<RunOnceN8nCredential, RunOnceCredentialBootstrapError> {
-    let mut header = [0_u8; RUN_ONCE_CREDENTIAL_HEADER_BYTES];
-    reader
-        .read_exact(&mut header)
-        .map_err(|_| RunOnceCredentialBootstrapError::Truncated)?;
-    if header[..RUN_ONCE_CREDENTIAL_MAGIC.len()] != RUN_ONCE_CREDENTIAL_MAGIC
-        || header[RUN_ONCE_CREDENTIAL_MAGIC.len()] != RUN_ONCE_CREDENTIAL_VERSION
-    {
-        return Err(RunOnceCredentialBootstrapError::InvalidFrame);
-    }
-    let length_offset = RUN_ONCE_CREDENTIAL_MAGIC.len() + 1;
-    let length = u32::from_be_bytes(
-        header[length_offset..]
-            .try_into()
-            .map_err(|_| RunOnceCredentialBootstrapError::InvalidFrame)?,
-    ) as usize;
-    if length == 0 {
-        return Err(RunOnceCredentialBootstrapError::Empty);
-    }
-    if length > RUN_ONCE_CREDENTIAL_MAX_SECRET_BYTES {
-        return Err(RunOnceCredentialBootstrapError::Oversized);
-    }
-
-    let mut secret_bytes = vec![0_u8; length];
-    if reader.read_exact(&mut secret_bytes).is_err() {
-        drop(ZeroizingSecret::with_zeroize_drop(secret_bytes));
-        return Err(RunOnceCredentialBootstrapError::Truncated);
-    }
-    let secret = ZeroizingSecret::with_zeroize_drop(secret_bytes);
-    secret.with_bytes(|bytes| {
-        let value =
-            std::str::from_utf8(bytes).map_err(|_| RunOnceCredentialBootstrapError::InvalidUtf8)?;
-        if value.is_empty()
-            || value.trim() != value
-            || bytes
-                .iter()
-                .any(|byte| !byte.is_ascii() || byte.is_ascii_control())
-        {
-            return Err(RunOnceCredentialBootstrapError::InvalidHeaderValue);
-        }
-        Ok::<(), RunOnceCredentialBootstrapError>(())
-    })?;
-
-    let mut trailing = [0_u8; 1];
-    match reader.read(&mut trailing) {
-        Ok(0) => {}
-        Ok(_) => return Err(RunOnceCredentialBootstrapError::TrailingData),
-        Err(_) => return Err(RunOnceCredentialBootstrapError::Io),
-    }
-
+    let secret = read_credential_frame(reader).map_err(map_credential_frame_error)?;
     Ok(RunOnceN8nCredential {
         binding,
         api_key: secret,
     })
 }
 
+fn map_credential_frame_error(error: CredentialFrameError) -> RunOnceCredentialBootstrapError {
+    match error {
+        CredentialFrameError::InvalidFrame => RunOnceCredentialBootstrapError::InvalidFrame,
+        CredentialFrameError::Truncated => RunOnceCredentialBootstrapError::Truncated,
+        CredentialFrameError::Oversized => RunOnceCredentialBootstrapError::Oversized,
+        CredentialFrameError::Empty => RunOnceCredentialBootstrapError::Empty,
+        CredentialFrameError::InvalidUtf8 => RunOnceCredentialBootstrapError::InvalidUtf8,
+        CredentialFrameError::InvalidHeaderValue => {
+            RunOnceCredentialBootstrapError::InvalidHeaderValue
+        }
+        CredentialFrameError::TrailingData => RunOnceCredentialBootstrapError::TrailingData,
+        CredentialFrameError::Io => RunOnceCredentialBootstrapError::Io,
+    }
+}
+
 /// Encode a one-shot credential frame for deterministic tests and trusted launchers.
 #[cfg(test)]
 fn encode_run_once_n8n_credential_frame(secret: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(RUN_ONCE_CREDENTIAL_HEADER_BYTES + secret.len());
-    frame.extend_from_slice(&RUN_ONCE_CREDENTIAL_MAGIC);
-    frame.push(RUN_ONCE_CREDENTIAL_VERSION);
+    let mut frame = Vec::with_capacity(fcp_crypto::credential_frame::HEADER_BYTES + secret.len());
+    frame.extend_from_slice(b"FCPK");
+    frame.push(1);
     frame.extend_from_slice(&(secret.len() as u32).to_be_bytes());
     frame.extend_from_slice(secret);
     frame

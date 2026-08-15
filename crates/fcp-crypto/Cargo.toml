@@ -19,6 +19,7 @@ test-utils = []
 # Shared auth-claim schema (single source of truth for label layout)
 fcp-auth-schema = { path = "../fcp-auth-schema" }
 fcp-cbor = { path = "../fcp-cbor" }
+fcp-secret = { path = "../fcp-secret" }
 
 # Signatures
 ed25519-dalek.workspace = true

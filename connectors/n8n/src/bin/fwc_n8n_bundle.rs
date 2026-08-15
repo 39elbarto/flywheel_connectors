@@ -17,22 +17,16 @@ use serde::Deserialize;
 const RECEIPT_SCHEMA: &str = "fwc.n8n.bundle.v1";
 const RECEIPT_FILE: &str = "receipt.json";
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
-const EXPECTED_ARTIFACTS: [&str; 8] = [
+const EXPECTED_ARTIFACTS: [&str; 7] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
     "bin/fcp-n8n",
-    "bin/secret-get",
     "manifests/fcp-n8n.toml",
     "inventory/eec.json",
     "inventory/hetzner.json",
     "policy/zone-policies.json",
 ];
-const EXECUTABLE_ARTIFACTS: [&str; 4] = [
-    "bin/fwc-n8n",
-    "bin/fcp-host",
-    "bin/fcp-n8n",
-    "bin/secret-get",
-];
+const EXECUTABLE_ARTIFACTS: [&str; 3] = ["bin/fwc-n8n", "bin/fcp-host", "bin/fcp-n8n"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BundleErrorCode {
@@ -152,7 +146,7 @@ impl fmt::Debug for BundleArtifact {
 /// digest was checked against the immutable receipt before this value was
 /// constructed.  This type intentionally exposes no release-root or caller
 /// supplied path and never reveals its contents through `Debug`.
-pub(super) struct VerifiedBundle {
+pub struct VerifiedBundle {
     fcp_host_path: PathBuf,
     fcp_host_digest: String,
     inventory_eec_path: PathBuf,
@@ -174,24 +168,24 @@ impl fmt::Debug for VerifiedBundle {
 }
 
 impl VerifiedBundle {
-    pub(super) fn fcp_host(&self) -> (&Path, &str) {
+    pub fn fcp_host(&self) -> (&Path, &str) {
         (&self.fcp_host_path, &self.fcp_host_digest)
     }
 
-    pub(super) fn inventory_eec(&self) -> (&Path, &str) {
+    pub fn inventory_eec(&self) -> (&Path, &str) {
         (&self.inventory_eec_path, &self.inventory_eec_digest)
     }
 
-    pub(super) fn inventory_hetzner(&self) -> (&Path, &str) {
+    pub fn inventory_hetzner(&self) -> (&Path, &str) {
         (&self.inventory_hetzner_path, &self.inventory_hetzner_digest)
     }
 
-    pub(super) fn zone_policy(&self) -> (&Path, &str) {
+    pub fn zone_policy(&self) -> (&Path, &str) {
         (&self.zone_policy_path, &self.zone_policy_digest)
     }
 
     #[cfg(test)]
-    pub(super) fn test_fixture() -> Self {
+    pub fn test_fixture() -> Self {
         Self {
             fcp_host_path: PathBuf::from("/release/bin/fcp-host"),
             fcp_host_digest: "a".repeat(64),
@@ -211,7 +205,7 @@ pub fn verify_current_release_bundle() -> Result<(), BundleError> {
 }
 
 /// Verify and return the fixed facts needed by the internal host runner.
-pub(super) fn verify_current_release_bundle_for_bridge() -> Result<VerifiedBundle, BundleError> {
+pub fn verify_current_release_bundle_for_bridge() -> Result<VerifiedBundle, BundleError> {
     #[cfg(not(unix))]
     {
         Err(BundleError::new(BundleErrorCode::UnsupportedPlatform))

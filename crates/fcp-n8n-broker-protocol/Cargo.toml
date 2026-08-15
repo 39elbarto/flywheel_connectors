@@ -1,0 +1,20 @@
+[package]
+name = "fcp-n8n-broker-protocol"
+description = "Non-live n8n secret broker protocol and fixed Unix transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_n8n_broker_protocol"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-secret = { path = "../fcp-secret" }
+rustix = { version = "1.1", features = ["event", "net"] }

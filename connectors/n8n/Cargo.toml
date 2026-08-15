@@ -31,6 +31,8 @@ fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-sdk = { path = "../../crates/fcp-sdk", features = ["connector-http"] }
 fcp-sandbox = { path = "../../crates/fcp-sandbox" }
+fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-n8n-broker-protocol = { path = "../../crates/fcp-n8n-broker-protocol" }
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -51,5 +53,4 @@ uuid.workspace = true
 [dev-dependencies]
 ciborium.workspace = true
 chrono.workspace = true
-fcp-crypto = { path = "../../crates/fcp-crypto" }
 wiremock.workspace = true

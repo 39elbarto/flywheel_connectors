@@ -686,6 +686,7 @@ mod tests {
                 != Some(expected_envelope_bytes as u64)
             || value.get("credentialBytes").and_then(Value::as_u64)
                 != Some(expected_credential_bytes as u64)
+            || value.get("nestedSetSidDescendant").and_then(Value::as_bool) != Some(true)
         {
             return Err(AppError::new("bridge_output_mismatch"));
         }
@@ -731,6 +732,22 @@ mod tests {
                 return Err(());
             }
             input.extend_from_slice(&buffer[..bytes]);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_nested_setsid_descendant() -> Result<(), ()> {
+        let mut descendant = std::process::Command::new("/usr/bin/setsid")
+            .args(["/usr/bin/sleep", "60"])
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|_| ())?;
+        match descendant.try_wait().map_err(|_| ())? {
+            None => Ok(()),
+            Some(_) => Err(()),
         }
     }
 
@@ -847,6 +864,7 @@ mod tests {
             if credential.read(&mut trailing).map_err(|_| ())? != 0 {
                 return Err(());
             }
+            spawn_nested_setsid_descendant()?;
             println!(
                 "{FAKE_CHILD_OUTPUT_MARKER}{}",
                 json!({
@@ -854,6 +872,7 @@ mod tests {
                     "status": "ok",
                     "envelopeBytes": envelope.len(),
                     "credentialBytes": length,
+                    "nestedSetSidDescendant": true,
                 })
             );
             Ok(())

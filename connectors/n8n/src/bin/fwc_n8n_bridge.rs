@@ -983,7 +983,22 @@ fn child_external_provenance_diagnostic(stderr: &[u8]) -> Option<&'static str> {
         match label {
             b"external.provider_5xx" => Some("external.provider_5xx"),
             b"external.host_proxy_rejected" => Some("external.host_proxy_rejected"),
-            b"external.connector_egress_channel" => Some("external.connector_egress_channel"),
+            b"external.connector_egress_transport" => Some("external.connector_egress_transport"),
+            b"external.connector_egress_inherited_channel" => {
+                Some("external.connector_egress_inherited_channel")
+            }
+            b"external.connector_egress_request_too_large" => {
+                Some("external.connector_egress_request_too_large")
+            }
+            b"external.connector_egress_request_malformed" => {
+                Some("external.connector_egress_request_malformed")
+            }
+            b"external.connector_egress_response_too_large" => {
+                Some("external.connector_egress_response_too_large")
+            }
+            b"external.connector_egress_response_malformed" => {
+                Some("external.connector_egress_response_malformed")
+            }
             _ => None,
         }
     })
@@ -1618,7 +1633,12 @@ mod tests {
         for label in [
             "external.provider_5xx",
             "external.host_proxy_rejected",
-            "external.connector_egress_channel",
+            "external.connector_egress_transport",
+            "external.connector_egress_inherited_channel",
+            "external.connector_egress_request_too_large",
+            "external.connector_egress_request_malformed",
+            "external.connector_egress_response_too_large",
+            "external.connector_egress_response_malformed",
         ] {
             let stderr =
                 format!("untrusted noise\nFCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 {label}\n");

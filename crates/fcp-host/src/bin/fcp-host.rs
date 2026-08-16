@@ -9979,7 +9979,12 @@ fn child_external_status_code(error: &Value) -> Option<u16> {
 enum N8nRunOnceExternalProvenanceDiagnostic {
     Provider5xx,
     HostProxyRejected,
-    ConnectorEgressChannel,
+    ConnectorEgressTransport,
+    ConnectorEgressInheritedChannel,
+    ConnectorEgressRequestTooLarge,
+    ConnectorEgressRequestMalformed,
+    ConnectorEgressResponseTooLarge,
+    ConnectorEgressResponseMalformed,
 }
 
 #[cfg(target_os = "linux")]
@@ -9988,7 +9993,14 @@ impl N8nRunOnceExternalProvenanceDiagnostic {
         match self {
             Self::Provider5xx => "external.provider_5xx",
             Self::HostProxyRejected => "external.host_proxy_rejected",
-            Self::ConnectorEgressChannel => "external.connector_egress_channel",
+            Self::ConnectorEgressTransport => "external.connector_egress_transport",
+            Self::ConnectorEgressInheritedChannel => "external.connector_egress_inherited_channel",
+            Self::ConnectorEgressRequestTooLarge => "external.connector_egress_request_too_large",
+            Self::ConnectorEgressRequestMalformed => "external.connector_egress_request_malformed",
+            Self::ConnectorEgressResponseTooLarge => "external.connector_egress_response_too_large",
+            Self::ConnectorEgressResponseMalformed => {
+                "external.connector_egress_response_malformed"
+            }
         }
     }
 }
@@ -10013,13 +10025,23 @@ fn child_external_provenance_diagnostic(
         "External service error: n8n - host egress proxy rejected mediated request" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::HostProxyRejected)
         }
-        "External service error: n8n - host egress proxy transport failed"
-        | "External service error: n8n - host egress proxy inherited channel failed"
-        | "External service error: n8n - host egress proxy request exceeded the configured limit"
-        | "External service error: n8n - host egress proxy request envelope was malformed"
-        | "External service error: n8n - host egress proxy response exceeded the configured limit"
-        | "External service error: n8n - host egress proxy returned a malformed response envelope" => {
-            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressChannel)
+        "External service error: n8n - host egress proxy transport failed" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressTransport)
+        }
+        "External service error: n8n - host egress proxy inherited channel failed" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedChannel)
+        }
+        "External service error: n8n - host egress proxy request exceeded the configured limit" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressRequestTooLarge)
+        }
+        "External service error: n8n - host egress proxy request envelope was malformed" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressRequestMalformed)
+        }
+        "External service error: n8n - host egress proxy response exceeded the configured limit" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressResponseTooLarge)
+        }
+        "External service error: n8n - host egress proxy returned a malformed response envelope" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressResponseMalformed)
         }
         _ => None,
     }
@@ -18696,14 +18718,42 @@ mod tests {
                     "message": "External service error: n8n - host egress proxy inherited channel failed",
                     "details": {"service": "n8n", "status_code": 502}
                 }),
-                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressChannel),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedChannel),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy transport failed",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressTransport),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy request exceeded the configured limit",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressRequestTooLarge),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy request envelope was malformed",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressRequestMalformed),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy response exceeded the configured limit",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressResponseTooLarge),
             ),
             (
                 json!({
                     "message": "External service error: n8n - host egress proxy returned a malformed response envelope",
                     "details": {"service": "n8n", "status_code": 502}
                 }),
-                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressChannel),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressResponseMalformed),
             ),
         ];
         for (error, expected) in cases {

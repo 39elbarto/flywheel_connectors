@@ -4137,6 +4137,7 @@ async fn owned_egress_loop(
                 }
             }
             Err(error) => {
+                emit_n8n_run_once_host_error_diagnostic(&error);
                 let (status, code) = owned_egress_error_response(&error);
                 let response = codec
                     .error_response(status, code)
@@ -4482,6 +4483,38 @@ mod owned_per_invocation_unit_tests {
             Some((403, HostEgressWireError::Rejected))
         );
         assert_eq!(owned_egress_gate_denial(true), None);
+    }
+
+    #[test]
+    fn owned_egress_errors_keep_private_content_out_of_fixed_diagnostics() {
+        let cases = [
+            (
+                HostError::PreflightFailed("PRIVATE-CONTENT-CANARY".to_string()),
+                403,
+                HostEgressWireError::Rejected,
+                "local.policy_denied",
+            ),
+            (
+                HostError::Unavailable("PRIVATE-CONTENT-CANARY".to_string()),
+                500,
+                HostEgressWireError::Internal,
+                "transport.host_connector",
+            ),
+            (
+                HostError::Internal("PRIVATE-CONTENT-CANARY".to_string()),
+                500,
+                HostEgressWireError::Internal,
+                "internal.runtime",
+            ),
+        ];
+        for (error, expected_status, expected_wire_error, expected_class) in cases {
+            let (status, wire_error) = owned_egress_error_response(&error);
+            assert_eq!(status, expected_status);
+            assert_eq!(wire_error, expected_wire_error);
+            let class = normalized_host_error_class(&error);
+            assert_eq!(class, expected_class);
+            assert!(!class.contains("PRIVATE-CONTENT-CANARY"));
+        }
     }
 
     #[test]

@@ -110,7 +110,9 @@ use fcp_host::{
 };
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 #[cfg(target_os = "linux")]
-use fcp_host::{InheritedEgressCodec, OwnedInvocationConfig, OwnedInvocationHandle};
+use fcp_host::{
+    InheritedEgressCodec, OwnedInvocationConfig, OwnedInvocationError, OwnedInvocationHandle,
+};
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse,
@@ -3829,23 +3831,44 @@ fn owned_process_spec(
 }
 
 #[cfg(target_os = "linux")]
-fn owned_invocation_error(_error: fcp_host::OwnedInvocationError) -> HostError {
+fn owned_invocation_error(error: OwnedInvocationError) -> HostError {
+    let diagnostic = match error {
+        OwnedInvocationError::UnsupportedPlatform
+        | OwnedInvocationError::InvalidConfig
+        | OwnedInvocationError::MissingPipe => N8nRunOnceOwnedDiagnostic::Setup,
+        OwnedInvocationError::Launch(_) => N8nRunOnceOwnedDiagnostic::Launch,
+        OwnedInvocationError::Termination(_) | OwnedInvocationError::TerminationIncomplete => {
+            N8nRunOnceOwnedDiagnostic::Teardown
+        }
+        OwnedInvocationError::FrameTooLarge
+        | OwnedInvocationError::MalformedFrame
+        | OwnedInvocationError::WrongResponseId => N8nRunOnceOwnedDiagnostic::RpcProtocol,
+        OwnedInvocationError::Closed
+        | OwnedInvocationError::WorkerStopped
+        | OwnedInvocationError::Cancelled
+        | OwnedInvocationError::Io
+        | OwnedInvocationError::Timeout => N8nRunOnceOwnedDiagnostic::RpcTransport,
+    };
+    emit_n8n_run_once_owned_diagnostic(diagnostic);
     HostError::RegistryError("owned per-invocation RPC or lifecycle failure".to_string())
 }
 
 #[cfg(target_os = "linux")]
 fn owned_codec_error(_error: fcp_host::InheritedEgressCodecError) -> HostError {
+    emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::EgressCodec);
     HostError::Internal("owned host-egress wire protocol failure".to_string())
 }
 
 #[cfg(target_os = "linux")]
 fn owned_rpc_result(response: Value) -> HostResult<Value> {
     if response.get("error").is_some() {
+        emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::RpcChildError);
         return Err(HostError::RegistryError(
             "owned per-invocation RPC returned an error".to_string(),
         ));
     }
     response.get("result").cloned().ok_or_else(|| {
+        emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::ResponseProtocol);
         HostError::RegistryError("owned per-invocation RPC response has no result".to_string())
     })
 }
@@ -4068,6 +4091,7 @@ async fn owned_run_protocol(
     let introspection_value = owned_rpc(handle, "introspect", json!({})).await?;
     let introspection: Introspection =
         serde_json::from_value(introspection_value).map_err(|_| {
+            emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::ResponseProtocol);
             HostError::RegistryError("connector introspection response was malformed".to_string())
         })?;
     let observed_operation = introspection
@@ -4113,6 +4137,7 @@ async fn owned_run_protocol(
         let handshake_value = owned_rpc(handle, "handshake", handshake_value).await?;
         let response: HandshakeResponse =
             serde_json::from_value(handshake_value).map_err(|_| {
+                emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::ResponseProtocol);
                 HostError::RegistryError("connector handshake response was malformed".to_string())
             })?;
         if response.status != "accepted" || response.nonce != nonce {
@@ -4126,9 +4151,11 @@ async fn owned_run_protocol(
         .map_err(|_| HostError::Internal("failed to encode owned invoke request".to_string()))?;
     let invoke_value = owned_rpc(handle, "invoke", invoke_params).await?;
     let response: InvokeResponse = serde_json::from_value(invoke_value).map_err(|_| {
+        emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::ResponseProtocol);
         HostError::RegistryError("connector invoke response was malformed".to_string())
     })?;
     if response.id != request.id {
+        emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::ResponseProtocol);
         return Err(HostError::RegistryError(
             "owned connector invoke response id did not match request".to_string(),
         ));
@@ -4175,14 +4202,18 @@ async fn owned_finalize(
     let shutdown_result = host_shutdown.shutdown(Shutdown::Both);
     let egress_result = match egress_task.await {
         Ok(result) => result,
-        Err(_) => Err(HostError::Internal(
-            "owned host-egress loop stopped unexpectedly".to_string(),
-        )),
+        Err(_) => {
+            emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::Teardown);
+            Err(HostError::Internal(
+                "owned host-egress loop stopped unexpectedly".to_string(),
+            ))
+        }
     };
     let termination_result = handle.terminate().await.map_err(owned_invocation_error);
     if let Ok(report) = termination_result.as_ref()
         && (!report.group_absent || !report.reaped)
     {
+        emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::Teardown);
         return Err(HostError::Internal(
             "owned connector teardown did not prove group absence and reap".to_string(),
         ));
@@ -4192,6 +4223,7 @@ async fn owned_finalize(
     }
     if operation_result.is_ok() {
         if shutdown_result.is_err() {
+            emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::Teardown);
             return Err(HostError::Internal(
                 "owned host-egress endpoint shutdown failed".to_string(),
             ));
@@ -4212,12 +4244,16 @@ async fn invoke_owned_per_invocation(
     let binding = OwnedPerInvocationBinding::from_plan(&plan, &request)?;
     let auth_token = owned_launch_auth_token();
     let spec = owned_process_spec(&plan, &auth_token)?;
-    let (host_endpoint, child_endpoint) = StdUnixStream::pair()
-        .map_err(|_| HostError::Internal("owned host-egress socketpair failed".to_string()))?;
-    let host_shutdown = host_endpoint
-        .try_clone()
-        .map_err(|_| HostError::Internal("owned host-egress shutdown clone failed".to_string()))?;
+    let (host_endpoint, child_endpoint) = StdUnixStream::pair().map_err(|_| {
+        emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::Setup);
+        HostError::Internal("owned host-egress socketpair failed".to_string())
+    })?;
+    let host_shutdown = host_endpoint.try_clone().map_err(|_| {
+        emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::Setup);
+        HostError::Internal("owned host-egress shutdown clone failed".to_string())
+    })?;
     let host_endpoint = fcp_async_core::net::UnixStream::from_std(host_endpoint).map_err(|_| {
+        emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::Setup);
         HostError::Internal("owned host-egress async stream setup failed".to_string())
     })?;
     let codec = InheritedEgressCodec::new(host_endpoint, &auth_token).map_err(owned_codec_error)?;
@@ -9707,6 +9743,37 @@ fn n8n_run_once_stage_error(stage: N8nRunOnceFailureStage) -> HostError {
 const N8N_RUN_ONCE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-INVOKE-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const N8N_RUN_ONCE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const N8N_RUN_ONCE_OWNED_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-OWNED-DIAGNOSTIC/v1 ";
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum N8nRunOnceOwnedDiagnostic {
+    Setup,
+    Launch,
+    RpcTransport,
+    RpcProtocol,
+    RpcChildError,
+    ResponseProtocol,
+    EgressCodec,
+    Teardown,
+}
+
+#[cfg(target_os = "linux")]
+impl N8nRunOnceOwnedDiagnostic {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Setup => "owned.setup",
+            Self::Launch => "owned.launch",
+            Self::RpcTransport => "owned.rpc_transport",
+            Self::RpcProtocol => "owned.rpc_protocol",
+            Self::RpcChildError => "owned.rpc_child_error",
+            Self::ResponseProtocol => "owned.response_protocol",
+            Self::EgressCodec => "owned.egress_codec",
+            Self::Teardown => "owned.teardown",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum N8nRunOnceInvokeDiagnostic {
@@ -9777,6 +9844,16 @@ fn emit_n8n_run_once_host_error_diagnostic(error: &HostError) {
 
 #[cfg(not(target_os = "linux"))]
 fn emit_n8n_run_once_host_error_diagnostic(_error: &HostError) {}
+
+#[cfg(target_os = "linux")]
+fn emit_n8n_run_once_owned_diagnostic(diagnostic: N8nRunOnceOwnedDiagnostic) {
+    if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
+        eprintln!(
+            "{N8N_RUN_ONCE_OWNED_DIAGNOSTIC_PREFIX}{}",
+            diagnostic.label()
+        );
+    }
+}
 
 fn n8n_run_once_dispatch_diagnostic(status: StatusCode) -> N8nRunOnceInvokeDiagnostic {
     if status.is_client_error() {
@@ -16428,9 +16505,9 @@ const fn normalized_host_error_class(error: &HostError) -> &'static str {
         HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => "local.policy_denied",
         HostError::Unavailable(_) => "transport.host_connector",
         HostError::ConnectorFrameLimit { .. } => "transport.frame_limit",
-        HostError::RegistryError(_) | HostError::CacheError(_) | HostError::Internal(_) => {
-            "internal"
-        }
+        HostError::RegistryError(_) => "internal.registry",
+        HostError::CacheError(_) => "internal.cache",
+        HostError::Internal(_) => "internal.runtime",
     }
 }
 
@@ -17977,8 +18054,48 @@ mod tests {
         );
         assert_eq!(
             normalized_host_error_class(&HostError::Internal("PRIVATE-CONTENT-CANARY".to_string())),
-            "internal"
+            "internal.runtime"
         );
+        assert_eq!(
+            normalized_host_error_class(&HostError::RegistryError(
+                "PRIVATE-CONTENT-CANARY".to_string()
+            )),
+            "internal.registry"
+        );
+        assert_eq!(
+            normalized_host_error_class(&HostError::CacheError(
+                "PRIVATE-CONTENT-CANARY".to_string()
+            )),
+            "internal.cache"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn n8n_owned_diagnostic_labels_are_fixed_and_content_free() {
+        let labels = [
+            (N8nRunOnceOwnedDiagnostic::Setup, "owned.setup"),
+            (N8nRunOnceOwnedDiagnostic::Launch, "owned.launch"),
+            (
+                N8nRunOnceOwnedDiagnostic::RpcTransport,
+                "owned.rpc_transport",
+            ),
+            (N8nRunOnceOwnedDiagnostic::RpcProtocol, "owned.rpc_protocol"),
+            (
+                N8nRunOnceOwnedDiagnostic::RpcChildError,
+                "owned.rpc_child_error",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::ResponseProtocol,
+                "owned.response_protocol",
+            ),
+            (N8nRunOnceOwnedDiagnostic::EgressCodec, "owned.egress_codec"),
+            (N8nRunOnceOwnedDiagnostic::Teardown, "owned.teardown"),
+        ];
+        for (diagnostic, expected) in labels {
+            assert_eq!(diagnostic.label(), expected);
+            assert!(!diagnostic.label().contains("PRIVATE-CONTENT-CANARY"));
+        }
     }
 
     #[test]

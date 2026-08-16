@@ -31,6 +31,10 @@ const CHILD_HOST_ERROR_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-HOST-ERROR-DIAGNOSTI
 #[cfg(target_os = "linux")]
 const BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
+const CHILD_OWNED_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-OWNED-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const BRIDGE_OWNED_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-OWNED-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
 const SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_READY_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/READY";
@@ -949,6 +953,9 @@ fn emit_child_invoke_diagnostic(stderr: &[u8]) {
     if let Some(label) = child_host_error_diagnostic(stderr) {
         eprintln!("{BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX}{label}");
     }
+    if let Some(label) = child_owned_diagnostic(stderr) {
+        eprintln!("{BRIDGE_OWNED_DIAGNOSTIC_PREFIX}{label}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -961,7 +968,27 @@ fn child_host_error_diagnostic(stderr: &[u8]) -> Option<&'static str> {
             b"local.policy_denied" => Some("local.policy_denied"),
             b"transport.host_connector" => Some("transport.host_connector"),
             b"transport.frame_limit" => Some("transport.frame_limit"),
-            b"internal" => Some("internal"),
+            b"internal.registry" => Some("internal.registry"),
+            b"internal.cache" => Some("internal.cache"),
+            b"internal.runtime" => Some("internal.runtime"),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn child_owned_diagnostic(stderr: &[u8]) -> Option<&'static str> {
+    stderr.split(|byte| *byte == b'\n').find_map(|line| {
+        let label = line.strip_prefix(CHILD_OWNED_DIAGNOSTIC_PREFIX)?;
+        match label {
+            b"owned.setup" => Some("owned.setup"),
+            b"owned.launch" => Some("owned.launch"),
+            b"owned.rpc_transport" => Some("owned.rpc_transport"),
+            b"owned.rpc_protocol" => Some("owned.rpc_protocol"),
+            b"owned.rpc_child_error" => Some("owned.rpc_child_error"),
+            b"owned.response_protocol" => Some("owned.response_protocol"),
+            b"owned.egress_codec" => Some("owned.egress_codec"),
+            b"owned.teardown" => Some("owned.teardown"),
             _ => None,
         }
     })
@@ -1509,7 +1536,9 @@ mod tests {
             "local.policy_denied",
             "transport.host_connector",
             "transport.frame_limit",
-            "internal",
+            "internal.registry",
+            "internal.cache",
+            "internal.runtime",
         ] {
             let stderr = format!("FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 {label}\n");
             assert_eq!(child_host_error_diagnostic(stderr.as_bytes()), Some(label));
@@ -1522,6 +1551,33 @@ mod tests {
             b"FCP-N8N-HOST-ERROR-DIAGNOSTIC/v2 internal",
         ] {
             assert_eq!(child_host_error_diagnostic(stderr), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_owned_diagnostic_accepts_only_fixed_stages() {
+        for label in [
+            "owned.setup",
+            "owned.launch",
+            "owned.rpc_transport",
+            "owned.rpc_protocol",
+            "owned.rpc_child_error",
+            "owned.response_protocol",
+            "owned.egress_codec",
+            "owned.teardown",
+        ] {
+            let stderr = format!("FCP-N8N-OWNED-DIAGNOSTIC/v1 {label}\n");
+            assert_eq!(child_owned_diagnostic(stderr.as_bytes()), Some(label));
+        }
+
+        for stderr in [
+            b"FCP-N8N-OWNED-DIAGNOSTIC/v1 PRIVATE".as_slice(),
+            b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error PRIVATE",
+            b"prefix FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error",
+            b"FCP-N8N-OWNED-DIAGNOSTIC/v2 owned.rpc_child_error",
+        ] {
+            assert_eq!(child_owned_diagnostic(stderr), None);
         }
     }
 

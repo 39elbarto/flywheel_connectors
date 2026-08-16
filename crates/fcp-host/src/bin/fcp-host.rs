@@ -9640,6 +9640,76 @@ fn run_once_invoke_error(status: StatusCode) -> HostError {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum N8nRunOnceFailureStage {
+    Input,
+    Config,
+    Plan,
+    Credential,
+    Policy,
+    RuntimeState,
+    Manifest,
+    Capability,
+    Invoke,
+}
+
+impl N8nRunOnceFailureStage {
+    const fn marker(self) -> &'static str {
+        match self {
+            Self::Input => "n8n-run-once-stage:input",
+            Self::Config => "n8n-run-once-stage:config",
+            Self::Plan => "n8n-run-once-stage:plan",
+            Self::Credential => "n8n-run-once-stage:credential",
+            Self::Policy => "n8n-run-once-stage:policy",
+            Self::RuntimeState => "n8n-run-once-stage:runtime-state",
+            Self::Manifest => "n8n-run-once-stage:manifest",
+            Self::Capability => "n8n-run-once-stage:capability",
+            Self::Invoke => "n8n-run-once-stage:invoke",
+        }
+    }
+
+    const fn wire_code(self) -> &'static str {
+        match self {
+            Self::Input => "n8n_input_failed",
+            Self::Config => "n8n_config_failed",
+            Self::Plan => "n8n_plan_failed",
+            Self::Credential => "n8n_credential_failed",
+            Self::Policy => "n8n_policy_failed",
+            Self::RuntimeState => "n8n_runtime_state_failed",
+            Self::Manifest => "n8n_manifest_failed",
+            Self::Capability => "n8n_capability_failed",
+            Self::Invoke => "n8n_invoke_failed",
+        }
+    }
+
+    fn from_marker(marker: &str) -> Option<Self> {
+        [
+            Self::Input,
+            Self::Config,
+            Self::Plan,
+            Self::Credential,
+            Self::Policy,
+            Self::RuntimeState,
+            Self::Manifest,
+            Self::Capability,
+            Self::Invoke,
+        ]
+        .into_iter()
+        .find(|stage| stage.marker() == marker)
+    }
+}
+
+fn n8n_run_once_stage_error(stage: N8nRunOnceFailureStage) -> HostError {
+    HostError::Internal(stage.marker().to_string())
+}
+
+fn accept_n8n_run_once_invoke_response(response: InvokeResponse) -> HostResult<InvokeResponse> {
+    if !matches!(response.status, InvokeStatus::Ok) || response.error.is_some() {
+        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke));
+    }
+    Ok(response)
+}
+
 fn run_once_error_code(error: &HostError) -> &'static str {
     match error {
         HostError::ConnectorNotFound(_) => "connector_not_found",
@@ -9647,9 +9717,10 @@ fn run_once_error_code(error: &HostError) -> &'static str {
         HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => "preflight_denied",
         HostError::Unavailable(_) => "connector_unavailable",
         HostError::ConnectorFrameLimit { .. } => "connector_frame_limit",
-        HostError::RegistryError(_) | HostError::CacheError(_) | HostError::Internal(_) => {
-            "internal"
-        }
+        HostError::Internal(marker) => N8nRunOnceFailureStage::from_marker(marker)
+            .map(N8nRunOnceFailureStage::wire_code)
+            .unwrap_or("internal"),
+        HostError::RegistryError(_) | HostError::CacheError(_) => "internal",
     }
 }
 
@@ -10165,33 +10236,43 @@ fn run_n8n_supervisor_gate_before_telemetry() -> HostResult<()> {
 async fn async_n8n_read_only_run_once(
     telemetry_config: TelemetryConfig,
 ) -> HostResult<InvokeResponse> {
-    let high_level_input = read_n8n_read_only_run_once_input_from_stdin()?;
+    let high_level_input = read_n8n_read_only_run_once_input_from_stdin()
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Input))?;
     let connector_id = ConnectorId::from_static("fcp.n8n");
-    let mut loaded_configs =
-        select_run_once_connector_config(load_connector_configs()?, &connector_id)?;
-    let selected_config = loaded_configs.configs.first().cloned().ok_or_else(|| {
-        HostError::ConnectorNotFound(
-            "n8n read-only run-once connector is not configured".to_string(),
-        )
-    })?;
-    let plan = build_n8n_read_only_run_once_plan(high_level_input, &selected_config)?;
+    let configs = load_connector_configs()
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
+    let mut loaded_configs = select_run_once_connector_config(configs, &connector_id)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
+    let selected_config = loaded_configs
+        .configs
+        .first()
+        .cloned()
+        .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
+    let plan = build_n8n_read_only_run_once_plan(high_level_input, &selected_config)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
     let credential =
-        read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())?
+        read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?
             .ok_or_else(|| {
                 HostError::PreflightFailed(
                     "n8n read-only run-once credential bootstrap is required".to_string(),
                 )
-            })?;
+            })
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?;
     let invocation_instance_id = InstanceId::new();
-    bind_n8n_run_once_connector_instance(&mut loaded_configs, &invocation_instance_id)?;
+    bind_n8n_run_once_connector_instance(&mut loaded_configs, &invocation_instance_id)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
 
-    let truth_precedence_boot = current_truth_precedence_boot_resolution().map_err(|error| {
-        emit_truth_precedence_boot_error(&error);
-        HostError::InvalidFilter("truth precedence configuration is invalid".to_string())
-    })?;
+    let truth_precedence_boot = current_truth_precedence_boot_resolution()
+        .map_err(|error| {
+            emit_truth_precedence_boot_error(&error);
+            HostError::InvalidFilter("truth precedence configuration is invalid".to_string())
+        })
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Policy))?;
     emit_boot_log(&truth_precedence_boot.classification);
     emit_operational_model_selection_log(&truth_precedence_boot.selection);
-    let zone_policies = load_zone_policies()?;
+    let zone_policies = load_zone_policies()
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Policy))?;
 
     let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
     let state = build_app_state(
@@ -10201,7 +10282,8 @@ async fn async_n8n_read_only_run_once(
         None,
         zone_policies,
     )
-    .await?;
+    .await
+    .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::RuntimeState))?;
     let introspection = state
         .registry
         .get_introspection(&connector_id)
@@ -10210,7 +10292,8 @@ async fn async_n8n_read_only_run_once(
             HostError::PreflightFailed(
                 "n8n read-only run-once trusted manifest introspection is unavailable".to_string(),
             )
-        })?;
+        })
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Manifest))?;
     let trusted_operation = introspection
         .operations
         .iter()
@@ -10219,25 +10302,37 @@ async fn async_n8n_read_only_run_once(
             HostError::PreflightFailed(
                 "n8n read-only run-once operation is absent from the trusted manifest".to_string(),
             )
-        })?;
-    seed_run_once_credential(&state, credential, &plan.zone_id, &plan.operation).await?;
-    let issuance = build_n8n_read_only_capability_issuance(&plan, trusted_operation)?.into_inner();
+        })
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Manifest))?;
+    seed_run_once_credential(&state, credential, &plan.zone_id, &plan.operation)
+        .await
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?;
+    let issuance = build_n8n_read_only_capability_issuance(&plan, trusted_operation)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?
+        .into_inner();
     let issued = state
         .lifecycle
         .issue_capability_token_for_instance(&issuance, &signing_key, &invocation_instance_id)
         .await
-        .map_err(map_lifecycle_host_error)?;
-    let token_b64 = issued.token_cbor_b64.ok_or_else(|| {
-        HostError::Internal("n8n read-only run-once capability issuance failed".to_string())
-    })?;
+        .map_err(map_lifecycle_host_error)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
+    let token_b64 = issued
+        .token_cbor_b64
+        .ok_or_else(|| {
+            HostError::Internal("n8n read-only run-once capability issuance failed".to_string())
+        })
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
     let capability_token =
-        capability_token_from_cbor_b64(&token_b64, "n8n read-only run-once capability")?;
+        capability_token_from_cbor_b64(&token_b64, "n8n read-only run-once capability")
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
     let (request, trusted_resource) = build_n8n_read_only_invoke_request(plan, capability_token);
 
     invoke_handler_inner(state, HeaderMap::new(), request, Some(trusted_resource))
         .await
         .map(|Json(response)| response)
         .map_err(|(status, _)| run_once_invoke_error(status))
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))
+        .and_then(accept_n8n_run_once_invoke_response)
 }
 
 fn main() -> HostResult<()> {
@@ -28926,6 +29021,69 @@ done"#;
         assert!(failed);
         assert!(encoded.contains("\"code\":\"internal\""));
         assert!(!encoded.contains("PRIVATE-RUN-ONCE-CANARY"));
+    }
+
+    #[test]
+    fn run_once_response_encoder_exposes_only_allowlisted_n8n_failure_stage() {
+        let cases = [
+            (N8nRunOnceFailureStage::Input, "n8n_input_failed"),
+            (N8nRunOnceFailureStage::Config, "n8n_config_failed"),
+            (N8nRunOnceFailureStage::Plan, "n8n_plan_failed"),
+            (N8nRunOnceFailureStage::Credential, "n8n_credential_failed"),
+            (N8nRunOnceFailureStage::Policy, "n8n_policy_failed"),
+            (
+                N8nRunOnceFailureStage::RuntimeState,
+                "n8n_runtime_state_failed",
+            ),
+            (N8nRunOnceFailureStage::Manifest, "n8n_manifest_failed"),
+            (N8nRunOnceFailureStage::Capability, "n8n_capability_failed"),
+            (N8nRunOnceFailureStage::Invoke, "n8n_invoke_failed"),
+        ];
+        for (stage, code) in cases {
+            let failure: HostResult<InvokeResponse> = Err(n8n_run_once_stage_error(stage));
+            let (encoded, failed) = encode_run_once_response(&failure);
+            assert!(failed);
+            assert_eq!(
+                serde_json::from_str::<Value>(&encoded).expect("stage failure JSON"),
+                json!({"type":"error","error":{"code":code}})
+            );
+            assert!(!encoded.contains("n8n-run-once-stage"));
+        }
+    }
+
+    #[test]
+    fn n8n_run_once_redacts_connector_error_responses_on_the_success_exit_path() {
+        let private_message = "PRIVATE-N8N-PROVIDER-ERROR-CANARY";
+        let provider_failure = InvokeResponse::error(
+            RequestId::random(),
+            fcp_core::FcpError::External {
+                service: "PRIVATE-N8N-PROVIDER".to_string(),
+                message: private_message.to_string(),
+                status_code: Some(500),
+                retryable: false,
+                retry_after: None,
+            },
+        );
+        let failure = accept_n8n_run_once_invoke_response(provider_failure)
+            .expect_err("connector error response must become a fixed host failure");
+        let (encoded, failed) = encode_run_once_response(&Err(failure));
+        assert!(failed);
+        assert_eq!(
+            serde_json::from_str::<Value>(&encoded).expect("invoke failure JSON"),
+            json!({"type":"error","error":{"code":"n8n_invoke_failed"}})
+        );
+        assert!(!encoded.contains(private_message));
+        assert!(!encoded.contains("PRIVATE-N8N-PROVIDER"));
+
+        let mut malformed_success = invoke_response_with_metrics(Vec::new());
+        malformed_success.error = Some(fcp_core::FcpError::External {
+            service: "PRIVATE-N8N-PROVIDER".to_string(),
+            message: private_message.to_string(),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        });
+        assert!(accept_n8n_run_once_invoke_response(malformed_success).is_err());
     }
 
     #[test]

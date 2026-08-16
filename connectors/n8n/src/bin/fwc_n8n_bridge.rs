@@ -987,7 +987,23 @@ fn child_owned_diagnostic(stderr: &[u8]) -> Option<&'static str> {
             b"owned.rpc_protocol" => Some("owned.rpc_protocol"),
             b"owned.rpc_child_error" => Some("owned.rpc_child_error"),
             b"owned.response_protocol" => Some("owned.response_protocol"),
-            b"owned.egress_codec" => Some("owned.egress_codec"),
+            b"owned.egress_codec.io" => Some("owned.egress_codec.io"),
+            b"owned.egress_codec.truncated" => Some("owned.egress_codec.truncated"),
+            b"owned.egress_codec.oversized" => Some("owned.egress_codec.oversized"),
+            b"owned.egress_codec.empty_frame" => Some("owned.egress_codec.empty_frame"),
+            b"owned.egress_codec.invalid_utf8" => Some("owned.egress_codec.invalid_utf8"),
+            b"owned.egress_codec.invalid_json" => Some("owned.egress_codec.invalid_json"),
+            b"owned.egress_codec.wrong_schema" => Some("owned.egress_codec.wrong_schema"),
+            b"owned.egress_codec.wrong_auth" => Some("owned.egress_codec.wrong_auth"),
+            b"owned.egress_codec.wrong_route_payload" => {
+                Some("owned.egress_codec.wrong_route_payload")
+            }
+            b"owned.egress_codec.wrong_request_id" => Some("owned.egress_codec.wrong_request_id"),
+            b"owned.egress_codec.invalid_response" => Some("owned.egress_codec.invalid_response"),
+            b"owned.egress_codec.invalid_auth_token" => {
+                Some("owned.egress_codec.invalid_auth_token")
+            }
+            b"owned.egress_codec.missing_request" => Some("owned.egress_codec.missing_request"),
             b"owned.teardown" => Some("owned.teardown"),
             _ => None,
         }
@@ -1564,7 +1580,19 @@ mod tests {
             "owned.rpc_protocol",
             "owned.rpc_child_error",
             "owned.response_protocol",
-            "owned.egress_codec",
+            "owned.egress_codec.io",
+            "owned.egress_codec.truncated",
+            "owned.egress_codec.oversized",
+            "owned.egress_codec.empty_frame",
+            "owned.egress_codec.invalid_utf8",
+            "owned.egress_codec.invalid_json",
+            "owned.egress_codec.wrong_schema",
+            "owned.egress_codec.wrong_auth",
+            "owned.egress_codec.wrong_route_payload",
+            "owned.egress_codec.wrong_request_id",
+            "owned.egress_codec.invalid_response",
+            "owned.egress_codec.invalid_auth_token",
+            "owned.egress_codec.missing_request",
             "owned.teardown",
         ] {
             let stderr = format!("FCP-N8N-OWNED-DIAGNOSTIC/v1 {label}\n");

@@ -3854,8 +3854,47 @@ fn owned_invocation_error(error: OwnedInvocationError) -> HostError {
 }
 
 #[cfg(target_os = "linux")]
-fn owned_codec_error(_error: fcp_host::InheritedEgressCodecError) -> HostError {
-    emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::EgressCodec);
+fn owned_codec_error(error: fcp_host::InheritedEgressCodecError) -> HostError {
+    let diagnostic = match error {
+        fcp_host::InheritedEgressCodecError::Io => N8nRunOnceOwnedDiagnostic::EgressCodecIo,
+        fcp_host::InheritedEgressCodecError::Truncated => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecTruncated
+        }
+        fcp_host::InheritedEgressCodecError::Oversized => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecOversized
+        }
+        fcp_host::InheritedEgressCodecError::EmptyFrame => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecEmptyFrame
+        }
+        fcp_host::InheritedEgressCodecError::InvalidUtf8 => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecInvalidUtf8
+        }
+        fcp_host::InheritedEgressCodecError::InvalidJson => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecInvalidJson
+        }
+        fcp_host::InheritedEgressCodecError::WrongSchema => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecWrongSchema
+        }
+        fcp_host::InheritedEgressCodecError::WrongAuth => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecWrongAuth
+        }
+        fcp_host::InheritedEgressCodecError::WrongRoutePayload => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecWrongRoutePayload
+        }
+        fcp_host::InheritedEgressCodecError::WrongRequestId => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecWrongRequestId
+        }
+        fcp_host::InheritedEgressCodecError::InvalidResponse => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecInvalidResponse
+        }
+        fcp_host::InheritedEgressCodecError::InvalidAuthToken => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecInvalidAuthToken
+        }
+        fcp_host::InheritedEgressCodecError::MissingRequest => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecMissingRequest
+        }
+    };
+    emit_n8n_run_once_owned_diagnostic(diagnostic);
     HostError::Internal("owned host-egress wire protocol failure".to_string())
 }
 
@@ -9755,7 +9794,19 @@ enum N8nRunOnceOwnedDiagnostic {
     RpcProtocol,
     RpcChildError,
     ResponseProtocol,
-    EgressCodec,
+    EgressCodecIo,
+    EgressCodecTruncated,
+    EgressCodecOversized,
+    EgressCodecEmptyFrame,
+    EgressCodecInvalidUtf8,
+    EgressCodecInvalidJson,
+    EgressCodecWrongSchema,
+    EgressCodecWrongAuth,
+    EgressCodecWrongRoutePayload,
+    EgressCodecWrongRequestId,
+    EgressCodecInvalidResponse,
+    EgressCodecInvalidAuthToken,
+    EgressCodecMissingRequest,
     Teardown,
 }
 
@@ -9769,7 +9820,19 @@ impl N8nRunOnceOwnedDiagnostic {
             Self::RpcProtocol => "owned.rpc_protocol",
             Self::RpcChildError => "owned.rpc_child_error",
             Self::ResponseProtocol => "owned.response_protocol",
-            Self::EgressCodec => "owned.egress_codec",
+            Self::EgressCodecIo => "owned.egress_codec.io",
+            Self::EgressCodecTruncated => "owned.egress_codec.truncated",
+            Self::EgressCodecOversized => "owned.egress_codec.oversized",
+            Self::EgressCodecEmptyFrame => "owned.egress_codec.empty_frame",
+            Self::EgressCodecInvalidUtf8 => "owned.egress_codec.invalid_utf8",
+            Self::EgressCodecInvalidJson => "owned.egress_codec.invalid_json",
+            Self::EgressCodecWrongSchema => "owned.egress_codec.wrong_schema",
+            Self::EgressCodecWrongAuth => "owned.egress_codec.wrong_auth",
+            Self::EgressCodecWrongRoutePayload => "owned.egress_codec.wrong_route_payload",
+            Self::EgressCodecWrongRequestId => "owned.egress_codec.wrong_request_id",
+            Self::EgressCodecInvalidResponse => "owned.egress_codec.invalid_response",
+            Self::EgressCodecInvalidAuthToken => "owned.egress_codec.invalid_auth_token",
+            Self::EgressCodecMissingRequest => "owned.egress_codec.missing_request",
             Self::Teardown => "owned.teardown",
         }
     }
@@ -18089,7 +18152,58 @@ mod tests {
                 N8nRunOnceOwnedDiagnostic::ResponseProtocol,
                 "owned.response_protocol",
             ),
-            (N8nRunOnceOwnedDiagnostic::EgressCodec, "owned.egress_codec"),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecIo,
+                "owned.egress_codec.io",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecTruncated,
+                "owned.egress_codec.truncated",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecOversized,
+                "owned.egress_codec.oversized",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecEmptyFrame,
+                "owned.egress_codec.empty_frame",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecInvalidUtf8,
+                "owned.egress_codec.invalid_utf8",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecInvalidJson,
+                "owned.egress_codec.invalid_json",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecWrongSchema,
+                "owned.egress_codec.wrong_schema",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecWrongAuth,
+                "owned.egress_codec.wrong_auth",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecWrongRoutePayload,
+                "owned.egress_codec.wrong_route_payload",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecWrongRequestId,
+                "owned.egress_codec.wrong_request_id",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecInvalidResponse,
+                "owned.egress_codec.invalid_response",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecInvalidAuthToken,
+                "owned.egress_codec.invalid_auth_token",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecMissingRequest,
+                "owned.egress_codec.missing_request",
+            ),
             (N8nRunOnceOwnedDiagnostic::Teardown, "owned.teardown"),
         ];
         for (diagnostic, expected) in labels {

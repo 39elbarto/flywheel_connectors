@@ -3394,6 +3394,8 @@ deny_ptrace = true
 
         let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
         let raw_fd = client_stream.into_raw_fd();
+        fcp_sandbox::prepare_inherited_fd_for_test(raw_fd)
+            .expect("clear inherited fixture close-on-exec");
         let peer_handle = thread::spawn(move || {
             for _ in 0..2 {
                 let mut frame = Vec::new();

@@ -19,6 +19,7 @@ nursery = "warn"
 
 [features]
 default = []
+test-utils = []
 windows-appcontainer = []
 
 [dependencies]

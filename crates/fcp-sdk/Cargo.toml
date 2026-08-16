@@ -42,6 +42,7 @@ connector-http = ["dep:fcp-sandbox", "dep:reqwest"]
 
 [dev-dependencies]
 asupersync = { version = "=0.3.4", default-features = false, features = ["tracing-integration", "tls", "tls-native-roots"] }
+fcp-sandbox = { path = "../fcp-sandbox", features = ["test-utils"] }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

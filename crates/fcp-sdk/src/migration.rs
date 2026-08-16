@@ -1824,6 +1824,21 @@ pub fn classify_http_status(status: u16, retry_after: Option<Duration>) -> Retry
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    fn clear_cloexec_for_inherited_test(fd: i32) {
+        fcp_sandbox::prepare_inherited_fd_for_test(fd)
+            .expect("clear inherited fixture close-on-exec");
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    fn into_inherited_raw_fd(stream: std::os::unix::net::UnixStream) -> i32 {
+        use std::os::fd::IntoRawFd;
+
+        let fd = stream.into_raw_fd();
+        clear_cloexec_for_inherited_test(fd);
+        fd
+    }
+
     // ── Replay safety (br-kxd3e) ─────────────────────────────────
 
     /// `Retryable` is a claim about SIDE EFFECTS, not about how transient the
@@ -2199,7 +2214,6 @@ mod tests {
     #[test]
     fn inherited_fd_channel_round_trips_http_tcp_and_auth_serially() {
         use std::io::Write;
-        use std::os::fd::IntoRawFd;
         use std::os::unix::net::UnixStream as StdUnixStream;
         use std::sync::mpsc;
         use std::thread;
@@ -2220,7 +2234,7 @@ mod tests {
             }
         });
         let client = HostEgressProxyClient::from_inherited_fd(
-            client_stream.into_raw_fd(),
+            into_inherited_raw_fd(client_stream),
             "inherited-auth-test",
             HostEgressProxyLimits::default(),
         )
@@ -2263,7 +2277,7 @@ mod tests {
     #[test]
     fn inherited_fd_channel_poisoning_and_fd_validation_are_deterministic() {
         use std::io::Write;
-        use std::os::fd::{AsRawFd, IntoRawFd};
+        use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream as StdUnixStream;
         use std::thread;
 
@@ -2277,7 +2291,7 @@ mod tests {
                 peer.write_all(&response).expect("write malformed response");
             });
             let client = HostEgressProxyClient::from_inherited_fd(
-                client_stream.into_raw_fd(),
+                into_inherited_raw_fd(client_stream),
                 "inherited-auth-test",
                 HostEgressProxyLimits::default(),
             )
@@ -2328,7 +2342,7 @@ mod tests {
             peer.write_all(b"\n").expect("write response delimiter");
         });
         let client = HostEgressProxyClient::from_inherited_fd(
-            client_stream.into_raw_fd(),
+            into_inherited_raw_fd(client_stream),
             "inherited-auth-test",
             HostEgressProxyLimits::default(),
         )
@@ -2349,7 +2363,7 @@ mod tests {
             let _ = peer.write_all(b"\n");
         });
         let client = HostEgressProxyClient::from_inherited_fd(
-            client_stream.into_raw_fd(),
+            into_inherited_raw_fd(client_stream),
             "inherited-auth-test",
             HostEgressProxyLimits {
                 request_timeout: Duration::from_secs(1),
@@ -2372,7 +2386,7 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
         });
         let client = HostEgressProxyClient::from_inherited_fd(
-            client_stream.into_raw_fd(),
+            into_inherited_raw_fd(client_stream),
             "inherited-auth-test",
             HostEgressProxyLimits {
                 request_timeout: Duration::from_millis(10),
@@ -2405,6 +2419,7 @@ mod tests {
         ));
 
         let file = std::fs::File::open("/dev/null").expect("open non-socket FD");
+        clear_cloexec_for_inherited_test(file.as_raw_fd());
         let non_socket_error = HostEgressProxyClient::from_inherited_fd(
             file.as_raw_fd(),
             "inherited-auth-test",
@@ -2420,6 +2435,7 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let tcp_client = std::net::TcpStream::connect(address).expect("connect TCP stream");
         let (tcp_peer, _) = listener.accept().expect("accept TCP stream");
+        clear_cloexec_for_inherited_test(tcp_client.as_raw_fd());
         let tcp_error = HostEgressProxyClient::from_inherited_fd(
             tcp_client.as_raw_fd(),
             "inherited-auth-test",
@@ -2433,6 +2449,7 @@ mod tests {
         drop(tcp_peer);
 
         let udp = std::net::UdpSocket::bind(("127.0.0.1", 0)).expect("bind UDP socket");
+        clear_cloexec_for_inherited_test(udp.as_raw_fd());
         let udp_error = HostEgressProxyClient::from_inherited_fd(
             udp.as_raw_fd(),
             "inherited-auth-test",
@@ -2450,7 +2467,6 @@ mod tests {
     fn inherited_fd_channel_cancellation_poisoning_is_deterministic() {
         use futures_util::future::{AbortHandle, Abortable};
         use std::io::Write;
-        use std::os::fd::IntoRawFd;
         use std::os::unix::net::UnixStream as StdUnixStream;
         use std::sync::mpsc;
         use std::thread;
@@ -2470,7 +2486,7 @@ mod tests {
         });
 
         let client = HostEgressProxyClient::from_inherited_fd(
-            client_stream.into_raw_fd(),
+            into_inherited_raw_fd(client_stream),
             "inherited-auth-test",
             HostEgressProxyLimits::default(),
         )

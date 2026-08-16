@@ -1039,20 +1039,32 @@ fn parse_kib_field(contents: &str, field: &str) -> Result<u64, ProcessGroupError
 }
 
 #[cfg(target_os = "linux")]
+static INHERITED_FD_CLAIM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(target_os = "linux")]
 /// Claim one inherited, connected Unix stream descriptor for connector use.
 ///
-/// The descriptor is validated while borrowed, then consumed exactly once.
-/// The returned stream owns a close-on-exec duplicate; the launcher's original
-/// descriptor is closed before this function returns. Unsafe ownership and OS
-/// checks stay contained in this sandbox crate's explicitly allowed layer.
+/// The descriptor must arrive with close-on-exec cleared by the fixed launcher.
+/// It is validated, atomically claimed within this process, marked close-on-exec
+/// again, and transferred without changing its numeric value. Preserving that
+/// value binds subsequent stream I/O to the launch-time seccomp capability.
 pub fn claim_inherited_host_egress_channel(fd: RawFd) -> Result<UnixStream, ProcessGroupError> {
     if fd < 3 {
         return Err(ProcessGroupError::InvalidSpec);
     }
 
+    let _claim_guard = INHERITED_FD_CLAIM_LOCK
+        .lock()
+        .map_err(|_| ProcessGroupError::InvalidSpec)?;
+
     let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if descriptor_flags < 0 {
         return Err(ProcessGroupError::Io(std::io::Error::last_os_error()));
+    }
+    if descriptor_flags & libc::FD_CLOEXEC != 0 {
+        return Err(ProcessGroupError::Io(std::io::Error::from_raw_os_error(
+            libc::EBADF,
+        )));
     }
 
     let mut domain: libc::c_int = 0;
@@ -1104,20 +1116,34 @@ pub fn claim_inherited_host_egress_channel(fd: RawFd) -> Result<UnixStream, Proc
         return Err(ProcessGroupError::InvalidSpec);
     }
 
-    // `F_DUPFD_CLOEXEC` is used by `OwnedFd::try_clone`; verify the returned
-    // descriptor keeps that invariant before closing the launcher's original.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, descriptor_flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(ProcessGroupError::Io(std::io::Error::last_os_error()));
+    }
+
+    // Once F_SETFD succeeds, immediately establish one owner so every later
+    // validation error closes the descriptor exactly once.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let cloexec = owned.try_clone().map_err(ProcessGroupError::Io)?;
-    let cloexec_flags = unsafe { libc::fcntl(cloexec.as_raw_fd(), libc::F_GETFD) };
+    let cloexec_flags = unsafe { libc::fcntl(owned.as_raw_fd(), libc::F_GETFD) };
     if cloexec_flags < 0 {
         return Err(ProcessGroupError::Io(std::io::Error::last_os_error()));
     }
     if cloexec_flags & libc::FD_CLOEXEC == 0 {
         return Err(ProcessGroupError::InvalidSpec);
     }
-    drop(owned);
+    Ok(UnixStream::from(owned))
+}
 
-    Ok(UnixStream::from(cloexec))
+/// Clear close-on-exec on a descriptor to emulate the fixed launcher boundary.
+///
+/// This is intentionally available only to test builds. Production launchers
+/// clear the flag inside their `pre_exec` closure immediately before `exec`.
+#[cfg(all(target_os = "linux", feature = "test-utils"))]
+#[doc(hidden)]
+pub fn prepare_inherited_fd_for_test(fd: RawFd) -> Result<(), ProcessGroupError> {
+    if fd < 3 {
+        return Err(ProcessGroupError::InvalidSpec);
+    }
+    clear_fd_cloexec(fd).map_err(ProcessGroupError::Io)
 }
 
 #[cfg(target_os = "linux")]
@@ -1473,9 +1499,20 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::io::{Read, Write};
     #[cfg(target_os = "linux")]
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
     #[cfg(target_os = "linux")]
     use std::os::unix::net::UnixStream;
+
+    #[cfg(target_os = "linux")]
+    fn clear_cloexec_for_inherited_test(fd: RawFd) {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "read inherited test fd flags");
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+            0,
+            "clear inherited test fd close-on-exec"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     fn test_process_spec(test_filter: &str, marker: &str) -> ProcessSpec {
@@ -1502,7 +1539,8 @@ mod tests {
             .expect("inherited channel fd environment")
             .parse::<i32>()
             .expect("numeric inherited channel fd");
-        let mut channel = unsafe { UnixStream::from_raw_fd(channel_fd) };
+        let mut channel =
+            claim_inherited_host_egress_channel(channel_fd).expect("claim inherited channel");
         let mut request = [0_u8; 4];
         channel.read_exact(&mut request).expect("channel request");
         assert_eq!(&request, b"ping");
@@ -1702,6 +1740,97 @@ mod tests {
             OwnedProcess::spawn_with_host_egress_channel(&valid_spec, non_cloexec),
             Err(ProcessGroupError::InvalidSpec)
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_channel_claim_preserves_fd_and_is_sequentially_one_shot() {
+        let (client, mut peer) = UnixStream::pair().expect("socketpair");
+        let raw_fd = client.into_raw_fd();
+        clear_cloexec_for_inherited_test(raw_fd);
+
+        let mut claimed = claim_inherited_host_egress_channel(raw_fd).expect("claim inherited fd");
+        assert_eq!(claimed.as_raw_fd(), raw_fd);
+        let claimed_flags = unsafe { libc::fcntl(claimed.as_raw_fd(), libc::F_GETFD) };
+        assert!(claimed_flags & libc::FD_CLOEXEC != 0);
+
+        peer.write_all(b"ping").expect("write inherited peer");
+        let mut request = [0_u8; 4];
+        claimed
+            .read_exact(&mut request)
+            .expect("read inherited channel");
+        assert_eq!(&request, b"ping");
+
+        assert!(matches!(
+            claim_inherited_host_egress_channel(raw_fd),
+            Err(ProcessGroupError::Io(error)) if error.raw_os_error() == Some(libc::EBADF)
+        ));
+        drop(claimed);
+        assert_eq!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_channel_claim_rejects_cloexec_without_taking_ownership() {
+        let (client, mut peer) = UnixStream::pair().expect("socketpair");
+        let raw_fd = client.into_raw_fd();
+        let initial_flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
+        assert!(initial_flags & libc::FD_CLOEXEC != 0);
+
+        assert!(matches!(
+            claim_inherited_host_egress_channel(raw_fd),
+            Err(ProcessGroupError::Io(error)) if error.raw_os_error() == Some(libc::EBADF)
+        ));
+
+        let mut original = unsafe { UnixStream::from_raw_fd(raw_fd) };
+        peer.write_all(b"ping").expect("write rejected peer");
+        let mut request = [0_u8; 4];
+        original
+            .read_exact(&mut request)
+            .expect("rejected fd remains caller-owned");
+        assert_eq!(&request, b"ping");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_channel_claim_is_concurrently_one_shot() {
+        let (client, _peer) = UnixStream::pair().expect("socketpair");
+        let raw_fd = client.into_raw_fd();
+        clear_cloexec_for_inherited_test(raw_fd);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let finish = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+
+        for _ in 0..2 {
+            let start = std::sync::Arc::clone(&start);
+            let finish = std::sync::Arc::clone(&finish);
+            handles.push(std::thread::spawn(move || {
+                start.wait();
+                let claimed = claim_inherited_host_egress_channel(raw_fd);
+                let succeeded = claimed.is_ok();
+                finish.wait();
+                drop(claimed);
+                succeeded
+            }));
+        }
+
+        start.wait();
+        finish.wait();
+        let successes = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join concurrent claimant"))
+            .filter(|succeeded| *succeeded)
+            .count();
+        assert_eq!(successes, 1);
+        assert_eq!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
     }
 
     #[cfg(target_os = "linux")]

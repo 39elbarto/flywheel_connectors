@@ -671,7 +671,7 @@ impl McpBridgeConnector {
                 let mut report = SelfCheckReport::ok();
                 report.details = Some(json!({
                     "provisioning": readiness,
-                    "probe": "POST /mcp tools/list",
+                    "probe": "POST configured MCP endpoint tools/list",
                 }));
                 report
             }
@@ -680,7 +680,7 @@ impl McpBridgeConnector {
                     SelfCheckReport::failed("provider_probe_failed", error.safe_summary());
                 report.details = Some(json!({
                     "provisioning": readiness,
-                    "probe": "POST /mcp tools/list",
+                    "probe": "POST configured MCP endpoint tools/list",
                 }));
                 report
             }
@@ -1864,7 +1864,7 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     ProvisioningRecipe::new(
         RecipeId::new("mcp-bridge.host_credential"),
         "1",
-        "Provision MCP Bridge with a canonical server identity, exact /mcp endpoint, and host-managed credential reference",
+        "Provision MCP Bridge with a canonical server identity, exact supported MCP endpoint, and host-managed credential reference",
     )
     .with_step(ProvisioningStep::new(
         StepId::new("enter_server_id"),
@@ -1876,7 +1876,7 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
         ProvisioningStep::new(
             StepId::new("enter_mcp_endpoint"),
             ProvisioningStepType::PromptUser {
-                message: "Enter the exact MCP endpoint ending in /mcp (only one trailing slash is normalized)".into(),
+                message: "Enter an exact supported MCP endpoint (/mcp or the official n8n /mcp-server/http path; only one trailing slash is normalized)".into(),
             },
         )
         .depends_on(StepId::new("enter_server_id")),
@@ -2709,6 +2709,13 @@ mod tests {
         let (ok, message) = base_url_policy("https://mcp.example.com/mcp");
         assert!(ok);
         assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_official_n8n_endpoint() {
+        let (ok, message) = base_url_policy("https://n8n.example.com/mcp-server/http/");
+        assert!(ok);
+        assert!(message.contains("/mcp-server/http"));
     }
 
     #[test]

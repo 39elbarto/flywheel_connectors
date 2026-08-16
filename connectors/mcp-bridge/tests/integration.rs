@@ -510,6 +510,47 @@ async fn tools_list_basic() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn tools_list_uses_official_n8n_mcp_endpoint_exactly() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp-server/http"))
+        .and(header("Authorization", "Bearer test-api-key"))
+        .and(body_partial_json(json!({"method": "tools/list"})))
+        .respond_with(MatchingJsonRpcIdResponder)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut connector = McpBridgeConnector::new();
+    let instance_id = InstanceId::new().to_string();
+    connector
+        .handle_configure(json!({
+            "server_id": TEST_SERVER_ID,
+            "mcp_url": format!("{}/mcp-server/http/", server.uri()),
+            "api_key": "test-api-key",
+        }))
+        .await
+        .unwrap();
+    connector
+        .handle_handshake(handshake_params(&instance_id))
+        .await
+        .unwrap();
+    let connector = TestConnector {
+        inner: connector,
+        instance_id,
+    };
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "mcp.tools.list",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    assert!(result["tools"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
 async fn tools_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

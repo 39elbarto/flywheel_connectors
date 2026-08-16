@@ -634,13 +634,22 @@ impl McpClient {
             ));
         }
         let path = parsed.path();
-        if path.contains('%') || !matches!(path, "/mcp" | "/mcp/") {
+        let canonical_path = match path {
+            "/mcp" | "/mcp/" => "/mcp",
+            "/mcp-server/http" | "/mcp-server/http/" => "/mcp-server/http",
+            _ => {
+                return Err(McpBridgeError::InvalidInput(
+                    "mcp_url must be an exact supported MCP endpoint; only /mcp and /mcp-server/http are accepted"
+                        .into(),
+                ));
+            }
+        };
+        if path.contains('%') {
             return Err(McpBridgeError::InvalidInput(
-                "mcp_url must be the exact /mcp endpoint; only a trailing slash may be normalized"
-                    .into(),
+                "mcp_url endpoint path must not be percent-encoded".into(),
             ));
         }
-        parsed.set_path("/mcp");
+        parsed.set_path(canonical_path);
         parsed.set_query(None);
         parsed.set_fragment(None);
         if parsed.port() == Some(443) {
@@ -1405,6 +1414,28 @@ mod tests {
             credential_id: None,
         };
         assert!(McpClient::new(auth, "https://example.com/api/v1").is_err());
+    }
+
+    #[test]
+    fn client_new_accepts_official_n8n_mcp_endpoint() {
+        let auth = McpAuth {
+            api_key: None,
+            credential_id: None,
+        };
+        let client = McpClient::new(auth, "https://n8n.example.com/mcp-server/http/").unwrap();
+        assert_eq!(
+            client.base_url.as_str(),
+            "https://n8n.example.com/mcp-server/http"
+        );
+    }
+
+    #[test]
+    fn client_new_rejects_n8n_mcp_endpoint_suffixes() {
+        let auth = McpAuth {
+            api_key: None,
+            credential_id: None,
+        };
+        assert!(McpClient::new(auth, "https://n8n.example.com/mcp-server/http/extra").is_err());
     }
 
     #[test]

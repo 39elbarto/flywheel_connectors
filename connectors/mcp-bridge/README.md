@@ -5,7 +5,7 @@
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
 > **MCP upstream specification**: https://modelcontextprotocol.io/specification/2025-06-18/
-> **MCP transport implemented here**: Streamable HTTP-style JSON-RPC over `POST /mcp`
+> **MCP transport implemented here**: Streamable HTTP-style JSON-RPC over an exact allowlisted endpoint (`/mcp`, or n8n's `/mcp-server/http`)
 
 ## Purpose
 
@@ -34,7 +34,7 @@ Important runtime truths the contract preserves:
 - Manifest interface hash is `blake3-256:fcp.interface.v2:0d9f9c20f0f3556a12ff0946155ce71c94352774e367eba94b9b03f02fbd72b6`.
 - Configuration requires `server_id` and a non-empty exact MCP endpoint.
 - `server_id` is a generic lowercase canonical slug: 1–64 ASCII letters, digits, `-`, or `_`; first and last characters are alphanumeric. The FWC layer owns any eec/hetzner/legacy registry mapping.
-- `mcp_url` must be exactly `/mcp`; only one trailing slash is normalized. Production URLs require HTTPS/443. Loopback HTTP is reserved for local fixtures.
+- `mcp_url` must use exactly `/mcp` or the official n8n `/mcp-server/http` path; only one trailing slash is normalized. Production URLs require HTTPS/443. Loopback HTTP is reserved for local fixtures.
 - Direct non-loopback egress fails closed until host-mediated exact-origin enforcement is available.
 - Configuration accepts one of an optional trimmed `api_key` or a UUID `credential_id`, never both.
 - Optional `capability_policy` is owner-reviewed configuration for `eec`, `hetzner`, or `legacy` and contains bounded `n8n_version`, exact `auth_mode` (`oauth` or `access_token`), bounded `api_scope_digest`, and up to 256 unique exact `approved_tools` entries (`name`, `class`, input/output schema digests). A direct `api_key` requires `auth_mode = access_token`; with `credential_id`, the mode remains trusted host-provisioning metadata because the connector cannot inspect the referenced secret type.
@@ -56,9 +56,9 @@ Important runtime truths the contract preserves:
 - `mcp.tools.call` performs exactly two provider calls per invocation: one fresh `tools/list` with the verified call context, then one `tools/call` only for an exact `Approved` snapshot entry. Unknown, blocked, or schema-drifted tools fail locally. There is no automatic retry or replay.
 - The attached `capability_snapshot` contains only server/protocol/auth metadata, schema digests, classes, statuses, and a snapshot digest; raw schemas, descriptions, arguments, results, and provider payloads are not retained.
 - Sampling remains local-only and returns safe metadata counts, never prompt content.
-- Provisioning requests only the trusted `server_id`, exact `/mcp` endpoint, and host-managed `credential_id` reference. It has no raw-secret prompt or storage step.
+- Provisioning requests only the trusted `server_id`, exact supported endpoint (`/mcp` or `/mcp-server/http`), and host-managed `credential_id` reference. It has no raw-secret prompt or storage step.
 - Reconfigure and shutdown clear the client, verifier, zone, session, and handshaken state.
-- `self_check()` issues one local-fixture `POST /mcp` `tools/list` probe and discards the catalog response. Credential and production direct-egress modes fail before network traffic.
+- `self_check()` issues one local-fixture `tools/list` probe against the configured endpoint and discards the catalog response. Credential and production direct-egress modes fail before network traffic.
 
 ## Enforced Security Boundaries
 
@@ -79,9 +79,9 @@ Out of scope for this packet are incremental or long-lived Streamable HTTP/SSE s
 
 The current MCP Bridge slice documents the bounded runtime surface:
 
-- canonical `server_id` and exact `/mcp` endpoint configuration
+- canonical `server_id` and exact `/mcp` or `/mcp-server/http` endpoint configuration
 - loopback fixture egress or fail-closed host-mediated production/credential modes
-- JSON-RPC over `POST /mcp`
+- JSON-RPC over an exact `/mcp` or `/mcp-server/http` endpoint
 - tool, resource, prompt, sampling, and metrics operations
 - host-key capability verification and exact approval gates
 - prompt-injection description scanning for server-provided catalogs
@@ -108,7 +108,7 @@ The current MCP Bridge slice documents the bounded runtime surface:
 
 ## Provisioning
 
-The `mcp-bridge.host_credential` recipe collects only the trusted lowercase `server_id`, the exact `/mcp` endpoint, and an optional host-managed `credential_id` UUID reference. It does not prompt for, store, or return a raw API key; an unauthenticated mode is reserved for loopback fixtures.
+The `mcp-bridge.host_credential` recipe collects only the trusted lowercase `server_id`, an exact supported endpoint (`/mcp` or `/mcp-server/http`), and an optional host-managed `credential_id` UUID reference. It does not prompt for, store, or return a raw API key; an unauthenticated mode is reserved for loopback fixtures.
 
 An owner-reviewed policy is supplied in connector configuration when tool calls
 are required:
@@ -140,7 +140,7 @@ connector keeps no durable raw catalog or tool result state.
 
 ## Network And Runtime Invariants
 
-- Runtime endpoint shape: exact `{mcp_url}` path `/mcp`; one trailing slash is normalized.
+- Runtime endpoint shape: exact `{mcp_url}` path `/mcp` or `/mcp-server/http`; one trailing slash is normalized.
 - Production endpoint policy: HTTPS, port 443, no userinfo/query/fragment, no private/tailnet hostnames, and no IP literals.
 - Loopback HTTP is accepted only for local deterministic fixtures.
 - Manifest `network_constraints` are declarative operator policy (operator-configured host, HTTPS/443, TLS/SNI, and deny rules); they are not a substitute for host-mediated DNS/private-range/max-response enforcement.
@@ -248,7 +248,7 @@ These are excluded on purpose:
 `doctor()`, `health()`, `self_check()`, `simulate()`, `introspect()`, and `mcp.server.metrics` are part of the public closeout contract. They surface:
 
 - local configuration, client, session ID, request, error, scan, finding, sampling, and zero-retry counter state
-- URL readiness plus a `POST /mcp` `tools/list` self-check probe
+- URL readiness plus a configured-endpoint `tools/list` self-check probe
 - degraded or unhealthy states for unconfigured, missing client, and missing session ID cases
 - operation metadata with capability, risk, safety tier, idempotency, schemas, and hints
 - simulation allow/deny for canonical `operation` values, with `mcp.tools.call` reporting conditional policy-gated semantics
@@ -295,7 +295,7 @@ rch exec -- cargo fmt --check
 
 ## Operator Guidance
 
-- Use a canonical exact `/mcp` endpoint. Production direct egress is intentionally fail-closed until host mediation is present.
+- Use a canonical exact `/mcp` or `/mcp-server/http` endpoint. Production direct egress is intentionally fail-closed until host mediation is present.
 - Treat all MCP catalog descriptions and remote tool output as untrusted model-facing input.
 - Keep `description_scan = "warn"` or `"block"` unless deterministic fixture tests require disabling it.
 - Treat `mcp.tools.call` and `mcp.sampling.handle` as high-review operations; tool calls are arbitrary official MCP side-effect boundaries and require fresh discovery, exact snapshot approval, capability-token, and execution approval. No remote tool is assumed safe from its name or description.

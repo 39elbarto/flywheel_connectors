@@ -2,7 +2,7 @@
 //!
 //! The verifier deliberately has no configurable path or release lookup.  It
 //! starts at the canonical current executable, derives its fixed `bin/` and
-//! release-root parents, and validates one exact receipt plus eight exact
+//! release-root parents, and validates one exact receipt plus seven exact
 //! sibling artifacts.  Root ownership and non-writable group/other modes are
 //! the current local trust root; this module does not claim signature
 //! verification.
@@ -13,10 +13,12 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
+use serde_json::Value;
 
 const RECEIPT_SCHEMA: &str = "fwc.n8n.bundle.v1";
 const RECEIPT_FILE: &str = "receipt.json";
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
+const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
 const EXPECTED_ARTIFACTS: [&str; 7] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
@@ -41,6 +43,8 @@ enum BundleErrorCode {
     ArtifactSet,
     ArtifactPath,
     Digest,
+    RuntimeFormat,
+    InventoryBinding,
 }
 
 impl BundleErrorCode {
@@ -57,6 +61,8 @@ impl BundleErrorCode {
             Self::ArtifactSet => "invalid_artifact_set",
             Self::ArtifactPath => "invalid_artifact_path",
             Self::Digest => "digest_mismatch",
+            Self::RuntimeFormat => "invalid_runtime_format",
+            Self::InventoryBinding => "invalid_inventory_binding",
         }
     }
 }
@@ -161,7 +167,7 @@ impl fmt::Debug for VerifiedBundle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedBundle")
-            .field("artifact_count", &4)
+            .field("artifact_count", &7)
             .field("digests", &"<redacted>")
             .finish()
     }
@@ -279,9 +285,30 @@ fn verify_release_bundle(
             .ok_or_else(|| BundleError::new(BundleErrorCode::ArtifactSet))
     };
     let (fcp_host_path, fcp_host_digest) = artifact("bin/fcp-host")?;
+    let (fcp_n8n_path, fcp_n8n_digest) = artifact("bin/fcp-n8n")?;
+    let (manifest_path, _) = artifact("manifests/fcp-n8n.toml")?;
     let (inventory_eec_path, inventory_eec_digest) = artifact("inventory/eec.json")?;
     let (inventory_hetzner_path, inventory_hetzner_digest) = artifact("inventory/hetzner.json")?;
     let (zone_policy_path, zone_policy_digest) = artifact("policy/zone-policies.json")?;
+    #[cfg(target_os = "linux")]
+    fcp_sandbox::verify_fixed_static_executable(&fcp_n8n_path)
+        .map_err(|_| BundleError::new(BundleErrorCode::RuntimeFormat))?;
+    #[cfg(not(target_os = "linux"))]
+    return Err(BundleError::new(BundleErrorCode::RuntimeFormat));
+    verify_inventory_binding(
+        &inventory_eec_path,
+        "eec",
+        &fcp_n8n_path,
+        &fcp_n8n_digest,
+        &manifest_path,
+    )?;
+    verify_inventory_binding(
+        &inventory_hetzner_path,
+        "hetzner",
+        &fcp_n8n_path,
+        &fcp_n8n_digest,
+        &manifest_path,
+    )?;
     Ok(VerifiedBundle {
         fcp_host_path,
         fcp_host_digest,
@@ -292,6 +319,62 @@ fn verify_release_bundle(
         zone_policy_path,
         zone_policy_digest,
     })
+}
+
+fn verify_inventory_binding(
+    path: &Path,
+    expected_server_id: &str,
+    executable: &Path,
+    executable_digest: &str,
+    manifest: &Path,
+) -> Result<(), BundleError> {
+    let value = read_bounded_json(path, MAX_INVENTORY_BYTES)
+        .map_err(|_| BundleError::new(BundleErrorCode::InventoryBinding))?;
+    let entries = value
+        .as_array()
+        .filter(|entries| entries.len() == 1)
+        .ok_or_else(|| BundleError::new(BundleErrorCode::InventoryBinding))?;
+    let entry = &entries[0];
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| BundleError::new(BundleErrorCode::InventoryBinding))?;
+    let manifest = manifest
+        .to_str()
+        .ok_or_else(|| BundleError::new(BundleErrorCode::InventoryBinding))?;
+    let exact = |pointer: &str, expected: &str| {
+        entry.pointer(pointer).and_then(Value::as_str) == Some(expected)
+    };
+    if !exact("/id", "fcp.n8n")
+        || !exact("/binary", executable)
+        || !exact("/manifest_path", manifest)
+        || !exact("/config/server_id", expected_server_id)
+        || !exact("/lifecycle_mode", "per_invocation")
+        || !exact("/runtime_network_enforcement", "host_egress_proxy")
+        || !exact("/launch_binding/launcher_path", executable)
+        || !exact("/launch_binding/launcher_digest", executable_digest)
+        || !exact("/launch_binding/runtime_executable", executable)
+        || !exact(
+            "/launch_binding/runtime_executable_digest",
+            executable_digest,
+        )
+    {
+        return Err(BundleError::new(BundleErrorCode::InventoryBinding));
+    }
+    Ok(())
+}
+
+fn read_bounded_json(path: &Path, max_bytes: usize) -> Result<Value, BundleError> {
+    let metadata = fs::metadata(path).map_err(|_| BundleError::new(BundleErrorCode::Receipt))?;
+    if metadata.len() > max_bytes as u64 {
+        return Err(BundleError::new(BundleErrorCode::Receipt));
+    }
+    let capacity =
+        usize::try_from(metadata.len()).map_err(|_| BundleError::new(BundleErrorCode::Receipt))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    File::open(path)
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|_| BundleError::new(BundleErrorCode::Receipt))?;
+    serde_json::from_slice(&bytes).map_err(|_| BundleError::new(BundleErrorCode::Receipt))
 }
 
 #[cfg(not(unix))]
@@ -504,7 +587,12 @@ mod tests {
             }
             for relative_path in EXPECTED_ARTIFACTS {
                 let path = root.join(relative_path);
-                fs::write(&path, relative_path.as_bytes()).expect("write release fixture artifact");
+                let bytes = if relative_path == "bin/fcp-n8n" {
+                    static_elf_fixture()
+                } else {
+                    relative_path.as_bytes().to_vec()
+                };
+                fs::write(&path, bytes).expect("write release fixture artifact");
                 let mode = if EXECUTABLE_ARTIFACTS.contains(&relative_path) {
                     0o700
                 } else {
@@ -522,6 +610,8 @@ mod tests {
                 executable,
                 owner,
             };
+            fixture.write_inventory("eec");
+            fixture.write_inventory("hetzner");
             fixture.write_receipt(None);
             fixture
         }
@@ -564,6 +654,50 @@ mod tests {
             )
             .expect("restrict release fixture receipt");
         }
+
+        fn write_inventory(&self, server_id: &str) {
+            let executable = self.artifact("bin/fcp-n8n");
+            let executable_digest = hash_file(&executable).expect("provider digest");
+            let manifest = self.artifact("manifests/fcp-n8n.toml");
+            let value = serde_json::json!([{
+                "id": "fcp.n8n",
+                "binary": executable,
+                "manifest_path": manifest,
+                "config": {"server_id": server_id},
+                "runtime_network_enforcement": "host_egress_proxy",
+                "lifecycle_mode": "per_invocation",
+                "launch_binding": {
+                    "launcher_path": executable,
+                    "launcher_digest": executable_digest,
+                    "runtime_executable": executable,
+                    "runtime_executable_digest": executable_digest,
+                }
+            }]);
+            fs::write(
+                self.artifact(&format!("inventory/{server_id}.json")),
+                serde_json::to_vec(&value).expect("encode inventory fixture"),
+            )
+            .expect("write inventory fixture");
+        }
+    }
+
+    #[cfg(unix)]
+    fn static_elf_fixture() -> Vec<u8> {
+        const HEADER_BYTES: usize = 64;
+        const PROGRAM_HEADER_BYTES: usize = 56;
+        let mut bytes = vec![0_u8; HEADER_BYTES + PROGRAM_HEADER_BYTES];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        bytes[16..18].copy_from_slice(&3_u16.to_le_bytes());
+        bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[32..40].copy_from_slice(&(HEADER_BYTES as u64).to_le_bytes());
+        bytes[52..54].copy_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
+        bytes[54..56].copy_from_slice(&(PROGRAM_HEADER_BYTES as u16).to_le_bytes());
+        bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[HEADER_BYTES..HEADER_BYTES + 4].copy_from_slice(&1_u32.to_le_bytes());
+        bytes
     }
 
     #[cfg(unix)]
@@ -652,7 +786,10 @@ mod tests {
             .uid();
         let error = verify_release_bundle_for_owner(&executable, owner)
             .expect_err("test executable is not named fwc-n8n");
-        assert_eq!(error.code(), BundleErrorCode::NotBundleExecutable);
+        assert!(matches!(
+            error.code(),
+            BundleErrorCode::NotBundleExecutable | BundleErrorCode::Permissions
+        ));
         assert!(!format!("{error:?}").contains(executable.to_string_lossy().as_ref()));
     }
 
@@ -670,6 +807,42 @@ mod tests {
                 .expect_err("wrong digest")
                 .code(),
             BundleErrorCode::Digest
+        );
+
+        let stale_inventory = ReleaseFixture::new();
+        let inventory_path = stale_inventory.artifact("inventory/eec.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["binary"] = Value::String("/old/release/bin/fcp-n8n".to_string());
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode stale inventory"),
+        )
+        .expect("write stale inventory");
+        stale_inventory.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(&stale_inventory.executable, stale_inventory.owner)
+                .expect_err("stale inventory binding")
+                .code(),
+            BundleErrorCode::InventoryBinding
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dynamic_provider_fails_closed_even_with_matching_receipt() {
+        let dynamic = ReleaseFixture::new();
+        fs::copy("/bin/true", dynamic.artifact("bin/fcp-n8n"))
+            .expect("install dynamic provider fixture");
+        dynamic.write_inventory("eec");
+        dynamic.write_inventory("hetzner");
+        dynamic.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(&dynamic.executable, dynamic.owner)
+                .expect_err("dynamic provider must fail")
+                .code(),
+            BundleErrorCode::RuntimeFormat
         );
     }
 

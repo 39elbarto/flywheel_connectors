@@ -38,6 +38,7 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::ref_as_ptr)]
 
+use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 
@@ -1236,6 +1237,12 @@ const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
 const FIXED_LANDLOCK_MIN_ABI: i32 = 5;
 const FIXED_LANDLOCK_ROOT_PATH: &[u8] = b"/\0";
 const FIXED_LANDLOCK_ROOT_ACCESS: u64 = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+const FIXED_LANDLOCK_EXECUTABLE_ACCESS: u64 = LANDLOCK_ACCESS_FS_EXECUTE;
+const ELF64_HEADER_BYTES: usize = 64;
+const ELF64_PROGRAM_HEADER_BYTES: usize = 56;
+const ELF_PROGRAM_LOAD: u32 = 1;
+const ELF_PROGRAM_INTERPRETER: u32 = 3;
+const MAX_ELF_PROGRAM_HEADERS: u16 = 1024;
 const FIXED_LANDLOCK_HANDLED_ACCESS: u64 = LANDLOCK_ACCESS_FS_EXECUTE
     | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_READ_FILE
@@ -1256,6 +1263,13 @@ const FIXED_LANDLOCK_HANDLED_ACCESS: u64 = LANDLOCK_ACCESS_FS_EXECUTE
 const fn fixed_landlock_root_rule(parent_fd: i32) -> LandlockPathBeneathAttr {
     LandlockPathBeneathAttr {
         allowed_access: FIXED_LANDLOCK_ROOT_ACCESS,
+        parent_fd,
+    }
+}
+
+const fn fixed_landlock_executable_rule(parent_fd: i32) -> LandlockPathBeneathAttr {
+    LandlockPathBeneathAttr {
+        allowed_access: FIXED_LANDLOCK_EXECUTABLE_ACCESS,
         parent_fd,
     }
 }
@@ -1313,6 +1327,33 @@ pub fn apply_fixed_read_only_landlock() -> Result<(), SandboxError> {
         Ok(()) => ruleset_close_result,
         Err(error) => Err(merge_fixed_landlock_error(error, ruleset_close_result)),
     }
+}
+
+/// Apply the fixed read-only boundary while allowing one exact static ELF to execute.
+///
+/// The executable path must already be absolute and canonical. The opened inode
+/// must be a regular static 64-bit little-endian ELF with no `PT_INTERP`; this
+/// prevents broadening the boundary to a shared dynamic loader that could run
+/// arbitrary readable programs. All filesystem mutation rights remain denied,
+/// and no other executable receives `LANDLOCK_ACCESS_FS_EXECUTE`.
+pub fn apply_fixed_read_only_landlock_with_static_executable(
+    executable: &Path,
+) -> Result<(), SandboxError> {
+    let executable_fd = open_fixed_static_executable(executable)?;
+    let abi = query_landlock_abi()?;
+    require_fixed_landlock_abi(abi)?;
+    set_fixed_landlock_no_new_privs()?;
+
+    let ruleset_fd = create_fixed_landlock_ruleset()?;
+    let root_fd = open_fixed_landlock_root()?;
+    add_fixed_landlock_root_rule(ruleset_fd.as_raw_fd(), root_fd.as_raw_fd())?;
+    add_fixed_landlock_executable_rule(ruleset_fd.as_raw_fd(), executable_fd.as_raw_fd())?;
+    restrict_fixed_landlock(ruleset_fd.as_raw_fd())
+}
+
+/// Verify the exact static-ELF invariant without applying Landlock.
+pub fn verify_fixed_static_executable(executable: &Path) -> Result<(), SandboxError> {
+    open_fixed_static_executable(executable).map(|_| ())
 }
 
 fn query_landlock_abi() -> Result<i32, SandboxError> {
@@ -1427,6 +1468,172 @@ fn add_fixed_landlock_root_rule(ruleset_fd: i32, root_fd: i32) -> Result<(), San
             "fixed Landlock root rule failed: {}",
             std::io::Error::last_os_error()
         )));
+    }
+    Ok(())
+}
+
+fn add_fixed_landlock_executable_rule(
+    ruleset_fd: i32,
+    executable_fd: i32,
+) -> Result<(), SandboxError> {
+    let attr = fixed_landlock_executable_rule(executable_fd);
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset_fd,
+            LANDLOCK_RULE_PATH_BENEATH,
+            &attr as *const LandlockPathBeneathAttr,
+            0,
+        )
+    };
+    if result < 0 {
+        return Err(SandboxError::SyscallFailed(
+            "fixed Landlock executable rule failed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn open_fixed_static_executable(path: &Path) -> Result<OwnedFd, SandboxError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    if !path.is_absolute() {
+        return Err(SandboxError::InvalidConfig(
+            "fixed executable path must be absolute".into(),
+        ));
+    }
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|_| SandboxError::InvalidConfig("fixed executable path is unavailable".into()))?;
+    if canonical != path {
+        return Err(SandboxError::InvalidConfig(
+            "fixed executable path must be canonical".into(),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| SandboxError::InvalidConfig("fixed executable metadata is invalid".into()))?;
+    if !metadata.file_type().is_file() {
+        return Err(SandboxError::InvalidConfig(
+            "fixed executable must be a regular file".into(),
+        ));
+    }
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| SandboxError::InvalidConfig("fixed executable path is invalid".into()))?;
+    let raw = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if raw < 0 {
+        return Err(SandboxError::InvalidConfig(
+            "fixed executable could not be opened".into(),
+        ));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    verify_static_elf_fd(&fd)?;
+    Ok(fd)
+}
+
+fn verify_static_elf_fd(fd: &OwnedFd) -> Result<(), SandboxError> {
+    let reader_fd = fd
+        .try_clone()
+        .map_err(|_| SandboxError::InvalidConfig("fixed executable could not be read".into()))?;
+    let mut file = std::fs::File::from(reader_fd);
+    let length = file
+        .metadata()
+        .map_err(|_| SandboxError::InvalidConfig("fixed executable metadata is invalid".into()))?
+        .len();
+    let mut header = [0_u8; ELF64_HEADER_BYTES];
+    file.read_exact(&mut header).map_err(|_| {
+        SandboxError::InvalidConfig("fixed executable ELF header is invalid".into())
+    })?;
+    if &header[..4] != b"\x7fELF" || header[4] != 2 || header[5] != 1 || header[6] != 1 {
+        return Err(SandboxError::InvalidConfig(
+            "fixed executable must be a 64-bit little-endian ELF".into(),
+        ));
+    }
+
+    let elf_type = u16::from_le_bytes(
+        header[16..18]
+            .try_into()
+            .map_err(|_| SandboxError::InvalidConfig("fixed executable ELF is invalid".into()))?,
+    );
+    let elf_version = u32::from_le_bytes(
+        header[20..24]
+            .try_into()
+            .map_err(|_| SandboxError::InvalidConfig("fixed executable ELF is invalid".into()))?,
+    );
+    let elf_header_size = u16::from_le_bytes(
+        header[52..54]
+            .try_into()
+            .map_err(|_| SandboxError::InvalidConfig("fixed executable ELF is invalid".into()))?,
+    );
+    if !matches!(elf_type, 2 | 3)
+        || elf_version != 1
+        || elf_header_size != ELF64_HEADER_BYTES as u16
+    {
+        return Err(SandboxError::InvalidConfig(
+            "fixed executable ELF header is invalid".into(),
+        ));
+    }
+
+    let program_offset = u64::from_le_bytes(
+        header[32..40]
+            .try_into()
+            .map_err(|_| SandboxError::InvalidConfig("fixed executable ELF is invalid".into()))?,
+    );
+    let program_entry_size = u16::from_le_bytes(
+        header[54..56]
+            .try_into()
+            .map_err(|_| SandboxError::InvalidConfig("fixed executable ELF is invalid".into()))?,
+    );
+    let program_count = u16::from_le_bytes(
+        header[56..58]
+            .try_into()
+            .map_err(|_| SandboxError::InvalidConfig("fixed executable ELF is invalid".into()))?,
+    );
+    if program_entry_size < ELF64_PROGRAM_HEADER_BYTES as u16
+        || program_count == 0
+        || program_count > MAX_ELF_PROGRAM_HEADERS
+    {
+        return Err(SandboxError::InvalidConfig(
+            "fixed executable ELF program headers are invalid".into(),
+        ));
+    }
+    u64::from(program_entry_size)
+        .checked_mul(u64::from(program_count))
+        .and_then(|bytes| program_offset.checked_add(bytes))
+        .filter(|end| *end <= length)
+        .ok_or_else(|| {
+            SandboxError::InvalidConfig("fixed executable ELF program headers are invalid".into())
+        })?;
+
+    let mut has_load = false;
+    for index in 0..program_count {
+        let offset = program_offset + u64::from(index) * u64::from(program_entry_size);
+        file.seek(SeekFrom::Start(offset)).map_err(|_| {
+            SandboxError::InvalidConfig("fixed executable ELF program headers are invalid".into())
+        })?;
+        let mut kind = [0_u8; 4];
+        file.read_exact(&mut kind).map_err(|_| {
+            SandboxError::InvalidConfig("fixed executable ELF program headers are invalid".into())
+        })?;
+        match u32::from_le_bytes(kind) {
+            ELF_PROGRAM_LOAD => has_load = true,
+            ELF_PROGRAM_INTERPRETER => {
+                return Err(SandboxError::InvalidConfig(
+                    "fixed executable must not contain PT_INTERP".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    if !has_load {
+        return Err(SandboxError::InvalidConfig(
+            "fixed executable ELF has no loadable segment".into(),
+        ));
     }
     Ok(())
 }
@@ -1769,11 +1976,17 @@ mod tests {
         assert_eq!(FIXED_LANDLOCK_HANDLED_ACCESS, 0xFFFF);
         assert_eq!(FIXED_LANDLOCK_ROOT_PATH, b"/\0");
         assert_eq!(FIXED_LANDLOCK_ROOT_ACCESS, 0b1100);
+        assert_eq!(FIXED_LANDLOCK_EXECUTABLE_ACCESS, 0b1);
         assert_eq!(
             fixed_landlock_root_rule(37).allowed_access,
             FIXED_LANDLOCK_ROOT_ACCESS
         );
         assert_eq!(fixed_landlock_root_rule(37).parent_fd, 37);
+        assert_eq!(
+            fixed_landlock_executable_rule(41).allowed_access,
+            FIXED_LANDLOCK_EXECUTABLE_ACCESS
+        );
+        assert_eq!(fixed_landlock_executable_rule(41).parent_fd, 41);
         assert_eq!(
             FIXED_LANDLOCK_ROOT_ACCESS & !FIXED_LANDLOCK_HANDLED_ACCESS,
             0
@@ -1860,6 +2073,79 @@ mod tests {
         let cleanup = std::fs::remove_dir_all(&fixture_dir);
         assert!(cleanup.is_ok(), "parent fixture cleanup failed");
         assert!(status.success(), "Landlock subprocess probe failed");
+    }
+
+    #[test]
+    fn fixed_read_only_landlock_allows_only_one_static_executable() {
+        const PROBE_EXECUTABLE: &str = "FCP_FIXED_LANDLOCK_STATIC_EXECUTABLE";
+        const PROBE_FIXTURE: &str = "FCP_FIXED_LANDLOCK_STATIC_FIXTURE";
+
+        if let (Some(executable), Some(fixture)) = (
+            std::env::var_os(PROBE_EXECUTABLE),
+            std::env::var_os(PROBE_FIXTURE),
+        ) {
+            let executable = PathBuf::from(executable);
+            let fixture = PathBuf::from(fixture);
+            apply_fixed_read_only_landlock_with_static_executable(&executable)
+                .expect("exact static executable Landlock setup");
+            assert_eq!(
+                std::fs::read(&fixture).expect("read-only fixture"),
+                b"fixed static executable fixture"
+            );
+            assert!(OpenOptions::new().write(true).open(&fixture).is_err());
+            assert!(
+                Command::new(&executable)
+                    .arg("true")
+                    .status()
+                    .is_ok_and(|status| status.success())
+            );
+            assert!(Command::new("/bin/true").status().is_err());
+            assert!(
+                Command::new(&executable)
+                    .args(["sh", "-c", "/bin/bash -c 'exit 0'"])
+                    .status()
+                    .is_ok_and(|status| !status.success())
+            );
+            return;
+        }
+
+        let static_executable = match std::fs::canonicalize("/bin/busybox") {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        verify_fixed_static_executable(&static_executable)
+            .expect("busybox must be a static ELF fixture");
+        let dynamic_executable = std::fs::canonicalize("/bin/true").expect("canonical true");
+        assert!(verify_fixed_static_executable(&dynamic_executable).is_err());
+        assert!(verify_fixed_static_executable(Path::new("relative/provider")).is_err());
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let fixture_dir = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temp directory")
+            .join(format!(
+                "fcp-fixed-static-landlock-{}-{nonce}",
+                std::process::id()
+            ));
+        std::fs::create_dir(&fixture_dir).expect("create fixture directory");
+        let fixture = fixture_dir.join("fixture");
+        std::fs::write(&fixture, b"fixed static executable fixture").expect("write fixture");
+        let fixture = fixture.canonicalize().expect("canonical fixture");
+
+        let status = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "fixed_read_only_landlock_allows_only_one_static_executable",
+                "--nocapture",
+            ])
+            .env(PROBE_EXECUTABLE, &static_executable)
+            .env(PROBE_FIXTURE, &fixture)
+            .status()
+            .expect("run exact executable Landlock subprocess probe");
+        let cleanup = std::fs::remove_dir_all(&fixture_dir);
+        assert!(cleanup.is_ok(), "parent fixture cleanup failed");
+        assert!(status.success(), "exact executable Landlock probe failed");
     }
 
     // ── New tests ──

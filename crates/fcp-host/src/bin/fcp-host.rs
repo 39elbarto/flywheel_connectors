@@ -10778,6 +10778,33 @@ async fn async_n8n_read_only_run_once(
         .and_then(accept_n8n_run_once_invoke_response)
 }
 
+#[cfg(target_os = "linux")]
+fn fixed_n8n_supervised_provider_executable() -> HostResult<PathBuf> {
+    let host = std::env::current_exe().map_err(|_| {
+        HostError::PreflightFailed("n8n supervised host executable is unavailable".to_string())
+    })?;
+    if host.file_name().and_then(|name| name.to_str()) != Some("fcp-host") {
+        return Err(HostError::PreflightFailed(
+            "n8n supervised host executable is invalid".to_string(),
+        ));
+    }
+    let bin = host.parent().filter(|path| {
+        path.is_absolute() && path.file_name().and_then(|name| name.to_str()) == Some("bin")
+    });
+    let provider = bin.map(|path| path.join("fcp-n8n")).ok_or_else(|| {
+        HostError::PreflightFailed("n8n supervised release layout is invalid".to_string())
+    })?;
+    let canonical = provider.canonicalize().map_err(|_| {
+        HostError::PreflightFailed("n8n supervised provider is unavailable".to_string())
+    })?;
+    if canonical != provider {
+        return Err(HostError::PreflightFailed(
+            "n8n supervised provider path is invalid".to_string(),
+        ));
+    }
+    Ok(provider)
+}
+
 fn main() -> HostResult<()> {
     let action = parse_cli_action()?;
     match action {
@@ -10799,13 +10826,20 @@ fn main() -> HostResult<()> {
             return print_run_once_response(Err(error));
         }
         #[cfg(target_os = "linux")]
-        if fcp_sandbox::apply_fixed_read_only_landlock().is_err() {
-            return print_run_once_response(Err(HostError::PreflightFailed(
-                "n8n supervised run-once sandbox admission rejected".to_string(),
-            )));
+        {
+            let provider = match fixed_n8n_supervised_provider_executable() {
+                Ok(provider) => provider,
+                Err(error) => return print_run_once_response(Err(error)),
+            };
+            if fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable(&provider)
+                .is_err()
+            {
+                return print_run_once_response(Err(HostError::PreflightFailed(
+                    "n8n supervised run-once sandbox admission rejected".to_string(),
+                )));
+            }
+            FIXED_READ_ONLY_LANDLOCK_ACTIVE.store(true, Ordering::Release);
         }
-        #[cfg(target_os = "linux")]
-        FIXED_READ_ONLY_LANDLOCK_ACTIVE.store(true, Ordering::Release);
     }
     let telemetry_config = match init_host_telemetry() {
         Ok(config) => config,

@@ -3930,7 +3930,13 @@ fn owned_codec_error(error: fcp_host::InheritedEgressCodecError) -> HostError {
 #[cfg(target_os = "linux")]
 fn owned_rpc_result(response: Value) -> HostResult<Value> {
     if let Some(error) = response.get("error") {
-        emit_n8n_run_once_child_error_diagnostic(child_error_diagnostic(error));
+        let child_diagnostic = child_error_diagnostic(error);
+        if child_diagnostic == N8nRunOnceChildErrorDiagnostic::External {
+            emit_n8n_run_once_invoke_diagnostic(n8n_run_once_external_diagnostic(
+                child_external_status_code(error),
+            ));
+        }
+        emit_n8n_run_once_child_error_diagnostic(child_diagnostic);
         emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::RpcChildError);
         return Err(HostError::RegistryError(
             "owned per-invocation RPC returned an error".to_string(),
@@ -9919,6 +9925,14 @@ fn child_error_diagnostic(error: &Value) -> N8nRunOnceChildErrorDiagnostic {
         b'9' => N8nRunOnceChildErrorDiagnostic::Internal,
         _ => N8nRunOnceChildErrorDiagnostic::Unknown,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn child_external_status_code(error: &Value) -> Option<u16> {
+    error
+        .pointer("/details/status_code")
+        .and_then(Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
 }
 
 #[cfg(target_os = "linux")]
@@ -18511,6 +18525,50 @@ mod tests {
             child_error_diagnostic(&json!({"code": 7003})),
             N8nRunOnceChildErrorDiagnostic::Unknown
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn n8n_child_external_status_uses_only_bounded_numeric_details() {
+        let cases = [
+            (
+                json!({"details": {"status_code": 404, "private": "PRIVATE-CONTENT-CANARY"}}),
+                Some(404),
+                N8nRunOnceInvokeDiagnostic::ResponseExternal4xx,
+            ),
+            (
+                json!({"details": {"status_code": 503}}),
+                Some(503),
+                N8nRunOnceInvokeDiagnostic::ResponseExternal5xx,
+            ),
+            (
+                json!({"details": {"status_code": 200}}),
+                Some(200),
+                N8nRunOnceInvokeDiagnostic::ResponseExternalOther,
+            ),
+            (
+                json!({"details": {"status_code": null}}),
+                None,
+                N8nRunOnceInvokeDiagnostic::ResponseExternalUnknown,
+            ),
+            (
+                json!({"details": {"status_code": "404"}}),
+                None,
+                N8nRunOnceInvokeDiagnostic::ResponseExternalUnknown,
+            ),
+            (
+                json!({"details": {"status_code": 70000}}),
+                None,
+                N8nRunOnceInvokeDiagnostic::ResponseExternalUnknown,
+            ),
+        ];
+        for (error, expected_status, expected_diagnostic) in cases {
+            let status = child_external_status_code(&error);
+            assert_eq!(status, expected_status);
+            let diagnostic = n8n_run_once_external_diagnostic(status);
+            assert_eq!(diagnostic, expected_diagnostic);
+            assert!(!diagnostic.label().contains("PRIVATE-CONTENT-CANARY"));
+        }
     }
 
     #[test]

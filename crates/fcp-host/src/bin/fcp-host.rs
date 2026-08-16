@@ -9705,6 +9705,8 @@ fn n8n_run_once_stage_error(stage: N8nRunOnceFailureStage) -> HostError {
 }
 
 const N8N_RUN_ONCE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-INVOKE-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const N8N_RUN_ONCE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum N8nRunOnceInvokeDiagnostic {
@@ -9762,6 +9764,19 @@ fn emit_n8n_run_once_invoke_diagnostic(diagnostic: N8nRunOnceInvokeDiagnostic) {
         diagnostic.label()
     );
 }
+
+#[cfg(target_os = "linux")]
+fn emit_n8n_run_once_host_error_diagnostic(error: &HostError) {
+    if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
+        eprintln!(
+            "{N8N_RUN_ONCE_HOST_ERROR_DIAGNOSTIC_PREFIX}{}",
+            normalized_host_error_class(error)
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn emit_n8n_run_once_host_error_diagnostic(_error: &HostError) {}
 
 fn n8n_run_once_dispatch_diagnostic(status: StatusCode) -> N8nRunOnceInvokeDiagnostic {
     if status.is_client_error() {
@@ -16631,6 +16646,7 @@ async fn invoke_handler_inner(
             Ok(Json(response))
         }
         Err(err) => {
+            emit_n8n_run_once_host_error_diagnostic(&err);
             let duration_ms = started_at.elapsed().as_millis() as u64;
             record_invoke_budget_usage(
                 state.budget.as_ref(),

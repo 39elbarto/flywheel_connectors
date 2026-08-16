@@ -27,6 +27,10 @@ const CHILD_INVOKE_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-INVOKE-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const BRIDGE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-INVOKE-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
+const CHILD_HOST_ERROR_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
 const SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_READY_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/READY";
@@ -942,6 +946,25 @@ fn emit_child_invoke_diagnostic(stderr: &[u8]) {
     if let Some(label) = child_invoke_diagnostic(stderr) {
         eprintln!("{BRIDGE_INVOKE_DIAGNOSTIC_PREFIX}{label}");
     }
+    if let Some(label) = child_host_error_diagnostic(stderr) {
+        eprintln!("{BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX}{label}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn child_host_error_diagnostic(stderr: &[u8]) -> Option<&'static str> {
+    stderr.split(|byte| *byte == b'\n').find_map(|line| {
+        let label = line.strip_prefix(CHILD_HOST_ERROR_DIAGNOSTIC_PREFIX)?;
+        match label {
+            b"local.capability_denied" => Some("local.capability_denied"),
+            b"local.validation" => Some("local.validation"),
+            b"local.policy_denied" => Some("local.policy_denied"),
+            b"transport.host_connector" => Some("transport.host_connector"),
+            b"transport.frame_limit" => Some("transport.frame_limit"),
+            b"internal" => Some("internal"),
+            _ => None,
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1474,6 +1497,31 @@ mod tests {
             b"FCP-N8N-INVOKE-DIAGNOSTIC/v2 response_external_5xx",
         ] {
             assert_eq!(child_invoke_diagnostic(stderr), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_host_error_diagnostic_accepts_only_normalized_classes() {
+        for label in [
+            "local.capability_denied",
+            "local.validation",
+            "local.policy_denied",
+            "transport.host_connector",
+            "transport.frame_limit",
+            "internal",
+        ] {
+            let stderr = format!("FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 {label}\n");
+            assert_eq!(child_host_error_diagnostic(stderr.as_bytes()), Some(label));
+        }
+
+        for stderr in [
+            b"FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 PRIVATE".as_slice(),
+            b"FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 internal PRIVATE",
+            b"prefix FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 internal",
+            b"FCP-N8N-HOST-ERROR-DIAGNOSTIC/v2 internal",
+        ] {
+            assert_eq!(child_host_error_diagnostic(stderr), None);
         }
     }
 

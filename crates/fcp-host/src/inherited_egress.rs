@@ -20,8 +20,12 @@ use subtle::ConstantTimeEq;
 /// Authentication and framing errors are deliberately content-free.
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
 pub enum InheritedEgressCodecError {
-    #[error("inherited host-egress stream is unavailable")]
-    Io,
+    #[error("inherited host-egress stream read failed")]
+    ReadIo,
+    #[error("inherited host-egress stream reached EOF")]
+    ReadEof,
+    #[error("inherited host-egress stream write failed")]
+    WriteIo,
     #[error("inherited host-egress frame is truncated")]
     Truncated,
     #[error("inherited host-egress frame is oversized")]
@@ -127,7 +131,7 @@ impl InheritedEgressCodec {
         self.stream
             .write_all(&frame)
             .await
-            .map_err(|_| InheritedEgressCodecError::Io)
+            .map_err(|_| InheritedEgressCodecError::WriteIo)
     }
 
     /// Build a typed success response for the current request.
@@ -199,10 +203,10 @@ impl InheritedEgressCodec {
                 .stream
                 .read(&mut chunk[..read_len])
                 .await
-                .map_err(|_| InheritedEgressCodecError::Io)?;
+                .map_err(|_| InheritedEgressCodecError::ReadIo)?;
             if count == 0 {
                 return Err(if self.retained_read_buffer.is_empty() {
-                    InheritedEgressCodecError::Io
+                    InheritedEgressCodecError::ReadEof
                 } else {
                     InheritedEgressCodecError::Truncated
                 });
@@ -478,6 +482,34 @@ mod tests {
         let truncated =
             fcp_async_core::runtime::block_on_sync(codec.read_frame()).expect("runtime");
         assert_eq!(truncated, Err(InheritedEgressCodecError::Truncated));
+
+        let (peer, stream) = std::os::unix::net::UnixStream::pair().expect("EOF pair");
+        let mut codec = InheritedEgressCodec::new(
+            UnixStream::from_std(stream).expect("EOF async stream"),
+            "top-secret",
+        )
+        .expect("EOF codec");
+        drop(peer);
+        let eof = fcp_async_core::runtime::block_on_sync(codec.read_frame()).expect("runtime");
+        assert_eq!(eof, Err(InheritedEgressCodecError::ReadEof));
+    }
+
+    #[test]
+    fn closed_peer_is_classified_as_write_io() {
+        let (peer, stream) = std::os::unix::net::UnixStream::pair().expect("write pair");
+        let mut codec = InheritedEgressCodec::new(
+            UnixStream::from_std(stream).expect("write async stream"),
+            "top-secret",
+        )
+        .expect("write codec");
+        codec.pending_response = Some((1, HostEgressWireRoute::Http));
+        drop(peer);
+        let response = codec.success_response(response_body(HostEgressWireRoute::Http));
+        let write = fcp_async_core::runtime::block_on_sync(async {
+            codec.write_response(&response.expect("response")).await
+        })
+        .expect("runtime");
+        assert_eq!(write, Err(InheritedEgressCodecError::WriteIo));
     }
 
     #[test]

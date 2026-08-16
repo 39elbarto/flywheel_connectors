@@ -3856,7 +3856,13 @@ fn owned_invocation_error(error: OwnedInvocationError) -> HostError {
 #[cfg(target_os = "linux")]
 fn owned_codec_error(error: fcp_host::InheritedEgressCodecError) -> HostError {
     let diagnostic = match error {
-        fcp_host::InheritedEgressCodecError::Io => N8nRunOnceOwnedDiagnostic::EgressCodecIo,
+        fcp_host::InheritedEgressCodecError::ReadIo => N8nRunOnceOwnedDiagnostic::EgressCodecReadIo,
+        fcp_host::InheritedEgressCodecError::ReadEof => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecReadEof
+        }
+        fcp_host::InheritedEgressCodecError::WriteIo => {
+            N8nRunOnceOwnedDiagnostic::EgressCodecWriteIo
+        }
         fcp_host::InheritedEgressCodecError::Truncated => {
             N8nRunOnceOwnedDiagnostic::EgressCodecTruncated
         }
@@ -3900,7 +3906,8 @@ fn owned_codec_error(error: fcp_host::InheritedEgressCodecError) -> HostError {
 
 #[cfg(target_os = "linux")]
 fn owned_rpc_result(response: Value) -> HostResult<Value> {
-    if response.get("error").is_some() {
+    if let Some(error) = response.get("error") {
+        emit_n8n_run_once_child_error_diagnostic(child_error_diagnostic(error));
         emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::RpcChildError);
         return Err(HostError::RegistryError(
             "owned per-invocation RPC returned an error".to_string(),
@@ -4071,10 +4078,9 @@ async fn owned_egress_loop(
             let response = codec
                 .error_response(status, error)
                 .map_err(owned_codec_error)?;
-            codec
-                .write_response(&response)
-                .await
-                .map_err(owned_codec_error)?;
+            if !owned_write_response(&mut codec, &response, &shutting_down).await? {
+                return Ok(());
+            }
             return Err(HostError::PreflightFailed(
                 "owned host-egress request arrived before activation".to_string(),
             ));
@@ -4087,10 +4093,9 @@ async fn owned_egress_loop(
             let response = codec
                 .error_response(400, HostEgressWireError::InvalidRequest)
                 .map_err(owned_codec_error)?;
-            codec
-                .write_response(&response)
-                .await
-                .map_err(owned_codec_error)?;
+            if !owned_write_response(&mut codec, &response, &shutting_down).await? {
+                return Ok(());
+            }
             return Err(HostError::InvalidFilter(
                 "owned host-egress request identity does not match invocation".to_string(),
             ));
@@ -4098,22 +4103,45 @@ async fn owned_egress_loop(
         match owned_perform_egress(&state, &binding, request.payload).await {
             Ok(body) => {
                 let response = codec.success_response(body).map_err(owned_codec_error)?;
-                codec
-                    .write_response(&response)
-                    .await
-                    .map_err(owned_codec_error)?;
+                if !owned_write_response(&mut codec, &response, &shutting_down).await? {
+                    return Ok(());
+                }
             }
             Err(error) => {
                 let (status, code) = owned_egress_error_response(&error);
                 let response = codec
                     .error_response(status, code)
                     .map_err(owned_codec_error)?;
-                codec
-                    .write_response(&response)
-                    .await
-                    .map_err(owned_codec_error)?;
+                if !owned_write_response(&mut codec, &response, &shutting_down).await? {
+                    return Ok(());
+                }
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn owned_write_response(
+    codec: &mut InheritedEgressCodec,
+    response: &fcp_manifest::HostEgressWireResponse,
+    shutting_down: &AtomicBool,
+) -> HostResult<bool> {
+    owned_write_result(codec.write_response(response).await, shutting_down)
+}
+
+#[cfg(target_os = "linux")]
+fn owned_write_result(
+    result: Result<(), fcp_host::InheritedEgressCodecError>,
+    shutting_down: &AtomicBool,
+) -> HostResult<bool> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(fcp_host::InheritedEgressCodecError::WriteIo)
+            if shutting_down.load(Ordering::Acquire) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(owned_codec_error(error)),
     }
 }
 
@@ -4425,6 +4453,36 @@ mod owned_per_invocation_unit_tests {
             Some((403, HostEgressWireError::Rejected))
         );
         assert_eq!(owned_egress_gate_denial(true), None);
+    }
+
+    #[test]
+    fn owned_write_failure_is_suppressed_only_after_shutdown_starts() {
+        let shutting_down = AtomicBool::new(false);
+        let active_failure = owned_write_result(
+            Err(fcp_host::InheritedEgressCodecError::WriteIo),
+            &shutting_down,
+        );
+        assert!(active_failure.is_err());
+
+        shutting_down.store(true, Ordering::Release);
+        assert!(
+            !owned_write_result(
+                Err(fcp_host::InheritedEgressCodecError::WriteIo),
+                &shutting_down,
+            )
+            .expect("shutdown write failure is normal termination")
+        );
+        assert!(
+            owned_write_result(Ok(()), &shutting_down)
+                .expect("successful write remains successful")
+        );
+        assert!(
+            owned_write_result(
+                Err(fcp_host::InheritedEgressCodecError::InvalidResponse),
+                &shutting_down,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -9784,6 +9842,61 @@ const N8N_RUN_ONCE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-INVOKE-DIAGNOSTIC/v
 const N8N_RUN_ONCE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const N8N_RUN_ONCE_OWNED_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-OWNED-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const N8N_RUN_ONCE_CHILD_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-CHILD-ERROR-DIAGNOSTIC/v1 ";
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum N8nRunOnceChildErrorDiagnostic {
+    Protocol,
+    Auth,
+    Capability,
+    Zone,
+    Connector,
+    Resource,
+    External,
+    Internal,
+    Unknown,
+}
+
+#[cfg(target_os = "linux")]
+impl N8nRunOnceChildErrorDiagnostic {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Protocol => "child.protocol",
+            Self::Auth => "child.auth",
+            Self::Capability => "child.capability",
+            Self::Zone => "child.zone",
+            Self::Connector => "child.connector",
+            Self::Resource => "child.resource",
+            Self::External => "child.external",
+            Self::Internal => "child.internal",
+            Self::Unknown => "child.unknown",
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn child_error_diagnostic(error: &Value) -> N8nRunOnceChildErrorDiagnostic {
+    let Some(code) = error.get("code").and_then(Value::as_str) else {
+        return N8nRunOnceChildErrorDiagnostic::Unknown;
+    };
+    let bytes = code.as_bytes();
+    if bytes.len() != 8 || &bytes[..4] != b"FCP-" || !bytes[4..].iter().all(u8::is_ascii_digit) {
+        return N8nRunOnceChildErrorDiagnostic::Unknown;
+    }
+    match bytes[4] {
+        b'1' => N8nRunOnceChildErrorDiagnostic::Protocol,
+        b'2' => N8nRunOnceChildErrorDiagnostic::Auth,
+        b'3' => N8nRunOnceChildErrorDiagnostic::Capability,
+        b'4' => N8nRunOnceChildErrorDiagnostic::Zone,
+        b'5' => N8nRunOnceChildErrorDiagnostic::Connector,
+        b'6' => N8nRunOnceChildErrorDiagnostic::Resource,
+        b'7' => N8nRunOnceChildErrorDiagnostic::External,
+        b'9' => N8nRunOnceChildErrorDiagnostic::Internal,
+        _ => N8nRunOnceChildErrorDiagnostic::Unknown,
+    }
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9794,7 +9907,9 @@ enum N8nRunOnceOwnedDiagnostic {
     RpcProtocol,
     RpcChildError,
     ResponseProtocol,
-    EgressCodecIo,
+    EgressCodecReadIo,
+    EgressCodecReadEof,
+    EgressCodecWriteIo,
     EgressCodecTruncated,
     EgressCodecOversized,
     EgressCodecEmptyFrame,
@@ -9820,7 +9935,9 @@ impl N8nRunOnceOwnedDiagnostic {
             Self::RpcProtocol => "owned.rpc_protocol",
             Self::RpcChildError => "owned.rpc_child_error",
             Self::ResponseProtocol => "owned.response_protocol",
-            Self::EgressCodecIo => "owned.egress_codec.io",
+            Self::EgressCodecReadIo => "owned.egress_codec.read_error",
+            Self::EgressCodecReadEof => "owned.egress_codec.read_eof",
+            Self::EgressCodecWriteIo => "owned.egress_codec.write_error",
             Self::EgressCodecTruncated => "owned.egress_codec.truncated",
             Self::EgressCodecOversized => "owned.egress_codec.oversized",
             Self::EgressCodecEmptyFrame => "owned.egress_codec.empty_frame",
@@ -9913,6 +10030,16 @@ fn emit_n8n_run_once_owned_diagnostic(diagnostic: N8nRunOnceOwnedDiagnostic) {
     if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
         eprintln!(
             "{N8N_RUN_ONCE_OWNED_DIAGNOSTIC_PREFIX}{}",
+            diagnostic.label()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn emit_n8n_run_once_child_error_diagnostic(diagnostic: N8nRunOnceChildErrorDiagnostic) {
+    if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
+        eprintln!(
+            "{N8N_RUN_ONCE_CHILD_ERROR_DIAGNOSTIC_PREFIX}{}",
             diagnostic.label()
         );
     }
@@ -18153,8 +18280,16 @@ mod tests {
                 "owned.response_protocol",
             ),
             (
-                N8nRunOnceOwnedDiagnostic::EgressCodecIo,
-                "owned.egress_codec.io",
+                N8nRunOnceOwnedDiagnostic::EgressCodecReadIo,
+                "owned.egress_codec.read_error",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecReadEof,
+                "owned.egress_codec.read_eof",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::EgressCodecWriteIo,
+                "owned.egress_codec.write_error",
             ),
             (
                 N8nRunOnceOwnedDiagnostic::EgressCodecTruncated,
@@ -18210,6 +18345,44 @@ mod tests {
             assert_eq!(diagnostic.label(), expected);
             assert!(!diagnostic.label().contains("PRIVATE-CONTENT-CANARY"));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn n8n_child_error_diagnostic_accepts_only_fcp_code_families() {
+        let cases = [
+            ("FCP-1001", N8nRunOnceChildErrorDiagnostic::Protocol),
+            ("FCP-2002", N8nRunOnceChildErrorDiagnostic::Auth),
+            ("FCP-3001", N8nRunOnceChildErrorDiagnostic::Capability),
+            ("FCP-4001", N8nRunOnceChildErrorDiagnostic::Zone),
+            ("FCP-5002", N8nRunOnceChildErrorDiagnostic::Connector),
+            ("FCP-6001", N8nRunOnceChildErrorDiagnostic::Resource),
+            ("FCP-7003", N8nRunOnceChildErrorDiagnostic::External),
+            ("FCP-9001", N8nRunOnceChildErrorDiagnostic::Internal),
+        ];
+        for (code, expected) in cases {
+            let error = json!({"code": code, "message": "PRIVATE-CONTENT-CANARY"});
+            let diagnostic = child_error_diagnostic(&error);
+            assert_eq!(diagnostic, expected);
+            assert!(!diagnostic.label().contains("PRIVATE-CONTENT-CANARY"));
+        }
+        for code in [
+            "",
+            "FCP-",
+            "FCP-0001",
+            "FCP-8001",
+            "fcp-7003",
+            "FCP-7003 PRIVATE",
+        ] {
+            assert_eq!(
+                child_error_diagnostic(&json!({"code": code})),
+                N8nRunOnceChildErrorDiagnostic::Unknown
+            );
+        }
+        assert_eq!(
+            child_error_diagnostic(&json!({"code": 7003})),
+            N8nRunOnceChildErrorDiagnostic::Unknown
+        );
     }
 
     #[test]

@@ -193,6 +193,55 @@ struct ActivationTarget {
     normalized_input: serde_json::Value,
 }
 
+struct HostRequestAttribution {
+    request_id: String,
+    correlation_id: Option<String>,
+}
+
+fn host_request_attribution(params: &Value) -> FcpResult<Option<HostRequestAttribution>> {
+    let correlation_id = match params.get("correlation_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(
+            uuid::Uuid::parse_str(value)
+                .map_err(|_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Invalid host correlation ID".into(),
+                })?
+                .to_string(),
+        ),
+        Some(_) => {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid host correlation ID".into(),
+            });
+        }
+    };
+
+    let Some(request_id) = params.get("id") else {
+        if correlation_id.is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Host correlation requires a request ID".into(),
+            });
+        }
+        return Ok(None);
+    };
+    let request_id = request_id.as_str().filter(|value| {
+        !value.is_empty()
+            && value.len() <= 256
+            && value.trim() == *value
+            && !value.chars().any(char::is_control)
+    });
+    let request_id = request_id.ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "Invalid host request ID".into(),
+    })?;
+    Ok(Some(HostRequestAttribution {
+        request_id: request_id.to_string(),
+        correlation_id,
+    }))
+}
+
 /// FCP n8n Connector.
 pub struct N8nConnector {
     base: Arc<BaseConnector>,
@@ -489,6 +538,7 @@ impl N8nConnector {
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
         validate_operation_input(operation, &input).map_err(|error| error.to_fcp_error())?;
+        let host_attribution = host_request_attribution(&params)?;
 
         let operation_id: OperationId =
             operation.parse().map_err(|_| FcpError::InvalidRequest {
@@ -546,6 +596,7 @@ impl N8nConnector {
             canonical_resource,
             &mediated_token,
             request_number,
+            host_attribution.as_ref(),
         )?;
 
         let result = match operation {
@@ -730,19 +781,26 @@ impl N8nConnector {
         resource_uri: &str,
         token: &CapabilityToken,
         request_number: u64,
+        host_attribution: Option<&HostRequestAttribution>,
     ) -> FcpResult<HostEgressContext> {
         let zone_id = self.zone_id.as_ref().ok_or(FcpError::NotHandshaken)?;
         let session_id = self.session_id.as_ref().ok_or(FcpError::NotHandshaken)?;
         let token_cbor = token.raw().to_cbor().map_err(|error| FcpError::Internal {
             message: format!("Failed to serialize verified capability token: {error}"),
         })?;
+        let request_id = host_attribution.map_or_else(
+            || format!("{session_id}:{request_number}"),
+            |attribution| attribution.request_id.clone(),
+        );
+        let correlation_id =
+            host_attribution.and_then(|attribution| attribution.correlation_id.clone());
         Ok(HostEgressContext {
             connector_id: "fcp.n8n".to_string(),
             operation_id: operation.to_string(),
             resource_uri: resource_uri.to_string(),
             zone_id: zone_id.to_string(),
-            request_id: format!("{session_id}:{request_number}"),
-            correlation_id: None,
+            request_id,
+            correlation_id,
             capability_token_cbor_b64: base64::engine::general_purpose::STANDARD.encode(token_cbor),
         })
     }
@@ -2045,6 +2103,52 @@ mod tests {
 
     fn normalized_state_digest(workflow: WorkflowDetail) -> String {
         normalize_workflow_state(workflow).unwrap().state_digest
+    }
+
+    #[test]
+    fn host_request_attribution_preserves_outer_request_identity() {
+        let attribution = host_request_attribution(&json!({
+            "id": "req_00000000000000000001",
+            "correlation_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(attribution.request_id, "req_00000000000000000001");
+        assert_eq!(
+            attribution.correlation_id.as_deref(),
+            Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        );
+    }
+
+    #[test]
+    fn host_request_attribution_keeps_legacy_fallback_when_absent() {
+        assert!(host_request_attribution(&json!({})).unwrap().is_none());
+        assert!(
+            host_request_attribution(&json!({"correlation_id": null}))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn host_request_attribution_rejects_partial_or_malformed_identity() {
+        for params in [
+            json!({"id": ""}),
+            json!({"id": " leading-space"}),
+            json!({"id": "embedded\ncontrol"}),
+            json!({"id": 42}),
+            json!({"correlation_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}),
+            json!({
+                "id": "11111111-2222-4333-8444-555555555555",
+                "correlation_id": "not-a-uuid"
+            }),
+            json!({
+                "id": "11111111-2222-4333-8444-555555555555",
+                "correlation_id": 42
+            }),
+        ] {
+            assert!(host_request_attribution(&params).is_err());
+        }
     }
 
     #[test]

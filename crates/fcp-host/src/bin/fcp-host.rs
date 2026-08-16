@@ -9956,7 +9956,7 @@ fn build_n8n_read_only_invoke_request(
         idempotency_key: None,
         lease_seq: None,
         deadline_ms: Some(plan.deadline_ms),
-        correlation_id: Some(plan.correlation_id.unwrap_or_default()),
+        correlation_id: plan.correlation_id,
         provenance: None,
         approval_tokens: Vec::new(),
     };
@@ -29271,6 +29271,26 @@ done"#;
                 .resource_uri_for(&mismatched_request)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn n8n_read_only_request_preserves_absent_correlation() {
+        let config = run_once_n8n_test_config();
+        let mut input = n8n_read_only_test_input("n8n.workflows.list");
+        input.correlation_id = None;
+        let plan =
+            build_n8n_read_only_run_once_plan(input, &config).expect("valid read-only launch plan");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let (request, _) = build_n8n_read_only_invoke_request(
+            plan,
+            test_capability_token(
+                &signing_key,
+                "n8n.workflows.read",
+                "n8n.workflows.list",
+                ZoneId::private().as_str(),
+            ),
+        );
+        assert!(request.correlation_id.is_none());
     }
 
     #[test]

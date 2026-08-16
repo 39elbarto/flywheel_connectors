@@ -194,6 +194,19 @@ async fn invoke(connector: &N8nConnector, operation: &str, input: Value) -> FcpR
         .await
 }
 
+async fn invoke_with_host_attribution(
+    connector: &N8nConnector,
+    operation: &str,
+    input: Value,
+    request_id: &str,
+    correlation_id: &str,
+) -> FcpResult<Value> {
+    let mut params = authorized_params(operation, &input);
+    params["id"] = json!(request_id);
+    params["correlation_id"] = json!(correlation_id);
+    connector.handle_invoke(params).await
+}
+
 async fn setup_connector(mock_url: &str) -> N8nConnector {
     setup_connector_with_config(json!({
         "api_key": "test-n8n-api-key-123",
@@ -1142,6 +1155,8 @@ async fn direct_provider_short_configured_timeout_fails_closed() {
 
 #[fcp_async_core::runtime::test]
 async fn mediated_projects_list_proxy_fixture_proves_wire_contract_and_safe_projection() {
+    let request_id = "req_00000000000000000001";
+    let correlation_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
     let proxy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/rpc/egress/http"))
@@ -1163,10 +1178,12 @@ async fn mediated_projects_list_proxy_fixture_proves_wire_contract_and_safe_proj
         .await;
 
     let c = setup_mediated_connector(&proxy.uri()).await;
-    let result = invoke(
+    let result = invoke_with_host_attribution(
         &c,
         "n8n.projects.list",
         json!({"limit": 200, "cursor": "opaque cursor/%"}),
+        request_id,
+        correlation_id,
     )
     .await
     .unwrap();
@@ -1206,12 +1223,8 @@ async fn mediated_projects_list_proxy_fixture_proves_wire_contract_and_safe_proj
     assert_eq!(logical_resource, "fwc-n8n://eec");
     assert_eq!(envelope["context"]["resource_uri"], logical_resource);
     assert_ne!(envelope["url"], logical_resource);
-    assert!(
-        envelope["context"]["request_id"]
-            .as_str()
-            .is_some_and(|value| value.ends_with(":1"))
-    );
-    assert!(envelope["context"].get("correlation_id").is_none());
+    assert_eq!(envelope["context"]["request_id"], request_id);
+    assert_eq!(envelope["context"]["correlation_id"], correlation_id);
     let capability_b64 = envelope["context"]["capability_token_cbor_b64"]
         .as_str()
         .unwrap();

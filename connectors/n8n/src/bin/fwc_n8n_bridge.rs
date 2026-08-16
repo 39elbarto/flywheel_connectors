@@ -39,6 +39,12 @@ const CHILD_CHILD_ERROR_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-CHILD-ERROR-DIAGNOS
 #[cfg(target_os = "linux")]
 const BRIDGE_CHILD_ERROR_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-CHILD-ERROR-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
+const CHILD_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX: &[u8] =
+    b"FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const BRIDGE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX: &str =
+    "FWC-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
 const MAX_OWNED_DIAGNOSTIC_LABELS: usize = 4;
 #[cfg(target_os = "linux")]
 const SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
@@ -956,6 +962,9 @@ fn emit_child_invoke_diagnostic(stderr: &[u8]) {
     if let Some(label) = child_invoke_diagnostic(stderr) {
         eprintln!("{BRIDGE_INVOKE_DIAGNOSTIC_PREFIX}{label}");
     }
+    if let Some(label) = child_external_provenance_diagnostic(stderr) {
+        eprintln!("{BRIDGE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX}{label}");
+    }
     if let Some(label) = child_host_error_diagnostic(stderr) {
         eprintln!("{BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX}{label}");
     }
@@ -965,6 +974,19 @@ fn emit_child_invoke_diagnostic(stderr: &[u8]) {
     if let Some(label) = child_child_error_diagnostic(stderr) {
         eprintln!("{BRIDGE_CHILD_ERROR_DIAGNOSTIC_PREFIX}{label}");
     }
+}
+
+#[cfg(target_os = "linux")]
+fn child_external_provenance_diagnostic(stderr: &[u8]) -> Option<&'static str> {
+    stderr.split(|byte| *byte == b'\n').find_map(|line| {
+        let label = line.strip_prefix(CHILD_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX)?;
+        match label {
+            b"external.provider_5xx" => Some("external.provider_5xx"),
+            b"external.host_proxy_rejected" => Some("external.host_proxy_rejected"),
+            b"external.connector_egress_channel" => Some("external.connector_egress_channel"),
+            _ => None,
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1587,6 +1609,32 @@ mod tests {
             b"FCP-N8N-INVOKE-DIAGNOSTIC/v2 response_external_5xx",
         ] {
             assert_eq!(child_invoke_diagnostic(stderr), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_external_provenance_accepts_only_exact_allowlisted_lines() {
+        for label in [
+            "external.provider_5xx",
+            "external.host_proxy_rejected",
+            "external.connector_egress_channel",
+        ] {
+            let stderr =
+                format!("untrusted noise\nFCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 {label}\n");
+            assert_eq!(
+                child_external_provenance_diagnostic(stderr.as_bytes()),
+                Some(label)
+            );
+        }
+
+        for stderr in [
+            b"FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 PRIVATE".as_slice(),
+            b"FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.provider_5xx PRIVATE",
+            b"prefix FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.provider_5xx",
+            b"FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v2 external.provider_5xx",
+        ] {
+            assert_eq!(child_external_provenance_diagnostic(stderr), None);
         }
     }
 

@@ -3935,6 +3935,9 @@ fn owned_rpc_result(response: Value) -> HostResult<Value> {
             emit_n8n_run_once_invoke_diagnostic(n8n_run_once_external_diagnostic(
                 child_external_status_code(error),
             ));
+            if let Some(provenance) = child_external_provenance_diagnostic(error) {
+                emit_n8n_run_once_external_provenance_diagnostic(provenance);
+            }
         }
         emit_n8n_run_once_child_error_diagnostic(child_diagnostic);
         emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::RpcChildError);
@@ -9906,6 +9909,9 @@ const N8N_RUN_ONCE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-HOST-ERROR-DIAG
 const N8N_RUN_ONCE_OWNED_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-OWNED-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const N8N_RUN_ONCE_CHILD_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-CHILD-ERROR-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const N8N_RUN_ONCE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX: &str =
+    "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 ";
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9966,6 +9972,57 @@ fn child_external_status_code(error: &Value) -> Option<u16> {
         .pointer("/details/status_code")
         .and_then(Value::as_u64)
         .and_then(|status| u16::try_from(status).ok())
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum N8nRunOnceExternalProvenanceDiagnostic {
+    Provider5xx,
+    HostProxyRejected,
+    ConnectorEgressChannel,
+}
+
+#[cfg(target_os = "linux")]
+impl N8nRunOnceExternalProvenanceDiagnostic {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Provider5xx => "external.provider_5xx",
+            Self::HostProxyRejected => "external.host_proxy_rejected",
+            Self::ConnectorEgressChannel => "external.connector_egress_channel",
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn child_external_provenance_diagnostic(
+    error: &Value,
+) -> Option<N8nRunOnceExternalProvenanceDiagnostic> {
+    let status = child_external_status_code(error)?;
+    if !(500..=599).contains(&status)
+        || error.pointer("/details/service").and_then(Value::as_str) != Some("n8n")
+    {
+        return None;
+    }
+    let message = error.get("message").and_then(Value::as_str)?;
+    let provider_message =
+        format!("External service error: n8n - n8n provider returned HTTP {status}");
+    if message == provider_message {
+        return Some(N8nRunOnceExternalProvenanceDiagnostic::Provider5xx);
+    }
+    match message {
+        "External service error: n8n - host egress proxy rejected mediated request" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::HostProxyRejected)
+        }
+        "External service error: n8n - host egress proxy transport failed"
+        | "External service error: n8n - host egress proxy inherited channel failed"
+        | "External service error: n8n - host egress proxy request exceeded the configured limit"
+        | "External service error: n8n - host egress proxy request envelope was malformed"
+        | "External service error: n8n - host egress proxy response exceeded the configured limit"
+        | "External service error: n8n - host egress proxy returned a malformed response envelope" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressChannel)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -10120,6 +10177,18 @@ fn emit_n8n_run_once_child_error_diagnostic(diagnostic: N8nRunOnceChildErrorDiag
     if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
         eprintln!(
             "{N8N_RUN_ONCE_CHILD_ERROR_DIAGNOSTIC_PREFIX}{}",
+            diagnostic.label()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn emit_n8n_run_once_external_provenance_diagnostic(
+    diagnostic: N8nRunOnceExternalProvenanceDiagnostic,
+) {
+    if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
+        eprintln!(
+            "{N8N_RUN_ONCE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX}{}",
             diagnostic.label()
         );
     }
@@ -18601,6 +18670,72 @@ mod tests {
             let diagnostic = n8n_run_once_external_diagnostic(status);
             assert_eq!(diagnostic, expected_diagnostic);
             assert!(!diagnostic.label().contains("PRIVATE-CONTENT-CANARY"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn n8n_child_external_provenance_accepts_only_canonical_fixed_messages() {
+        let cases = [
+            (
+                json!({
+                    "message": "External service error: n8n - n8n provider returned HTTP 503",
+                    "details": {"service": "n8n", "status_code": 503}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::Provider5xx),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy rejected mediated request",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::HostProxyRejected),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel failed",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressChannel),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy returned a malformed response envelope",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressChannel),
+            ),
+        ];
+        for (error, expected) in cases {
+            let diagnostic = child_external_provenance_diagnostic(&error);
+            assert_eq!(diagnostic, expected);
+            assert!(
+                !diagnostic
+                    .expect("canonical message should have a diagnostic")
+                    .label()
+                    .contains("PRIVATE-CONTENT-CANARY")
+            );
+        }
+
+        for error in [
+            json!({
+                "message": "External service error: n8n - n8n provider returned HTTP 503 PRIVATE-CONTENT-CANARY",
+                "details": {"service": "n8n", "status_code": 503}
+            }),
+            json!({
+                "message": "External service error: n8n - n8n provider returned HTTP 502",
+                "details": {"service": "other", "status_code": 502}
+            }),
+            json!({
+                "message": "External service error: n8n - n8n provider returned HTTP 503",
+                "details": {"service": "n8n", "status_code": 502}
+            }),
+            json!({
+                "message": "External service error: n8n - host egress proxy inherited channel failed",
+                "details": {"service": "n8n", "status_code": 499}
+            }),
+        ] {
+            assert_eq!(child_external_provenance_diagnostic(&error), None);
         }
     }
 

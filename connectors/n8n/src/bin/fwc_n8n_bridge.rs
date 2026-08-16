@@ -61,6 +61,12 @@ enum BridgeErrorCode {
     WaitFailed,
     Timeout,
     ChildFailed,
+    HostConnectorNotFound,
+    HostInvalidInput,
+    HostPreflightDenied,
+    HostConnectorUnavailable,
+    HostConnectorFrameLimit,
+    HostInternal,
     TeardownFailed,
     GroupPresent,
     IoWorkerFailed,
@@ -96,6 +102,12 @@ impl BridgeErrorCode {
             Self::WaitFailed => "process_wait_failed",
             Self::Timeout => "timeout",
             Self::ChildFailed => "child_failed",
+            Self::HostConnectorNotFound => "host_connector_not_found",
+            Self::HostInvalidInput => "host_invalid_input",
+            Self::HostPreflightDenied => "host_preflight_denied",
+            Self::HostConnectorUnavailable => "host_connector_unavailable",
+            Self::HostConnectorFrameLimit => "host_connector_frame_limit",
+            Self::HostInternal => "host_internal",
             Self::TeardownFailed => "teardown_failed",
             Self::GroupPresent => "process_group_present",
             Self::IoWorkerFailed => "io_worker_failed",
@@ -865,7 +877,7 @@ pub fn run_process(
         request_deadline_at,
     )?;
     if !status.success() {
-        return Err(BridgeError::new(BridgeErrorCode::ChildFailed));
+        return Err(BridgeError::new(child_failure_code(&stdout)));
     }
     Ok(ProcessOutput {
         stdout,
@@ -1194,6 +1206,34 @@ fn parse_response(bytes: &[u8]) -> Result<Value, BridgeError> {
     Ok(value)
 }
 
+#[cfg(target_os = "linux")]
+fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
+    let Ok(value) = parse_response(bytes) else {
+        return BridgeErrorCode::ChildFailed;
+    };
+    let Some(envelope) = value.as_object() else {
+        return BridgeErrorCode::ChildFailed;
+    };
+    if envelope.len() != 2 || envelope.get("type").and_then(Value::as_str) != Some("error") {
+        return BridgeErrorCode::ChildFailed;
+    }
+    let Some(error) = envelope.get("error").and_then(Value::as_object) else {
+        return BridgeErrorCode::ChildFailed;
+    };
+    if error.len() != 1 {
+        return BridgeErrorCode::ChildFailed;
+    }
+    match error.get("code").and_then(Value::as_str) {
+        Some("connector_not_found") => BridgeErrorCode::HostConnectorNotFound,
+        Some("invalid_input") => BridgeErrorCode::HostInvalidInput,
+        Some("preflight_denied") => BridgeErrorCode::HostPreflightDenied,
+        Some("connector_unavailable") => BridgeErrorCode::HostConnectorUnavailable,
+        Some("connector_frame_limit") => BridgeErrorCode::HostConnectorFrameLimit,
+        Some("internal") => BridgeErrorCode::HostInternal,
+        _ => BridgeErrorCode::ChildFailed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1280,6 +1320,37 @@ mod tests {
                 .code(),
             "output_invalid"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_failure_exposes_only_exact_allowlisted_host_error_codes() {
+        let cases = [
+            ("connector_not_found", "host_connector_not_found"),
+            ("invalid_input", "host_invalid_input"),
+            ("preflight_denied", "host_preflight_denied"),
+            ("connector_unavailable", "host_connector_unavailable"),
+            ("connector_frame_limit", "host_connector_frame_limit"),
+            ("internal", "host_internal"),
+        ];
+        for (host_code, expected) in cases {
+            let encoded = format!(r#"{{"type":"error","error":{{"code":"{host_code}"}}}}"#);
+            assert_eq!(child_failure_code(encoded.as_bytes()).as_str(), expected);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_failure_rejects_unknown_or_contaminated_error_envelopes() {
+        for encoded in [
+            br#"{"type":"error","error":{"code":"PRIVATE-PROVIDER-TEXT"}}"#.as_slice(),
+            br#"{"type":"error","error":{"code":"preflight_denied","detail":"PRIVATE"}}"#,
+            br#"{"type":"error","error":{"code":"preflight_denied"},"extra":true}"#,
+            br#"{"type":"response","error":{"code":"preflight_denied"}}"#,
+            br#"not-json"#,
+        ] {
+            assert_eq!(child_failure_code(encoded).as_str(), "child_failed");
+        }
     }
 
     #[cfg(target_os = "linux")]

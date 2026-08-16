@@ -105,14 +105,7 @@ fn find_password(database: &Database, service: &str) -> Result<ZeroizingSecret, 
     if services.len() != 1 {
         return Err(BrokerError::new(crate::BrokerErrorCode::BackendFailed));
     }
-    let groups: Vec<_> = services[0]
-        .groups()
-        .filter(|group| group.name == service)
-        .collect();
-    if groups.len() != 1 {
-        return Err(BrokerError::new(crate::BrokerErrorCode::BackendFailed));
-    }
-    let entries: Vec<_> = groups[0]
+    let entries: Vec<_> = services[0]
         .entries()
         .filter(|entry| entry.get_title() == Some(service))
         .collect();
@@ -276,23 +269,20 @@ mod tests {
         matching_entries: usize,
     ) -> Database {
         let mut database = Database::new();
-        let mut root = database.root_mut();
-        let mut services = root.add_group();
-        services.name = "services".into();
-        let mut server = services.add_group();
-        server.name = service.into();
-        for index in 0..matching_entries {
-            let mut entry = server.add_entry();
-            entry.set_unprotected(fields::TITLE, service);
-            match protected_password {
-                Some(true) => entry.set_protected(fields::PASSWORD, format!("key-{index}")),
-                Some(false) => entry.set_unprotected(fields::PASSWORD, format!("key-{index}")),
-                None => {}
+        {
+            let mut root = database.root_mut();
+            let mut services = root.add_group();
+            services.name = "services".into();
+            for index in 0..matching_entries {
+                let mut entry = services.add_entry();
+                entry.set_unprotected(fields::TITLE, service);
+                match protected_password {
+                    Some(true) => entry.set_protected(fields::PASSWORD, format!("key-{index}")),
+                    Some(false) => entry.set_unprotected(fields::PASSWORD, format!("key-{index}")),
+                    None => {}
+                }
             }
         }
-        drop(server);
-        drop(services);
-        drop(root);
         database
     }
 
@@ -326,11 +316,11 @@ mod tests {
     #[test]
     fn duplicate_service_groups_fail_closed() {
         let mut database = database_with_service("n8n-eec", Some(true), 1);
-        let mut root = database.root_mut();
-        let mut second_services = root.add_group();
-        second_services.name = "services".into();
-        drop(second_services);
-        drop(root);
+        {
+            let mut root = database.root_mut();
+            let mut second_services = root.add_group();
+            second_services.name = "services".into();
+        }
         assert_eq!(
             find_password(&database, "n8n-eec")
                 .expect_err("duplicate services")

@@ -345,6 +345,7 @@ const N8N_READ_ONLY_RUN_ONCE_TTL_SECS: u64 = 60;
 const N8N_READ_ONLY_RUN_ONCE_MAX_DEADLINE_MS: u64 = 60_000;
 const N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const N8N_READ_ONLY_RUN_ONCE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const N8N_OPERATOR_CONFIGURED_MANIFEST_HOST: &str = "operator-configured";
 const N8N_SUPERVISED_RUN_ONCE_TOKEN: &str = "n8n-run-once-supervised";
 #[cfg(target_os = "linux")]
 const N8N_SUPERVISOR_CONTROL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD";
@@ -360,6 +361,8 @@ const N8N_SUPERVISOR_ABORT_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/ABORT";
 const N8N_SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
 #[cfg(target_os = "linux")]
 const N8N_SUPERVISOR_START_FRAME_LEN: usize = N8N_SUPERVISOR_START_PREFIX.len() + 4;
+#[cfg(target_os = "linux")]
+static FIXED_READ_ONLY_LANDLOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
 const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
     "n8n.credentials.list",
     "n8n.executions.get",
@@ -2450,6 +2453,55 @@ fn rate_limit_scope_label(scope: RateLimitScope) -> &'static str {
     }
 }
 
+fn resolve_per_invocation_network_constraints(
+    config: &ManagedConnectorConfig,
+    operation: &OperationId,
+    zone_id: &ZoneId,
+    manifest_constraints: &NetworkConstraints,
+) -> HostResult<NetworkConstraints> {
+    let mut expected = manifest_constraints.clone();
+    let configured_placeholder_count = expected
+        .host_allow
+        .iter()
+        .filter(|host| host.as_str() == N8N_OPERATOR_CONFIGURED_MANIFEST_HOST)
+        .count();
+    if config.id == "fcp.n8n" && configured_placeholder_count > 0 {
+        if configured_placeholder_count != 1 || expected.host_allow.len() != 1 {
+            return Err(HostError::PreflightFailed(format!(
+                "per-invocation execution plan has an ambiguous operator-configured host for operation `{operation}`"
+            )));
+        }
+        let binding = run_once_n8n_credential_binding_for_zone(config, zone_id).map_err(|_| {
+            HostError::PreflightFailed(format!(
+                "per-invocation execution plan could not resolve the operator-configured host for operation `{operation}`"
+            ))
+        })?;
+        expected.host_allow = vec![binding.host_allow];
+    }
+
+    let managed_constraints = config
+        .operation_network_constraints
+        .get(operation.as_str())
+        .ok_or_else(|| {
+            HostError::PreflightFailed(format!(
+                "per-invocation execution plan has no managed network constraints for operation `{operation}`"
+            ))
+        })?;
+    let resolved = managed_constraints
+        .resolve(config.config.as_ref())
+        .map_err(|_| {
+            HostError::PreflightFailed(format!(
+                "per-invocation execution plan could not resolve managed network constraints for operation `{operation}`"
+            ))
+        })?;
+    if resolved != expected {
+        return Err(HostError::PreflightFailed(format!(
+            "per-invocation execution plan network constraints mismatch for operation `{operation}`"
+        )));
+    }
+    Ok(expected)
+}
+
 impl SubprocessRegistry {
     async fn from_configs(
         configs: Vec<ConnectorConfig>,
@@ -2882,30 +2934,12 @@ impl SubprocessRegistry {
                         request.operation
                     ))
                 })?;
-            let managed_constraints = entry
-                .config
-                .operation_network_constraints
-                .get(request.operation.as_str())
-                .ok_or_else(|| {
-                    HostError::PreflightFailed(format!(
-                        "per-invocation execution plan has no managed network constraints for operation `{}`",
-                        request.operation
-                    ))
-                })?;
-            let resolved_constraints = managed_constraints
-                .resolve(entry.config.config.as_ref())
-                .map_err(|_| {
-                    HostError::PreflightFailed(format!(
-                        "per-invocation execution plan could not resolve managed network constraints for operation `{}`",
-                        request.operation
-                    ))
-                })?;
-            if resolved_constraints != manifest_constraints {
-                return Err(HostError::PreflightFailed(format!(
-                    "per-invocation execution plan network constraints mismatch for operation `{}`",
-                    request.operation
-                )));
-            }
+            let resolved_constraints = resolve_per_invocation_network_constraints(
+                &entry.config,
+                &request.operation,
+                &request.zone_id,
+                &manifest_constraints,
+            )?;
 
             let binding = entry.config.launch_binding.as_ref().ok_or_else(|| {
                 HostError::PreflightFailed(
@@ -2944,7 +2978,7 @@ impl SubprocessRegistry {
                 request_correlation_id: request.correlation_id.clone(),
                 manifest_operation,
                 launch_snapshot,
-                network_constraints: manifest_constraints,
+                network_constraints: resolved_constraints,
                 configure_payload: entry.config.config.clone(),
                 capability_verifying_key: self.capability_verifying_key,
                 requested_instance_id,
@@ -3050,26 +3084,13 @@ impl SubprocessRegistry {
                         "per-invocation execution plan network proof changed".to_string(),
                     )
                 })?;
-            let managed_constraints = entry
-                .config
-                .operation_network_constraints
-                .get(request.operation.as_str())
-                .ok_or_else(|| {
-                    HostError::PreflightFailed(
-                        "per-invocation execution plan managed network proof changed".to_string(),
-                    )
-                })?;
-            let resolved_constraints = managed_constraints
-                .resolve(entry.config.config.as_ref())
-                .map_err(|_| {
-                    HostError::PreflightFailed(
-                        "per-invocation execution plan managed network proof is invalid"
-                            .to_string(),
-                    )
-                })?;
-            if manifest_constraints != &plan.network_constraints
-                || resolved_constraints != plan.network_constraints
-            {
+            let resolved_constraints = resolve_per_invocation_network_constraints(
+                &entry.config,
+                &request.operation,
+                &request.zone_id,
+                manifest_constraints,
+            )?;
+            if resolved_constraints != plan.network_constraints {
                 return Err(HostError::PreflightFailed(
                     "per-invocation execution plan network proof changed".to_string(),
                 ));
@@ -4025,17 +4046,18 @@ async fn owned_run_protocol(
     activated.store(true, Ordering::Release);
 
     if let Some(host_public_key) = plan.capability_verifying_key {
-        let state_root = plan
-            .state_root
-            .clone()
-            .unwrap_or_else(connector_state_root_dir);
-        let zone_dir =
-            prepare_connector_zone_state_dir(&state_root, &plan.connector_id, &plan.zone_id)?;
+        let zone_dir = owned_handshake_zone_dir(
+            &plan.connector_id,
+            &plan.operation,
+            &plan.zone_id,
+            plan.state_root.as_deref(),
+            FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire),
+        )?;
         let nonce = owned_handshake_nonce();
         let handshake = HandshakeRequest {
             protocol_version: "1.0.0".to_string(),
             zone: plan.zone_id.clone(),
-            zone_dir: Some(zone_dir.to_string_lossy().into_owned()),
+            zone_dir,
             host_public_key,
             nonce,
             capabilities_requested: Vec::new(),
@@ -4070,6 +4092,33 @@ async fn owned_run_protocol(
         ));
     }
     Ok(response)
+}
+
+#[cfg(target_os = "linux")]
+fn owned_handshake_zone_dir(
+    connector_id: &ConnectorId,
+    operation: &OperationId,
+    zone_id: &ZoneId,
+    configured_state_root: Option<&StdPath>,
+    fixed_read_only_landlock_active: bool,
+) -> HostResult<Option<String>> {
+    if fixed_read_only_landlock_active {
+        if connector_id.as_str() != "fcp.n8n"
+            || !N8N_READ_ONLY_OPERATIONS.contains(&operation.as_str())
+        {
+            return Err(HostError::PreflightFailed(
+                "fixed read-only owned handshake is restricted to approved n8n operations"
+                    .to_string(),
+            ));
+        }
+        return Ok(None);
+    }
+
+    let state_root = configured_state_root
+        .map(StdPath::to_path_buf)
+        .unwrap_or_else(connector_state_root_dir);
+    let zone_dir = prepare_connector_zone_state_dir(&state_root, connector_id, zone_id)?;
+    Ok(Some(zone_dir.to_string_lossy().into_owned()))
 }
 
 #[cfg(target_os = "linux")]
@@ -4165,6 +4214,49 @@ async fn invoke_owned_per_invocation(
 #[cfg(all(test, target_os = "linux"))]
 mod owned_per_invocation_unit_tests {
     use super::*;
+
+    #[test]
+    fn fixed_read_only_n8n_handshake_omits_state_dir_without_filesystem_mutation() {
+        let state_root = tempfile::tempdir().expect("read-only state root");
+        let connector_id = ConnectorId::from_static("fcp.n8n");
+        let operation = OperationId::from_static("n8n.workflows.list");
+        let zone_id: ZoneId = "z:work".parse().expect("n8n zone");
+
+        let zone_dir = owned_handshake_zone_dir(
+            &connector_id,
+            &operation,
+            &zone_id,
+            Some(state_root.path()),
+            true,
+        )
+        .expect("approved n8n read must not need mutable connector state");
+
+        assert!(zone_dir.is_none());
+        assert_eq!(
+            std::fs::read_dir(state_root.path())
+                .expect("inspect untouched state root")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn fixed_read_only_handshake_rejects_unapproved_connector_or_operation() {
+        let zone_id: ZoneId = "z:work".parse().expect("test zone");
+        let read_operation = OperationId::from_static("n8n.workflows.list");
+        let other_connector = ConnectorId::from_static("fcp.test");
+        assert!(
+            owned_handshake_zone_dir(&other_connector, &read_operation, &zone_id, None, true,)
+                .is_err()
+        );
+
+        let n8n_connector = ConnectorId::from_static("fcp.n8n");
+        let write_operation = OperationId::from_static("n8n.workflows.update");
+        assert!(
+            owned_handshake_zone_dir(&n8n_connector, &write_operation, &zone_id, None, true,)
+                .is_err()
+        );
+    }
 
     #[test]
     fn exact_operation_metadata_parity_is_required() {
@@ -10061,6 +10153,8 @@ fn main() -> HostResult<()> {
                 "n8n supervised run-once sandbox admission rejected".to_string(),
             )));
         }
+        #[cfg(target_os = "linux")]
+        FIXED_READ_ONLY_LANDLOCK_ACTIVE.store(true, Ordering::Release);
     }
     let telemetry_config = match init_host_telemetry() {
         Ok(config) => config,
@@ -20146,6 +20240,58 @@ deny_ptrace = true
             capability_verifying_key: None,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
         }
+    }
+
+    #[test]
+    fn n8n_operator_configured_manifest_host_resolves_only_to_trusted_config() {
+        let (mut config, _, _) = per_invocation_plan_test_fixture();
+        config.id = "fcp.n8n".to_string();
+        config.allowed_zones = vec![ZoneId::work().to_string()];
+        config.config = Some(json!({
+            "credential_id": "11111111-1111-1111-1111-111111111111",
+            "base_url": "https://n8n.example.test",
+            "server_id": "eec"
+        }));
+        let operation = OperationId::from_static("op.a");
+        config
+            .operation_network_constraints
+            .get_mut(operation.as_str())
+            .expect("op.a managed constraints")
+            .host_allow = vec!["n8n.example.test".to_string()];
+        let catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &two_operation_network_manifest(),
+            "inline-n8n-placeholder-test".to_string(),
+        )
+        .expect("valid test manifest");
+        let mut manifest_constraints = catalog
+            .network_constraints
+            .get("op.a")
+            .cloned()
+            .expect("op.a manifest constraints");
+        manifest_constraints.host_allow = vec![N8N_OPERATOR_CONFIGURED_MANIFEST_HOST.to_string()];
+
+        let resolved = resolve_per_invocation_network_constraints(
+            &config,
+            &operation,
+            &ZoneId::work(),
+            &manifest_constraints,
+        )
+        .expect("trusted n8n base_url host must replace the manifest placeholder");
+        assert_eq!(resolved.host_allow, vec!["n8n.example.test"]);
+
+        config
+            .operation_network_constraints
+            .get_mut(operation.as_str())
+            .expect("op.a managed constraints")
+            .host_allow = vec!["different.example.test".to_string()];
+        let error = resolve_per_invocation_network_constraints(
+            &config,
+            &operation,
+            &ZoneId::work(),
+            &manifest_constraints,
+        )
+        .expect_err("managed host must match the trusted n8n base_url host");
+        assert!(error.to_string().contains("network constraints mismatch"));
     }
 
     async fn assert_per_invocation_plan_denied(

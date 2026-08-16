@@ -39,6 +39,8 @@ const CHILD_CHILD_ERROR_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-CHILD-ERROR-DIAGNOS
 #[cfg(target_os = "linux")]
 const BRIDGE_CHILD_ERROR_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-CHILD-ERROR-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
+const MAX_OWNED_DIAGNOSTIC_LABELS: usize = 4;
+#[cfg(target_os = "linux")]
 const SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_READY_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/READY";
@@ -957,7 +959,7 @@ fn emit_child_invoke_diagnostic(stderr: &[u8]) {
     if let Some(label) = child_host_error_diagnostic(stderr) {
         eprintln!("{BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX}{label}");
     }
-    if let Some(label) = child_owned_diagnostic(stderr) {
+    for label in child_owned_diagnostics(stderr) {
         eprintln!("{BRIDGE_OWNED_DIAGNOSTIC_PREFIX}{label}");
     }
     if let Some(label) = child_child_error_diagnostic(stderr) {
@@ -984,39 +986,51 @@ fn child_host_error_diagnostic(stderr: &[u8]) -> Option<&'static str> {
 }
 
 #[cfg(target_os = "linux")]
-fn child_owned_diagnostic(stderr: &[u8]) -> Option<&'static str> {
-    stderr.split(|byte| *byte == b'\n').find_map(|line| {
-        let label = line.strip_prefix(CHILD_OWNED_DIAGNOSTIC_PREFIX)?;
-        match label {
-            b"owned.setup" => Some("owned.setup"),
-            b"owned.launch" => Some("owned.launch"),
-            b"owned.rpc_transport" => Some("owned.rpc_transport"),
-            b"owned.rpc_protocol" => Some("owned.rpc_protocol"),
-            b"owned.rpc_child_error" => Some("owned.rpc_child_error"),
-            b"owned.response_protocol" => Some("owned.response_protocol"),
-            b"owned.egress_codec.read_error" => Some("owned.egress_codec.read_error"),
-            b"owned.egress_codec.read_eof" => Some("owned.egress_codec.read_eof"),
-            b"owned.egress_codec.write_error" => Some("owned.egress_codec.write_error"),
-            b"owned.egress_codec.truncated" => Some("owned.egress_codec.truncated"),
-            b"owned.egress_codec.oversized" => Some("owned.egress_codec.oversized"),
-            b"owned.egress_codec.empty_frame" => Some("owned.egress_codec.empty_frame"),
-            b"owned.egress_codec.invalid_utf8" => Some("owned.egress_codec.invalid_utf8"),
-            b"owned.egress_codec.invalid_json" => Some("owned.egress_codec.invalid_json"),
-            b"owned.egress_codec.wrong_schema" => Some("owned.egress_codec.wrong_schema"),
-            b"owned.egress_codec.wrong_auth" => Some("owned.egress_codec.wrong_auth"),
-            b"owned.egress_codec.wrong_route_payload" => {
-                Some("owned.egress_codec.wrong_route_payload")
-            }
-            b"owned.egress_codec.wrong_request_id" => Some("owned.egress_codec.wrong_request_id"),
-            b"owned.egress_codec.invalid_response" => Some("owned.egress_codec.invalid_response"),
-            b"owned.egress_codec.invalid_auth_token" => {
-                Some("owned.egress_codec.invalid_auth_token")
-            }
-            b"owned.egress_codec.missing_request" => Some("owned.egress_codec.missing_request"),
-            b"owned.teardown" => Some("owned.teardown"),
-            _ => None,
+fn child_owned_diagnostics(stderr: &[u8]) -> Vec<&'static str> {
+    let mut diagnostics = Vec::with_capacity(MAX_OWNED_DIAGNOSTIC_LABELS);
+    for line in stderr.split(|byte| *byte == b'\n') {
+        let Some(label) = child_owned_diagnostic_label(line) else {
+            continue;
+        };
+        if diagnostics.contains(&label) {
+            continue;
         }
-    })
+        diagnostics.push(label);
+        if diagnostics.len() == MAX_OWNED_DIAGNOSTIC_LABELS {
+            break;
+        }
+    }
+    diagnostics
+}
+
+#[cfg(target_os = "linux")]
+fn child_owned_diagnostic_label(line: &[u8]) -> Option<&'static str> {
+    let label = line.strip_prefix(CHILD_OWNED_DIAGNOSTIC_PREFIX)?;
+    match label {
+        b"owned.setup" => Some("owned.setup"),
+        b"owned.launch" => Some("owned.launch"),
+        b"owned.rpc_transport" => Some("owned.rpc_transport"),
+        b"owned.rpc_protocol" => Some("owned.rpc_protocol"),
+        b"owned.rpc_child_error" => Some("owned.rpc_child_error"),
+        b"owned.response_protocol" => Some("owned.response_protocol"),
+        b"owned.egress_codec.read_error" => Some("owned.egress_codec.read_error"),
+        b"owned.egress_codec.read_eof" => Some("owned.egress_codec.read_eof"),
+        b"owned.egress_codec.write_error" => Some("owned.egress_codec.write_error"),
+        b"owned.egress_codec.truncated" => Some("owned.egress_codec.truncated"),
+        b"owned.egress_codec.oversized" => Some("owned.egress_codec.oversized"),
+        b"owned.egress_codec.empty_frame" => Some("owned.egress_codec.empty_frame"),
+        b"owned.egress_codec.invalid_utf8" => Some("owned.egress_codec.invalid_utf8"),
+        b"owned.egress_codec.invalid_json" => Some("owned.egress_codec.invalid_json"),
+        b"owned.egress_codec.wrong_schema" => Some("owned.egress_codec.wrong_schema"),
+        b"owned.egress_codec.wrong_auth" => Some("owned.egress_codec.wrong_auth"),
+        b"owned.egress_codec.wrong_route_payload" => Some("owned.egress_codec.wrong_route_payload"),
+        b"owned.egress_codec.wrong_request_id" => Some("owned.egress_codec.wrong_request_id"),
+        b"owned.egress_codec.invalid_response" => Some("owned.egress_codec.invalid_response"),
+        b"owned.egress_codec.invalid_auth_token" => Some("owned.egress_codec.invalid_auth_token"),
+        b"owned.egress_codec.missing_request" => Some("owned.egress_codec.missing_request"),
+        b"owned.teardown" => Some("owned.teardown"),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1626,7 +1640,7 @@ mod tests {
             "owned.teardown",
         ] {
             let stderr = format!("FCP-N8N-OWNED-DIAGNOSTIC/v1 {label}\n");
-            assert_eq!(child_owned_diagnostic(stderr.as_bytes()), Some(label));
+            assert_eq!(child_owned_diagnostics(stderr.as_bytes()), vec![label]);
         }
 
         for stderr in [
@@ -1635,8 +1649,28 @@ mod tests {
             b"prefix FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error",
             b"FCP-N8N-OWNED-DIAGNOSTIC/v2 owned.rpc_child_error",
         ] {
-            assert_eq!(child_owned_diagnostic(stderr), None);
+            assert!(child_owned_diagnostics(stderr).is_empty());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_owned_diagnostics_preserve_bounded_distinct_order() {
+        let stderr = b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_codec.read_eof\n\
+FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_transport\n\
+FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error\n\
+FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_codec.read_eof\n\
+FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.response_protocol\n\
+FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.teardown\n";
+        assert_eq!(
+            child_owned_diagnostics(stderr),
+            vec![
+                "owned.egress_codec.read_eof",
+                "owned.rpc_transport",
+                "owned.rpc_child_error",
+                "owned.response_protocol",
+            ]
+        );
     }
 
     #[cfg(target_os = "linux")]

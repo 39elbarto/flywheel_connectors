@@ -33,6 +33,7 @@ fcp-sdk = { path = "../../crates/fcp-sdk", features = ["connector-http"] }
 fcp-sandbox = { path = "../../crates/fcp-sandbox" }
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-n8n-broker-protocol = { path = "../../crates/fcp-n8n-broker-protocol" }
+fcp-host = { path = "../../crates/fcp-host" }
 
 anyhow.workspace = true
 async-trait.workspace = true

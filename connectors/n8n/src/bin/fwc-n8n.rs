@@ -6,10 +6,14 @@
 use std::{
     fmt, io,
     io::Read,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
 use clap::{Parser, Subcommand};
+use fcp_host::{
+    LocalMcpProvider, LocalN8nDispatchErrorCode, LocalN8nDispatchRequest, LocalN8nDispatcher,
+};
 use fcp_n8n::router::{
     CapabilitySnapshot, OperationIntent, ProviderRouter, ResolvedTarget, TargetQuery,
     TargetResolution, TargetResolver,
@@ -31,6 +35,7 @@ const HOST_RUN_ONCE_SCHEMA: &str = "fwc.n8n.host-run-once.v1";
 const HOST_RUN_ONCE_ZONE: &str = "z:work";
 const HOST_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const HOST_RUN_ONCE_MAX_DEADLINE_MS: u64 = 60_000;
+const LOCAL_RUN_ONCE_SCHEMA: &str = "fwc.n8n.local-run-once.v1";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -127,6 +132,27 @@ struct HostRunOnceInput {
     deadline_ms: Option<u64>,
     #[serde(default)]
     correlation_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalRunOnceInput {
+    input: Value,
+    #[serde(default)]
+    correlation_id: Option<String>,
+}
+
+impl fmt::Debug for LocalRunOnceInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalRunOnceInput")
+            .field("input", &"[REDACTED]")
+            .field(
+                "correlation_id",
+                &self.correlation_id.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl fmt::Debug for HostRunOnceInput {
@@ -263,7 +289,81 @@ fn run_once(operation: &str) -> Result<Value, AppError> {
         .checked_add(STDIN_READ_TIMEOUT)
         .ok_or_else(|| AppError::new("input_read_timeout"))?;
     let bytes = read_input_until(io::stdin(), input_deadline)?;
+    if matches!(operation, "n8n.knowledge.query" | "n8n.validation.run") {
+        return run_local_once_from_bytes(operation, &bytes, execute_local_run_once);
+    }
     run_once_from_bytes_at(operation, &bytes, request_started_at, execute_host_run_once)
+}
+
+fn run_local_once_from_bytes<F>(
+    operation: &str,
+    bytes: &[u8],
+    dispatch: F,
+) -> Result<Value, AppError>
+where
+    F: FnOnce(LocalN8nDispatchRequest) -> Result<Value, AppError>,
+{
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(AppError::new("input_too_large"));
+    }
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Err(AppError::new("input_empty"));
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let input = LocalRunOnceInput::deserialize(&mut deserializer)
+        .map_err(|_| AppError::new("invalid_input"))?;
+    deserializer
+        .end()
+        .map_err(|_| AppError::new("trailing_input"))?;
+
+    let mut operation_input = input
+        .input
+        .as_object()
+        .cloned()
+        .ok_or_else(|| AppError::new("input_object_required"))?;
+    if operation_input.contains_key("correlation_id") {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let correlation_id = input
+        .correlation_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    if Uuid::parse_str(&correlation_id).is_err() {
+        return Err(AppError::new("invalid_correlation_id"));
+    }
+    operation_input.insert("correlation_id".into(), Value::String(correlation_id));
+    let request = serde_json::from_value(json!({
+        "operation": operation,
+        "input": Value::Object(operation_input),
+    }))
+    .map_err(|_| AppError::new("invalid_operation_input"))?;
+    dispatch(request)
+}
+
+fn execute_local_run_once(request: LocalN8nDispatchRequest) -> Result<Value, AppError> {
+    let bundle = fwc_n8n_bundle::verify_current_release_bundle_for_bridge()
+        .map_err(|_| AppError::new("bundle_unavailable"))?;
+    let provider = LocalMcpProvider::new(bundle.local_mcp_policy().clone())
+        .map_err(|_| AppError::new("local_provider_policy_invalid"))?;
+    let dispatcher = LocalN8nDispatcher::new(provider);
+    let response = dispatcher
+        .dispatch(request, Arc::new(AtomicBool::new(false)))
+        .map_err(map_local_dispatch_error)?;
+    Ok(json!({
+        "schema": LOCAL_RUN_ONCE_SCHEMA,
+        "provider": "local_mcp",
+        "response": response,
+    }))
+}
+
+const fn map_local_dispatch_error(code: fcp_host::LocalN8nDispatchError) -> AppError {
+    let code = match code.code() {
+        LocalN8nDispatchErrorCode::InvalidRequest => "invalid_operation_input",
+        LocalN8nDispatchErrorCode::InputTooLarge => "input_too_large",
+        LocalN8nDispatchErrorCode::UnsupportedPlatform => "unsupported_platform",
+        LocalN8nDispatchErrorCode::Cancelled => "cancelled",
+        LocalN8nDispatchErrorCode::ProviderError => "local_provider_failed",
+    };
+    AppError::new(code)
 }
 
 fn read_input_until<R>(reader: R, deadline: Instant) -> Result<Vec<u8>, AppError>
@@ -1040,6 +1140,65 @@ mod tests {
         )
         .expect("bounded input");
         assert_eq!(bytes, b"bounded");
+    }
+
+    #[test]
+    fn local_run_once_builds_only_the_typed_local_dispatch_request() {
+        let input = json!({
+            "input": {
+                "action": {
+                    "search_nodes": {
+                        "query": "webhook",
+                        "limit": 3
+                    }
+                }
+            },
+            "correlation_id": Uuid::new_v4().to_string(),
+        });
+        let value = run_local_once_from_bytes(
+            "n8n.knowledge.query",
+            &serde_json::to_vec(&input).expect("local input"),
+            |request| {
+                assert_eq!(
+                    request.operation_kind(),
+                    fcp_host::LocalN8nOperationKind::KnowledgeQuery
+                );
+                assert_eq!(request.internal_tool(), fcp_host::LocalN8nTool::SearchNodes);
+                Ok(json!({"dispatched": true}))
+            },
+        )
+        .expect("typed local request");
+        assert_eq!(value, json!({"dispatched": true}));
+    }
+
+    #[test]
+    fn local_run_once_rejects_provider_and_correlation_smuggling() {
+        for input in [
+            json!({
+                "input": {
+                    "correlation_id": Uuid::new_v4().to_string(),
+                    "action": {"search_nodes": {"query": "webhook"}}
+                }
+            }),
+            json!({
+                "input": {"action": {"search_nodes": {"query": "webhook"}}},
+                "correlation_id": "not-a-uuid"
+            }),
+            json!({
+                "input": {"action": {"unknown_tool": {}}}
+            }),
+        ] {
+            let error = run_local_once_from_bytes(
+                "n8n.knowledge.query",
+                &serde_json::to_vec(&input).expect("local input"),
+                |_| panic!("invalid input must fail before dispatch"),
+            )
+            .expect_err("local smuggling must fail closed");
+            assert!(matches!(
+                error.code,
+                "invalid_operation_input" | "invalid_correlation_id"
+            ));
+        }
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use fcp_manifest::LocalMcpPolicy;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -19,7 +20,8 @@ const RECEIPT_SCHEMA: &str = "fwc.n8n.bundle.v1";
 const RECEIPT_FILE: &str = "receipt.json";
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
-const EXPECTED_ARTIFACTS: [&str; 7] = [
+const MAX_LOCAL_MCP_POLICY_BYTES: usize = 256 * 1024;
+const EXPECTED_ARTIFACTS: [&str; 8] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
     "bin/fcp-n8n",
@@ -27,6 +29,7 @@ const EXPECTED_ARTIFACTS: [&str; 7] = [
     "inventory/eec.json",
     "inventory/hetzner.json",
     "policy/zone-policies.json",
+    "policy/local-mcp.json",
 ];
 const EXECUTABLE_ARTIFACTS: [&str; 3] = ["bin/fwc-n8n", "bin/fcp-host", "bin/fcp-n8n"];
 
@@ -45,6 +48,7 @@ enum BundleErrorCode {
     Digest,
     RuntimeFormat,
     InventoryBinding,
+    LocalMcpPolicy,
 }
 
 impl BundleErrorCode {
@@ -63,6 +67,7 @@ impl BundleErrorCode {
             Self::Digest => "digest_mismatch",
             Self::RuntimeFormat => "invalid_runtime_format",
             Self::InventoryBinding => "invalid_inventory_binding",
+            Self::LocalMcpPolicy => "invalid_local_mcp_policy",
         }
     }
 }
@@ -161,13 +166,14 @@ pub struct VerifiedBundle {
     inventory_hetzner_digest: String,
     zone_policy_path: PathBuf,
     zone_policy_digest: String,
+    local_mcp_policy: LocalMcpPolicy,
 }
 
 impl fmt::Debug for VerifiedBundle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedBundle")
-            .field("artifact_count", &7)
+            .field("artifact_count", &8)
             .field("digests", &"<redacted>")
             .finish()
     }
@@ -190,6 +196,10 @@ impl VerifiedBundle {
         (&self.zone_policy_path, &self.zone_policy_digest)
     }
 
+    pub const fn local_mcp_policy(&self) -> &LocalMcpPolicy {
+        &self.local_mcp_policy
+    }
+
     #[cfg(test)]
     pub fn test_fixture() -> Self {
         Self {
@@ -201,8 +211,50 @@ impl VerifiedBundle {
             inventory_hetzner_digest: "c".repeat(64),
             zone_policy_path: PathBuf::from("/release/policy/zone-policies.json"),
             zone_policy_digest: "d".repeat(64),
+            local_mcp_policy: test_local_mcp_policy(),
         }
     }
+}
+
+#[cfg(test)]
+fn test_local_mcp_policy() -> LocalMcpPolicy {
+    serde_json::from_value(serde_json::json!({
+        "package_id": "n8n-mcp",
+        "package_version": "2.69.0",
+        "launcher_path": "/usr/bin/node",
+        "launcher_digest": "0".repeat(64),
+        "runtime_executable": "/usr/bin/node",
+        "runtime_executable_digest": "0".repeat(64),
+        "package_metadata_path": "/usr/local/lib/node_modules/n8n-mcp/package.json",
+        "package_metadata_digest": "0".repeat(64),
+        "protocol_version": "2024-11-05",
+        "fixed_args": ["/usr/local/lib/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"],
+        "fixed_env": {"N8N_MCP_TELEMETRY_DISABLED": "true"},
+        "allowed_methods": ["initialize", "notifications/initialized", "tools/list", "tools/call"],
+        "expected_catalog": {
+            "tools_documentation": "0".repeat(64),
+            "search_nodes": "0".repeat(64),
+            "get_node": "0".repeat(64),
+            "validate_node": "0".repeat(64),
+            "get_template": "0".repeat(64),
+            "search_templates": "0".repeat(64),
+            "validate_workflow": "0".repeat(64),
+        },
+        "callable_tools": [
+            "tools_documentation", "search_nodes", "get_node", "validate_node",
+            "get_template", "search_templates", "validate_workflow"
+        ],
+        "max_frame_bytes": 262144,
+        "max_request_bytes": 65536,
+        "max_result_bytes": 262144,
+        "max_sequential_calls": 7,
+        "startup_timeout_ms": 30000,
+        "request_timeout_ms": 30000,
+        "shutdown_timeout_ms": 2000,
+        "idle_window_ms": 0,
+        "network_disabled": true
+    }))
+    .expect("test local MCP policy")
 }
 
 /// Verify the fixed release bundle selected by the canonical current binary.
@@ -290,6 +342,8 @@ fn verify_release_bundle(
     let (inventory_eec_path, inventory_eec_digest) = artifact("inventory/eec.json")?;
     let (inventory_hetzner_path, inventory_hetzner_digest) = artifact("inventory/hetzner.json")?;
     let (zone_policy_path, zone_policy_digest) = artifact("policy/zone-policies.json")?;
+    let (local_mcp_policy_path, _) = artifact("policy/local-mcp.json")?;
+    let local_mcp_policy = read_local_mcp_policy(&local_mcp_policy_path)?;
     #[cfg(target_os = "linux")]
     fcp_sandbox::verify_fixed_static_executable(&fcp_n8n_path)
         .map_err(|_| BundleError::new(BundleErrorCode::RuntimeFormat))?;
@@ -318,7 +372,19 @@ fn verify_release_bundle(
         inventory_hetzner_digest,
         zone_policy_path,
         zone_policy_digest,
+        local_mcp_policy,
     })
+}
+
+fn read_local_mcp_policy(path: &Path) -> Result<LocalMcpPolicy, BundleError> {
+    let value = read_bounded_json(path, MAX_LOCAL_MCP_POLICY_BYTES)
+        .map_err(|_| BundleError::new(BundleErrorCode::LocalMcpPolicy))?;
+    let policy: LocalMcpPolicy = serde_json::from_value(value)
+        .map_err(|_| BundleError::new(BundleErrorCode::LocalMcpPolicy))?;
+    policy
+        .validate()
+        .map_err(|_| BundleError::new(BundleErrorCode::LocalMcpPolicy))?;
+    Ok(policy)
 }
 
 fn verify_inventory_binding(
@@ -587,10 +653,11 @@ mod tests {
             }
             for relative_path in EXPECTED_ARTIFACTS {
                 let path = root.join(relative_path);
-                let bytes = if relative_path == "bin/fcp-n8n" {
-                    static_elf_fixture()
-                } else {
-                    relative_path.as_bytes().to_vec()
+                let bytes = match relative_path {
+                    "bin/fcp-n8n" => static_elf_fixture(),
+                    "policy/local-mcp.json" => serde_json::to_vec(&test_local_mcp_policy())
+                        .expect("encode local MCP policy fixture"),
+                    _ => relative_path.as_bytes().to_vec(),
                 };
                 fs::write(&path, bytes).expect("write release fixture artifact");
                 let mode = if EXECUTABLE_ARTIFACTS.contains(&relative_path) {
@@ -826,6 +893,25 @@ mod tests {
                 .expect_err("stale inventory binding")
                 .code(),
             BundleErrorCode::InventoryBinding
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_local_mcp_policy_fails_closed_even_with_matching_receipt() {
+        let fixture = ReleaseFixture::new();
+        fs::write(
+            fixture.artifact("policy/local-mcp.json"),
+            serde_json::to_vec(&serde_json::json!({"package_id": "unreviewed"}))
+                .expect("encode invalid policy"),
+        )
+        .expect("replace local MCP policy fixture");
+        fixture.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(&fixture.executable, fixture.owner)
+                .expect_err("invalid local MCP policy")
+                .code(),
+            BundleErrorCode::LocalMcpPolicy
         );
     }
 

@@ -5905,6 +5905,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-host",
  "fcp-manifest",
  "fcp-n8n-broker-protocol",
  "fcp-prelude",

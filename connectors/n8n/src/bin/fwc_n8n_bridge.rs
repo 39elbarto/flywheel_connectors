@@ -1008,7 +1008,12 @@ fn child_owned_diagnostic_label(line: &[u8]) -> Option<&'static str> {
     let label = line.strip_prefix(CHILD_OWNED_DIAGNOSTIC_PREFIX)?;
     match label {
         b"owned.setup" => Some("owned.setup"),
-        b"owned.launch" => Some("owned.launch"),
+        b"owned.launch.unsupported_platform" => Some("owned.launch.unsupported_platform"),
+        b"owned.launch.invalid_spec" => Some("owned.launch.invalid_spec"),
+        b"owned.launch.io" => Some("owned.launch.io"),
+        b"owned.launch.digest_mismatch" => Some("owned.launch.digest_mismatch"),
+        b"owned.launch.identity_mismatch" => Some("owned.launch.identity_mismatch"),
+        b"owned.launch.teardown" => Some("owned.launch.teardown"),
         b"owned.rpc_transport" => Some("owned.rpc_transport"),
         b"owned.rpc_protocol" => Some("owned.rpc_protocol"),
         b"owned.rpc_child_error" => Some("owned.rpc_child_error"),
@@ -1617,7 +1622,12 @@ mod tests {
     fn child_owned_diagnostic_accepts_only_fixed_stages() {
         for label in [
             "owned.setup",
-            "owned.launch",
+            "owned.launch.unsupported_platform",
+            "owned.launch.invalid_spec",
+            "owned.launch.io",
+            "owned.launch.digest_mismatch",
+            "owned.launch.identity_mismatch",
+            "owned.launch.teardown",
             "owned.rpc_transport",
             "owned.rpc_protocol",
             "owned.rpc_child_error",
@@ -1645,6 +1655,7 @@ mod tests {
 
         for stderr in [
             b"FCP-N8N-OWNED-DIAGNOSTIC/v1 PRIVATE".as_slice(),
+            b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.launch",
             b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error PRIVATE",
             b"prefix FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error",
             b"FCP-N8N-OWNED-DIAGNOSTIC/v2 owned.rpc_child_error",
@@ -1657,7 +1668,7 @@ mod tests {
     #[test]
     fn child_owned_diagnostics_preserve_bounded_distinct_order() {
         let stderr = b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_codec.read_eof\n\
-FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_transport\n\
+FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.launch.io\n\
 FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error\n\
 FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_codec.read_eof\n\
 FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.response_protocol\n\
@@ -1666,7 +1677,7 @@ FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.teardown\n";
             child_owned_diagnostics(stderr),
             vec![
                 "owned.egress_codec.read_eof",
-                "owned.rpc_transport",
+                "owned.launch.io",
                 "owned.rpc_child_error",
                 "owned.response_protocol",
             ]

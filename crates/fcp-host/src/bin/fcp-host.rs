@@ -3836,7 +3836,7 @@ fn owned_invocation_error(error: OwnedInvocationError) -> HostError {
         OwnedInvocationError::UnsupportedPlatform
         | OwnedInvocationError::InvalidConfig
         | OwnedInvocationError::MissingPipe => N8nRunOnceOwnedDiagnostic::Setup,
-        OwnedInvocationError::Launch(_) => N8nRunOnceOwnedDiagnostic::Launch,
+        OwnedInvocationError::Launch(error) => owned_launch_diagnostic(&error),
         OwnedInvocationError::Termination(_) | OwnedInvocationError::TerminationIncomplete => {
             N8nRunOnceOwnedDiagnostic::Teardown
         }
@@ -3851,6 +3851,29 @@ fn owned_invocation_error(error: OwnedInvocationError) -> HostError {
     };
     emit_n8n_run_once_owned_diagnostic(diagnostic);
     HostError::RegistryError("owned per-invocation RPC or lifecycle failure".to_string())
+}
+
+#[cfg(target_os = "linux")]
+const fn owned_launch_diagnostic(
+    error: &fcp_sandbox::ProcessGroupError,
+) -> N8nRunOnceOwnedDiagnostic {
+    match error {
+        fcp_sandbox::ProcessGroupError::UnsupportedPlatform => {
+            N8nRunOnceOwnedDiagnostic::LaunchUnsupportedPlatform
+        }
+        fcp_sandbox::ProcessGroupError::InvalidSpec => N8nRunOnceOwnedDiagnostic::LaunchInvalidSpec,
+        fcp_sandbox::ProcessGroupError::Io(_) => N8nRunOnceOwnedDiagnostic::LaunchIo,
+        fcp_sandbox::ProcessGroupError::LauncherDigestMismatch => {
+            N8nRunOnceOwnedDiagnostic::LaunchDigestMismatch
+        }
+        fcp_sandbox::ProcessGroupError::IdentityMismatch => {
+            N8nRunOnceOwnedDiagnostic::LaunchIdentityMismatch
+        }
+        fcp_sandbox::ProcessGroupError::TeardownTimeout
+        | fcp_sandbox::ProcessGroupError::TeardownTerminal => {
+            N8nRunOnceOwnedDiagnostic::LaunchTeardown
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -9902,7 +9925,12 @@ fn child_error_diagnostic(error: &Value) -> N8nRunOnceChildErrorDiagnostic {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum N8nRunOnceOwnedDiagnostic {
     Setup,
-    Launch,
+    LaunchUnsupportedPlatform,
+    LaunchInvalidSpec,
+    LaunchIo,
+    LaunchDigestMismatch,
+    LaunchIdentityMismatch,
+    LaunchTeardown,
     RpcTransport,
     RpcProtocol,
     RpcChildError,
@@ -9930,7 +9958,12 @@ impl N8nRunOnceOwnedDiagnostic {
     const fn label(self) -> &'static str {
         match self {
             Self::Setup => "owned.setup",
-            Self::Launch => "owned.launch",
+            Self::LaunchUnsupportedPlatform => "owned.launch.unsupported_platform",
+            Self::LaunchInvalidSpec => "owned.launch.invalid_spec",
+            Self::LaunchIo => "owned.launch.io",
+            Self::LaunchDigestMismatch => "owned.launch.digest_mismatch",
+            Self::LaunchIdentityMismatch => "owned.launch.identity_mismatch",
+            Self::LaunchTeardown => "owned.launch.teardown",
             Self::RpcTransport => "owned.rpc_transport",
             Self::RpcProtocol => "owned.rpc_protocol",
             Self::RpcChildError => "owned.rpc_child_error",
@@ -18265,7 +18298,27 @@ mod tests {
     fn n8n_owned_diagnostic_labels_are_fixed_and_content_free() {
         let labels = [
             (N8nRunOnceOwnedDiagnostic::Setup, "owned.setup"),
-            (N8nRunOnceOwnedDiagnostic::Launch, "owned.launch"),
+            (
+                N8nRunOnceOwnedDiagnostic::LaunchUnsupportedPlatform,
+                "owned.launch.unsupported_platform",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::LaunchInvalidSpec,
+                "owned.launch.invalid_spec",
+            ),
+            (N8nRunOnceOwnedDiagnostic::LaunchIo, "owned.launch.io"),
+            (
+                N8nRunOnceOwnedDiagnostic::LaunchDigestMismatch,
+                "owned.launch.digest_mismatch",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::LaunchIdentityMismatch,
+                "owned.launch.identity_mismatch",
+            ),
+            (
+                N8nRunOnceOwnedDiagnostic::LaunchTeardown,
+                "owned.launch.teardown",
+            ),
             (
                 N8nRunOnceOwnedDiagnostic::RpcTransport,
                 "owned.rpc_transport",
@@ -18344,6 +18397,47 @@ mod tests {
         for (diagnostic, expected) in labels {
             assert_eq!(diagnostic.label(), expected);
             assert!(!diagnostic.label().contains("PRIVATE-CONTENT-CANARY"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn n8n_owned_launch_diagnostics_discard_error_content() {
+        let private = fcp_sandbox::ProcessGroupError::Io(std::io::Error::other(
+            "PRIVATE-CONTENT-CANARY /private/provider/path",
+        ));
+        let cases = [
+            (
+                fcp_sandbox::ProcessGroupError::UnsupportedPlatform,
+                "owned.launch.unsupported_platform",
+            ),
+            (
+                fcp_sandbox::ProcessGroupError::InvalidSpec,
+                "owned.launch.invalid_spec",
+            ),
+            (private, "owned.launch.io"),
+            (
+                fcp_sandbox::ProcessGroupError::LauncherDigestMismatch,
+                "owned.launch.digest_mismatch",
+            ),
+            (
+                fcp_sandbox::ProcessGroupError::IdentityMismatch,
+                "owned.launch.identity_mismatch",
+            ),
+            (
+                fcp_sandbox::ProcessGroupError::TeardownTimeout,
+                "owned.launch.teardown",
+            ),
+            (
+                fcp_sandbox::ProcessGroupError::TeardownTerminal,
+                "owned.launch.teardown",
+            ),
+        ];
+        for (error, expected) in cases {
+            let diagnostic = owned_launch_diagnostic(&error);
+            assert_eq!(diagnostic.label(), expected);
+            assert!(!diagnostic.label().contains("PRIVATE-CONTENT-CANARY"));
+            assert!(!diagnostic.label().contains("/private/provider/path"));
         }
     }
 

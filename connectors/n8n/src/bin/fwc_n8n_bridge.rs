@@ -23,6 +23,10 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 const PROCESS_GRACE: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
+const CHILD_INVOKE_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-INVOKE-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const BRIDGE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-INVOKE-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
 const SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_READY_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/READY";
@@ -895,6 +899,7 @@ pub fn run_process(
         request_deadline_at,
     )?;
     if !status.success() {
+        emit_child_invoke_diagnostic(&stderr);
         return Err(BridgeError::new(child_failure_code(&stdout)));
     }
     Ok(ProcessOutput {
@@ -903,6 +908,40 @@ pub fn run_process(
         status,
         termination,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn child_invoke_diagnostic(stderr: &[u8]) -> Option<&'static str> {
+    stderr.split(|byte| *byte == b'\n').find_map(|line| {
+        let label = line.strip_prefix(CHILD_INVOKE_DIAGNOSTIC_PREFIX)?;
+        match label {
+            b"dispatch_4xx" => Some("dispatch_4xx"),
+            b"dispatch_5xx" => Some("dispatch_5xx"),
+            b"dispatch_other" => Some("dispatch_other"),
+            b"response_protocol" => Some("response_protocol"),
+            b"response_auth" => Some("response_auth"),
+            b"response_rate_limited" => Some("response_rate_limited"),
+            b"response_capability" => Some("response_capability"),
+            b"response_zone" => Some("response_zone"),
+            b"response_connector" => Some("response_connector"),
+            b"response_resource" => Some("response_resource"),
+            b"response_external_4xx" => Some("response_external_4xx"),
+            b"response_external_5xx" => Some("response_external_5xx"),
+            b"response_external_other" => Some("response_external_other"),
+            b"response_external_unknown" => Some("response_external_unknown"),
+            b"response_upstream_timeout" => Some("response_upstream_timeout"),
+            b"response_dependency_unavailable" => Some("response_dependency_unavailable"),
+            b"response_internal" => Some("response_internal"),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn emit_child_invoke_diagnostic(stderr: &[u8]) {
+    if let Some(label) = child_invoke_diagnostic(stderr) {
+        eprintln!("{BRIDGE_INVOKE_DIAGNOSTIC_PREFIX}{label}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1388,6 +1427,7 @@ mod tests {
     fn child_failure_rejects_unknown_or_contaminated_error_envelopes() {
         for encoded in [
             br#"{"type":"error","error":{"code":"PRIVATE-PROVIDER-TEXT"}}"#.as_slice(),
+            br#"{"type":"error","error":{"code":"n8n_invoke_response_external_5xx_failed"}}"#,
             br#"{"type":"error","error":{"code":"preflight_denied","detail":"PRIVATE"}}"#,
             br#"{"type":"error","error":{"code":"preflight_denied"},"extra":true}"#,
             br#"{"type":"response","error":{"code":"preflight_denied"}}"#,
@@ -1397,6 +1437,43 @@ mod tests {
             br#"not-json"#,
         ] {
             assert_eq!(child_failure_code(encoded).as_str(), "child_failed");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_invoke_diagnostic_accepts_only_exact_allowlisted_lines() {
+        let labels = [
+            "dispatch_4xx",
+            "dispatch_5xx",
+            "dispatch_other",
+            "response_protocol",
+            "response_auth",
+            "response_rate_limited",
+            "response_capability",
+            "response_zone",
+            "response_connector",
+            "response_resource",
+            "response_external_4xx",
+            "response_external_5xx",
+            "response_external_other",
+            "response_external_unknown",
+            "response_upstream_timeout",
+            "response_dependency_unavailable",
+            "response_internal",
+        ];
+        for label in labels {
+            let stderr = format!("untrusted noise\nFCP-N8N-INVOKE-DIAGNOSTIC/v1 {label}\n");
+            assert_eq!(child_invoke_diagnostic(stderr.as_bytes()), Some(label));
+        }
+
+        for stderr in [
+            b"FCP-N8N-INVOKE-DIAGNOSTIC/v1 PRIVATE".as_slice(),
+            b"FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx PRIVATE",
+            b"prefix FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx",
+            b"FCP-N8N-INVOKE-DIAGNOSTIC/v2 response_external_5xx",
+        ] {
+            assert_eq!(child_invoke_diagnostic(stderr), None);
         }
     }
 

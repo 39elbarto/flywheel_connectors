@@ -131,10 +131,11 @@ use fcp_policy::{
 };
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, ConnectorStateCanonicalStatus,
-    CorrelationId, CostEstimateConfidence, CredentialId, Decision, InstanceId, Lease as CoreLease,
-    LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
-    ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject, TailscaleNodeId, TransportMode,
-    UsageMetric, UsageMetricKind, Uuid, ZoneId, ZonePolicyObject, simulate_policy_decision,
+    CorrelationId, CostEstimateConfidence, CredentialId, Decision, FcpError, InstanceId,
+    Lease as CoreLease, LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey,
+    PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject,
+    TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind, Uuid, ZoneId, ZonePolicyObject,
+    simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{
@@ -9703,8 +9704,133 @@ fn n8n_run_once_stage_error(stage: N8nRunOnceFailureStage) -> HostError {
     HostError::Internal(stage.marker().to_string())
 }
 
+const N8N_RUN_ONCE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-INVOKE-DIAGNOSTIC/v1 ";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum N8nRunOnceInvokeDiagnostic {
+    Dispatch4xx,
+    Dispatch5xx,
+    DispatchOther,
+    ResponseProtocol,
+    ResponseAuth,
+    ResponseRateLimited,
+    ResponseCapability,
+    ResponseZone,
+    ResponseConnector,
+    ResponseResource,
+    ResponseExternal4xx,
+    ResponseExternal5xx,
+    ResponseExternalOther,
+    ResponseExternalUnknown,
+    ResponseUpstreamTimeout,
+    ResponseDependencyUnavailable,
+    ResponseInternal,
+}
+
+impl N8nRunOnceInvokeDiagnostic {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Dispatch4xx => "dispatch_4xx",
+            Self::Dispatch5xx => "dispatch_5xx",
+            Self::DispatchOther => "dispatch_other",
+            Self::ResponseProtocol => "response_protocol",
+            Self::ResponseAuth => "response_auth",
+            Self::ResponseRateLimited => "response_rate_limited",
+            Self::ResponseCapability => "response_capability",
+            Self::ResponseZone => "response_zone",
+            Self::ResponseConnector => "response_connector",
+            Self::ResponseResource => "response_resource",
+            Self::ResponseExternal4xx => "response_external_4xx",
+            Self::ResponseExternal5xx => "response_external_5xx",
+            Self::ResponseExternalOther => "response_external_other",
+            Self::ResponseExternalUnknown => "response_external_unknown",
+            Self::ResponseUpstreamTimeout => "response_upstream_timeout",
+            Self::ResponseDependencyUnavailable => "response_dependency_unavailable",
+            Self::ResponseInternal => "response_internal",
+        }
+    }
+}
+
+fn emit_n8n_run_once_invoke_diagnostic(diagnostic: N8nRunOnceInvokeDiagnostic) {
+    tracing::warn!(
+        event = "n8n_run_once_invoke_failure",
+        class = diagnostic.label(),
+        "n8n run-once invoke failed"
+    );
+    eprintln!(
+        "{N8N_RUN_ONCE_INVOKE_DIAGNOSTIC_PREFIX}{}",
+        diagnostic.label()
+    );
+}
+
+fn n8n_run_once_dispatch_diagnostic(status: StatusCode) -> N8nRunOnceInvokeDiagnostic {
+    if status.is_client_error() {
+        N8nRunOnceInvokeDiagnostic::Dispatch4xx
+    } else if status.is_server_error() {
+        N8nRunOnceInvokeDiagnostic::Dispatch5xx
+    } else {
+        N8nRunOnceInvokeDiagnostic::DispatchOther
+    }
+}
+
+const fn n8n_run_once_external_diagnostic(status: Option<u16>) -> N8nRunOnceInvokeDiagnostic {
+    match status {
+        Some(400..=499) => N8nRunOnceInvokeDiagnostic::ResponseExternal4xx,
+        Some(500..=599) => N8nRunOnceInvokeDiagnostic::ResponseExternal5xx,
+        Some(_) => N8nRunOnceInvokeDiagnostic::ResponseExternalOther,
+        None => N8nRunOnceInvokeDiagnostic::ResponseExternalUnknown,
+    }
+}
+
+const fn n8n_run_once_response_diagnostic(error: &FcpError) -> N8nRunOnceInvokeDiagnostic {
+    match error {
+        FcpError::InvalidRequest { .. }
+        | FcpError::MalformedFrame { .. }
+        | FcpError::MissingField { .. }
+        | FcpError::ChecksumMismatch
+        | FcpError::VersionMismatch { .. } => N8nRunOnceInvokeDiagnostic::ResponseProtocol,
+        FcpError::Unauthorized { .. }
+        | FcpError::TokenExpired
+        | FcpError::TokenNotYetValid
+        | FcpError::InvalidSignature => N8nRunOnceInvokeDiagnostic::ResponseAuth,
+        FcpError::RateLimited { .. } => N8nRunOnceInvokeDiagnostic::ResponseRateLimited,
+        FcpError::CapabilityDenied { .. }
+        | FcpError::OperationNotGranted { .. }
+        | FcpError::ResourceNotAllowed { .. }
+        | FcpError::CapabilityConstraintDenied { .. } => {
+            N8nRunOnceInvokeDiagnostic::ResponseCapability
+        }
+        FcpError::ZoneViolation { .. }
+        | FcpError::TaintViolation { .. }
+        | FcpError::ElevationRequired { .. } => N8nRunOnceInvokeDiagnostic::ResponseZone,
+        FcpError::ConnectorUnavailable { .. }
+        | FcpError::NotConfigured
+        | FcpError::NotHandshaken
+        | FcpError::HealthCheckFailed { .. }
+        | FcpError::StreamingNotSupported
+        | FcpError::ConfigurationLeakedSecret { .. } => {
+            N8nRunOnceInvokeDiagnostic::ResponseConnector
+        }
+        FcpError::ResourceNotFound { .. }
+        | FcpError::ResourceExhausted { .. }
+        | FcpError::BudgetExceeded { .. }
+        | FcpError::Conflict { .. } => N8nRunOnceInvokeDiagnostic::ResponseResource,
+        FcpError::External { status_code, .. } => n8n_run_once_external_diagnostic(*status_code),
+        FcpError::UpstreamTimeout { .. } => N8nRunOnceInvokeDiagnostic::ResponseUpstreamTimeout,
+        FcpError::DependencyUnavailable { .. } => {
+            N8nRunOnceInvokeDiagnostic::ResponseDependencyUnavailable
+        }
+        FcpError::Internal { .. } => N8nRunOnceInvokeDiagnostic::ResponseInternal,
+    }
+}
+
 fn accept_n8n_run_once_invoke_response(response: InvokeResponse) -> HostResult<InvokeResponse> {
     if !matches!(response.status, InvokeStatus::Ok) || response.error.is_some() {
+        let diagnostic = response.error.as_ref().map_or(
+            N8nRunOnceInvokeDiagnostic::ResponseInternal,
+            n8n_run_once_response_diagnostic,
+        );
+        emit_n8n_run_once_invoke_diagnostic(diagnostic);
         return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke));
     }
     Ok(response)
@@ -10330,8 +10456,10 @@ async fn async_n8n_read_only_run_once(
     invoke_handler_inner(state, HeaderMap::new(), request, Some(trusted_resource))
         .await
         .map(|Json(response)| response)
-        .map_err(|(status, _)| run_once_invoke_error(status))
-        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))
+        .map_err(|(status, _)| {
+            emit_n8n_run_once_invoke_diagnostic(n8n_run_once_dispatch_diagnostic(status));
+            n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke)
+        })
         .and_then(accept_n8n_run_once_invoke_response)
 }
 
@@ -29084,6 +29212,55 @@ done"#;
             retry_after: None,
         });
         assert!(accept_n8n_run_once_invoke_response(malformed_success).is_err());
+    }
+
+    #[test]
+    fn n8n_run_once_invoke_classification_is_bounded_and_redaction_safe() {
+        assert_eq!(
+            n8n_run_once_dispatch_diagnostic(StatusCode::BAD_REQUEST),
+            N8nRunOnceInvokeDiagnostic::Dispatch4xx
+        );
+        assert_eq!(
+            n8n_run_once_dispatch_diagnostic(StatusCode::BAD_GATEWAY),
+            N8nRunOnceInvokeDiagnostic::Dispatch5xx
+        );
+        assert_eq!(
+            n8n_run_once_dispatch_diagnostic(StatusCode::TEMPORARY_REDIRECT),
+            N8nRunOnceInvokeDiagnostic::DispatchOther
+        );
+
+        let cases = [
+            (None, N8nRunOnceInvokeDiagnostic::ResponseExternalUnknown),
+            (Some(401), N8nRunOnceInvokeDiagnostic::ResponseExternal4xx),
+            (Some(403), N8nRunOnceInvokeDiagnostic::ResponseExternal4xx),
+            (Some(404), N8nRunOnceInvokeDiagnostic::ResponseExternal4xx),
+            (Some(429), N8nRunOnceInvokeDiagnostic::ResponseExternal4xx),
+            (Some(418), N8nRunOnceInvokeDiagnostic::ResponseExternal4xx),
+            (Some(502), N8nRunOnceInvokeDiagnostic::ResponseExternal5xx),
+            (Some(503), N8nRunOnceInvokeDiagnostic::ResponseExternal5xx),
+            (Some(302), N8nRunOnceInvokeDiagnostic::ResponseExternalOther),
+        ];
+        for (status_code, expected) in cases {
+            let error = FcpError::External {
+                service: "PRIVATE-SERVICE-CANARY".to_string(),
+                message: "PRIVATE-MESSAGE-CANARY".to_string(),
+                status_code,
+                retryable: false,
+                retry_after: None,
+            };
+            let diagnostic = n8n_run_once_response_diagnostic(&error);
+            assert_eq!(diagnostic, expected);
+            assert!(!diagnostic.label().contains("PRIVATE"));
+        }
+
+        let rate_limited = FcpError::RateLimited {
+            retry_after_ms: 1,
+            violation: None,
+        };
+        assert_eq!(
+            n8n_run_once_response_diagnostic(&rate_limited),
+            N8nRunOnceInvokeDiagnostic::ResponseRateLimited
+        );
     }
 
     #[test]

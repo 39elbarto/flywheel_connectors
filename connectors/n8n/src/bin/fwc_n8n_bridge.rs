@@ -1207,29 +1207,37 @@ fn parse_response(bytes: &[u8]) -> Result<Value, BridgeError> {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildFailureEnvelope {
+    #[serde(rename = "type")]
+    kind: String,
+    error: ChildFailureDetail,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChildFailureDetail {
+    code: String,
+}
+
+#[cfg(target_os = "linux")]
 fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
-    let Ok(value) = parse_response(bytes) else {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let Ok(envelope) = ChildFailureEnvelope::deserialize(&mut deserializer) else {
         return BridgeErrorCode::ChildFailed;
     };
-    let Some(envelope) = value.as_object() else {
-        return BridgeErrorCode::ChildFailed;
-    };
-    if envelope.len() != 2 || envelope.get("type").and_then(Value::as_str) != Some("error") {
+    if deserializer.end().is_err() || envelope.kind != "error" {
         return BridgeErrorCode::ChildFailed;
     }
-    let Some(error) = envelope.get("error").and_then(Value::as_object) else {
-        return BridgeErrorCode::ChildFailed;
-    };
-    if error.len() != 1 {
-        return BridgeErrorCode::ChildFailed;
-    }
-    match error.get("code").and_then(Value::as_str) {
-        Some("connector_not_found") => BridgeErrorCode::HostConnectorNotFound,
-        Some("invalid_input") => BridgeErrorCode::HostInvalidInput,
-        Some("preflight_denied") => BridgeErrorCode::HostPreflightDenied,
-        Some("connector_unavailable") => BridgeErrorCode::HostConnectorUnavailable,
-        Some("connector_frame_limit") => BridgeErrorCode::HostConnectorFrameLimit,
-        Some("internal") => BridgeErrorCode::HostInternal,
+    match envelope.error.code.as_str() {
+        "connector_not_found" => BridgeErrorCode::HostConnectorNotFound,
+        "invalid_input" => BridgeErrorCode::HostInvalidInput,
+        "preflight_denied" => BridgeErrorCode::HostPreflightDenied,
+        "connector_unavailable" => BridgeErrorCode::HostConnectorUnavailable,
+        "connector_frame_limit" => BridgeErrorCode::HostConnectorFrameLimit,
+        "internal" => BridgeErrorCode::HostInternal,
         _ => BridgeErrorCode::ChildFailed,
     }
 }
@@ -1347,6 +1355,9 @@ mod tests {
             br#"{"type":"error","error":{"code":"preflight_denied","detail":"PRIVATE"}}"#,
             br#"{"type":"error","error":{"code":"preflight_denied"},"extra":true}"#,
             br#"{"type":"response","error":{"code":"preflight_denied"}}"#,
+            br#"{"type":"error","error":{"code":"PRIVATE","code":"preflight_denied"}}"#,
+            br#"{"type":"response","type":"error","error":{"code":"preflight_denied"}}"#,
+            br#"{"type":"error","error":{"code":"PRIVATE"},"error":{"code":"preflight_denied"}}"#,
             br#"not-json"#,
         ] {
             assert_eq!(child_failure_code(encoded).as_str(), "child_failed");

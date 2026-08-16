@@ -438,6 +438,47 @@ struct N8nReadOnlyRunOncePlan {
     credential_binding: RunOnceCredentialBinding,
 }
 
+/// Host-only resource scope carried beside an internally built invoke request.
+///
+/// This is deliberately neither serialized nor `Debug`: external invoke JSON
+/// cannot construct it, and provider input/context never contain the URI.
+struct TrustedResourceBinding {
+    server_id: N8nReadOnlyServerId,
+    connector_id: ConnectorId,
+    operation: OperationId,
+    zone_id: ZoneId,
+    request_id: RequestId,
+    resource_uri: String,
+}
+
+impl TrustedResourceBinding {
+    fn resource_uri_for<'a>(&'a self, request: &InvokeRequest) -> HostResult<&'a str> {
+        if self.connector_id != request.connector_id
+            || self.operation != request.operation
+            || self.zone_id != request.zone_id
+            || self.request_id != request.id
+            || request.connector_id.as_str() != "fcp.n8n"
+            || !N8N_READ_ONLY_OPERATIONS.contains(&request.operation.as_str())
+        {
+            return Err(HostError::PreflightFailed(
+                "trusted n8n resource binding does not match the invoke request".to_string(),
+            ));
+        }
+        let expected = expected_n8n_read_only_resource_uri(
+            self.server_id,
+            request.operation.as_str(),
+            &request.input,
+        )?;
+        if expected != self.resource_uri {
+            return Err(HostError::PreflightFailed(
+                "trusted n8n resource binding is not canonical for the invoke request".to_string(),
+            ));
+        }
+        validate_n8n_read_only_resource_uri(self.server_id, &self.resource_uri)?;
+        Ok(&self.resource_uri)
+    }
+}
+
 #[allow(dead_code)] // Consumed by the next host-owned n8n one-shot wiring packet.
 struct N8nReadOnlyCapabilityIssuance {
     request: CapabilityIssuanceRequest,
@@ -6868,6 +6909,26 @@ fn live_constraint_resource_uri(input: &Value) -> Option<String> {
         })
 }
 
+fn verified_live_constraint_resource_uri(
+    request: &InvokeRequest,
+    trusted_resource: Option<&TrustedResourceBinding>,
+) -> HostResult<Option<String>> {
+    let input_resource = live_constraint_resource_uri(&request.input);
+    let Some(binding) = trusted_resource else {
+        return Ok(input_resource);
+    };
+    let bound_resource = binding.resource_uri_for(request)?;
+    if input_resource
+        .as_deref()
+        .is_some_and(|resource| resource != bound_resource)
+    {
+        return Err(HostError::PreflightFailed(
+            "trusted resource binding conflicts with invoke input".to_string(),
+        ));
+    }
+    Ok(Some(bound_resource.to_string()))
+}
+
 fn enforce_live_capability_constraints(
     request: &InvokeRequest,
     claims: &fcp_crypto::cose::CwtClaims,
@@ -8094,6 +8155,15 @@ async fn verify_live_request(
     request: &InvokeRequest,
     principal_override: Option<&str>,
 ) -> HostResult<VerifiedLiveRequest> {
+    verify_live_request_with_resource(state, request, principal_override, None).await
+}
+
+async fn verify_live_request_with_resource(
+    state: &AppState,
+    request: &InvokeRequest,
+    principal_override: Option<&str>,
+    trusted_resource: Option<&TrustedResourceBinding>,
+) -> HostResult<VerifiedLiveRequest> {
     // Connector home-zone binding (br-flywheel_connectors-by4vu).
     //
     // Without this gate, a structurally-valid capability token signed for
@@ -8192,7 +8262,7 @@ async fn verify_live_request(
                 .to_string(),
         )
     })?;
-    let constraint_resource_uri = live_constraint_resource_uri(&request.input);
+    let constraint_resource_uri = verified_live_constraint_resource_uri(request, trusted_resource)?;
     let constraint_resource_uris = constraint_resource_uri
         .iter()
         .cloned()
@@ -8456,6 +8526,15 @@ async fn evaluate_verified_live_preflight(
     request: &InvokeRequest,
     principal_override: Option<&str>,
 ) -> HostResult<VerifiedLiveRequest> {
+    evaluate_verified_live_preflight_with_resource(state, request, principal_override, None).await
+}
+
+async fn evaluate_verified_live_preflight_with_resource(
+    state: &AppState,
+    request: &InvokeRequest,
+    principal_override: Option<&str>,
+    trusted_resource: Option<&TrustedResourceBinding>,
+) -> HostResult<VerifiedLiveRequest> {
     let response = state
         .discovery
         .preflight(PreflightRequest {
@@ -8473,7 +8552,7 @@ async fn evaluate_verified_live_preflight(
                 .unwrap_or_else(|| "live preflight denied request".to_string()),
         ));
     }
-    verify_live_request(state, request, principal_override).await
+    verify_live_request_with_resource(state, request, principal_override, trusted_resource).await
 }
 
 async fn evaluate_live_preflight(
@@ -9853,11 +9932,21 @@ async fn async_run_once(telemetry_config: TelemetryConfig) -> HostResult<InvokeR
 fn build_n8n_read_only_invoke_request(
     plan: N8nReadOnlyRunOncePlan,
     capability_token: fcp_core::CapabilityToken,
-) -> InvokeRequest {
-    InvokeRequest {
+) -> (InvokeRequest, TrustedResourceBinding) {
+    let request_id = RequestId::random();
+    let connector_id = ConnectorId::from_static("fcp.n8n");
+    let trusted_resource = TrustedResourceBinding {
+        server_id: plan.server_id,
+        connector_id: connector_id.clone(),
+        operation: plan.operation.clone(),
+        zone_id: plan.zone_id.clone(),
+        request_id: request_id.clone(),
+        resource_uri: plan.resource_uri,
+    };
+    let request = InvokeRequest {
         r#type: "invoke".to_string(),
-        id: RequestId::random(),
-        connector_id: ConnectorId::from_static("fcp.n8n"),
+        id: request_id,
+        connector_id,
         operation: plan.operation,
         zone_id: plan.zone_id,
         input: plan.input,
@@ -9870,7 +9959,8 @@ fn build_n8n_read_only_invoke_request(
         correlation_id: Some(plan.correlation_id.unwrap_or_default()),
         provenance: None,
         approval_tokens: Vec::new(),
-    }
+    };
+    (request, trusted_resource)
 }
 
 #[cfg(target_os = "linux")]
@@ -10119,9 +10209,9 @@ async fn async_n8n_read_only_run_once(
     })?;
     let capability_token =
         capability_token_from_cbor_b64(&token_b64, "n8n read-only run-once capability")?;
-    let request = build_n8n_read_only_invoke_request(plan, capability_token);
+    let (request, trusted_resource) = build_n8n_read_only_invoke_request(plan, capability_token);
 
-    invoke_handler(State(state), HeaderMap::new(), Json(request))
+    invoke_handler_inner(state, HeaderMap::new(), request, Some(trusted_resource))
         .await
         .map(|Json(response)| response)
         .map_err(|(status, _)| run_once_invoke_error(status))
@@ -16088,6 +16178,15 @@ async fn invoke_handler(
     headers: HeaderMap,
     Json(request): Json<InvokeRequest>,
 ) -> Result<Json<InvokeResponse>, (StatusCode, String)> {
+    invoke_handler_inner(state, headers, request, None).await
+}
+
+async fn invoke_handler_inner(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    request: InvokeRequest,
+    trusted_resource: Option<TrustedResourceBinding>,
+) -> Result<Json<InvokeResponse>, (StatusCode, String)> {
     request.validate_idempotency_key().map_err(|err| {
         map_host_error(HostError::InvalidFilter(format!(
             "invalid invoke request: {err}"
@@ -16141,48 +16240,52 @@ async fn invoke_handler(
             .unwrap_or(0),
     };
 
-    let verified =
-        match evaluate_verified_live_preflight(&state, &request, asserted_principal.as_deref())
-            .await
-        {
-            Ok(verified) => verified,
-            Err(error) => {
-                let reason = error.to_string();
-                // br-mvax3: deny path MUST append a hash-linked audit event so
-                // the README "every operation produces an audit event" claim is
-                // literally true even for denied requests.
-                if let Err(err) = state.invoke_audit.append(
-                    &audit_ctx,
-                    fcp_host::InvokePhase::PreflightDeny {
-                        reason: reason.clone(),
-                    },
-                ) {
-                    tracing::warn!(
-                        event = "invoke_audit_append_error",
-                        phase = "deny",
-                        error = %err,
-                        "failed to append invoke deny audit event"
-                    );
-                }
+    let verified = match evaluate_verified_live_preflight_with_resource(
+        &state,
+        &request,
+        asserted_principal.as_deref(),
+        trusted_resource.as_ref(),
+    )
+    .await
+    {
+        Ok(verified) => verified,
+        Err(error) => {
+            let reason = error.to_string();
+            // br-mvax3: deny path MUST append a hash-linked audit event so
+            // the README "every operation produces an audit event" claim is
+            // literally true even for denied requests.
+            if let Err(err) = state.invoke_audit.append(
+                &audit_ctx,
+                fcp_host::InvokePhase::PreflightDeny {
+                    reason: reason.clone(),
+                },
+            ) {
                 tracing::warn!(
-                    event = "invoke_error",
-                    schema_version = "fwc.google_workspace.telemetry.v1",
-                    event_type = "workspace.phase.host",
-                    producer_layer = "host",
-                    host_phase = "preflight_denied",
-                    connector_id = %connector_id,
-                    operation = %operation,
-                    operation_id = %operation_id,
-                    correlation_id,
-                    error_class = "local.policy_denied",
-                    duration_ms = started_at.elapsed().as_millis() as u64,
-                    host_total_us =
-                        u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
-                    "invoke request failed preflight"
+                    event = "invoke_audit_append_error",
+                    phase = "deny",
+                    error = %err,
+                    "failed to append invoke deny audit event"
                 );
-                return Err(map_host_error(HostError::PreflightFailed(reason)));
             }
-        };
+            tracing::warn!(
+                event = "invoke_error",
+                schema_version = "fwc.google_workspace.telemetry.v1",
+                event_type = "workspace.phase.host",
+                producer_layer = "host",
+                host_phase = "preflight_denied",
+                connector_id = %connector_id,
+                operation = %operation,
+                operation_id = %operation_id,
+                correlation_id,
+                error_class = "local.policy_denied",
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                host_total_us =
+                    u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+                "invoke request failed preflight"
+            );
+            return Err(map_host_error(HostError::PreflightFailed(reason)));
+        }
+    };
     let per_invocation_plan = verified.per_invocation_plan;
 
     // br-mvax3: preflight allow → append hash-linked audit event before
@@ -29070,7 +29173,7 @@ done"#;
         assert!(build_n8n_read_only_capability_issuance(&plan, &wrong_trusted_operation).is_err());
 
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
-        let request = build_n8n_read_only_invoke_request(
+        let (request, trusted_resource) = build_n8n_read_only_invoke_request(
             plan,
             test_capability_token(
                 &signing_key,
@@ -29096,6 +29199,78 @@ done"#;
         );
         assert!(request.idempotency_key.is_none());
         assert!(request.approval_tokens.is_empty());
+        assert!(request.context.is_none());
+        assert_eq!(
+            request.input,
+            json!({"id": "workflow-1", "marker": "PRIVATE-PAYLOAD-CANARY"})
+        );
+        assert_eq!(
+            trusted_resource
+                .resource_uri_for(&request)
+                .expect("host-only resource binding must match"),
+            "fwc-n8n://eec/workflows/workflow%2D1"
+        );
+        assert_eq!(
+            verified_live_constraint_resource_uri(&request, Some(&trusted_resource))
+                .expect("trusted resource must be selected")
+                .as_deref(),
+            Some("fwc-n8n://eec/workflows/workflow%2D1")
+        );
+        assert!(
+            verified_live_constraint_resource_uri(&request, None)
+                .expect("ordinary input lookup must remain available")
+                .is_none(),
+            "ordinary requests must not inherit the host-only resource"
+        );
+
+        let mut tagged_request = request.clone();
+        let mut context = tagged_request.context.take().unwrap_or_default();
+        context.request_tags.insert(
+            "fcp.host.constraint_resource_uri".to_string(),
+            "fwc-n8n://eec/workflows/workflow%2D1".to_string(),
+        );
+        tagged_request.context = Some(context);
+        assert!(
+            verified_live_constraint_resource_uri(&tagged_request, None)
+                .expect("public request tags must be ignored")
+                .is_none()
+        );
+
+        let mut mismatched_request = request.clone();
+        mismatched_request.id = RequestId::random();
+        assert!(
+            trusted_resource
+                .resource_uri_for(&mismatched_request)
+                .is_err()
+        );
+        mismatched_request = request.clone();
+        mismatched_request.connector_id = ConnectorId::from_static("fcp.test");
+        assert!(
+            trusted_resource
+                .resource_uri_for(&mismatched_request)
+                .is_err()
+        );
+        mismatched_request = request.clone();
+        mismatched_request.operation = OperationId::from_static("n8n.workflows.list");
+        assert!(
+            trusted_resource
+                .resource_uri_for(&mismatched_request)
+                .is_err()
+        );
+        mismatched_request = request.clone();
+        mismatched_request.zone_id = ZoneId::work();
+        assert!(
+            trusted_resource
+                .resource_uri_for(&mismatched_request)
+                .is_err()
+        );
+        mismatched_request = request;
+        mismatched_request.input = json!({"id": "workflow-2"});
+        assert!(
+            trusted_resource
+                .resource_uri_for(&mismatched_request)
+                .is_err()
+        );
     }
 
     #[test]

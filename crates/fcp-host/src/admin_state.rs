@@ -19,7 +19,7 @@ use fcp_kernel::{
 pub use fcp_mesh::planner::SimulateResourceAvailability;
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken,
-    CredentialId, ObjectPlacementPolicy, OperationId,
+    CredentialId, InstanceId, ObjectPlacementPolicy, OperationId,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -3953,6 +3953,36 @@ impl HostAdminStateStore {
         request: &CapabilityIssuanceRequest,
         signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
     ) -> Result<CapabilityIssuanceResponse, LifecycleError> {
+        self.issue_capability_token_inner(request, signing_key, None)
+            .await
+    }
+
+    /// Issue a capability token bound to one exact connector instance.
+    ///
+    /// This is the issuance path for a host-owned launch that chooses the
+    /// connector instance before handshake. The ordinary issuance API remains
+    /// instance-agnostic for callers that do not own that lifecycle boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if token construction or persistence fails.
+    pub async fn issue_capability_token_for_instance(
+        &self,
+        request: &CapabilityIssuanceRequest,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        instance_id: &InstanceId,
+    ) -> Result<CapabilityIssuanceResponse, LifecycleError> {
+        self.issue_capability_token_inner(request, signing_key, Some(instance_id))
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn issue_capability_token_inner(
+        &self,
+        request: &CapabilityIssuanceRequest,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        instance_id: Option<&InstanceId>,
+    ) -> Result<CapabilityIssuanceResponse, LifecycleError> {
         let now = Utc::now();
         let ttl = i64::try_from(request.ttl_secs).unwrap_or(3600);
         let expires = now + chrono::Duration::seconds(ttl);
@@ -4003,6 +4033,9 @@ impl HostAdminStateStore {
 
         if let Some(ref holder) = request.holder_node {
             claims = claims.holder_node(holder);
+        }
+        if let Some(instance_id) = instance_id {
+            claims = claims.target_instance(instance_id.as_str());
         }
 
         claims = claims.custom(
@@ -6975,6 +7008,59 @@ mod tests {
             .expect("host-issued token must satisfy live core verifier");
 
         assert_eq!(verified.claims().get_capability_id(), Some("github.repo"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn instance_bound_issuance_verifies_only_for_selected_instance() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let request = basic_issuance_request();
+        let selected_instance: InstanceId = "inst_host_owned_test"
+            .parse()
+            .expect("canonical selected instance");
+
+        let response = store
+            .issue_capability_token_for_instance(&request, &key, &selected_instance)
+            .await
+            .expect("bound issuance");
+        let token_b64 = response.token_cbor_b64.expect("non-dry-run token");
+        let token_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, token_b64).unwrap();
+        let token = CapabilityToken::from_raw(CoseToken::from_cbor(&token_bytes).unwrap());
+
+        let verifier = fcp_core::CapabilityVerifier::new(
+            key.verifying_key().to_bytes(),
+            fcp_core::ZoneId::try_from("z:work".to_string()).unwrap(),
+            selected_instance,
+        );
+        verifier
+            .verify_bound(
+                token.clone(),
+                &CapabilityId::new("github.repo").unwrap(),
+                &OperationId::new("list_repos").unwrap(),
+                &[],
+            )
+            .expect("selected instance must accept the token");
+
+        let wrong_instance: InstanceId = "inst_host_owned_wrong"
+            .parse()
+            .expect("canonical wrong instance");
+        let wrong_verifier = fcp_core::CapabilityVerifier::new(
+            key.verifying_key().to_bytes(),
+            fcp_core::ZoneId::try_from("z:work".to_string()).unwrap(),
+            wrong_instance,
+        );
+        assert!(
+            wrong_verifier
+                .verify_bound(
+                    token,
+                    &CapabilityId::new("github.repo").unwrap(),
+                    &OperationId::new("list_repos").unwrap(),
+                    &[],
+                )
+                .is_err(),
+            "a different connector instance must reject the token"
+        );
     }
 
     #[fcp_async_core::runtime::test]

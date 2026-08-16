@@ -9605,6 +9605,27 @@ fn select_run_once_connector_config(
     })
 }
 
+fn bind_n8n_run_once_connector_instance(
+    loaded_configs: &mut LoadedConnectorConfigs,
+    instance_id: &InstanceId,
+) -> HostResult<()> {
+    let config = loaded_configs.configs.first_mut().ok_or_else(|| {
+        HostError::ConnectorNotFound(
+            "n8n read-only run-once connector is not configured".to_string(),
+        )
+    })?;
+    if config.id != "fcp.n8n" || config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation {
+        return Err(HostError::PreflightFailed(
+            "n8n read-only run-once instance binding was denied".to_string(),
+        ));
+    }
+    config.env.insert(
+        REQUESTED_INSTANCE_ID_ENV.to_string(),
+        instance_id.to_string(),
+    );
+    Ok(())
+}
+
 fn run_once_invoke_error(status: StatusCode) -> HostError {
     if status == StatusCode::BAD_REQUEST {
         HostError::InvalidFilter("run-once request was rejected".to_string())
@@ -10146,7 +10167,7 @@ async fn async_n8n_read_only_run_once(
 ) -> HostResult<InvokeResponse> {
     let high_level_input = read_n8n_read_only_run_once_input_from_stdin()?;
     let connector_id = ConnectorId::from_static("fcp.n8n");
-    let loaded_configs =
+    let mut loaded_configs =
         select_run_once_connector_config(load_connector_configs()?, &connector_id)?;
     let selected_config = loaded_configs.configs.first().cloned().ok_or_else(|| {
         HostError::ConnectorNotFound(
@@ -10161,6 +10182,8 @@ async fn async_n8n_read_only_run_once(
                     "n8n read-only run-once credential bootstrap is required".to_string(),
                 )
             })?;
+    let invocation_instance_id = InstanceId::new();
+    bind_n8n_run_once_connector_instance(&mut loaded_configs, &invocation_instance_id)?;
 
     let truth_precedence_boot = current_truth_precedence_boot_resolution().map_err(|error| {
         emit_truth_precedence_boot_error(&error);
@@ -10201,7 +10224,7 @@ async fn async_n8n_read_only_run_once(
     let issuance = build_n8n_read_only_capability_issuance(&plan, trusted_operation)?.into_inner();
     let issued = state
         .lifecycle
-        .issue_capability_token(&issuance, &signing_key)
+        .issue_capability_token_for_instance(&issuance, &signing_key, &invocation_instance_id)
         .await
         .map_err(map_lifecycle_host_error)?;
     let token_b64 = issued.token_cbor_b64.ok_or_else(|| {
@@ -28967,6 +28990,31 @@ done"#;
             "server_id": "eec"
         }));
         config
+    }
+
+    #[test]
+    fn n8n_run_once_replaces_inventory_instance_with_fresh_host_binding() {
+        let mut config = run_once_n8n_test_config();
+        config.env.insert(
+            REQUESTED_INSTANCE_ID_ENV.to_string(),
+            "inst_stale_inventory_value".to_string(),
+        );
+        let mut loaded_configs = LoadedConnectorConfigs {
+            configs: vec![config],
+            connectors_file: None,
+        };
+        let selected_instance: InstanceId = "inst_n8n_run_once_selected"
+            .parse()
+            .expect("canonical selected instance");
+
+        bind_n8n_run_once_connector_instance(&mut loaded_configs, &selected_instance)
+            .expect("host-owned n8n instance binding");
+
+        assert_eq!(
+            requested_instance_id_from_config(&loaded_configs.configs[0])
+                .expect("valid configured instance"),
+            Some(selected_instance)
+        );
     }
 
     fn n8n_read_only_test_input(operation: &str) -> N8nReadOnlyRunOnceInput {

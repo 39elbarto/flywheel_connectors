@@ -356,7 +356,7 @@ impl OwnedProcess {
                     return Err(std::io::Error::last_os_error());
                 }
                 if network_disabled {
-                    install_network_deny_filter()?;
+                    install_network_deny_filter(inherited_fd)?;
                 }
                 Ok(())
             });
@@ -1260,17 +1260,66 @@ fn write_literal_zero(fd: RawFd) -> Result<(), std::io::Error> {
 }
 
 #[cfg(target_os = "linux")]
-fn install_network_deny_filter() -> Result<(), std::io::Error> {
+fn append_connected_channel_io_rule(
+    filter: &mut Vec<SeccompInstruction>,
+    syscall: u32,
+    allowed_fd: u32,
+) {
+    const BPF_LD_W_ABS: u16 = 0x20;
+    const BPF_JMP_JEQ: u16 = 0x15;
+    const BPF_RET_K: u16 = 0x06;
+    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+    const SECCOMP_SYSCALL_OFFSET: u32 = 0;
+    #[cfg(target_endian = "little")]
+    const SECCOMP_ARG0_LOW_OFFSET: u32 = 16;
+    #[cfg(target_endian = "big")]
+    const SECCOMP_ARG0_LOW_OFFSET: u32 = 20;
+
+    filter.push(SeccompInstruction::jump(BPF_JMP_JEQ, syscall, 0, 4));
+    filter.push(SeccompInstruction::stmt(
+        BPF_LD_W_ABS,
+        SECCOMP_ARG0_LOW_OFFSET,
+    ));
+    filter.push(SeccompInstruction::jump(BPF_JMP_JEQ, allowed_fd, 0, 1));
+    filter.push(SeccompInstruction::stmt(BPF_RET_K, SECCOMP_RET_ALLOW));
+    filter.push(SeccompInstruction::stmt(
+        BPF_RET_K,
+        SECCOMP_RET_ERRNO | u32::try_from(libc::EPERM).unwrap_or(1),
+    ));
+    filter.push(SeccompInstruction::stmt(
+        BPF_LD_W_ABS,
+        SECCOMP_SYSCALL_OFFSET,
+    ));
+}
+
+#[cfg(target_os = "linux")]
+fn install_network_deny_filter(
+    allowed_connected_channel_fd: Option<RawFd>,
+) -> Result<(), std::io::Error> {
     const BPF_LD_W_ABS: u16 = 0x20;
     const BPF_JMP_JEQ: u16 = 0x15;
     const BPF_RET_K: u16 = 0x06;
     const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
     const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
     const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+    const SECCOMP_SYSCALL_OFFSET: u32 = 0;
+    const SECCOMP_ARCH_OFFSET: u32 = 4;
 
     let expected_arch = expected_seccomp_arch().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::Unsupported, "unsupported seccomp ABI")
     })?;
+
+    let allowed_connected_channel_fd = allowed_connected_channel_fd
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    #[cfg(target_arch = "x86")]
+    if allowed_connected_channel_fd.is_some() {
+        // i386 libc may route socket I/O through socketcall, whose nested fd
+        // argument cannot be constrained by this classic BPF program.
+        return Err(std::io::Error::from(std::io::ErrorKind::Unsupported));
+    }
 
     let mut denied = vec![
         libc::SYS_socket as u32,
@@ -1280,9 +1329,7 @@ fn install_network_deny_filter() -> Result<(), std::io::Error> {
         libc::SYS_listen as u32,
         libc::SYS_accept as u32,
         libc::SYS_accept4 as u32,
-        libc::SYS_sendto as u32,
         libc::SYS_sendmsg as u32,
-        libc::SYS_recvfrom as u32,
         libc::SYS_recvmsg as u32,
         libc::SYS_shutdown as u32,
         libc::SYS_sendmmsg as u32,
@@ -1293,19 +1340,35 @@ fn install_network_deny_filter() -> Result<(), std::io::Error> {
         libc::SYS_setsid as u32,
         libc::SYS_setpgid as u32,
     ];
+    if allowed_connected_channel_fd.is_none() {
+        denied.push(libc::SYS_sendto as u32);
+        denied.push(libc::SYS_recvfrom as u32);
+    }
     #[cfg(target_arch = "x86")]
     denied.push(libc::SYS_socketcall as u32);
     denied.sort_unstable();
     denied.dedup();
 
-    let mut filter = Vec::with_capacity(5 + denied.len() * 2);
-    filter.push(SeccompInstruction::stmt(BPF_LD_W_ABS, 4));
+    let mut filter = Vec::with_capacity(5 + denied.len() * 2 + 12);
+    filter.push(SeccompInstruction::stmt(BPF_LD_W_ABS, SECCOMP_ARCH_OFFSET));
     filter.push(SeccompInstruction::jump(BPF_JMP_JEQ, expected_arch, 1, 0));
     filter.push(SeccompInstruction::stmt(
         BPF_RET_K,
         SECCOMP_RET_KILL_PROCESS,
     ));
-    filter.push(SeccompInstruction::stmt(BPF_LD_W_ABS, 0));
+    filter.push(SeccompInstruction::stmt(
+        BPF_LD_W_ABS,
+        SECCOMP_SYSCALL_OFFSET,
+    ));
+    if let Some(allowed_fd) = allowed_connected_channel_fd {
+        // Rust's std UnixStream uses sendto/recvfrom for ordinary stream I/O
+        // on Linux. Permit those two operations only on the already-connected,
+        // host-owned descriptor inherited by this child. sendmsg/recvmsg stay
+        // denied so the connector cannot transfer file descriptors.
+        for syscall in [libc::SYS_sendto as u32, libc::SYS_recvfrom as u32] {
+            append_connected_channel_io_rule(&mut filter, syscall, allowed_fd);
+        }
+    }
     for syscall in denied {
         filter.push(SeccompInstruction::jump(BPF_JMP_JEQ, syscall, 0, 1));
         filter.push(SeccompInstruction::stmt(
@@ -1439,10 +1502,47 @@ mod tests {
             .expect("inherited channel fd environment")
             .parse::<i32>()
             .expect("numeric inherited channel fd");
-        let mut channel = unsafe { std::fs::File::from_raw_fd(channel_fd) };
+        let mut channel = unsafe { UnixStream::from_raw_fd(channel_fd) };
         let mut request = [0_u8; 4];
         channel.read_exact(&mut request).expect("channel request");
         assert_eq!(&request, b"ping");
+
+        let duplicated_fd = unsafe { libc::dup(channel.as_raw_fd()) };
+        assert!(duplicated_fd >= 0, "duplicate inherited channel fd");
+        let mut empty = [0_u8; 0];
+        let duplicated_send_errno = unsafe {
+            let result = libc::sendto(
+                duplicated_fd,
+                empty.as_ptr().cast(),
+                empty.len(),
+                libc::MSG_NOSIGNAL,
+                std::ptr::null(),
+                0,
+            );
+            let error = if result == 0 {
+                0
+            } else {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            };
+            error
+        };
+        let duplicated_recv_errno = unsafe {
+            let result = libc::recvfrom(
+                duplicated_fd,
+                empty.as_mut_ptr().cast(),
+                empty.len(),
+                libc::MSG_DONTWAIT,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            let error = if result == 0 {
+                0
+            } else {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            };
+            libc::close(duplicated_fd);
+            error
+        };
 
         let socket_errno = unsafe {
             let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
@@ -1461,7 +1561,9 @@ mod tests {
                 std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
             }
         };
-        let response = format!("{socket_errno}:{connect_errno}:pong");
+        let response = format!(
+            "{socket_errno}:{connect_errno}:{duplicated_send_errno}:{duplicated_recv_errno}:pong"
+        );
         channel
             .write_all(response.as_bytes())
             .expect("channel response");
@@ -1615,7 +1717,13 @@ mod tests {
         host_endpoint
             .write_all(b"ping")
             .expect("write channel request");
-        let expected = format!("{}:{}:pong", libc::EPERM, libc::EPERM);
+        let expected = format!(
+            "{}:{}:{}:{}:pong",
+            libc::EPERM,
+            libc::EPERM,
+            libc::EPERM,
+            libc::EPERM
+        );
         let mut response = vec![0_u8; expected.len()];
         host_endpoint
             .read_exact(&mut response)

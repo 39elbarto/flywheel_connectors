@@ -10,6 +10,8 @@ use fcp_manifest::{
 };
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::HostEgressProxyError;
+#[cfg(test)]
+use fcp_sdk::migration::InheritedChannelStage;
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::de::DeserializeOwned;
@@ -721,6 +723,7 @@ fn map_host_egress_error(error: &HostEgressProxyError) -> N8nError {
     let message = match error {
         HostEgressProxyError::Transport(_) => "host egress proxy transport failed",
         HostEgressProxyError::InheritedChannel => "host egress proxy inherited channel failed",
+        HostEgressProxyError::InheritedChannelStage(stage) => stage.fixed_message(),
         HostEgressProxyError::RequestEnvelopeTooLarge => {
             "host egress proxy request exceeded the configured limit"
         }
@@ -1056,6 +1059,22 @@ mod tests {
             (
                 HostEgressProxyError::InheritedChannel,
                 "host egress proxy inherited channel failed",
+            ),
+            (
+                HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Poisoned),
+                "host egress proxy inherited channel was unavailable or poisoned",
+            ),
+            (
+                HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::ReadEof),
+                "host egress proxy inherited channel reached EOF",
+            ),
+            (
+                HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Validation),
+                "host egress proxy inherited channel returned an invalid response",
+            ),
+            (
+                HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Timeout),
+                "host egress proxy inherited channel timed out",
             ),
             (
                 HostEgressProxyError::RequestEnvelopeTooLarge,

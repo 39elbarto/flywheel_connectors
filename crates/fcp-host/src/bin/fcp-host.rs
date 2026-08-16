@@ -9981,6 +9981,15 @@ enum N8nRunOnceExternalProvenanceDiagnostic {
     HostProxyRejected,
     ConnectorEgressTransport,
     ConnectorEgressInheritedChannel,
+    ConnectorEgressInheritedRequestId,
+    ConnectorEgressInheritedPoisoned,
+    ConnectorEgressInheritedWrite,
+    ConnectorEgressInheritedRead,
+    ConnectorEgressInheritedReadEof,
+    ConnectorEgressInheritedFrame,
+    ConnectorEgressInheritedJson,
+    ConnectorEgressInheritedValidation,
+    ConnectorEgressInheritedTimeout,
     ConnectorEgressRequestTooLarge,
     ConnectorEgressRequestMalformed,
     ConnectorEgressResponseTooLarge,
@@ -9995,6 +10004,21 @@ impl N8nRunOnceExternalProvenanceDiagnostic {
             Self::HostProxyRejected => "external.host_proxy_rejected",
             Self::ConnectorEgressTransport => "external.connector_egress_transport",
             Self::ConnectorEgressInheritedChannel => "external.connector_egress_inherited_channel",
+            Self::ConnectorEgressInheritedRequestId => {
+                "external.connector_egress_inherited_request_id"
+            }
+            Self::ConnectorEgressInheritedPoisoned => {
+                "external.connector_egress_inherited_poisoned"
+            }
+            Self::ConnectorEgressInheritedWrite => "external.connector_egress_inherited_write",
+            Self::ConnectorEgressInheritedRead => "external.connector_egress_inherited_read",
+            Self::ConnectorEgressInheritedReadEof => "external.connector_egress_inherited_read_eof",
+            Self::ConnectorEgressInheritedFrame => "external.connector_egress_inherited_frame",
+            Self::ConnectorEgressInheritedJson => "external.connector_egress_inherited_json",
+            Self::ConnectorEgressInheritedValidation => {
+                "external.connector_egress_inherited_validation"
+            }
+            Self::ConnectorEgressInheritedTimeout => "external.connector_egress_inherited_timeout",
             Self::ConnectorEgressRequestTooLarge => "external.connector_egress_request_too_large",
             Self::ConnectorEgressRequestMalformed => "external.connector_egress_request_malformed",
             Self::ConnectorEgressResponseTooLarge => "external.connector_egress_response_too_large",
@@ -10030,6 +10054,33 @@ fn child_external_provenance_diagnostic(
         }
         "External service error: n8n - host egress proxy inherited channel failed" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedChannel)
+        }
+        "External service error: n8n - host egress proxy inherited channel request id exhausted" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedRequestId)
+        }
+        "External service error: n8n - host egress proxy inherited channel was unavailable or poisoned" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedPoisoned)
+        }
+        "External service error: n8n - host egress proxy inherited channel write failed" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedWrite)
+        }
+        "External service error: n8n - host egress proxy inherited channel read failed" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedRead)
+        }
+        "External service error: n8n - host egress proxy inherited channel reached EOF" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedReadEof)
+        }
+        "External service error: n8n - host egress proxy inherited channel returned an invalid frame" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedFrame)
+        }
+        "External service error: n8n - host egress proxy inherited channel returned invalid JSON" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedJson)
+        }
+        "External service error: n8n - host egress proxy inherited channel returned an invalid response" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedValidation)
+        }
+        "External service error: n8n - host egress proxy inherited channel timed out" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedTimeout)
         }
         "External service error: n8n - host egress proxy request exceeded the configured limit" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressRequestTooLarge)
@@ -18719,6 +18770,69 @@ mod tests {
                     "details": {"service": "n8n", "status_code": 502}
                 }),
                 Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedChannel),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel request id exhausted",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedRequestId),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel was unavailable or poisoned",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedPoisoned),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel write failed",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedWrite),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel read failed",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedRead),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel reached EOF",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedReadEof),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel returned an invalid frame",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedFrame),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel returned invalid JSON",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedJson),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel returned an invalid response",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedValidation),
+            ),
+            (
+                json!({
+                    "message": "External service error: n8n - host egress proxy inherited channel timed out",
+                    "details": {"service": "n8n", "status_code": 502}
+                }),
+                Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedTimeout),
             ),
             (
                 json!({

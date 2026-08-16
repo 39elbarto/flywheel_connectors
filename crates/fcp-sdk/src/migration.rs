@@ -698,22 +698,69 @@ struct InheritedFdExchangeGuard<'a> {
     validated_response: bool,
 }
 
+#[cfg(feature = "connector-http")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Content-free stage at which an inherited host-egress exchange failed.
+pub enum InheritedChannelStage {
+    /// The monotonically increasing wire request identifier wrapped to zero.
+    RequestIdExhausted,
+    /// The channel was already unavailable or poisoned by an earlier exchange.
+    Poisoned,
+    /// Writing the request frame to the inherited stream failed.
+    WriteIo,
+    /// Reading the response frame from the inherited stream failed.
+    ReadIo,
+    /// The inherited stream reached EOF before a response frame arrived.
+    ReadEof,
+    /// The response frame violated the bounded newline-delimited framing contract.
+    Frame,
+    /// The response frame was not a valid JSON wire response.
+    Json,
+    /// The decoded response violated the request/route/status/body contract.
+    Validation,
+    /// The bounded exchange deadline elapsed.
+    Timeout,
+}
+
+#[cfg(feature = "connector-http")]
+impl InheritedChannelStage {
+    /// Fixed, content-free text suitable for redacted connector diagnostics.
+    #[must_use]
+    pub const fn fixed_message(self) -> &'static str {
+        match self {
+            Self::RequestIdExhausted => "host egress proxy inherited channel request id exhausted",
+            Self::Poisoned => "host egress proxy inherited channel was unavailable or poisoned",
+            Self::WriteIo => "host egress proxy inherited channel write failed",
+            Self::ReadIo => "host egress proxy inherited channel read failed",
+            Self::ReadEof => "host egress proxy inherited channel reached EOF",
+            Self::Frame => "host egress proxy inherited channel returned an invalid frame",
+            Self::Json => "host egress proxy inherited channel returned invalid JSON",
+            Self::Validation => "host egress proxy inherited channel returned an invalid response",
+            Self::Timeout => "host egress proxy inherited channel timed out",
+        }
+    }
+}
+
 #[cfg(all(feature = "connector-http", target_os = "linux"))]
 impl Drop for InheritedFdExchangeGuard<'_> {
     fn drop(&mut self) {
         if !self.validated_response {
-            self.channel.poisoned.store(true, Ordering::Release);
-            if let Ok(mut state) = self.channel.state.try_lock() {
-                state.poisoned = true;
-                let _ = state.stream.take();
-                state.retained_read_buffer.clear();
-            }
+            self.channel.poison();
         }
     }
 }
 
 #[cfg(all(feature = "connector-http", target_os = "linux"))]
 impl InheritedFdChannel {
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+        if let Ok(mut state) = self.state.try_lock() {
+            state.poisoned = true;
+            let _ = state.stream.take();
+            state.retained_read_buffer.clear();
+        }
+    }
+
     fn new(
         stream: UnixStream,
         auth_token: String,
@@ -741,7 +788,10 @@ impl InheritedFdChannel {
     ) -> Result<HostEgressWireResponse, HostEgressProxyError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         if request_id == 0 {
-            return Err(HostEgressProxyError::InheritedChannel);
+            self.poison();
+            return Err(HostEgressProxyError::InheritedChannelStage(
+                InheritedChannelStage::RequestIdExhausted,
+            ));
         }
         let request = HostEgressWireRequest {
             schema_version: HOST_EGRESS_WIRE_SCHEMA_VERSION,
@@ -754,7 +804,9 @@ impl InheritedFdChannel {
 
         let mut state = self.state.lock().await;
         if self.poisoned.load(Ordering::Acquire) || state.poisoned || state.stream.is_none() {
-            return Err(HostEgressProxyError::InheritedChannel);
+            return Err(HostEgressProxyError::InheritedChannelStage(
+                InheritedChannelStage::Poisoned,
+            ));
         }
 
         // Arm cancellation poisoning only after this caller owns the
@@ -772,15 +824,18 @@ impl InheritedFdChannel {
             ..
         } = &mut *state;
         let operation = async {
-            let stream = stream.as_mut().ok_or(())?;
-            stream.write_all(&frame).await.map_err(|_| ())?;
+            let stream = stream.as_mut().ok_or(InheritedChannelStage::Poisoned)?;
+            stream
+                .write_all(&frame)
+                .await
+                .map_err(|_| InheritedChannelStage::WriteIo)?;
             let response =
                 read_bounded_wire_frame(stream, retained_read_buffer, self.max_envelope_bytes)
-                    .await
-                    .map_err(|_| ())?;
-            let response =
-                serde_json::from_slice::<HostEgressWireResponse>(&response).map_err(|_| ())?;
-            validate_inherited_wire_response(response, request_id, route).map_err(|_| ())
+                    .await?;
+            let response = serde_json::from_slice::<HostEgressWireResponse>(&response)
+                .map_err(|_| InheritedChannelStage::Json)?;
+            validate_inherited_wire_response(response, request_id, route)
+                .map_err(|_| InheritedChannelStage::Validation)
         };
 
         match fcp_async_core::time::timeout(self.request_timeout, operation).await {
@@ -788,7 +843,10 @@ impl InheritedFdChannel {
                 exchange_guard.validated_response = true;
                 Ok(response)
             }
-            Ok(Err(())) | Err(_) => Err(HostEgressProxyError::InheritedChannel),
+            Ok(Err(stage)) => Err(HostEgressProxyError::InheritedChannelStage(stage)),
+            Err(_) => Err(HostEgressProxyError::InheritedChannelStage(
+                InheritedChannelStage::Timeout,
+            )),
         }
     }
 }
@@ -812,29 +870,36 @@ async fn read_bounded_wire_frame(
     stream: &mut UnixStream,
     retained_read_buffer: &mut Vec<u8>,
     max_bytes: usize,
-) -> Result<Vec<u8>, ()> {
+) -> Result<Vec<u8>, InheritedChannelStage> {
     loop {
         if let Some(newline) = retained_read_buffer.iter().position(|byte| *byte == b'\n') {
             let frame_len = newline + 1;
             if frame_len > max_bytes || newline == 0 || retained_read_buffer.len() != frame_len {
-                return Err(());
+                return Err(InheritedChannelStage::Frame);
             }
             let mut frame = retained_read_buffer.drain(..frame_len).collect::<Vec<_>>();
             frame.pop();
             if frame.contains(&b'\n') {
-                return Err(());
+                return Err(InheritedChannelStage::Frame);
             }
             return Ok(frame);
         }
         if retained_read_buffer.len() >= max_bytes {
-            return Err(());
+            return Err(InheritedChannelStage::Frame);
         }
         let remaining = max_bytes - retained_read_buffer.len();
         let mut chunk = [0_u8; 1024];
         let read_len = remaining.min(chunk.len());
-        let count = stream.read(&mut chunk[..read_len]).await.map_err(|_| ())?;
+        let count = stream
+            .read(&mut chunk[..read_len])
+            .await
+            .map_err(|_| InheritedChannelStage::ReadIo)?;
         if count == 0 {
-            return Err(());
+            return Err(if retained_read_buffer.is_empty() {
+                InheritedChannelStage::ReadEof
+            } else {
+                InheritedChannelStage::Frame
+            });
         }
         retained_read_buffer.extend_from_slice(&chunk[..count]);
     }
@@ -849,6 +914,7 @@ fn validate_inherited_wire_response(
     if response.schema_version != HOST_EGRESS_WIRE_SCHEMA_VERSION
         || response.request_id != request_id
         || response.route != route
+        || !(100..=599).contains(&response.status)
     {
         return Err(());
     }
@@ -1261,6 +1327,9 @@ pub enum HostEgressProxyError {
     /// The inherited host channel was closed, poisoned, malformed, or timed out.
     #[error("host egress inherited channel failed")]
     InheritedChannel,
+    /// The inherited host channel failed at a fixed, content-free stage.
+    #[error("host egress inherited channel failed at {0:?}")]
+    InheritedChannelStage(InheritedChannelStage),
     /// The serialized request exceeded the fixed connector-to-host cap.
     #[error("host egress proxy request exceeded the configured envelope limit")]
     RequestEnvelopeTooLarge,
@@ -1289,6 +1358,10 @@ impl fmt::Debug for HostEgressProxyError {
         match self {
             Self::Transport(_) => formatter.write_str("Transport([redacted])"),
             Self::InheritedChannel => formatter.write_str("InheritedChannel"),
+            Self::InheritedChannelStage(stage) => formatter
+                .debug_tuple("InheritedChannelStage")
+                .field(stage)
+                .finish(),
             Self::RequestEnvelopeTooLarge => formatter.write_str("RequestEnvelopeTooLarge"),
             Self::MalformedRequestEnvelope => formatter.write_str("MalformedRequestEnvelope"),
             Self::EnvelopeTooLarge => formatter.write_str("EnvelopeTooLarge"),
@@ -1310,6 +1383,7 @@ impl HostEgressProxyError {
         match self {
             Self::Transport(_)
             | Self::InheritedChannel
+            | Self::InheritedChannelStage(_)
             | Self::RequestEnvelopeTooLarge
             | Self::MalformedRequestEnvelope
             | Self::EnvelopeTooLarge
@@ -1324,6 +1398,7 @@ impl HostEgressProxyError {
         match self {
             Self::Transport(_)
             | Self::InheritedChannel
+            | Self::InheritedChannelStage(_)
             | Self::RequestEnvelopeTooLarge
             | Self::MalformedRequestEnvelope
             | Self::EnvelopeTooLarge
@@ -2026,6 +2101,79 @@ mod tests {
     }
 
     #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn inherited_channel_stages_are_fixed_and_status_validation_is_symmetric() {
+        let stages = [
+            InheritedChannelStage::RequestIdExhausted,
+            InheritedChannelStage::Poisoned,
+            InheritedChannelStage::WriteIo,
+            InheritedChannelStage::ReadIo,
+            InheritedChannelStage::ReadEof,
+            InheritedChannelStage::Frame,
+            InheritedChannelStage::Json,
+            InheritedChannelStage::Validation,
+            InheritedChannelStage::Timeout,
+        ];
+        for stage in stages {
+            let message = stage.fixed_message();
+            assert!(message.is_ascii());
+            assert!(message.starts_with("host egress proxy inherited channel"));
+            assert!(!message.contains("secret"));
+        }
+
+        let request = HostEgressWireRequest {
+            schema_version: HOST_EGRESS_WIRE_SCHEMA_VERSION,
+            request_id: 1,
+            auth_token: "inherited-auth-test".to_string(),
+            route: HostEgressWireRoute::Http,
+            payload: HostEgressWireRequestPayload::Http(fcp_manifest::HostEgressHttpRequest {
+                context: br_b0qqv_host_egress_context("messages.create", "req-wire-status"),
+                url: "https://api.example.test".to_string(),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: None,
+            }),
+        };
+        for invalid_status in [99, 600] {
+            let mut response = inherited_test_response(&request);
+            response.status = invalid_status;
+            assert!(
+                validate_inherited_wire_response(response, request.request_id, request.route)
+                    .is_err()
+            );
+        }
+
+        let (client_stream, _peer) =
+            std::os::unix::net::UnixStream::pair().expect("request-id socketpair");
+        let channel = InheritedFdChannel::new(
+            UnixStream::from_std(client_stream).expect("async request-id stream"),
+            "inherited-auth-test".to_string(),
+            Duration::from_secs(1),
+            HOST_EGRESS_WIRE_MAX_FRAME_BYTES,
+        );
+        channel.next_request_id.store(0, Ordering::Relaxed);
+        let first = fcp_async_core::runtime::block_on_sync(
+            channel.exchange(request.route, request.payload.clone()),
+        )
+        .expect("runtime layer")
+        .expect_err("wrapped request id must fail");
+        assert!(matches!(
+            first,
+            HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::RequestIdExhausted)
+        ));
+        let second = fcp_async_core::runtime::block_on_sync(
+            channel.exchange(request.route, request.payload.clone()),
+        )
+        .expect("runtime layer")
+        .expect_err("request-id exhaustion must poison the channel");
+        assert!(matches!(
+            second,
+            HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Poisoned)
+        ));
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
     fn read_wire_test_frame(
         stream: &mut std::os::unix::net::UnixStream,
     ) -> std::io::Result<Vec<u8>> {
@@ -2119,7 +2267,10 @@ mod tests {
         use std::os::unix::net::UnixStream as StdUnixStream;
         use std::thread;
 
-        for response in [b"not-json\n".to_vec(), b"{".to_vec()] {
+        for (response, expected_stage) in [
+            (b"not-json\n".to_vec(), InheritedChannelStage::Json),
+            (b"{".to_vec(), InheritedChannelStage::Frame),
+        ] {
             let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
             let handle = thread::spawn(move || {
                 let _ = read_wire_test_frame(&mut peer);
@@ -2142,11 +2293,17 @@ mod tests {
             let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
                 .expect("runtime layer")
                 .expect_err("bad response must fail");
-            assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+            assert!(matches!(
+                error,
+                HostEgressProxyError::InheritedChannelStage(stage) if stage == expected_stage
+            ));
             let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
                 .expect("runtime layer")
                 .expect_err("poisoned channel must stay closed");
-            assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+            assert!(matches!(
+                error,
+                HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Poisoned)
+            ));
             handle.join().expect("wire peer thread");
         }
 
@@ -2179,7 +2336,10 @@ mod tests {
         let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
             .expect("runtime layer")
             .expect_err("wrong response id must fail closed");
-        assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+        assert!(matches!(
+            error,
+            HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Validation)
+        ));
         handle.join().expect("wire peer thread");
 
         let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
@@ -2200,7 +2360,10 @@ mod tests {
         let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
             .expect("runtime layer")
             .expect_err("oversized response must fail closed");
-        assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+        assert!(matches!(
+            error,
+            HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Frame)
+        ));
         handle.join().expect("wire peer thread");
 
         let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
@@ -2220,7 +2383,10 @@ mod tests {
         let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
             .expect("runtime layer")
             .expect_err("response timeout must poison channel");
-        assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+        assert!(matches!(
+            error,
+            HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Timeout)
+        ));
         handle.join().expect("wire peer thread");
 
         let (closed, peer) = StdUnixStream::pair().expect("socketpair");
@@ -2342,7 +2508,10 @@ mod tests {
         let error = fcp_async_core::runtime::block_on_sync(client.http(&request))
             .expect("runtime layer")
             .expect_err("cancelled in-flight exchange must poison channel");
-        assert!(matches!(error, HostEgressProxyError::InheritedChannel));
+        assert!(matches!(
+            error,
+            HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Poisoned)
+        ));
     }
 
     // -- HttpRetryConfig tests ------------------------------------------------

@@ -1003,6 +1003,7 @@ fn map_host_egress_error(error: &HostEgressProxyError) -> McpBridgeError {
     let message = match error {
         HostEgressProxyError::Transport(_) => "host egress proxy transport failed",
         HostEgressProxyError::InheritedChannel => "host egress proxy inherited channel failed",
+        HostEgressProxyError::InheritedChannelStage(stage) => stage.fixed_message(),
         HostEgressProxyError::RequestEnvelopeTooLarge => {
             "host egress proxy request exceeded the configured limit"
         }

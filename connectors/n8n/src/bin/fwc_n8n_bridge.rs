@@ -987,6 +987,33 @@ fn child_external_provenance_diagnostic(stderr: &[u8]) -> Option<&'static str> {
             b"external.connector_egress_inherited_channel" => {
                 Some("external.connector_egress_inherited_channel")
             }
+            b"external.connector_egress_inherited_request_id" => {
+                Some("external.connector_egress_inherited_request_id")
+            }
+            b"external.connector_egress_inherited_poisoned" => {
+                Some("external.connector_egress_inherited_poisoned")
+            }
+            b"external.connector_egress_inherited_write" => {
+                Some("external.connector_egress_inherited_write")
+            }
+            b"external.connector_egress_inherited_read" => {
+                Some("external.connector_egress_inherited_read")
+            }
+            b"external.connector_egress_inherited_read_eof" => {
+                Some("external.connector_egress_inherited_read_eof")
+            }
+            b"external.connector_egress_inherited_frame" => {
+                Some("external.connector_egress_inherited_frame")
+            }
+            b"external.connector_egress_inherited_json" => {
+                Some("external.connector_egress_inherited_json")
+            }
+            b"external.connector_egress_inherited_validation" => {
+                Some("external.connector_egress_inherited_validation")
+            }
+            b"external.connector_egress_inherited_timeout" => {
+                Some("external.connector_egress_inherited_timeout")
+            }
             b"external.connector_egress_request_too_large" => {
                 Some("external.connector_egress_request_too_large")
             }
@@ -1635,6 +1662,15 @@ mod tests {
             "external.host_proxy_rejected",
             "external.connector_egress_transport",
             "external.connector_egress_inherited_channel",
+            "external.connector_egress_inherited_request_id",
+            "external.connector_egress_inherited_poisoned",
+            "external.connector_egress_inherited_write",
+            "external.connector_egress_inherited_read",
+            "external.connector_egress_inherited_read_eof",
+            "external.connector_egress_inherited_frame",
+            "external.connector_egress_inherited_json",
+            "external.connector_egress_inherited_validation",
+            "external.connector_egress_inherited_timeout",
             "external.connector_egress_request_too_large",
             "external.connector_egress_request_malformed",
             "external.connector_egress_response_too_large",

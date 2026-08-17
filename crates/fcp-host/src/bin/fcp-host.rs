@@ -94,17 +94,17 @@ use fcp_host::{
     ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer,
     RevocationCascadeVerifier, RolloutController, RolloutDecision, RolloutObservation,
     RolloutOutcome, RunOnceCredentialBinding, RunOnceCredentialBootstrapError,
-    RunOnceN8nCredential, RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig,
-    SimulateCostConfidence, SimulateCostEstimate, SimulatePhase, SimulateReceipt,
-    SimulateReceiptQueryRequest, SimulateReceiptQueryResponse, SimulateResourceAvailability,
-    StartupReconciliationReport, StickyCredentialPolicy, SupplyChainGate, SupplyChainGateConfig,
-    TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE, ToolDescriptor, TruthPrecedenceBootError,
-    TruthPrecedenceBootResolution, TruthPrecedenceBootSelection, V2_DEFAULT_GRADUATED_ENV,
-    V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV, V2_MIN_HEALTHY_MESH_PEERS_ENV, WARM_POOL_EVIDENCE_EVENT,
-    WarmPoolEntrySnapshot, WarmPoolKey, WarmPoolPressureSnapshot, admit_safety_tier,
-    capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
-    emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
-    native_proxy_only_sandbox_decision, read_run_once_n8n_credential_frame,
+    RunOnceCredentialKind, RunOnceN8nCredential, RuntimeNetworkEnforcement, SafetyTierExt,
+    SanitizedConnectorConfig, SimulateCostConfidence, SimulateCostEstimate, SimulatePhase,
+    SimulateReceipt, SimulateReceiptQueryRequest, SimulateReceiptQueryResponse,
+    SimulateResourceAvailability, StartupReconciliationReport, StickyCredentialPolicy,
+    SupplyChainGate, SupplyChainGateConfig, TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE, ToolDescriptor,
+    TruthPrecedenceBootError, TruthPrecedenceBootResolution, TruthPrecedenceBootSelection,
+    V2_DEFAULT_GRADUATED_ENV, V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV, V2_MIN_HEALTHY_MESH_PEERS_ENV,
+    WARM_POOL_EVIDENCE_EVENT, WarmPoolEntrySnapshot, WarmPoolKey, WarmPoolPressureSnapshot,
+    admit_safety_tier, capability_constraint_audit_descriptor, classify_deployment_mode,
+    diff_sanitized_config_values, emit_boot_log, emit_capability_constraint_denial_audit_event,
+    merge_connector_health, native_proxy_only_sandbox_decision, read_run_once_n8n_credential_frame,
     resolve_truth_precedence_boot_resolution, validate_runtime_network_claim,
     wasi_config_for_operation_network_policy,
 };
@@ -338,6 +338,7 @@ enum CliAction {
     RunOnce,
     N8nReadOnlyRunOnce,
     N8nSupervisedReadOnlyRunOnce,
+    N8nSupervisedOfficialMcpRunOnce,
     PrintHelp,
     PrintVersion,
 }
@@ -350,6 +351,9 @@ const N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const N8N_READ_ONLY_RUN_ONCE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const N8N_OPERATOR_CONFIGURED_MANIFEST_HOST: &str = "operator-configured";
 const N8N_SUPERVISED_RUN_ONCE_TOKEN: &str = "n8n-run-once-supervised";
+const N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN: &str = "n8n-official-mcp-run-once-supervised";
+const N8N_CAPABILITIES_INSPECT_OPERATION: &str = "n8n.capabilities.inspect";
+const N8N_OFFICIAL_MCP_PROVIDER_OPERATION: &str = "mcp.tools.list";
 #[cfg(target_os = "linux")]
 const N8N_SUPERVISOR_CONTROL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD";
 #[cfg(target_os = "linux")]
@@ -441,6 +445,17 @@ struct N8nReadOnlyRunOncePlan {
     credential_binding: RunOnceCredentialBinding,
 }
 
+#[derive(Clone)]
+struct N8nOfficialMcpRunOncePlan {
+    server_id: N8nReadOnlyServerId,
+    operation: OperationId,
+    zone_id: ZoneId,
+    resource_uri: String,
+    deadline_ms: u64,
+    correlation_id: Option<CorrelationId>,
+    credential_binding: RunOnceCredentialBinding,
+}
+
 /// Host-only resource scope carried beside an internally built invoke request.
 ///
 /// This is deliberately neither serialized nor `Debug`: external invoke JSON
@@ -460,24 +475,42 @@ impl TrustedResourceBinding {
             || self.operation != request.operation
             || self.zone_id != request.zone_id
             || self.request_id != request.id
-            || request.connector_id.as_str() != "fcp.n8n"
-            || !N8N_READ_ONLY_OPERATIONS.contains(&request.operation.as_str())
         {
             return Err(HostError::PreflightFailed(
                 "trusted n8n resource binding does not match the invoke request".to_string(),
             ));
         }
-        let expected = expected_n8n_read_only_resource_uri(
-            self.server_id,
-            request.operation.as_str(),
-            &request.input,
-        )?;
+        let expected = match request.connector_id.as_str() {
+            "fcp.n8n" if N8N_READ_ONLY_OPERATIONS.contains(&request.operation.as_str()) => {
+                expected_n8n_read_only_resource_uri(
+                    self.server_id,
+                    request.operation.as_str(),
+                    &request.input,
+                )?
+            }
+            "fcp.mcp-bridge"
+                if request.operation.as_str() == N8N_OFFICIAL_MCP_PROVIDER_OPERATION
+                    && request
+                        .input
+                        .as_object()
+                        .is_some_and(serde_json::Map::is_empty) =>
+            {
+                format!("fwc-mcp-bridge://{}", self.server_id.as_str())
+            }
+            _ => {
+                return Err(HostError::PreflightFailed(
+                    "trusted n8n resource binding operation was denied".to_string(),
+                ));
+            }
+        };
         if expected != self.resource_uri {
             return Err(HostError::PreflightFailed(
                 "trusted n8n resource binding is not canonical for the invoke request".to_string(),
             ));
         }
-        validate_n8n_read_only_resource_uri(self.server_id, &self.resource_uri)?;
+        if request.connector_id.as_str() == "fcp.n8n" {
+            validate_n8n_read_only_resource_uri(self.server_id, &self.resource_uri)?;
+        }
         Ok(&self.resource_uri)
     }
 }
@@ -2509,13 +2542,20 @@ fn resolve_per_invocation_network_constraints(
         .iter()
         .filter(|host| host.as_str() == N8N_OPERATOR_CONFIGURED_MANIFEST_HOST)
         .count();
-    if config.id == "fcp.n8n" && configured_placeholder_count > 0 {
+    if matches!(config.id.as_str(), "fcp.n8n" | "fcp.mcp-bridge")
+        && configured_placeholder_count > 0
+    {
         if configured_placeholder_count != 1 || expected.host_allow.len() != 1 {
             return Err(HostError::PreflightFailed(format!(
                 "per-invocation execution plan has an ambiguous operator-configured host for operation `{operation}`"
             )));
         }
-        let binding = run_once_n8n_credential_binding_for_zone(config, zone_id).map_err(|_| {
+        let binding = if config.id == "fcp.n8n" {
+            run_once_n8n_credential_binding_for_zone(config, zone_id)
+        } else {
+            run_once_n8n_official_mcp_credential_binding_for_zone(config, zone_id)
+        }
+        .map_err(|_| {
             HostError::PreflightFailed(format!(
                 "per-invocation execution plan could not resolve the operator-configured host for operation `{operation}`"
             ))
@@ -4272,12 +4312,13 @@ fn owned_handshake_zone_dir(
     fixed_read_only_landlock_active: bool,
 ) -> HostResult<Option<String>> {
     if fixed_read_only_landlock_active {
-        if connector_id.as_str() != "fcp.n8n"
-            || !N8N_READ_ONLY_OPERATIONS.contains(&operation.as_str())
-        {
+        let approved = (connector_id.as_str() == "fcp.n8n"
+            && N8N_READ_ONLY_OPERATIONS.contains(&operation.as_str()))
+            || (connector_id.as_str() == "fcp.mcp-bridge"
+                && operation.as_str() == N8N_OFFICIAL_MCP_PROVIDER_OPERATION);
+        if !approved {
             return Err(HostError::PreflightFailed(
-                "fixed read-only owned handshake is restricted to approved n8n operations"
-                    .to_string(),
+                "fixed read-only owned handshake is restricted to approved operations".to_string(),
             ));
         }
         return Ok(None);
@@ -4433,6 +4474,36 @@ mod owned_per_invocation_unit_tests {
         assert!(
             owned_handshake_zone_dir(&n8n_connector, &write_operation, &zone_id, None, true,)
                 .is_err()
+        );
+
+        let mcp_connector = ConnectorId::from_static("fcp.mcp-bridge");
+        let tools_list = OperationId::from_static(N8N_OFFICIAL_MCP_PROVIDER_OPERATION);
+        assert!(
+            owned_handshake_zone_dir(&mcp_connector, &tools_list, &zone_id, None, true)
+                .expect("official n8n MCP tools/list handshake")
+                .is_none()
+        );
+        for denied in ["mcp.tools.call", "mcp.resources.list", "mcp.server.metrics"] {
+            assert!(
+                owned_handshake_zone_dir(
+                    &mcp_connector,
+                    &OperationId::new(denied).expect("test operation"),
+                    &zone_id,
+                    None,
+                    true,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            owned_handshake_zone_dir(
+                &ConnectorId::from_static("fcp.test"),
+                &tools_list,
+                &zone_id,
+                None,
+                true,
+            )
+            .is_err()
         );
     }
 
@@ -6405,6 +6476,9 @@ where
         [arg] if arg == OsStr::new("n8n-run-once") => Ok(CliAction::N8nReadOnlyRunOnce),
         [arg] if arg == OsStr::new(N8N_SUPERVISED_RUN_ONCE_TOKEN) => {
             Ok(CliAction::N8nSupervisedReadOnlyRunOnce)
+        }
+        [arg] if arg == OsStr::new(N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN) => {
+            Ok(CliAction::N8nSupervisedOfficialMcpRunOnce)
         }
         [arg] if arg == OsStr::new("-h") || arg == OsStr::new("--help") => Ok(CliAction::PrintHelp),
         [arg] if arg == OsStr::new("-V") || arg == OsStr::new("--version") => {
@@ -9743,6 +9817,81 @@ fn build_n8n_read_only_run_once_plan(
     })
 }
 
+fn build_n8n_official_mcp_run_once_plan(
+    input: N8nReadOnlyRunOnceInput,
+    config: &ManagedConnectorConfig,
+) -> HostResult<N8nOfficialMcpRunOncePlan> {
+    if input.schema != N8N_READ_ONLY_RUN_ONCE_SCHEMA
+        || input.operation != N8N_CAPABILITIES_INSPECT_OPERATION
+        || !input
+            .input
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n official MCP run-once operation is not allowed".to_string(),
+        ));
+    }
+    let expected_resource_uri = format!("fwc-mcp-bridge://{}", input.server_id.as_str());
+    if input.resource_uri != expected_resource_uri {
+        return Err(HostError::PreflightFailed(
+            "n8n official MCP run-once resource binding was denied".to_string(),
+        ));
+    }
+    let operation = OperationId::new(N8N_OFFICIAL_MCP_PROVIDER_OPERATION).map_err(|_| {
+        HostError::InvalidFilter("n8n official MCP provider operation is invalid".to_string())
+    })?;
+    if config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation
+        || config.allowed_operations.is_empty()
+        || !config
+            .allowed_operations
+            .iter()
+            .any(|allowed| allowed == operation.as_str())
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n official MCP operation is not admitted by trusted configuration".to_string(),
+        ));
+    }
+    let zone_id = input.zone_id.parse::<ZoneId>().map_err(|_| {
+        HostError::InvalidFilter("n8n official MCP run-once zone is invalid".to_string())
+    })?;
+    let deadline_ms = input
+        .deadline_ms
+        .unwrap_or(N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS);
+    if deadline_ms == 0 || deadline_ms > N8N_READ_ONLY_RUN_ONCE_MAX_DEADLINE_MS {
+        return Err(HostError::InvalidFilter(
+            "n8n official MCP run-once deadline is invalid".to_string(),
+        ));
+    }
+    let correlation_id = input
+        .correlation_id
+        .map(|value| {
+            Uuid::parse_str(&value).map(CorrelationId).map_err(|_| {
+                HostError::InvalidFilter(
+                    "n8n official MCP run-once correlation id is invalid".to_string(),
+                )
+            })
+        })
+        .transpose()?;
+    let credential_binding =
+        run_once_n8n_official_mcp_credential_binding_for_zone(config, &zone_id)?;
+    if credential_binding.server_id != input.server_id.as_str() {
+        return Err(HostError::PreflightFailed(
+            "n8n official MCP run-once server binding was denied".to_string(),
+        ));
+    }
+
+    Ok(N8nOfficialMcpRunOncePlan {
+        server_id: input.server_id,
+        operation,
+        zone_id,
+        resource_uri: input.resource_uri,
+        deadline_ms,
+        correlation_id,
+        credential_binding,
+    })
+}
+
 #[allow(dead_code)] // Consumed by the next host-owned n8n one-shot wiring packet.
 fn build_n8n_read_only_capability_issuance(
     plan: &N8nReadOnlyRunOncePlan,
@@ -9756,6 +9905,36 @@ fn build_n8n_read_only_capability_issuance(
     Ok(N8nReadOnlyCapabilityIssuance {
         request: CapabilityIssuanceRequest {
             connector_id: "fcp.n8n".to_string(),
+            capability_id: trusted_operation.capability.to_string(),
+            zone_id: plan.zone_id.to_string(),
+            principal_id: "agent:fwc-n8n".to_string(),
+            operations: vec![plan.operation.to_string()],
+            ttl_secs: N8N_READ_ONLY_RUN_ONCE_TTL_SECS,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![plan.resource_uri.clone()],
+            resource_deny: Vec::new(),
+            max_calls: Some(1),
+            max_bytes: Some(N8N_READ_ONLY_RUN_ONCE_MAX_BYTES),
+            credential_allow: vec![plan.credential_binding.credential_id],
+            dry_run: false,
+        },
+    })
+}
+
+fn build_n8n_official_mcp_capability_issuance(
+    plan: &N8nOfficialMcpRunOncePlan,
+    trusted_operation: &OperationInfo,
+) -> HostResult<N8nReadOnlyCapabilityIssuance> {
+    if trusted_operation.id != plan.operation {
+        return Err(HostError::PreflightFailed(
+            "n8n official MCP capability does not match the trusted operation".to_string(),
+        ));
+    }
+    Ok(N8nReadOnlyCapabilityIssuance {
+        request: CapabilityIssuanceRequest {
+            connector_id: "fcp.mcp-bridge".to_string(),
             capability_id: trusted_operation.capability.to_string(),
             zone_id: plan.zone_id.to_string(),
             principal_id: "agent:fwc-n8n".to_string(),
@@ -9816,6 +9995,29 @@ fn bind_n8n_run_once_connector_instance(
     if config.id != "fcp.n8n" || config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation {
         return Err(HostError::PreflightFailed(
             "n8n read-only run-once instance binding was denied".to_string(),
+        ));
+    }
+    config.env.insert(
+        REQUESTED_INSTANCE_ID_ENV.to_string(),
+        instance_id.to_string(),
+    );
+    Ok(())
+}
+
+fn bind_n8n_official_mcp_run_once_connector_instance(
+    loaded_configs: &mut LoadedConnectorConfigs,
+    instance_id: &InstanceId,
+) -> HostResult<()> {
+    let config = loaded_configs.configs.first_mut().ok_or_else(|| {
+        HostError::ConnectorNotFound(
+            "n8n official MCP run-once connector is not configured".to_string(),
+        )
+    })?;
+    if config.id != "fcp.mcp-bridge"
+        || config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n official MCP run-once instance binding was denied".to_string(),
         ));
     }
     config.env.insert(
@@ -10475,6 +10677,104 @@ fn run_once_n8n_credential_binding_for_zone(
         credential_id,
         host_allow: host.to_ascii_lowercase(),
         server_id: server_id.to_string(),
+        kind: RunOnceCredentialKind::RestApiKey,
+    })
+}
+
+fn run_once_n8n_official_mcp_credential_binding_for_zone(
+    config: &ManagedConnectorConfig,
+    zone_id: &ZoneId,
+) -> HostResult<RunOnceCredentialBinding> {
+    if config.id != "fcp.mcp-bridge" {
+        return Err(HostError::InvalidFilter(
+            "official MCP credential bootstrap requires the fcp.mcp-bridge connector".to_string(),
+        ));
+    }
+    if config.allowed_zones.is_empty()
+        || !config
+            .allowed_zones
+            .iter()
+            .any(|zone| zone == zone_id.as_str())
+    {
+        return Err(HostError::PreflightFailed(
+            "official MCP credential bootstrap zone is not configured".to_string(),
+        ));
+    }
+    let Some(Value::Object(config)) = config.config.as_ref() else {
+        return Err(HostError::InvalidFilter(
+            "run-once official MCP credential config is invalid".to_string(),
+        ));
+    };
+    if config.len() != 4
+        || config.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "credential_id" | "mcp_url" | "server_id" | "security"
+            )
+        })
+        || config
+            .get("security")
+            .and_then(Value::as_object)
+            .filter(|security| {
+                security.len() == 1
+                    && security.get("description_scan").and_then(Value::as_str) == Some("block")
+            })
+            .is_none()
+    {
+        return Err(HostError::InvalidFilter(
+            "run-once official MCP credential config is invalid".to_string(),
+        ));
+    }
+    let credential_id = config
+        .get("credential_id")
+        .and_then(Value::as_str)
+        .and_then(|raw| CredentialId::parse(raw).ok())
+        .ok_or_else(|| {
+            HostError::InvalidFilter(
+                "run-once official MCP credential config is invalid".to_string(),
+            )
+        })?;
+    let mcp_url = config
+        .get("mcp_url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.trim() == *value)
+        .ok_or_else(|| {
+            HostError::InvalidFilter(
+                "run-once official MCP credential config is invalid".to_string(),
+            )
+        })?;
+    let parsed = url::Url::parse(mcp_url).map_err(|_| {
+        HostError::InvalidFilter("run-once official MCP credential config is invalid".to_string())
+    })?;
+    let host = parsed.host_str().ok_or_else(|| {
+        HostError::InvalidFilter("run-once official MCP credential config is invalid".to_string())
+    })?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.port_or_known_default() != Some(443)
+        || parsed.path() != "/mcp-server/http"
+    {
+        return Err(HostError::InvalidFilter(
+            "run-once official MCP credential config is invalid".to_string(),
+        ));
+    }
+    let server_id = config
+        .get("server_id")
+        .and_then(Value::as_str)
+        .filter(|server_id| matches!(*server_id, "eec" | "hetzner"))
+        .ok_or_else(|| {
+            HostError::InvalidFilter(
+                "run-once official MCP credential config is invalid".to_string(),
+            )
+        })?;
+    Ok(RunOnceCredentialBinding {
+        credential_id,
+        host_allow: host.to_ascii_lowercase(),
+        server_id: server_id.to_string(),
+        kind: RunOnceCredentialKind::OfficialMcpAccessToken,
     })
 }
 
@@ -10575,10 +10875,11 @@ async fn seed_run_once_credential(
     operation: &OperationId,
 ) -> HostResult<()> {
     let server_id = credential.server_id().to_string();
+    let provider_name = credential.provider();
     let pooled = credential
         .into_pooled_credential()
         .map_err(run_once_credential_bootstrap_error)?;
-    let provider = ProviderKey::new("n8n").map_err(|_| {
+    let provider = ProviderKey::new(provider_name).map_err(|_| {
         HostError::PreflightFailed("run-once credential bootstrap is unavailable".to_string())
     })?;
     let key = CredentialPoolKey::new(provider, zone_id.clone());
@@ -10600,7 +10901,7 @@ async fn seed_run_once_credential(
         })?;
     tracing::debug!(
         event = "run_once_credential_bootstrap_seeded",
-        provider = "n8n",
+        provider = provider_name,
         server_id = %server_id,
         zone_id = %zone_id.as_str(),
         operation = %operation.as_str(),
@@ -10672,6 +10973,40 @@ fn build_n8n_read_only_invoke_request(
         operation: plan.operation,
         zone_id: plan.zone_id,
         input: plan.input,
+        capability_token,
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: Some(plan.deadline_ms),
+        correlation_id: plan.correlation_id,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    };
+    (request, trusted_resource)
+}
+
+fn build_n8n_official_mcp_invoke_request(
+    plan: N8nOfficialMcpRunOncePlan,
+    capability_token: fcp_core::CapabilityToken,
+) -> (InvokeRequest, TrustedResourceBinding) {
+    let request_id = RequestId::random();
+    let connector_id = ConnectorId::from_static("fcp.mcp-bridge");
+    let trusted_resource = TrustedResourceBinding {
+        server_id: plan.server_id,
+        connector_id: connector_id.clone(),
+        operation: plan.operation.clone(),
+        zone_id: plan.zone_id.clone(),
+        request_id: request_id.clone(),
+        resource_uri: plan.resource_uri,
+    };
+    let request = InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: request_id,
+        connector_id,
+        operation: plan.operation,
+        zone_id: plan.zone_id,
+        input: serde_json::json!({}),
         capability_token,
         holder_proof: None,
         context: None,
@@ -10967,8 +11302,121 @@ async fn async_n8n_read_only_run_once(
         .and_then(accept_n8n_run_once_invoke_response)
 }
 
+async fn async_n8n_official_mcp_run_once(
+    telemetry_config: TelemetryConfig,
+) -> HostResult<InvokeResponse> {
+    let high_level_input = read_n8n_read_only_run_once_input_from_stdin()
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Input))?;
+    let connector_id = ConnectorId::from_static("fcp.mcp-bridge");
+    let configs = load_connector_configs()
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
+    let mut loaded_configs = select_run_once_connector_config(configs, &connector_id)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
+    let selected_config = loaded_configs
+        .configs
+        .first()
+        .cloned()
+        .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
+    let plan = build_n8n_official_mcp_run_once_plan(high_level_input, &selected_config)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+    let credential =
+        read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?
+            .ok_or_else(|| {
+                HostError::PreflightFailed(
+                    "n8n official MCP run-once credential bootstrap is required".to_string(),
+                )
+            })
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?;
+    let invocation_instance_id = InstanceId::new();
+    bind_n8n_official_mcp_run_once_connector_instance(&mut loaded_configs, &invocation_instance_id)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
+
+    let truth_precedence_boot = current_truth_precedence_boot_resolution()
+        .map_err(|error| {
+            emit_truth_precedence_boot_error(&error);
+            HostError::InvalidFilter("truth precedence configuration is invalid".to_string())
+        })
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Policy))?;
+    emit_boot_log(&truth_precedence_boot.classification);
+    emit_operational_model_selection_log(&truth_precedence_boot.selection);
+    let zone_policies = load_zone_policies()
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Policy))?;
+
+    let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+    let state = build_app_state(
+        telemetry_config,
+        loaded_configs,
+        Some(signing_key.verifying_key()),
+        None,
+        zone_policies,
+    )
+    .await
+    .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::RuntimeState))?;
+    let introspection = state
+        .registry
+        .get_introspection(&connector_id)
+        .await
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n official MCP trusted manifest introspection is unavailable".to_string(),
+            )
+        })
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Manifest))?;
+    let trusted_operation = introspection
+        .operations
+        .iter()
+        .find(|operation| operation.id == plan.operation)
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n official MCP operation is absent from the trusted manifest".to_string(),
+            )
+        })
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Manifest))?;
+    seed_run_once_credential(&state, credential, &plan.zone_id, &plan.operation)
+        .await
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?;
+    let issuance = build_n8n_official_mcp_capability_issuance(&plan, trusted_operation)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?
+        .into_inner();
+    let issued = state
+        .lifecycle
+        .issue_capability_token_for_instance(&issuance, &signing_key, &invocation_instance_id)
+        .await
+        .map_err(map_lifecycle_host_error)
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
+    let token_b64 = issued
+        .token_cbor_b64
+        .ok_or_else(|| {
+            HostError::Internal("n8n official MCP capability issuance failed".to_string())
+        })
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
+    let capability_token =
+        capability_token_from_cbor_b64(&token_b64, "n8n official MCP run-once capability")
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
+    let (request, trusted_resource) = build_n8n_official_mcp_invoke_request(plan, capability_token);
+
+    invoke_handler_inner(state, HeaderMap::new(), request, Some(trusted_resource))
+        .await
+        .map(|Json(response)| response)
+        .map_err(|(status, _)| {
+            emit_n8n_run_once_invoke_diagnostic(n8n_run_once_dispatch_diagnostic(status));
+            n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke)
+        })
+        .and_then(accept_n8n_run_once_invoke_response)
+}
+
 #[cfg(target_os = "linux")]
-fn fixed_n8n_supervised_provider_executable() -> HostResult<PathBuf> {
+#[derive(Clone, Copy)]
+enum N8nSupervisedProvider {
+    RestApi,
+    OfficialMcp,
+}
+
+#[cfg(target_os = "linux")]
+fn fixed_n8n_supervised_provider_executable(
+    provider_kind: N8nSupervisedProvider,
+) -> HostResult<PathBuf> {
     let host = std::env::current_exe().map_err(|_| {
         HostError::PreflightFailed("n8n supervised host executable is unavailable".to_string())
     })?;
@@ -10980,7 +11428,11 @@ fn fixed_n8n_supervised_provider_executable() -> HostResult<PathBuf> {
     let bin = host.parent().filter(|path| {
         path.is_absolute() && path.file_name().and_then(|name| name.to_str()) == Some("bin")
     });
-    let provider = bin.map(|path| path.join("fcp-n8n")).ok_or_else(|| {
+    let provider_name = match provider_kind {
+        N8nSupervisedProvider::RestApi => "fcp-n8n",
+        N8nSupervisedProvider::OfficialMcp => "fcp-mcp-bridge",
+    };
+    let provider = bin.map(|path| path.join(provider_name)).ok_or_else(|| {
         HostError::PreflightFailed("n8n supervised release layout is invalid".to_string())
     })?;
     let canonical = provider.canonicalize().map_err(|_| {
@@ -11001,6 +11453,7 @@ fn main() -> HostResult<()> {
         CliAction::RunOnce => {}
         CliAction::N8nReadOnlyRunOnce => {}
         CliAction::N8nSupervisedReadOnlyRunOnce => {}
+        CliAction::N8nSupervisedOfficialMcpRunOnce => {}
         CliAction::PrintHelp => {
             print_cli_help();
             return Ok(());
@@ -11010,13 +11463,21 @@ fn main() -> HostResult<()> {
             return Ok(());
         }
     }
-    if matches!(action, CliAction::N8nSupervisedReadOnlyRunOnce) {
+    if matches!(
+        action,
+        CliAction::N8nSupervisedReadOnlyRunOnce | CliAction::N8nSupervisedOfficialMcpRunOnce
+    ) {
         if let Err(error) = run_n8n_supervisor_gate_before_telemetry() {
             return print_run_once_response(Err(error));
         }
         #[cfg(target_os = "linux")]
         {
-            let provider = match fixed_n8n_supervised_provider_executable() {
+            let provider_kind = match action {
+                CliAction::N8nSupervisedReadOnlyRunOnce => N8nSupervisedProvider::RestApi,
+                CliAction::N8nSupervisedOfficialMcpRunOnce => N8nSupervisedProvider::OfficialMcp,
+                _ => unreachable!("supervised provider selected only for supervised actions"),
+            };
+            let provider = match fixed_n8n_supervised_provider_executable(provider_kind) {
                 Ok(provider) => provider,
                 Err(error) => return print_run_once_response(Err(error)),
             };
@@ -11038,6 +11499,7 @@ fn main() -> HostResult<()> {
                 CliAction::RunOnce
                     | CliAction::N8nReadOnlyRunOnce
                     | CliAction::N8nSupervisedReadOnlyRunOnce
+                    | CliAction::N8nSupervisedOfficialMcpRunOnce
             ) =>
         {
             return print_run_once_response(Err(HostError::Internal(
@@ -11081,6 +11543,17 @@ fn main() -> HostResult<()> {
                 Ok(result) => result,
                 Err(_) => Err(HostError::Internal(
                     "n8n supervised run-once runtime failed".to_string(),
+                )),
+            };
+            print_run_once_response(result)
+        }
+        CliAction::N8nSupervisedOfficialMcpRunOnce => {
+            let result = match fcp_async_core::runtime::block_on_sync(
+                async_n8n_official_mcp_run_once(telemetry_config),
+            ) {
+                Ok(result) => result,
+                Err(_) => Err(HostError::Internal(
+                    "n8n supervised official MCP run-once runtime failed".to_string(),
                 )),
             };
             print_run_once_response(result)
@@ -15625,6 +16098,45 @@ async fn acquire_host_egress_credential_lease(
     Ok(Some(lease))
 }
 
+fn validate_n8n_specific_host_egress_credential(
+    connector_id: &ConnectorId,
+    resource_uri: &str,
+    lease: &CredentialLease,
+) -> HostResult<()> {
+    let expected = match connector_id.as_str() {
+        "fcp.n8n" => ("n8n", "X-N8N-API-KEY", None),
+        "fcp.mcp-bridge"
+            if matches!(
+                resource_uri,
+                "fwc-mcp-bridge://eec" | "fwc-mcp-bridge://hetzner"
+            ) =>
+        {
+            ("mcp-bridge", "Authorization", Some("Bearer"))
+        }
+        _ => return Ok(()),
+    };
+    let profile = lease.payload.as_auth_profile().ok_or_else(|| {
+        HostError::PreflightFailed(
+            "n8n host-egress credential profile binding was denied".to_string(),
+        )
+    })?;
+    let AuthMethodKind::ApiKey(method) = &profile.method else {
+        return Err(HostError::PreflightFailed(
+            "n8n host-egress credential profile binding was denied".to_string(),
+        ));
+    };
+    if lease.pool_key.provider.as_str() != expected.0
+        || profile.provider != expected.0
+        || !method.header_name.eq_ignore_ascii_case(expected.1)
+        || method.value_prefix.as_deref() != expected.2
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n host-egress credential profile binding was denied".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn release_host_egress_credential_lease(state: &AppState, lease: CredentialLease) {
     if let Err(err) = state
         .credential_pools
@@ -15903,6 +16415,18 @@ async fn host_egress_http_handler(
     )
     .await
     .map_err(map_host_error)?;
+    if let Some(lease_ref) = lease.as_ref()
+        && let Err(error) = validate_n8n_specific_host_egress_credential(
+            &authorized.connector_id,
+            &request.context.resource_uri,
+            lease_ref,
+        )
+    {
+        if let Some(lease) = lease {
+            release_host_egress_credential_lease(&state, lease).await;
+        }
+        return Err(map_host_error(error));
+    }
     let result = authorize_and_perform_host_http_egress(
         &state,
         &authorized,
@@ -29962,6 +30486,22 @@ done"#;
         );
     }
 
+    #[test]
+    fn parse_cli_action_accepts_only_the_hidden_official_mcp_token() {
+        let action =
+            parse_cli_action_from_args(["fcp-host", N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN])
+                .expect("hidden official MCP token should parse");
+        assert_eq!(action, CliAction::N8nSupervisedOfficialMcpRunOnce);
+        assert!(
+            parse_cli_action_from_args([
+                "fcp-host",
+                N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN,
+                "extra",
+            ])
+            .is_err()
+        );
+    }
+
     #[cfg(target_os = "linux")]
     fn supervisor_test_start_frame(budget_ms: u32) -> Vec<u8> {
         let mut frame = N8N_SUPERVISOR_START_PREFIX.to_vec();
@@ -30263,6 +30803,177 @@ done"#;
             "server_id": "eec"
         }));
         config
+    }
+
+    fn run_once_n8n_official_mcp_test_config() -> ManagedConnectorConfig {
+        let mut config = run_once_n8n_test_config();
+        config.id = "fcp.mcp-bridge".to_string();
+        config.allowed_operations = vec![N8N_OFFICIAL_MCP_PROVIDER_OPERATION.to_string()];
+        config.config = Some(json!({
+            "credential_id": "22222222-2222-4222-8222-222222222222",
+            "mcp_url": "https://n8n.europeaneyecenter.com/mcp-server/http",
+            "server_id": "eec",
+            "security": {"description_scan": "block"}
+        }));
+        config
+    }
+
+    fn n8n_official_mcp_test_input() -> N8nReadOnlyRunOnceInput {
+        N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: N8N_CAPABILITIES_INSPECT_OPERATION.to_string(),
+            zone_id: ZoneId::private().to_string(),
+            resource_uri: "fwc-mcp-bridge://eec".to_string(),
+            input: json!({}),
+            deadline_ms: None,
+            correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+        }
+    }
+
+    #[test]
+    fn n8n_official_mcp_plan_is_tools_list_only_and_bearer_bound() {
+        let config = run_once_n8n_official_mcp_test_config();
+        let plan = build_n8n_official_mcp_run_once_plan(n8n_official_mcp_test_input(), &config)
+            .expect("closed official MCP plan");
+        assert_eq!(plan.operation.as_str(), N8N_OFFICIAL_MCP_PROVIDER_OPERATION);
+        assert_eq!(plan.resource_uri, "fwc-mcp-bridge://eec");
+        assert_eq!(
+            plan.credential_binding.kind,
+            RunOnceCredentialKind::OfficialMcpAccessToken
+        );
+        assert_eq!(
+            plan.credential_binding.host_allow,
+            "n8n.europeaneyecenter.com"
+        );
+
+        let mut smuggled = n8n_official_mcp_test_input();
+        smuggled.input = json!({"name": "n8n_update_full_workflow"});
+        assert!(build_n8n_official_mcp_run_once_plan(smuggled, &config).is_err());
+
+        let mut wrong_operation = n8n_official_mcp_test_input();
+        wrong_operation.operation = "mcp.tools.call".to_string();
+        assert!(build_n8n_official_mcp_run_once_plan(wrong_operation, &config).is_err());
+
+        let mut unsafe_scan = config;
+        unsafe_scan.config.as_mut().expect("config")["security"]["description_scan"] =
+            json!("warn");
+        assert!(
+            build_n8n_official_mcp_run_once_plan(n8n_official_mcp_test_input(), &unsafe_scan,)
+                .is_err()
+        );
+    }
+
+    fn n8n_specific_test_lease(
+        pool_provider: &str,
+        profile_provider: &str,
+        method: ApiKeyAuth,
+    ) -> CredentialLease {
+        let credential_id =
+            CredentialId::parse("33333333-3333-4333-8333-333333333333").expect("credential id");
+        let profile = AuthProfile::new(
+            credential_id.to_string(),
+            profile_provider,
+            AuthMethodKind::ApiKey(method),
+            "n8n binding fixture",
+            0,
+        )
+        .expect("auth profile");
+        let payload =
+            CredentialPayload::auth_profile_with_allowed_hosts(profile, ["n8n.example.test"]);
+        let key = CredentialPoolKey::new(
+            ProviderKey::new(pool_provider).expect("provider key"),
+            ZoneId::work(),
+        );
+        let mut registry = CredentialPoolRegistry::new();
+        registry
+            .add_credential(
+                key.clone(),
+                CredentialPoolStrategy::Priority,
+                fcp_host::PooledCredential::new(
+                    credential_id,
+                    fcp_host::CredentialSource::Manual,
+                    0,
+                    "n8n binding fixture",
+                    payload,
+                ),
+                CredentialUpsertMode::RejectExisting,
+            )
+            .expect("install credential");
+        registry
+            .acquire(&key, Utc::now())
+            .expect("acquire credential")
+    }
+
+    #[test]
+    fn n8n_host_egress_rejects_cross_purpose_or_raw_profile_before_network() {
+        let rest = n8n_specific_test_lease(
+            "n8n",
+            "n8n",
+            ApiKeyAuth::new("rest-canary", "X-N8N-API-KEY", None::<String>).expect("REST profile"),
+        );
+        assert!(
+            validate_n8n_specific_host_egress_credential(
+                &ConnectorId::from_static("fcp.n8n"),
+                "fwc-n8n://eec",
+                &rest,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_n8n_specific_host_egress_credential(
+                &ConnectorId::from_static("fcp.mcp-bridge"),
+                "fwc-mcp-bridge://eec",
+                &rest,
+            )
+            .is_err()
+        );
+
+        let official = n8n_specific_test_lease(
+            "mcp-bridge",
+            "mcp-bridge",
+            ApiKeyAuth::bearer("mcp-canary").expect("official MCP profile"),
+        );
+        assert!(
+            validate_n8n_specific_host_egress_credential(
+                &ConnectorId::from_static("fcp.mcp-bridge"),
+                "fwc-mcp-bridge://eec",
+                &official,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_n8n_specific_host_egress_credential(
+                &ConnectorId::from_static("fcp.n8n"),
+                "fwc-n8n://eec",
+                &official,
+            )
+            .is_err()
+        );
+
+        let raw = CredentialLease {
+            payload: CredentialPayload::raw_json(json!({
+                "host_allow": ["n8n.example.test"],
+                "http": {"bearer_token": "raw-canary"}
+            })),
+            ..official
+        };
+        assert!(
+            validate_n8n_specific_host_egress_credential(
+                &ConnectorId::from_static("fcp.mcp-bridge"),
+                "fwc-mcp-bridge://eec",
+                &raw,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_n8n_specific_host_egress_credential(
+                &ConnectorId::from_static("fcp.mcp-bridge"),
+                "fcp-mcp-bridge://unrelated-server",
+                &raw,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

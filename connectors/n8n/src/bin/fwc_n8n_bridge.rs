@@ -213,7 +213,7 @@ pub fn run_verified_host_bridge(
 
     #[cfg(target_os = "linux")]
     {
-        let spec = process_spec(bundle, envelope.server_id)?;
+        let spec = process_spec(bundle, envelope.server_id, envelope.operation)?;
         let working_directory = bundle_working_directory(bundle)?;
         let output = run_process(
             &spec,
@@ -243,15 +243,19 @@ fn bundle_working_directory(bundle: &VerifiedBundle) -> Result<&Path, BridgeErro
 fn process_spec(
     bundle: &VerifiedBundle,
     server_id: HostRunOnceServerId,
+    operation: super::HostRunOnceOperation,
 ) -> Result<fcp_sandbox::ProcessSpec, BridgeError> {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::path::Path;
 
     let (host_path, host_digest) = bundle.fcp_host();
-    let (inventory_path, _inventory_digest) = match server_id {
-        HostRunOnceServerId::Eec => bundle.inventory_eec(),
-        HostRunOnceServerId::Hetzner => bundle.inventory_hetzner(),
+    let official_mcp = matches!(operation, super::HostRunOnceOperation::CapabilitiesInspect);
+    let (inventory_path, _inventory_digest) = match (server_id, official_mcp) {
+        (HostRunOnceServerId::Eec, false) => bundle.inventory_eec(),
+        (HostRunOnceServerId::Hetzner, false) => bundle.inventory_hetzner(),
+        (HostRunOnceServerId::Eec, true) => bundle.inventory_eec_official_mcp(),
+        (HostRunOnceServerId::Hetzner, true) => bundle.inventory_hetzner_official_mcp(),
     };
     let policy = bundle.zone_policy();
     let env_value = |path: &Path| {
@@ -274,7 +278,11 @@ fn process_spec(
         launcher_digest: host_digest.to_owned(),
         runtime_executable: host_path.to_path_buf(),
         expected_runtime_executable_digest: host_digest.to_owned(),
-        fixed_args: vec![OsString::from("n8n-run-once-supervised")],
+        fixed_args: vec![OsString::from(if official_mcp {
+            "n8n-official-mcp-run-once-supervised"
+        } else {
+            "n8n-run-once-supervised"
+        })],
         fixed_env,
         network_disabled: false,
     })
@@ -1488,6 +1496,7 @@ fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HostRunOnceOperation;
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -1499,7 +1508,12 @@ mod tests {
         let bundle_debug = format!("{bundle:?}");
         assert!(!bundle_debug.contains("/release"));
         assert!(!bundle_debug.contains(&"a".repeat(64)));
-        let spec = process_spec(&bundle, HostRunOnceServerId::Eec).expect("EEC spec");
+        let spec = process_spec(
+            &bundle,
+            HostRunOnceServerId::Eec,
+            HostRunOnceOperation::WorkflowsGet,
+        )
+        .expect("EEC spec");
         assert_eq!(spec.launcher_path, PathBuf::from("/release/bin/fcp-host"));
         assert_eq!(spec.runtime_executable, spec.launcher_path);
         assert_eq!(spec.launcher_digest, "a".repeat(64));
@@ -1530,12 +1544,34 @@ mod tests {
             Path::new("/release/bin")
         );
 
-        let hetzner = process_spec(&bundle, HostRunOnceServerId::Hetzner).expect("Hetzner spec");
+        let hetzner = process_spec(
+            &bundle,
+            HostRunOnceServerId::Hetzner,
+            HostRunOnceOperation::WorkflowsGet,
+        )
+        .expect("Hetzner spec");
         assert_eq!(
             hetzner
                 .fixed_env
                 .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
             Some(&OsString::from("/release/inventory/hetzner.json"))
+        );
+
+        let official = process_spec(
+            &bundle,
+            HostRunOnceServerId::Eec,
+            HostRunOnceOperation::CapabilitiesInspect,
+        )
+        .expect("official MCP spec");
+        assert_eq!(
+            official.fixed_args,
+            vec![OsString::from("n8n-official-mcp-run-once-supervised")]
+        );
+        assert_eq!(
+            official
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
+            Some(&OsString::from("/release/inventory/eec-official-mcp.json"))
         );
     }
 

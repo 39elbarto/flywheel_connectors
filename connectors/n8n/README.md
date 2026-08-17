@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Linux owned per-invocation launch now supplies a host-owned inherited-FD host-egress channel and proves process-group teardown. `fcp-host n8n-run-once` accepts a closed nine-operation read-only envelope and consumes one request-scoped credential FD. The thin `fwc-n8n` wrapper derives that envelope for EEC or Hetzner. `fwc-n8n status` now verifies the fixed immutable release bundle and reports only `bundleAvailable`; an internal producer-neutral verified host runner now uses only the verified release `fcp-host` directory as cwd, forces an empty `FCP_HOST_LIFECYCLE_STATE_FILE`, and uses cancelable bounded stdio workers. The credential producer, public dispatch wiring, and local/official-MCP dispatch remain pending. Real-host narrow-token verification against EEC and Hetzner also remains pending.
+> **Status**: Source now implements three per-invocation paths behind the same verified wrapper boundary: nine typed REST reads, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. Official discovery uses a distinct broker purpose, bearer-token credential profile, fixed `fcp-mcp-bridge` binary, fixed per-server inventory, and only provider operation `mcp.tools.list`; arbitrary remote method or `tools/call` input is not representable. The expanded twelve-artifact bundle and owner-gated MCP token entries are not installed yet, so the deployed release remains fail-closed for this new path. Real-host EEC/Hetzner acceptance remains pending.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.21`
 > **Verification script**: none tracked; use the commands below
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -32,7 +32,8 @@ Important runtime truths:
 - Package and binary name are `fcp-n8n`.
 - The crate also builds the operator wrapper `fwc-n8n`. Its current commands are
   `resolve`, `route <public-operation>`, `run-once <host-read-operation>`, and
-  `status`. `run-once` accepts exactly the nine Phase-1 host reads, a strict
+  `status`. `run-once` accepts the nine Phase-1 host reads plus the closed
+  `n8n.capabilities.inspect` operation, a strict
   EEC-or-Hetzner payload, bounded deadline, and optional UUID correlation ID.
   CLI framing has a fixed five-second maximum, and the operation deadline is
   measured from before that read. It derives the fixed `z:work` host envelope
@@ -49,7 +50,19 @@ Important runtime truths:
   Per-operation input keys and scalar bounds mirror the manifest, so arbitrary
   headers, credentials, tokens, URLs, commands, paths, or nested payloads
   cannot enter the host-launch request.
-  `n8n.targets.resolve`, `n8n.capabilities.inspect`, `n8n.runtime.status`,
+  For `n8n.capabilities.inspect`, the same wrapper requests only the distinct
+  official-MCP credential purpose and selects a separate immutable inventory.
+  `fcp-host` translates that public operation only to `mcp.tools.list`, issues
+  a one-call `mcp.tools.read` capability, and injects the token only as an
+  `Authorization: Bearer` header to the canonical `/mcp-server/http` endpoint.
+  The inventory requires description scanning in blocking mode. `tools/call`,
+  caller-supplied URLs, methods, tool names, headers, or tokens are rejected
+  before launch. After scanning, the public wrapper replaces the provider
+  catalog with a deterministic compact response containing only tool names,
+  SHA-256 input/output schema digests, and `unknown`/`unreviewed` policy
+  markers. Provider descriptions and raw schemas are never returned to the
+  caller.
+  `n8n.targets.resolve`, `n8n.runtime.status`,
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and
   `n8n.mcp_access.reconcile` still need dedicated routing intents or host-local
   dispatch before they can use this command.
@@ -64,7 +77,8 @@ Important runtime truths:
   prefer official MCP. Every fallback is represented explicitly and unknown
   write capability fails closed. These are typed routing decisions only; the
   wrapper does not spawn a local provider, load a policy file, or dispatch REST
-  or official MCP. All provider execution remains behind a host-owned boundary.
+  or other official-MCP operations. All provider execution remains behind a
+  host-owned boundary.
 - `fwc-n8n status` is process-scan-free and reports only
   `{"bundleAvailable":true|false}`. It derives the release root from the
   canonical current executable and verifies the exact versioned bundle layout,
@@ -85,6 +99,10 @@ Important runtime truths:
 - `credential_id` is only a host-managed reference. Every advertised read operation constructs a bounded host-egress request whose context carries the already-verified canonical resource separately from the HTTPS transport URL. The connector never resolves, stores, or sends the API key itself.
 - In the Linux owned per-invocation path, the host creates a connected Unix socketpair, passes only the child endpoint as an inherited file descriptor, and binds the channel to a fresh per-launch authentication token. Connector configuration and operation input cannot select or redirect this transport.
 - The sandbox process supervisor exposes a fixed-name inherited-FD channel for the verified `fwc-n8n` bridge to deliver one `fcp-host n8n-run-once` credential frame. It marks every ambient descriptor close-on-exec, makes only the selected channel inheritable, rejects reserved environment overrides, and retains exact process-group ownership.
+- Official-MCP discovery uses the separate hidden host action
+  `n8n-official-mcp-run-once-supervised`. Landlock admits only the immutable
+  sibling `fcp-mcp-bridge` executable for that action; the REST action still
+  admits only `fcp-n8n`.
 - The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The code path has synchronous bundle/hash checks, whole-CLI stdin/deadline enforcement, nested process-group teardown proof, and the reviewed fixed credential broker. Deployment still fails closed until the separate owner gate installs and accepts those artifacts.
 - The host compares the connector's selected-operation introspection with trusted manifest metadata before activating egress, binds every egress frame to connector, operation, zone, request, correlation, and capability-token context, and proves child reap plus process-group absence before returning.
 - Each n8n run-once invocation generates a fresh host-owned connector instance ID in memory, passes that exact ID through the owned handshake, and issues the capability token with the matching instance claim. A stale or inventory-pinned instance value is replaced for the one-shot launch, and a different connector instance cannot reuse the token.

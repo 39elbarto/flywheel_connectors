@@ -33,6 +33,25 @@ pub const RUN_ONCE_CREDENTIAL_TRANSPORT: &str = "inherited-fd-v1";
 pub const RUN_ONCE_CREDENTIAL_MAX_SECRET_BYTES: usize = 4096;
 const RUN_ONCE_N8N_PROVIDER: &str = "n8n";
 const RUN_ONCE_N8N_API_KEY_HEADER: &str = "X-N8N-API-KEY";
+const RUN_ONCE_N8N_OFFICIAL_MCP_PROVIDER: &str = "mcp-bridge";
+
+/// Closed authentication shape for one-shot n8n provider credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOnceCredentialKind {
+    /// Public n8n REST API key injected through `X-N8N-API-KEY`.
+    RestApiKey,
+    /// Personal official n8n MCP access token injected as a bearer token.
+    OfficialMcpAccessToken,
+}
+
+impl RunOnceCredentialKind {
+    const fn provider(self) -> &'static str {
+        match self {
+            Self::RestApiKey => RUN_ONCE_N8N_PROVIDER,
+            Self::OfficialMcpAccessToken => RUN_ONCE_N8N_OFFICIAL_MCP_PROVIDER,
+        }
+    }
+}
 
 /// Trusted binding derived from the selected `fcp.n8n` connector config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +62,8 @@ pub struct RunOnceCredentialBinding {
     pub host_allow: String,
     /// Trusted n8n server selector for redacted operational telemetry.
     pub server_id: String,
+    /// Fixed authentication shape selected from trusted connector inventory.
+    pub kind: RunOnceCredentialKind,
 }
 
 /// Redacted, stable failures for one-shot credential bootstrap.
@@ -102,6 +123,12 @@ impl RunOnceN8nCredential {
         &self.binding.server_id
     }
 
+    /// Return the fixed provider pool key for this credential purpose.
+    #[must_use]
+    pub const fn provider(&self) -> &'static str {
+        self.binding.kind.provider()
+    }
+
     /// Convert the material to the fixed, host-internal n8n pool entry.
     ///
     /// # Errors
@@ -115,13 +142,18 @@ impl RunOnceN8nCredential {
             String::from_utf8(bytes.to_vec())
                 .map_err(|_| RunOnceCredentialBootstrapError::InvalidUtf8)
         })?;
-        let method = ApiKeyAuth::new(key, RUN_ONCE_N8N_API_KEY_HEADER, None::<String>)
-            .map_err(|_| RunOnceCredentialBootstrapError::InvalidCredential)?;
+        let method = match self.binding.kind {
+            RunOnceCredentialKind::RestApiKey => {
+                ApiKeyAuth::new(key, RUN_ONCE_N8N_API_KEY_HEADER, None::<String>)
+            }
+            RunOnceCredentialKind::OfficialMcpAccessToken => ApiKeyAuth::bearer(key),
+        }
+        .map_err(|_| RunOnceCredentialBootstrapError::InvalidCredential)?;
         let profile = AuthProfile::new(
             self.binding.credential_id.to_string(),
-            RUN_ONCE_N8N_PROVIDER,
+            self.binding.kind.provider(),
             AuthMethodKind::ApiKey(method),
-            "run-once n8n credential",
+            "run-once n8n provider credential",
             0,
         )
         .map_err(|_| RunOnceCredentialBootstrapError::InvalidCredential)?;
@@ -131,7 +163,7 @@ impl RunOnceN8nCredential {
             self.binding.credential_id,
             CredentialSource::CustomPool("run-once".to_string()),
             0,
-            "run-once n8n credential",
+            "run-once n8n provider credential",
             payload,
         ))
     }
@@ -154,7 +186,9 @@ pub fn read_run_once_n8n_credential_frame<R: Read>(
     })
 }
 
-fn map_credential_frame_error(error: CredentialFrameError) -> RunOnceCredentialBootstrapError {
+const fn map_credential_frame_error(
+    error: CredentialFrameError,
+) -> RunOnceCredentialBootstrapError {
     match error {
         CredentialFrameError::InvalidFrame => RunOnceCredentialBootstrapError::InvalidFrame,
         CredentialFrameError::Truncated => RunOnceCredentialBootstrapError::Truncated,
@@ -2229,6 +2263,7 @@ mod tests {
             credential_id: cred(0x44),
             host_allow: "n8n.example.test".to_string(),
             server_id: "eec".to_string(),
+            kind: RunOnceCredentialKind::RestApiKey,
         };
         let mut valid = encode_run_once_n8n_credential_frame(canary.as_bytes());
         let credential = read_run_once_n8n_credential_frame(
@@ -2259,11 +2294,39 @@ mod tests {
     }
 
     #[test]
+    fn run_once_official_mcp_token_is_bearer_bound_and_redacted() {
+        let canary = format!("MCP-{}", "CANARY");
+        let binding = RunOnceCredentialBinding {
+            credential_id: cred(0x45),
+            host_allow: "n8n.example.test".to_string(),
+            server_id: "eec".to_string(),
+            kind: RunOnceCredentialKind::OfficialMcpAccessToken,
+        };
+        let credential = read_run_once_n8n_credential_frame(
+            &mut std::io::Cursor::new(encode_run_once_n8n_credential_frame(canary.as_bytes())),
+            binding,
+        )
+        .expect("valid official MCP token frame");
+        assert_eq!(credential.provider(), "mcp-bridge");
+        let pooled = credential.into_pooled_credential().expect("bearer profile");
+        let rendered = format!("{pooled:?}");
+        assert!(!rendered.contains(&canary));
+        let profile = pooled.payload.as_auth_profile().expect("auth profile");
+        assert_eq!(profile.provider, "mcp-bridge");
+        let AuthMethodKind::ApiKey(method) = &profile.method else {
+            panic!("expected fixed bearer api key auth");
+        };
+        assert_eq!(method.header_name, "Authorization");
+        assert_eq!(method.value_prefix.as_deref(), Some("Bearer"));
+    }
+
+    #[test]
     fn run_once_n8n_frame_rejects_each_malformed_class() {
         let binding = RunOnceCredentialBinding {
             credential_id: cred(0x55),
             host_allow: "n8n.example.test".to_string(),
             server_id: "hetzner".to_string(),
+            kind: RunOnceCredentialKind::RestApiKey,
         };
         let canary = [b'c', b'a', b'n', b'a', b'r', b'y'];
         let mut bad_magic = encode_run_once_n8n_credential_frame(&canary);

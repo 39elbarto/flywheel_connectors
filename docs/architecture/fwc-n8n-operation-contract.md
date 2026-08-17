@@ -14,36 +14,40 @@ of truth for the code that exists today.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
-Current implementation boundary: `fwc-n8n` is a thin typed CLI for `resolve`,
-`route`, `run-once`, and `status`. `run-once` accepts exactly nine Phase-1
-host-read operations, requires EEC or Hetzner, validates operation-specific
-scalar input, and derives the fixed `z:work` host envelope plus canonical
-resource URI. It then fails closed with `bridge_not_wired`; it does not read
-KeePass or start a process. `fcp-host n8n-run-once` already verifies the same
-closed envelope, issues a one-call manifest-derived capability, consumes one
-request-scoped inherited-FD credential, and reuses owned connector teardown.
-The sandbox has the fixed inherited credential-channel spawn primitive. The
-`status` action now verifies a fixed immutable versioned release bundle derived
-from the canonical current executable and returns only
-`{"bundleAvailable":true|false}`; it performs no process scan, spawn, or secret
-read and does not claim that the bridge is wired. The verified producer-neutral
-host runner is implemented internally with a fixed verified-release working
-directory, in-memory lifecycle state, and cancelable bounded stdio workers, but
-it is not wired into `fwc-n8n` yet and has no credential producer. Public wiring
-remains NO-GO pending synchronous spawn/hash deadline enforcement, whole-CLI
-stdin framing/deadline enforcement, nested connector teardown proof, and a
-reviewed credential producer. Bundle verification currently
+Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
+`run-once`, and `status`. `run-once` supports nine Phase-1 REST reads, two local
+knowledge/validation operations, and one official-MCP discovery operation,
+`n8n.capabilities.inspect`. Official discovery accepts only EEC or Hetzner and
+an empty operation input. It requests a separate official-MCP broker purpose,
+selects a fixed per-server `fcp.mcp-bridge` inventory, and maps internally only
+to `mcp.tools.list`. The host issues a one-call `mcp.tools.read` capability,
+injects a request-scoped bearer token over the inherited credential channel,
+and reuses owned connector teardown. There is no generic MCP method, remote
+tool name, URL, header, or token field on the public surface.
+The bridge scans every provider description in blocking mode, then the wrapper
+discards all descriptions and raw schemas. The public result retains only
+sorted tool names, SHA-256 input/output schema digests, and explicit
+`unknown`/`unreviewed` markers until the owner approves a capability policy.
+
+The immutable bundle contract now requires twelve exact artifacts, including
+`fcp-mcp-bridge`, its manifest, and separate EEC/Hetzner official-MCP
+inventories. The currently installed release predates that bundle expansion,
+and the reserved `n8n-eec-mcp` / `n8n-hetzner-mcp` owner entries are not yet
+provisioned. Therefore live official-MCP use remains unavailable and fails
+closed until a separately accepted release installation and server-by-server
+read-only acceptance. Bundle verification currently
 trusts root ownership, restrictive filesystem modes, and serialized atomic
 privileged updates locally. Its path-based checks do not defend against a
 concurrent malicious root updater, and it does not claim signature
 verification; a future signed installer/update receipt can strengthen that
 root of trust.
-`n8n.targets.resolve`, `n8n.capabilities.inspect`, `n8n.runtime.status`,
+`n8n.targets.resolve`, `n8n.runtime.status`,
 `n8n.node_resources.explore`, `n8n.evaluations.manage`, and
 `n8n.mcp_access.reconcile` are not all representable by that enum yet. Local,
-typed REST, and official MCP dispatch must be wired through the host-owned
-boundary; this wrapper does not load policy files, spawn provider processes, or
-accept model-supplied commands, paths, environments, or upstream tool names.
+typed REST, local MCP, and any official-MCP operation beyond capability
+inspection must remain behind the host-owned boundary; this wrapper does not
+accept model-supplied commands, paths, environments, URLs, or upstream tool
+names.
 
 ## 1. Fixed owner decisions
 

@@ -838,6 +838,7 @@ pub enum Provider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationIntent {
+    CapabilitiesInspection,
     KnownIdRead,
     Search,
     NodeKnowledge,
@@ -863,6 +864,7 @@ impl OperationIntent {
 
     const fn preferred_and_fallback(self) -> (Provider, Option<Provider>) {
         match self {
+            Self::CapabilitiesInspection => (Provider::OfficialMcp, None),
             Self::KnownIdRead | Self::Search => (Provider::TypedRest, Some(Provider::OfficialMcp)),
             Self::NodeKnowledge | Self::Validation => {
                 (Provider::LocalMcp, Some(Provider::OfficialMcp))
@@ -884,6 +886,7 @@ impl OperationIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderCapability {
+    CapabilitiesInspection,
     KnownIdRead,
     Search,
     NodeKnowledge,
@@ -901,6 +904,7 @@ pub enum ProviderCapability {
 impl From<OperationIntent> for ProviderCapability {
     fn from(intent: OperationIntent) -> Self {
         match intent {
+            OperationIntent::CapabilitiesInspection => Self::CapabilitiesInspection,
             OperationIntent::KnownIdRead => Self::KnownIdRead,
             OperationIntent::Search => Self::Search,
             OperationIntent::NodeKnowledge => Self::NodeKnowledge,

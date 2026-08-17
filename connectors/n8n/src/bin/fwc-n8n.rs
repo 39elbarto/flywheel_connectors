@@ -4,6 +4,7 @@
 //! execution uses a fixed one-shot credential broker and verified host bridge.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt, io,
     io::Read,
     sync::{Arc, atomic::AtomicBool},
@@ -21,6 +22,7 @@ use fcp_n8n::router::{
 use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[path = "fwc_n8n_bridge.rs"]
@@ -86,6 +88,8 @@ impl HostRunOnceServerId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 enum HostRunOnceOperation {
+    #[serde(rename = "n8n.capabilities.inspect")]
+    CapabilitiesInspect,
     #[serde(rename = "n8n.credentials.list")]
     CredentialsList,
     #[serde(rename = "n8n.executions.get")]
@@ -109,6 +113,7 @@ enum HostRunOnceOperation {
 impl HostRunOnceOperation {
     fn parse(value: &str) -> Result<Self, AppError> {
         match value {
+            "n8n.capabilities.inspect" => Ok(Self::CapabilitiesInspect),
             "n8n.credentials.list" => Ok(Self::CredentialsList),
             "n8n.executions.get" => Ok(Self::ExecutionsGet),
             "n8n.executions.list" => Ok(Self::ExecutionsList),
@@ -119,6 +124,21 @@ impl HostRunOnceOperation {
             "n8n.workflows.get" => Ok(Self::WorkflowsGet),
             "n8n.workflows.list" => Ok(Self::WorkflowsList),
             _ => Err(AppError::new("operation_not_allowed")),
+        }
+    }
+
+    const fn credential_purpose(self) -> BrokerCredentialPurpose {
+        match self {
+            Self::CapabilitiesInspect => BrokerCredentialPurpose::OfficialMcp,
+            Self::CredentialsList
+            | Self::ExecutionsGet
+            | Self::ExecutionsList
+            | Self::FoldersGet
+            | Self::FoldersList
+            | Self::ProjectsList
+            | Self::TagsList
+            | Self::WorkflowsGet
+            | Self::WorkflowsList => BrokerCredentialPurpose::RestApi,
         }
     }
 }
@@ -434,6 +454,7 @@ fn execute_host_run_once(
         HostRunOnceServerId::Eec => BrokerServer::Eec,
         HostRunOnceServerId::Hetzner => BrokerServer::Hetzner,
     };
+    let credential_purpose = envelope.operation.credential_purpose();
     let client = BrokerClient::fixed();
     #[cfg(unix)]
     let credential = {
@@ -445,7 +466,7 @@ fn execute_host_run_once(
                 &mut transport,
                 BrokerRequest {
                     server,
-                    purpose: BrokerCredentialPurpose::RestApi,
+                    purpose: credential_purpose,
                 },
                 request_deadline_at,
             )
@@ -458,8 +479,123 @@ fn execute_host_run_once(
     };
 
     envelope.deadline_ms = Some(remaining_deadline_ms(request_deadline_at)?);
-    fwc_n8n_bridge::run_verified_host_bridge(&bundle, &envelope, credential, request_deadline_at)
-        .map_err(|error| AppError::new(error.code()))
+    let operation = envelope.operation;
+    let server_id = envelope.server_id;
+    let response = fwc_n8n_bridge::run_verified_host_bridge(
+        &bundle,
+        &envelope,
+        credential,
+        request_deadline_at,
+    )
+    .map_err(|error| AppError::new(error.code()))?;
+    normalize_host_run_once_response(operation, server_id, response)
+}
+
+fn normalize_host_run_once_response(
+    operation: HostRunOnceOperation,
+    server_id: HostRunOnceServerId,
+    mut response: Value,
+) -> Result<Value, AppError> {
+    if operation != HostRunOnceOperation::CapabilitiesInspect
+        || response.get("status").and_then(Value::as_str) != Some("ok")
+    {
+        return Ok(response);
+    }
+
+    let result = response
+        .get_mut("result")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| AppError::new("official_mcp_response_invalid"))?;
+    let tools = result
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::new("official_mcp_response_invalid"))?;
+    if tools.len() > 256 {
+        return Err(AppError::new("official_mcp_response_invalid"));
+    }
+
+    let mut names = BTreeSet::new();
+    let mut compact = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let tool = tool
+            .as_object()
+            .ok_or_else(|| AppError::new("official_mcp_response_invalid"))?;
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| valid_capability_tool_name(name))
+            .ok_or_else(|| AppError::new("official_mcp_response_invalid"))?;
+        if !names.insert(name.to_owned()) {
+            return Err(AppError::new("official_mcp_response_invalid"));
+        }
+        if tool
+            .get("injection_findings")
+            .and_then(Value::as_array)
+            .is_none_or(|findings| !findings.is_empty())
+        {
+            return Err(AppError::new("official_mcp_catalog_blocked"));
+        }
+        let input_schema = tool.get("inputSchema").unwrap_or(&Value::Null);
+        let output_schema = tool.get("outputSchema").unwrap_or(&Value::Null);
+        if (!input_schema.is_null() && !input_schema.is_object())
+            || (!output_schema.is_null() && !output_schema.is_object())
+        {
+            return Err(AppError::new("official_mcp_response_invalid"));
+        }
+        compact.push(json!({
+            "name": name,
+            "inputSchemaDigest": digest_capability_schema(input_schema)?,
+            "outputSchemaDigest": digest_capability_schema(output_schema)?,
+            "class": "unknown",
+            "status": "unreviewed",
+        }));
+    }
+    compact.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .cmp(&right.get("name").and_then(Value::as_str))
+    });
+
+    *result = serde_json::Map::from_iter([(
+        "capabilities".to_owned(),
+        json!({
+            "schema": "fwc.n8n.capabilities.v1",
+            "serverId": server_id.as_str(),
+            "provider": "official_mcp",
+            "toolCount": compact.len(),
+            "tools": compact,
+        }),
+    )]);
+    Ok(response)
+}
+
+fn valid_capability_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+fn digest_capability_schema(value: &Value) -> Result<String, AppError> {
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut ordered = BTreeMap::new();
+                for (key, value) in map {
+                    ordered.insert(key.clone(), canonical(value));
+                }
+                Value::Object(ordered.into_iter().collect())
+            }
+            Value::Array(values) => Value::Array(values.iter().map(canonical).collect()),
+            other => other.clone(),
+        }
+    }
+
+    let bytes = serde_json::to_vec(&canonical(value))
+        .map_err(|_| AppError::new("official_mcp_response_invalid"))?;
+    let digest = Sha256::digest(bytes);
+    Ok(format!("sha256:{}", hex::encode(digest)))
 }
 
 fn ensure_request_deadline(deadline: Instant) -> Result<(), AppError> {
@@ -560,6 +696,7 @@ fn validate_host_run_once_input(
         .as_object()
         .ok_or_else(|| AppError::new("input_object_required"))?;
     let (allowed, required): (&[&str], &[&str]) = match operation {
+        HostRunOnceOperation::CapabilitiesInspect => (&[], &[]),
         HostRunOnceOperation::CredentialsList
         | HostRunOnceOperation::ExecutionsList
         | HostRunOnceOperation::ProjectsList
@@ -582,6 +719,7 @@ fn validate_host_run_once_input(
     }
 
     match operation {
+        HostRunOnceOperation::CapabilitiesInspect => Ok(()),
         HostRunOnceOperation::CredentialsList
         | HostRunOnceOperation::ExecutionsList
         | HostRunOnceOperation::ProjectsList
@@ -650,6 +788,9 @@ fn expected_host_run_once_resource_uri(
 ) -> Result<String, AppError> {
     let root = format!("fwc-n8n://{}", server_id.as_str());
     match operation {
+        HostRunOnceOperation::CapabilitiesInspect => {
+            Ok(format!("fwc-mcp-bridge://{}", server_id.as_str()))
+        }
         HostRunOnceOperation::CredentialsList
         | HostRunOnceOperation::ExecutionsList
         | HostRunOnceOperation::ProjectsList
@@ -717,6 +858,7 @@ fn encode_host_resource_segment(value: &str) -> String {
 
 fn public_operation_intent(operation: &str) -> Result<OperationIntent, AppError> {
     let intent = match operation {
+        "n8n.capabilities.inspect" => OperationIntent::CapabilitiesInspection,
         "n8n.knowledge.query" => OperationIntent::NodeKnowledge,
         "n8n.validation.run" => OperationIntent::Validation,
         "n8n.workflows.get" | "n8n.executions.get" => OperationIntent::KnownIdRead,
@@ -1315,8 +1457,13 @@ mod tests {
     }
 
     #[test]
-    fn host_run_once_maps_all_nine_operations_to_canonical_resources() {
+    fn host_run_once_maps_all_ten_operations_to_canonical_resources() {
         let cases = [
+            (
+                "n8n.capabilities.inspect",
+                json!({}),
+                "fwc-mcp-bridge://eec",
+            ),
             ("n8n.credentials.list", json!({}), "fwc-n8n://eec"),
             (
                 "n8n.executions.get",
@@ -1362,6 +1509,105 @@ mod tests {
     }
 
     #[test]
+    fn credential_purpose_is_closed_by_operation() {
+        assert_eq!(
+            HostRunOnceOperation::CapabilitiesInspect.credential_purpose(),
+            BrokerCredentialPurpose::OfficialMcp
+        );
+        assert_eq!(
+            HostRunOnceOperation::WorkflowsGet.credential_purpose(),
+            BrokerCredentialPurpose::RestApi
+        );
+    }
+
+    #[test]
+    fn official_mcp_catalog_is_compacted_and_untrusted_text_is_removed() {
+        let response = json!({
+            "type": "response",
+            "id": "request-1",
+            "status": "ok",
+            "result": {
+                "tools": [
+                    {
+                        "name": "z_tool",
+                        "description": "PRIVATE-UNTRUSTED-DESCRIPTION",
+                        "inputSchema": {"required": ["b"], "properties": {"b": {"type": "string"}}},
+                        "outputSchema": {"type": "object"},
+                        "injection_findings": []
+                    },
+                    {
+                        "name": "a_tool",
+                        "description": "another provider description",
+                        "inputSchema": {"type": "object", "properties": {}},
+                        "injection_findings": []
+                    }
+                ]
+            },
+            "resource_uris": []
+        });
+        let compact = normalize_host_run_once_response(
+            HostRunOnceOperation::CapabilitiesInspect,
+            HostRunOnceServerId::Hetzner,
+            response,
+        )
+        .expect("compact official catalog");
+
+        let encoded = serde_json::to_string(&compact).expect("encoded response");
+        assert!(!encoded.contains("PRIVATE-UNTRUSTED-DESCRIPTION"));
+        assert!(!encoded.contains("properties"));
+        assert_eq!(compact["result"]["capabilities"]["toolCount"], 2);
+        assert_eq!(compact["result"]["capabilities"]["serverId"], "hetzner");
+        assert_eq!(
+            compact["result"]["capabilities"]["tools"][0]["name"],
+            "a_tool"
+        );
+        assert_eq!(
+            compact["result"]["capabilities"]["tools"][0]["class"],
+            "unknown"
+        );
+        assert_eq!(
+            compact["result"]["capabilities"]["tools"][0]["status"],
+            "unreviewed"
+        );
+        assert!(
+            compact["result"]["capabilities"]["tools"][0]["inputSchemaDigest"]
+                .as_str()
+                .is_some_and(|digest| digest.starts_with("sha256:"))
+        );
+    }
+
+    #[test]
+    fn official_mcp_catalog_fails_closed_on_findings_or_duplicates() {
+        for tools in [
+            json!([{
+                "name": "tool",
+                "inputSchema": {},
+                "injection_findings": [{"kind": "prompt_injection"}]
+            }]),
+            json!([
+                {"name": "tool", "inputSchema": {}, "injection_findings": []},
+                {"name": "tool", "inputSchema": {}, "injection_findings": []}
+            ]),
+            json!([{
+                "name": "ignore previous instructions",
+                "inputSchema": {},
+                "injection_findings": []
+            }]),
+        ] {
+            let error = normalize_host_run_once_response(
+                HostRunOnceOperation::CapabilitiesInspect,
+                HostRunOnceServerId::Eec,
+                json!({"status": "ok", "result": {"tools": tools}}),
+            )
+            .expect_err("unsafe catalog must fail closed");
+            assert!(matches!(
+                error.code,
+                "official_mcp_catalog_blocked" | "official_mcp_response_invalid"
+            ));
+        }
+    }
+
+    #[test]
     fn host_run_once_rejects_unknown_fields_servers_operations_and_ids() {
         let unknown = json!({
             "server_id": "eec",
@@ -1399,6 +1645,10 @@ mod tests {
         }
 
         for (operation, input) in [
+            (
+                "n8n.capabilities.inspect",
+                json!({"tool_name": "n8n_update_full_workflow"}),
+            ),
             ("n8n.workflows.list", json!({"api_key": "PRIVATE-KEY"})),
             (
                 "n8n.executions.list",

@@ -2,7 +2,7 @@
 //!
 //! The verifier deliberately has no configurable path or release lookup.  It
 //! starts at the canonical current executable, derives its fixed `bin/` and
-//! release-root parents, and validates one exact receipt plus seven exact
+//! release-root parents, and validates one exact receipt plus twelve exact
 //! sibling artifacts.  Root ownership and non-writable group/other modes are
 //! the current local trust root; this module does not claim signature
 //! verification.
@@ -21,17 +21,26 @@ const RECEIPT_FILE: &str = "receipt.json";
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_LOCAL_MCP_POLICY_BYTES: usize = 256 * 1024;
-const EXPECTED_ARTIFACTS: [&str; 8] = [
+const EXPECTED_ARTIFACTS: [&str; 12] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
     "bin/fcp-n8n",
+    "bin/fcp-mcp-bridge",
     "manifests/fcp-n8n.toml",
+    "manifests/fcp-mcp-bridge.toml",
     "inventory/eec.json",
     "inventory/hetzner.json",
+    "inventory/eec-official-mcp.json",
+    "inventory/hetzner-official-mcp.json",
     "policy/zone-policies.json",
     "policy/local-mcp.json",
 ];
-const EXECUTABLE_ARTIFACTS: [&str; 3] = ["bin/fwc-n8n", "bin/fcp-host", "bin/fcp-n8n"];
+const EXECUTABLE_ARTIFACTS: [&str; 4] = [
+    "bin/fwc-n8n",
+    "bin/fcp-host",
+    "bin/fcp-n8n",
+    "bin/fcp-mcp-bridge",
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BundleErrorCode {
@@ -164,6 +173,10 @@ pub struct VerifiedBundle {
     inventory_eec_digest: String,
     inventory_hetzner_path: PathBuf,
     inventory_hetzner_digest: String,
+    inventory_eec_official_mcp_path: PathBuf,
+    inventory_eec_official_mcp_digest: String,
+    inventory_hetzner_official_mcp_path: PathBuf,
+    inventory_hetzner_official_mcp_digest: String,
     zone_policy_path: PathBuf,
     zone_policy_digest: String,
     local_mcp_policy: LocalMcpPolicy,
@@ -173,7 +186,7 @@ impl fmt::Debug for VerifiedBundle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedBundle")
-            .field("artifact_count", &8)
+            .field("artifact_count", &12)
             .field("digests", &"<redacted>")
             .finish()
     }
@@ -190,6 +203,20 @@ impl VerifiedBundle {
 
     pub fn inventory_hetzner(&self) -> (&Path, &str) {
         (&self.inventory_hetzner_path, &self.inventory_hetzner_digest)
+    }
+
+    pub fn inventory_eec_official_mcp(&self) -> (&Path, &str) {
+        (
+            &self.inventory_eec_official_mcp_path,
+            &self.inventory_eec_official_mcp_digest,
+        )
+    }
+
+    pub fn inventory_hetzner_official_mcp(&self) -> (&Path, &str) {
+        (
+            &self.inventory_hetzner_official_mcp_path,
+            &self.inventory_hetzner_official_mcp_digest,
+        )
     }
 
     pub fn zone_policy(&self) -> (&Path, &str) {
@@ -209,6 +236,14 @@ impl VerifiedBundle {
             inventory_eec_digest: "b".repeat(64),
             inventory_hetzner_path: PathBuf::from("/release/inventory/hetzner.json"),
             inventory_hetzner_digest: "c".repeat(64),
+            inventory_eec_official_mcp_path: PathBuf::from(
+                "/release/inventory/eec-official-mcp.json",
+            ),
+            inventory_eec_official_mcp_digest: "e".repeat(64),
+            inventory_hetzner_official_mcp_path: PathBuf::from(
+                "/release/inventory/hetzner-official-mcp.json",
+            ),
+            inventory_hetzner_official_mcp_digest: "f".repeat(64),
             zone_policy_path: PathBuf::from("/release/policy/zone-policies.json"),
             zone_policy_digest: "d".repeat(64),
             local_mcp_policy: test_local_mcp_policy(),
@@ -305,11 +340,96 @@ fn verify_release_bundle(
     let receipt = read_receipt(&receipt_path)?;
     validate_receipt_shape(&receipt, root)?;
 
-    let mut verified_artifacts = Vec::with_capacity(EXPECTED_ARTIFACTS.len());
+    let verified_artifacts = verify_release_artifacts(root, expected_owner, &receipt)?;
+
+    let artifact = |relative_path: &str| {
+        verified_artifacts
+            .iter()
+            .find(|(path, _, _)| *path == relative_path)
+            .map(|(_, path, digest)| (path.clone(), digest.clone()))
+            .ok_or_else(|| BundleError::new(BundleErrorCode::ArtifactSet))
+    };
+    let (fcp_host_path, fcp_host_digest) = artifact("bin/fcp-host")?;
+    let (fcp_n8n_path, fcp_n8n_digest) = artifact("bin/fcp-n8n")?;
+    let (fcp_mcp_bridge_path, fcp_mcp_bridge_digest) = artifact("bin/fcp-mcp-bridge")?;
+    let (manifest_path, _) = artifact("manifests/fcp-n8n.toml")?;
+    let (mcp_manifest_path, _) = artifact("manifests/fcp-mcp-bridge.toml")?;
+    let (inventory_eec_path, inventory_eec_digest) = artifact("inventory/eec.json")?;
+    let (inventory_hetzner_path, inventory_hetzner_digest) = artifact("inventory/hetzner.json")?;
+    let (inventory_eec_official_mcp_path, inventory_eec_official_mcp_digest) =
+        artifact("inventory/eec-official-mcp.json")?;
+    let (inventory_hetzner_official_mcp_path, inventory_hetzner_official_mcp_digest) =
+        artifact("inventory/hetzner-official-mcp.json")?;
+    let (zone_policy_path, zone_policy_digest) = artifact("policy/zone-policies.json")?;
+    let (local_mcp_policy_path, _) = artifact("policy/local-mcp.json")?;
+    let local_mcp_policy = read_local_mcp_policy(&local_mcp_policy_path)?;
+    #[cfg(target_os = "linux")]
+    fcp_sandbox::verify_fixed_static_executable(&fcp_n8n_path)
+        .map_err(|_| BundleError::new(BundleErrorCode::RuntimeFormat))?;
+    #[cfg(target_os = "linux")]
+    fcp_sandbox::verify_fixed_static_executable(&fcp_mcp_bridge_path)
+        .map_err(|_| BundleError::new(BundleErrorCode::RuntimeFormat))?;
+    #[cfg(not(target_os = "linux"))]
+    return Err(BundleError::new(BundleErrorCode::RuntimeFormat));
+    verify_inventory_binding(
+        &inventory_eec_path,
+        "eec",
+        "fcp.n8n",
+        &fcp_n8n_path,
+        &fcp_n8n_digest,
+        &manifest_path,
+    )?;
+    verify_inventory_binding(
+        &inventory_hetzner_path,
+        "hetzner",
+        "fcp.n8n",
+        &fcp_n8n_path,
+        &fcp_n8n_digest,
+        &manifest_path,
+    )?;
+    verify_inventory_binding(
+        &inventory_eec_official_mcp_path,
+        "eec",
+        "fcp.mcp-bridge",
+        &fcp_mcp_bridge_path,
+        &fcp_mcp_bridge_digest,
+        &mcp_manifest_path,
+    )?;
+    verify_inventory_binding(
+        &inventory_hetzner_official_mcp_path,
+        "hetzner",
+        "fcp.mcp-bridge",
+        &fcp_mcp_bridge_path,
+        &fcp_mcp_bridge_digest,
+        &mcp_manifest_path,
+    )?;
+    Ok(VerifiedBundle {
+        fcp_host_path,
+        fcp_host_digest,
+        inventory_eec_path,
+        inventory_eec_digest,
+        inventory_hetzner_path,
+        inventory_hetzner_digest,
+        inventory_eec_official_mcp_path,
+        inventory_eec_official_mcp_digest,
+        inventory_hetzner_official_mcp_path,
+        inventory_hetzner_official_mcp_digest,
+        zone_policy_path,
+        zone_policy_digest,
+        local_mcp_policy,
+    })
+}
+
+#[cfg(unix)]
+fn verify_release_artifacts(
+    root: &Path,
+    expected_owner: u32,
+    receipt: &BundleReceipt,
+) -> Result<Vec<(&'static str, PathBuf, String)>, BundleError> {
+    let mut verified = Vec::with_capacity(EXPECTED_ARTIFACTS.len());
     for relative_path in EXPECTED_ARTIFACTS {
-        let artifact_path = root.join(relative_path);
         let artifact = verify_file(
-            &artifact_path,
+            &root.join(relative_path),
             expected_owner,
             EXECUTABLE_ARTIFACTS.contains(&relative_path),
         )?;
@@ -326,54 +446,9 @@ fn verify_release_bundle(
         if actual_digest != expected_digest {
             return Err(BundleError::new(BundleErrorCode::Digest));
         }
-        verified_artifacts.push((relative_path, artifact, actual_digest));
+        verified.push((relative_path, artifact, actual_digest));
     }
-
-    let artifact = |relative_path: &str| {
-        verified_artifacts
-            .iter()
-            .find(|(path, _, _)| *path == relative_path)
-            .map(|(_, path, digest)| (path.clone(), digest.clone()))
-            .ok_or_else(|| BundleError::new(BundleErrorCode::ArtifactSet))
-    };
-    let (fcp_host_path, fcp_host_digest) = artifact("bin/fcp-host")?;
-    let (fcp_n8n_path, fcp_n8n_digest) = artifact("bin/fcp-n8n")?;
-    let (manifest_path, _) = artifact("manifests/fcp-n8n.toml")?;
-    let (inventory_eec_path, inventory_eec_digest) = artifact("inventory/eec.json")?;
-    let (inventory_hetzner_path, inventory_hetzner_digest) = artifact("inventory/hetzner.json")?;
-    let (zone_policy_path, zone_policy_digest) = artifact("policy/zone-policies.json")?;
-    let (local_mcp_policy_path, _) = artifact("policy/local-mcp.json")?;
-    let local_mcp_policy = read_local_mcp_policy(&local_mcp_policy_path)?;
-    #[cfg(target_os = "linux")]
-    fcp_sandbox::verify_fixed_static_executable(&fcp_n8n_path)
-        .map_err(|_| BundleError::new(BundleErrorCode::RuntimeFormat))?;
-    #[cfg(not(target_os = "linux"))]
-    return Err(BundleError::new(BundleErrorCode::RuntimeFormat));
-    verify_inventory_binding(
-        &inventory_eec_path,
-        "eec",
-        &fcp_n8n_path,
-        &fcp_n8n_digest,
-        &manifest_path,
-    )?;
-    verify_inventory_binding(
-        &inventory_hetzner_path,
-        "hetzner",
-        &fcp_n8n_path,
-        &fcp_n8n_digest,
-        &manifest_path,
-    )?;
-    Ok(VerifiedBundle {
-        fcp_host_path,
-        fcp_host_digest,
-        inventory_eec_path,
-        inventory_eec_digest,
-        inventory_hetzner_path,
-        inventory_hetzner_digest,
-        zone_policy_path,
-        zone_policy_digest,
-        local_mcp_policy,
-    })
+    Ok(verified)
 }
 
 fn read_local_mcp_policy(path: &Path) -> Result<LocalMcpPolicy, BundleError> {
@@ -390,6 +465,7 @@ fn read_local_mcp_policy(path: &Path) -> Result<LocalMcpPolicy, BundleError> {
 fn verify_inventory_binding(
     path: &Path,
     expected_server_id: &str,
+    expected_connector_id: &str,
     executable: &Path,
     executable_digest: &str,
     manifest: &Path,
@@ -410,7 +486,7 @@ fn verify_inventory_binding(
     let exact = |pointer: &str, expected: &str| {
         entry.pointer(pointer).and_then(Value::as_str) == Some(expected)
     };
-    if !exact("/id", "fcp.n8n")
+    if !exact("/id", expected_connector_id)
         || !exact("/binary", executable)
         || !exact("/manifest_path", manifest)
         || !exact("/config/server_id", expected_server_id)
@@ -425,6 +501,24 @@ fn verify_inventory_binding(
         )
     {
         return Err(BundleError::new(BundleErrorCode::InventoryBinding));
+    }
+    if expected_connector_id == "fcp.mcp-bridge" {
+        let expected_url = match expected_server_id {
+            "eec" => "https://n8n.europeaneyecenter.com/mcp-server/http",
+            "hetzner" => "https://n8nhet.levilaser.com/mcp-server/http",
+            _ => return Err(BundleError::new(BundleErrorCode::InventoryBinding)),
+        };
+        if !exact("/config/mcp_url", expected_url)
+            || !exact("/config/security/description_scan", "block")
+            || entry
+                .pointer("/allowed_operations")
+                .and_then(Value::as_array)
+                .is_none_or(|operations| {
+                    operations.len() != 1 || operations[0].as_str() != Some("mcp.tools.list")
+                })
+        {
+            return Err(BundleError::new(BundleErrorCode::InventoryBinding));
+        }
     }
     Ok(())
 }
@@ -654,7 +748,7 @@ mod tests {
             for relative_path in EXPECTED_ARTIFACTS {
                 let path = root.join(relative_path);
                 let bytes = match relative_path {
-                    "bin/fcp-n8n" => static_elf_fixture(),
+                    "bin/fcp-n8n" | "bin/fcp-mcp-bridge" => static_elf_fixture(),
                     "policy/local-mcp.json" => serde_json::to_vec(&test_local_mcp_policy())
                         .expect("encode local MCP policy fixture"),
                     _ => relative_path.as_bytes().to_vec(),
@@ -679,6 +773,8 @@ mod tests {
             };
             fixture.write_inventory("eec");
             fixture.write_inventory("hetzner");
+            fixture.write_official_mcp_inventory("eec");
+            fixture.write_official_mcp_inventory("hetzner");
             fixture.write_receipt(None);
             fixture
         }
@@ -745,6 +841,43 @@ mod tests {
                 serde_json::to_vec(&value).expect("encode inventory fixture"),
             )
             .expect("write inventory fixture");
+        }
+
+        fn write_official_mcp_inventory(&self, server_id: &str) {
+            let executable = self.artifact("bin/fcp-mcp-bridge");
+            let executable_digest = hash_file(&executable).expect("provider digest");
+            let manifest = self.artifact("manifests/fcp-mcp-bridge.toml");
+            let mcp_url = match server_id {
+                "eec" => "https://n8n.europeaneyecenter.com/mcp-server/http",
+                "hetzner" => "https://n8nhet.levilaser.com/mcp-server/http",
+                _ => panic!("unsupported fixture server"),
+            };
+            let value = serde_json::json!([{
+                "id": "fcp.mcp-bridge",
+                "binary": executable,
+                "manifest_path": manifest,
+                "config": {
+                    "server_id": server_id,
+                    "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "mcp_url": mcp_url,
+                    "security": {"description_scan": "block"},
+                },
+                "allowed_zones": ["z:work"],
+                "allowed_operations": ["mcp.tools.list"],
+                "runtime_network_enforcement": "host_egress_proxy",
+                "lifecycle_mode": "per_invocation",
+                "launch_binding": {
+                    "launcher_path": executable,
+                    "launcher_digest": executable_digest,
+                    "runtime_executable": executable,
+                    "runtime_executable_digest": executable_digest,
+                }
+            }]);
+            fs::write(
+                self.artifact(&format!("inventory/{server_id}-official-mcp.json")),
+                serde_json::to_vec(&value).expect("encode official MCP inventory fixture"),
+            )
+            .expect("write official MCP inventory fixture");
         }
     }
 

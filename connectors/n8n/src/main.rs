@@ -49,6 +49,8 @@ fn run_fcp_loop() -> Result<()> {
     let mut connector = N8nConnector::try_new()?;
 
     let runtime = Builder::new_multi_thread().enable_all().build()?;
+    let inherited_host_egress = std::env::var("FCP_HOST_EGRESS_TRANSPORT")
+        .is_ok_and(|transport| transport == "inherited-fd-v1");
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -56,7 +58,11 @@ fn run_fcp_loop() -> Result<()> {
             continue;
         }
 
-        let response = runtime.block_on(async { handle_message(&mut connector, &line).await });
+        let response = if inherited_host_egress {
+            runtime.block_on_native(async { handle_message(&mut connector, &line).await })
+        } else {
+            runtime.block_on(async { handle_message(&mut connector, &line).await })
+        };
 
         let response_json = serde_json::to_string(&response)?;
         writeln!(stdout, "{response_json}")?;

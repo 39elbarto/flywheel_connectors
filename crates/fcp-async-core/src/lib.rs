@@ -393,6 +393,25 @@ pub mod runtime {
             let _tokio_guard = tokio_handle.enter();
             self.inner.block_on(future)
         }
+
+        /// Block on a future without entering the Tokio compatibility runtime.
+        ///
+        /// This is intended for connector processes that use only native FCP
+        /// async primitives while running under a network-deny sandbox. Tokio's
+        /// I/O driver creates an internal Unix socket pair on first use, which
+        /// such a sandbox deliberately rejects. Callers that may reach Tokio-
+        /// based libraries such as direct `reqwest` transport must use
+        /// [`Self::block_on`] instead.
+        pub fn block_on_native<F>(&self, future: F) -> F::Output
+        where
+            F: Future,
+        {
+            let _guard = RuntimeGuard::enter(RuntimeContext {
+                handle: self.inner.handle(),
+                flavor: self.flavor,
+            });
+            self.inner.block_on(future)
+        }
     }
 
     /// Execute a future from sync context.
@@ -7905,6 +7924,16 @@ mod tests {
             let nested = tokio_handle.spawn(async { 11_u32 });
             assert_eq!(nested.await.expect("nested tokio task should complete"), 11);
         });
+    }
+
+    #[test]
+    fn runtime_block_on_native_omits_tokio_compat_context() {
+        let rt = runtime::Runtime::new().unwrap();
+        let value = rt.block_on_native(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            17_u32
+        });
+        assert_eq!(value, 17);
     }
 
     #[test]

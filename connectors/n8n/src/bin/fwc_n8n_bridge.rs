@@ -59,6 +59,10 @@ const SUPERVISOR_ABORT_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/ABORT";
 const SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
 #[cfg(target_os = "linux")]
 const SUPERVISOR_START_FRAME_LEN: usize = SUPERVISOR_START_PREFIX.len() + 4;
+#[cfg(target_os = "linux")]
+const CREATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.create_draft"}"#;
+#[cfg(target_os = "linux")]
+const UPDATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.update_draft"}"#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BridgeErrorCode {
@@ -252,11 +256,12 @@ fn process_spec(
 
     let (host_path, host_digest) = bundle.fcp_host();
     let official_mcp = matches!(operation, super::HostRunOnceOperation::CapabilitiesInspect);
-    let write = matches!(
-        operation,
-        super::HostRunOnceOperation::WorkflowsCreateDraft
-            | super::HostRunOnceOperation::WorkflowsUpdateDraft
-    );
+    let owner_admission = match operation {
+        super::HostRunOnceOperation::WorkflowsCreateDraft => Some(CREATE_DRAFT_OWNER_ADMISSION),
+        super::HostRunOnceOperation::WorkflowsUpdateDraft => Some(UPDATE_DRAFT_OWNER_ADMISSION),
+        _ => None,
+    };
+    let write = owner_admission.is_some();
     let (inventory_path, _inventory_digest) = match (server_id, official_mcp) {
         (HostRunOnceServerId::Eec, false) => bundle.inventory_eec(),
         (HostRunOnceServerId::Hetzner, false) => bundle.inventory_hetzner(),
@@ -278,6 +283,12 @@ fn process_spec(
         OsString::from("FCP_HOST_LIFECYCLE_STATE_FILE"),
         OsString::new(),
     );
+    if let Some(admission) = owner_admission {
+        fixed_env.insert(
+            OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION"),
+            OsString::from(admission),
+        );
+    }
 
     Ok(fcp_sandbox::ProcessSpec {
         launcher_path: host_path.to_path_buf(),
@@ -1603,6 +1614,32 @@ mod tests {
                 .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
             Some(&OsString::from("/release/inventory/hetzner.json"))
         );
+        assert_eq!(
+            write
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(CREATE_DRAFT_OWNER_ADMISSION))
+        );
+        let admission: Value = serde_json::from_str(CREATE_DRAFT_OWNER_ADMISSION)
+            .expect("fixed owner admission must remain valid JSON");
+        assert_eq!(admission["version"], 1);
+        assert_eq!(admission["mode"], "owner-approved-single-host");
+        assert_eq!(admission["zone_id"], "z:work");
+        assert_eq!(admission["connector_id"], "fcp.n8n");
+        assert_eq!(admission["operation"], "n8n.workflows.create_draft");
+
+        let update = process_spec(
+            &bundle,
+            HostRunOnceServerId::Eec,
+            HostRunOnceOperation::WorkflowsUpdateDraft,
+        )
+        .expect("update spec");
+        assert_eq!(
+            update
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(UPDATE_DRAFT_OWNER_ADMISSION))
+        );
 
         let official = process_spec(
             &bundle,
@@ -1619,6 +1656,12 @@ mod tests {
                 .fixed_env
                 .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
             Some(&OsString::from("/release/inventory/eec-official-mcp.json"))
+        );
+        assert!(
+            official
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION"))
+                .is_none()
         );
     }
 

@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements three per-invocation provider paths behind the same verified wrapper boundary: nine typed REST reads plus guarded REST draft create/update, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The installed owner-gated deployment remains immutable release `release-20260817-nqm817-34`; it has accepted the read-only, local-knowledge, and official-discovery paths but does not yet contain or authorize the source-only draft-write packet. Draft writes still require a separate release and an owner-approved disposable-workflow live acceptance with rollback. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. All bundle, host, connector, broker, and request-scope processes were absent at 0, 5, and 30 seconds after the accepted read-only operations. Existing opt-in MCP profiles remain the fallback.
+> **Status**: Source implements three per-invocation provider paths behind the same verified wrapper boundary: nine typed REST reads plus guarded REST draft create/update, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The active owner-gated deployment is immutable release `release-20260818-nqm819-44`. EEC and Hetzner reads, local knowledge, and official discovery have live acceptance; guarded create/update has live acceptance on one disposable, inactive, unpublished Hetzner workflow. The accepted update used independent GET readback even though n8n preserved `versionId` for a metadata-only change. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. Bundle, host, connector, and bridge processes were absent immediately, after 5 seconds, and after 30 seconds following the accepted write. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -63,8 +63,10 @@ Important runtime truths:
   never retries an unknown result and never implicitly publishes, activates,
   deactivates, archives, or changes credential objects. Runtime files live
   under a private fixed `/run/user/<uid>/fwc-n8n` tree and reject symlink or
-  hard-link substitution. This source path has mock/local proof only until the
-  owner approves a disposable-workflow live acceptance and rollback.
+  hard-link substitution. The guarded write path has mock/local coverage plus
+  owner-approved create, update, reconciliation, and compensating-rollback
+  evidence on a disposable Hetzner workflow. This evidence does not authorize
+  writes to other workflows without a fresh exact approval and precondition.
   For `n8n.capabilities.inspect`, the same wrapper requests only the distinct
   official-MCP credential purpose and selects a separate immutable inventory.
   `fcp-host` translates that public operation only to `mcp.tools.list`, issues
@@ -314,8 +316,8 @@ This packet documents and verifies:
 - Production transport provenance comes only from the host-created connected descriptor plus `FCP_HOST_EGRESS_TRANSPORT=inherited-fd-v1` and a fresh host-issued `FCP_HOST_EGRESS_AUTH_TOKEN`. All host-egress transport variables are reserved and rejected in managed connector environment. Neither connector configuration nor operation input can supply them. `FCP_HOST_EGRESS_PROXY_URL` is retained only for explicit legacy/test construction and is never a production fallback.
 - Credential-reference mode sends no provider credential header from this client. The host resolves and injects the credential; the connector neither receives nor returns it.
 - Runtime user agent is `fcp-n8n/0.1.0 (FCP connector)`.
-- Direct provider I/O is allowed only for loopback test hosts (`localhost`, `127.0.0.1`, or IPv6 loopback) with API-key mode. Production HTTPS reads use only the credential-reference host-egress path; full real-host readiness is not claimed until its narrow-token host test is executed.
-- Host egress treats `context.resource_uri` as the capability-constrained logical resource and treats `url` as an independent transport-policy target. Focused host tests cover matching logical-resource authorization, mismatched logical-resource denial, disallowed transport, inherited-channel identity binding, stale registry generation, pre-activation rejection, exact operation-metadata parity, bounded success, post-launch failure teardown, child reap, and process-group absence. Real EEC/Hetzner narrow-token proof remains a separate acceptance gate.
+- Direct provider I/O is allowed only for loopback test hosts (`localhost`, `127.0.0.1`, or IPv6 loopback) with API-key mode. Production HTTPS uses only the credential-reference host-egress path. Live EEC/Hetzner reads and the bounded Hetzner disposable-workflow draft-write acceptance have exercised that path.
+- Host egress treats `context.resource_uri` as the capability-constrained logical resource and treats `url` as an independent transport-policy target. Focused host tests cover matching logical-resource authorization, mismatched logical-resource denial, disallowed transport, inherited-channel identity binding, stale registry generation, pre-activation rejection, exact operation-metadata parity, bounded success, post-launch failure teardown, child reap, and process-group absence. Live acceptance supplements rather than replaces those deterministic tests.
 - A missing, rejected, malformed, or failed host proxy response fails closed with no direct fallback and no second attempt. Host/provider bodies, headers, capability material, and credential UUIDs are not exposed in connector output or safe errors.
 - Mediated response bodies are bounded to 10 MiB before JSON and typed projection. Host decision metadata must exactly match the connector, exact operation, zone, request identity, target host/port, allow decision, managed operation-network constraint source, and successful credential injection.
 - Runtime request and connect timeouts are supplied by `ConnectorRuntimeConfig`; the connector default request timeout is `30 seconds`.
@@ -343,6 +345,8 @@ This packet documents and verifies:
 | `n8n.tags.list` | `GET /tags` with bounded `limit`/opaque `cursor` | `n8n.tags.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
 | `n8n.folders.list` | `GET /projects/{projectId}/folders` with fixed `select`, optional JSON filter, and bounded `skip`/`take` | `n8n.folders.read` | `Safe` | `Low` | `Strict` | `project_id` |
 | `n8n.folders.get` | `GET /projects/{projectId}/folders/{folderId}` | `n8n.folders.read` | `Safe` | `Low` | `Strict` | `project_id`, `folder_id` |
+| `n8n.workflows.create_draft` | one `POST /workflows`, then independent `GET /workflows/{id}` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | name, typed graph, exact approval reference, UUID idempotency key |
+| `n8n.workflows.update_draft` | baseline `GET`, one `PUT /workflows/{id}`, then independent `GET` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | id, typed graph, full lifecycle/state precondition, exact approval reference, UUID idempotency key |
 
 Read output boundary:
 - Workflow list items keep the compact metadata projection (`id`, nullable `name` and

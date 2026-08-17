@@ -252,6 +252,11 @@ fn process_spec(
 
     let (host_path, host_digest) = bundle.fcp_host();
     let official_mcp = matches!(operation, super::HostRunOnceOperation::CapabilitiesInspect);
+    let write = matches!(
+        operation,
+        super::HostRunOnceOperation::WorkflowsCreateDraft
+            | super::HostRunOnceOperation::WorkflowsUpdateDraft
+    );
     let (inventory_path, _inventory_digest) = match (server_id, official_mcp) {
         (HostRunOnceServerId::Eec, false) => bundle.inventory_eec(),
         (HostRunOnceServerId::Hetzner, false) => bundle.inventory_hetzner(),
@@ -281,6 +286,8 @@ fn process_spec(
         expected_runtime_executable_digest: host_digest.to_owned(),
         fixed_args: vec![OsString::from(if official_mcp {
             "n8n-official-mcp-run-once-supervised"
+        } else if write {
+            "n8n-write-run-once-supervised"
         } else {
             "n8n-run-once-supervised"
         })],
@@ -1575,6 +1582,23 @@ mod tests {
         .expect("Hetzner spec");
         assert_eq!(
             hetzner
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
+            Some(&OsString::from("/release/inventory/hetzner.json"))
+        );
+
+        let write = process_spec(
+            &bundle,
+            HostRunOnceServerId::Hetzner,
+            HostRunOnceOperation::WorkflowsCreateDraft,
+        )
+        .expect("write spec");
+        assert_eq!(
+            write.fixed_args,
+            vec![OsString::from("n8n-write-run-once-supervised")]
+        );
+        assert_eq!(
+            write
                 .fixed_env
                 .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
             Some(&OsString::from("/release/inventory/hetzner.json"))

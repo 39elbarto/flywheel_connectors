@@ -1238,6 +1238,10 @@ const FIXED_LANDLOCK_MIN_ABI: i32 = 5;
 const FIXED_LANDLOCK_ROOT_PATH: &[u8] = b"/\0";
 const FIXED_LANDLOCK_ROOT_ACCESS: u64 = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
 const FIXED_LANDLOCK_EXECUTABLE_ACCESS: u64 = LANDLOCK_ACCESS_FS_EXECUTE;
+const FIXED_LANDLOCK_WRITABLE_DIR_ACCESS: u64 = LANDLOCK_ACCESS_FS_READ_FILE
+    | LANDLOCK_ACCESS_FS_READ_DIR
+    | LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_MAKE_REG;
 const ELF64_HEADER_BYTES: usize = 64;
 const ELF64_PROGRAM_HEADER_BYTES: usize = 56;
 const ELF_PROGRAM_LOAD: u32 = 1;
@@ -1270,6 +1274,13 @@ const fn fixed_landlock_root_rule(parent_fd: i32) -> LandlockPathBeneathAttr {
 const fn fixed_landlock_executable_rule(parent_fd: i32) -> LandlockPathBeneathAttr {
     LandlockPathBeneathAttr {
         allowed_access: FIXED_LANDLOCK_EXECUTABLE_ACCESS,
+        parent_fd,
+    }
+}
+
+const fn fixed_landlock_writable_dir_rule(parent_fd: i32) -> LandlockPathBeneathAttr {
+    LandlockPathBeneathAttr {
+        allowed_access: FIXED_LANDLOCK_WRITABLE_DIR_ACCESS,
         parent_fd,
     }
 }
@@ -1348,6 +1359,31 @@ pub fn apply_fixed_read_only_landlock_with_static_executable(
     let root_fd = open_fixed_landlock_root()?;
     add_fixed_landlock_root_rule(ruleset_fd.as_raw_fd(), root_fd.as_raw_fd())?;
     add_fixed_landlock_executable_rule(ruleset_fd.as_raw_fd(), executable_fd.as_raw_fd())?;
+    restrict_fixed_landlock(ruleset_fd.as_raw_fd())
+}
+
+/// Apply the fixed boundary while allowing one static ELF and one private write tree.
+///
+/// The writable directory must already exist as an absolute canonical directory
+/// owned by the effective user with mode `0700`. The rule permits reading,
+/// writing existing regular files, and creating regular files below that exact
+/// directory. Directory creation, deletion, renaming, links, sockets, devices,
+/// FIFOs, truncation, and execution remain denied.
+pub fn apply_fixed_read_only_landlock_with_static_executable_and_writable_dir(
+    executable: &Path,
+    writable_dir: &Path,
+) -> Result<(), SandboxError> {
+    let executable_fd = open_fixed_static_executable(executable)?;
+    let writable_dir_fd = open_fixed_private_writable_dir(writable_dir)?;
+    let abi = query_landlock_abi()?;
+    require_fixed_landlock_abi(abi)?;
+    set_fixed_landlock_no_new_privs()?;
+
+    let ruleset_fd = create_fixed_landlock_ruleset()?;
+    let root_fd = open_fixed_landlock_root()?;
+    add_fixed_landlock_root_rule(ruleset_fd.as_raw_fd(), root_fd.as_raw_fd())?;
+    add_fixed_landlock_executable_rule(ruleset_fd.as_raw_fd(), executable_fd.as_raw_fd())?;
+    add_fixed_landlock_writable_dir_rule(ruleset_fd.as_raw_fd(), writable_dir_fd.as_raw_fd())?;
     restrict_fixed_landlock(ruleset_fd.as_raw_fd())
 }
 
@@ -1492,6 +1528,91 @@ fn add_fixed_landlock_executable_rule(
         ));
     }
     Ok(())
+}
+
+fn add_fixed_landlock_writable_dir_rule(
+    ruleset_fd: i32,
+    writable_dir_fd: i32,
+) -> Result<(), SandboxError> {
+    let attr = fixed_landlock_writable_dir_rule(writable_dir_fd);
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
+            ruleset_fd,
+            LANDLOCK_RULE_PATH_BENEATH,
+            &attr as *const LandlockPathBeneathAttr,
+            0,
+        )
+    };
+    if result < 0 {
+        return Err(SandboxError::SyscallFailed(
+            "fixed Landlock writable directory rule failed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn open_fixed_private_writable_dir(path: &Path) -> Result<OwnedFd, SandboxError> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if !path.is_absolute() {
+        return Err(SandboxError::InvalidConfig(
+            "fixed writable directory path must be absolute".into(),
+        ));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|_| {
+        SandboxError::InvalidConfig("fixed writable directory is unavailable".into())
+    })?;
+    if canonical != path {
+        return Err(SandboxError::InvalidConfig(
+            "fixed writable directory path must be canonical".into(),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+        SandboxError::InvalidConfig("fixed writable directory metadata is invalid".into())
+    })?;
+    let effective_uid = unsafe { libc::geteuid() };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != effective_uid
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(SandboxError::InvalidConfig(
+            "fixed writable directory must be private to the effective user".into(),
+        ));
+    }
+
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        SandboxError::InvalidConfig("fixed writable directory path is invalid".into())
+    })?;
+    let raw = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if raw < 0 {
+        return Err(SandboxError::SyscallFailed(
+            "fixed writable directory open failed".into(),
+        ));
+    }
+    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+    let opened_metadata = file.metadata().map_err(|_| {
+        SandboxError::InvalidConfig("fixed writable directory metadata changed".into())
+    })?;
+    if !opened_metadata.is_dir()
+        || opened_metadata.uid() != effective_uid
+        || opened_metadata.permissions().mode() & 0o777 != 0o700
+        || opened_metadata.dev() != metadata.dev()
+        || opened_metadata.ino() != metadata.ino()
+    {
+        return Err(SandboxError::InvalidConfig(
+            "fixed writable directory changed during admission".into(),
+        ));
+    }
+    Ok(file.into())
 }
 
 fn open_fixed_static_executable(path: &Path) -> Result<OwnedFd, SandboxError> {
@@ -1828,6 +1949,7 @@ mod tests {
     use crate::sandbox::{CompiledPolicy, PlatformFlags};
     use fcp_manifest::SandboxProfile;
     use std::fs::OpenOptions;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::Duration;
@@ -1977,6 +2099,7 @@ mod tests {
         assert_eq!(FIXED_LANDLOCK_ROOT_PATH, b"/\0");
         assert_eq!(FIXED_LANDLOCK_ROOT_ACCESS, 0b1100);
         assert_eq!(FIXED_LANDLOCK_EXECUTABLE_ACCESS, 0b1);
+        assert_eq!(FIXED_LANDLOCK_WRITABLE_DIR_ACCESS, 0b1_0000_1110);
         assert_eq!(
             fixed_landlock_root_rule(37).allowed_access,
             FIXED_LANDLOCK_ROOT_ACCESS
@@ -1987,6 +2110,11 @@ mod tests {
             FIXED_LANDLOCK_EXECUTABLE_ACCESS
         );
         assert_eq!(fixed_landlock_executable_rule(41).parent_fd, 41);
+        assert_eq!(
+            fixed_landlock_writable_dir_rule(43).allowed_access,
+            FIXED_LANDLOCK_WRITABLE_DIR_ACCESS
+        );
+        assert_eq!(fixed_landlock_writable_dir_rule(43).parent_fd, 43);
         assert_eq!(
             FIXED_LANDLOCK_ROOT_ACCESS & !FIXED_LANDLOCK_HANDLED_ACCESS,
             0
@@ -2146,6 +2274,106 @@ mod tests {
         let cleanup = std::fs::remove_dir_all(&fixture_dir);
         assert!(cleanup.is_ok(), "parent fixture cleanup failed");
         assert!(status.success(), "exact executable Landlock probe failed");
+    }
+
+    #[test]
+    fn fixed_landlock_allows_only_private_runtime_file_writes() {
+        const PROBE_EXECUTABLE: &str = "FCP_FIXED_WRITE_LANDLOCK_STATIC_EXECUTABLE";
+        const PROBE_WRITABLE_DIR: &str = "FCP_FIXED_WRITE_LANDLOCK_WRITABLE_DIR";
+        const PROBE_OUTSIDE_FILE: &str = "FCP_FIXED_WRITE_LANDLOCK_OUTSIDE_FILE";
+
+        if let (Some(executable), Some(writable_dir), Some(outside_file)) = (
+            std::env::var_os(PROBE_EXECUTABLE),
+            std::env::var_os(PROBE_WRITABLE_DIR),
+            std::env::var_os(PROBE_OUTSIDE_FILE),
+        ) {
+            let executable = PathBuf::from(executable);
+            let writable_dir = PathBuf::from(writable_dir);
+            let outside_file = PathBuf::from(outside_file);
+            apply_fixed_read_only_landlock_with_static_executable_and_writable_dir(
+                &executable,
+                &writable_dir,
+            )
+            .expect("fixed write Landlock setup");
+
+            let inside_file = writable_dir.join("receipt.json");
+            std::fs::write(&inside_file, b"receipt").expect("create private receipt");
+            assert_eq!(
+                std::fs::read(&inside_file).expect("read receipt"),
+                b"receipt"
+            );
+            assert!(OpenOptions::new().write(true).open(&outside_file).is_err());
+            assert!(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(outside_file.with_file_name("outside-created"))
+                    .is_err()
+            );
+            assert!(std::fs::create_dir(writable_dir.join("nested")).is_err());
+            assert!(std::fs::remove_file(&inside_file).is_err());
+            assert!(
+                Command::new(&executable)
+                    .arg("true")
+                    .status()
+                    .is_ok_and(|status| status.success())
+            );
+            assert!(Command::new("/bin/true").status().is_err());
+            return;
+        }
+
+        let abi = match query_landlock_abi() {
+            Ok(abi) => abi,
+            Err(SandboxError::UnsupportedPlatform(_)) => return,
+            Err(error) => panic!("Landlock ABI query failed: {error}"),
+        };
+        assert!(abi >= FIXED_LANDLOCK_MIN_ABI);
+        let static_executable = match std::fs::canonicalize("/bin/busybox") {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        verify_fixed_static_executable(&static_executable)
+            .expect("busybox must be a static ELF fixture");
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let fixture_dir = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonical temp directory")
+            .join(format!(
+                "fcp-fixed-write-landlock-{}-{nonce}",
+                std::process::id()
+            ));
+        let writable_dir = fixture_dir.join("private-runtime");
+        std::fs::create_dir_all(&writable_dir).expect("create private runtime fixture");
+        std::fs::set_permissions(&writable_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("set private runtime mode");
+        let outside_file = fixture_dir.join("outside");
+        std::fs::write(&outside_file, b"outside fixture").expect("write outside fixture");
+        let writable_dir = writable_dir
+            .canonicalize()
+            .expect("canonical private runtime");
+        let outside_file = outside_file
+            .canonicalize()
+            .expect("canonical outside fixture");
+
+        let status = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "fixed_landlock_allows_only_private_runtime_file_writes",
+                "--nocapture",
+            ])
+            .env(PROBE_EXECUTABLE, &static_executable)
+            .env(PROBE_WRITABLE_DIR, &writable_dir)
+            .env(PROBE_OUTSIDE_FILE, &outside_file)
+            .status()
+            .expect("run fixed write Landlock subprocess probe");
+        let cleanup = std::fs::remove_dir_all(&fixture_dir);
+        assert!(cleanup.is_ok(), "parent fixture cleanup failed");
+        assert!(
+            status.success(),
+            "fixed write Landlock subprocess probe failed"
+        );
     }
 
     // ── New tests ──

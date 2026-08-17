@@ -343,6 +343,7 @@ enum CliAction {
     RunOnce,
     N8nReadOnlyRunOnce,
     N8nSupervisedReadOnlyRunOnce,
+    N8nSupervisedWriteRunOnce,
     N8nSupervisedOfficialMcpRunOnce,
     PrintHelp,
     PrintVersion,
@@ -356,6 +357,7 @@ const N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const N8N_READ_ONLY_RUN_ONCE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const N8N_OPERATOR_CONFIGURED_MANIFEST_HOST: &str = "operator-configured";
 const N8N_SUPERVISED_RUN_ONCE_TOKEN: &str = "n8n-run-once-supervised";
+const N8N_SUPERVISED_WRITE_RUN_ONCE_TOKEN: &str = "n8n-write-run-once-supervised";
 const N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN: &str = "n8n-official-mcp-run-once-supervised";
 const N8N_CAPABILITIES_INSPECT_OPERATION: &str = "n8n.capabilities.inspect";
 const N8N_OFFICIAL_MCP_PROVIDER_OPERATION: &str = "mcp.tools.list";
@@ -6602,6 +6604,9 @@ where
         [arg] if arg == OsStr::new(N8N_SUPERVISED_RUN_ONCE_TOKEN) => {
             Ok(CliAction::N8nSupervisedReadOnlyRunOnce)
         }
+        [arg] if arg == OsStr::new(N8N_SUPERVISED_WRITE_RUN_ONCE_TOKEN) => {
+            Ok(CliAction::N8nSupervisedWriteRunOnce)
+        }
         [arg] if arg == OsStr::new(N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN) => {
             Ok(CliAction::N8nSupervisedOfficialMcpRunOnce)
         }
@@ -12100,8 +12105,13 @@ fn run_n8n_supervisor_gate_before_telemetry() -> HostResult<()> {
     ))
 }
 
+fn n8n_run_once_operation_class_allowed(expected_write: Option<bool>, operation: &str) -> bool {
+    expected_write.is_none_or(|expected| expected == N8N_WRITE_OPERATIONS.contains(&operation))
+}
+
 async fn async_n8n_read_only_run_once(
     telemetry_config: TelemetryConfig,
+    expected_write: Option<bool>,
 ) -> HostResult<InvokeResponse> {
     let high_level_input = read_n8n_read_only_run_once_input_from_stdin()
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Input))?;
@@ -12118,6 +12128,9 @@ async fn async_n8n_read_only_run_once(
     let plan = build_n8n_read_only_run_once_plan(high_level_input, &selected_config)
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
     let is_write = N8N_WRITE_OPERATIONS.contains(&plan.operation.as_str());
+    if !n8n_run_once_operation_class_allowed(expected_write, plan.operation.as_str()) {
+        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
+    }
     let approval_signing_key = is_write.then(fcp_crypto::ed25519::Ed25519SigningKey::generate);
     let approval_token = if let Some(signing_key) = approval_signing_key.as_ref() {
         Some(
@@ -12414,6 +12427,7 @@ fn main() -> HostResult<()> {
         CliAction::RunOnce => {}
         CliAction::N8nReadOnlyRunOnce => {}
         CliAction::N8nSupervisedReadOnlyRunOnce => {}
+        CliAction::N8nSupervisedWriteRunOnce => {}
         CliAction::N8nSupervisedOfficialMcpRunOnce => {}
         CliAction::PrintHelp => {
             print_cli_help();
@@ -12426,7 +12440,9 @@ fn main() -> HostResult<()> {
     }
     if matches!(
         action,
-        CliAction::N8nSupervisedReadOnlyRunOnce | CliAction::N8nSupervisedOfficialMcpRunOnce
+        CliAction::N8nSupervisedReadOnlyRunOnce
+            | CliAction::N8nSupervisedWriteRunOnce
+            | CliAction::N8nSupervisedOfficialMcpRunOnce
     ) {
         if let Err(error) = run_n8n_supervisor_gate_before_telemetry() {
             return print_run_once_response(Err(error));
@@ -12434,7 +12450,9 @@ fn main() -> HostResult<()> {
         #[cfg(target_os = "linux")]
         {
             let provider_kind = match action {
-                CliAction::N8nSupervisedReadOnlyRunOnce => N8nSupervisedProvider::RestApi,
+                CliAction::N8nSupervisedReadOnlyRunOnce | CliAction::N8nSupervisedWriteRunOnce => {
+                    N8nSupervisedProvider::RestApi
+                }
                 CliAction::N8nSupervisedOfficialMcpRunOnce => N8nSupervisedProvider::OfficialMcp,
                 _ => unreachable!("supervised provider selected only for supervised actions"),
             };
@@ -12442,9 +12460,27 @@ fn main() -> HostResult<()> {
                 Ok(provider) => provider,
                 Err(error) => return print_run_once_response(Err(error)),
             };
-            if fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable(&provider)
-                .is_err()
-            {
+            let sandbox_result = if matches!(action, CliAction::N8nSupervisedWriteRunOnce) {
+                n8n_run_once_runtime_dir().and_then(|runtime_dir| {
+                    fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable_and_writable_dir(
+                        &provider,
+                        &runtime_dir,
+                    )
+                    .map_err(|_| {
+                        HostError::PreflightFailed(
+                            "n8n supervised run-once sandbox admission rejected".to_string(),
+                        )
+                    })
+                })
+            } else {
+                fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable(&provider)
+                    .map_err(|_| {
+                        HostError::PreflightFailed(
+                            "n8n supervised run-once sandbox admission rejected".to_string(),
+                        )
+                    })
+            };
+            if sandbox_result.is_err() {
                 return print_run_once_response(Err(HostError::PreflightFailed(
                     "n8n supervised run-once sandbox admission rejected".to_string(),
                 )));
@@ -12460,6 +12496,7 @@ fn main() -> HostResult<()> {
                 CliAction::RunOnce
                     | CliAction::N8nReadOnlyRunOnce
                     | CliAction::N8nSupervisedReadOnlyRunOnce
+                    | CliAction::N8nSupervisedWriteRunOnce
                     | CliAction::N8nSupervisedOfficialMcpRunOnce
             ) =>
         {
@@ -12489,6 +12526,7 @@ fn main() -> HostResult<()> {
         CliAction::N8nReadOnlyRunOnce => {
             let result = match fcp_async_core::runtime::block_on_sync(async_n8n_read_only_run_once(
                 telemetry_config,
+                None,
             )) {
                 Ok(result) => result,
                 Err(_) => Err(HostError::Internal(
@@ -12500,10 +12538,23 @@ fn main() -> HostResult<()> {
         CliAction::N8nSupervisedReadOnlyRunOnce => {
             let result = match fcp_async_core::runtime::block_on_sync(async_n8n_read_only_run_once(
                 telemetry_config,
+                Some(false),
             )) {
                 Ok(result) => result,
                 Err(_) => Err(HostError::Internal(
                     "n8n supervised run-once runtime failed".to_string(),
+                )),
+            };
+            print_run_once_response(result)
+        }
+        CliAction::N8nSupervisedWriteRunOnce => {
+            let result = match fcp_async_core::runtime::block_on_sync(async_n8n_read_only_run_once(
+                telemetry_config,
+                Some(true),
+            )) {
+                Ok(result) => result,
+                Err(_) => Err(HostError::Internal(
+                    "n8n supervised write run-once runtime failed".to_string(),
                 )),
             };
             print_run_once_response(result)
@@ -31454,6 +31505,42 @@ done"#;
             parse_cli_action_from_args(["fcp-host", N8N_SUPERVISED_RUN_ONCE_TOKEN, "extra"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn parse_cli_action_accepts_only_the_hidden_supervised_write_token() {
+        let action = parse_cli_action_from_args(["fcp-host", N8N_SUPERVISED_WRITE_RUN_ONCE_TOKEN])
+            .expect("hidden supervised write token should parse");
+        assert_eq!(action, CliAction::N8nSupervisedWriteRunOnce);
+        assert!(
+            parse_cli_action_from_args(["fcp-host", N8N_SUPERVISED_WRITE_RUN_ONCE_TOKEN, "extra",])
+                .is_err()
+        );
+        assert!(parse_cli_action_from_args(["fcp-host", "n8n-write-run-once"]).is_err());
+    }
+
+    #[test]
+    fn supervised_n8n_sandbox_class_must_match_operation_class() {
+        assert!(n8n_run_once_operation_class_allowed(
+            Some(false),
+            "n8n.workflows.get"
+        ));
+        assert!(!n8n_run_once_operation_class_allowed(
+            Some(false),
+            "n8n.workflows.create_draft"
+        ));
+        assert!(n8n_run_once_operation_class_allowed(
+            Some(true),
+            "n8n.workflows.update_draft"
+        ));
+        assert!(!n8n_run_once_operation_class_allowed(
+            Some(true),
+            "n8n.executions.list"
+        ));
+        assert!(n8n_run_once_operation_class_allowed(
+            None,
+            "n8n.workflows.create_draft"
+        ));
     }
 
     #[test]

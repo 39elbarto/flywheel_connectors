@@ -34,6 +34,8 @@ fcp-ratelimit = { path = "../fcp-ratelimit" }
 fcp-store = { path = "../fcp-store" }
 fcp-tailscale = { path = "../fcp-tailscale" }
 fcp-telemetry.workspace = true
+libc = "0.2"
+nix = { version = "0.31.2", features = ["fs"] }
 
 # Async runtime
 async-trait = "0.1"

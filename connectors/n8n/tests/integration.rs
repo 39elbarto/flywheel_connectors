@@ -11,12 +11,13 @@
     clippy::unused_async
 )]
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
-    ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope,
+    ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope, FcpError,
     FcpResult, InputConstraint, ZoneId,
 };
 use fcp_sdk::ConnectorRuntimeConfig;
@@ -59,6 +60,20 @@ fn resource_uri(operation: &str, input: &Value) -> String {
             let id = utf8_percent_encode(id, NON_ALPHANUMERIC);
             format!("fwc-n8n://{TEST_SERVER_ID}/workflows/{id}")
         }
+        "n8n.workflows.create_draft" => {
+            let project_id = input["project_id"]
+                .as_str()
+                .expect("project id for draft approval");
+            let project_id = utf8_percent_encode(project_id, NON_ALPHANUMERIC);
+            format!("fwc-n8n://{TEST_SERVER_ID}/projects/{project_id}")
+        }
+        "n8n.workflows.update_draft" => {
+            let id = input["id"]
+                .as_str()
+                .expect("workflow id for draft approval");
+            let id = utf8_percent_encode(id, NON_ALPHANUMERIC);
+            format!("fwc-n8n://{TEST_SERVER_ID}/workflows/{id}")
+        }
         "n8n.executions.get" => {
             let workflow_id = input["workflow_id"]
                 .as_str()
@@ -93,7 +108,9 @@ fn capability_token_with_options(
     expires_at: chrono::DateTime<chrono::Utc>,
 ) -> CapabilityToken {
     let capability = match operation {
-        "n8n.workflows.activate" => "n8n.workflows.write",
+        "n8n.workflows.activate" | "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
+            "n8n.workflows.write"
+        }
         "n8n.workflows.list" | "n8n.workflows.get" => "n8n.workflows.read",
         "n8n.executions.list" | "n8n.executions.get" => "n8n.executions.read",
         "n8n.projects.list" => "n8n.projects.read",
@@ -160,6 +177,140 @@ fn approval_token(input: &Value) -> ApprovalToken {
     )
 }
 
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            let mut canonical = serde_json::Map::new();
+            for (key, child) in entries {
+                canonical.insert(key.clone(), canonical_json(child));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(array) => Value::Array(array.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
+}
+
+fn draft_graph_digest(input: &Value) -> String {
+    let semantic_nodes = input["graph"]["nodes"]
+        .as_array()
+        .expect("draft graph nodes")
+        .iter()
+        .map(|node| {
+            let mut node = node.clone();
+            node.as_object_mut()
+                .expect("draft graph node object")
+                .remove("credentials");
+            node
+        })
+        .collect::<Vec<_>>();
+    let canonical = canonical_json(&json!({
+        "nodes": semantic_nodes,
+        "connections": input["graph"]["connections"],
+    }));
+    let bytes = serde_json::to_vec(&canonical).expect("graph digest JSON");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fwc-n8n.graph-digest.v1");
+    hasher.update(&[0]);
+    hasher.update(&bytes);
+    format!("blake3-256:{}", hasher.finalize().to_hex())
+}
+
+fn draft_mutation_digest(input: &Value) -> String {
+    let graph = input["graph"].as_object().expect("draft graph object");
+    let canonical = canonical_json(&json!({
+        "id": input.get("id").cloned().unwrap_or(Value::Null),
+        "name": input.get("name").cloned().unwrap_or(Value::Null),
+        "project_id": input.get("project_id").cloned().unwrap_or(Value::Null),
+        "parent_folder_id": input
+            .get("parent_folder_id")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "graph": {
+            "nodes": graph.get("nodes").cloned().unwrap_or(Value::Null),
+            "connections": graph.get("connections").cloned().unwrap_or(Value::Null),
+            "settings": graph.get("settings").cloned().unwrap_or(Value::Null),
+            "staticData": graph.get("staticData").cloned().unwrap_or(Value::Null),
+            "pinData": graph.get("pinData").cloned().unwrap_or(Value::Null),
+        },
+    }));
+    let bytes = serde_json::to_vec(&canonical).expect("mutation digest JSON");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fwc-n8n.mutation-digest.v1");
+    hasher.update(&[0]);
+    hasher.update(&bytes);
+    format!("blake3-256:{}", hasher.finalize().to_hex())
+}
+
+fn draft_approval_token(operation: &str, input: &Value) -> ApprovalToken {
+    let guard = &input["guard"];
+    let precondition = &guard["precondition"];
+    let normalized = json!({
+        "server_id": TEST_SERVER_ID,
+        "resource_uri": resource_uri(operation, input),
+        "operation": operation,
+        "version_id": precondition.get("versionId").cloned().unwrap_or(Value::Null),
+        "state_digest": precondition.get("stateDigest").cloned().unwrap_or(Value::Null),
+        "active_version_id": precondition
+            .get("activeVersionId")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "active_version_id_present": precondition.get("activeVersionId").is_some(),
+        "active": precondition.get("active").cloned().unwrap_or(Value::Null),
+        "is_archived": precondition
+            .get("isArchived")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "graph_digest": draft_graph_digest(input),
+        "mutation_digest": draft_mutation_digest(input),
+        "idempotency_key": guard["idempotencyKey"],
+        "provider": "rest",
+        "side_effect": "draft_only",
+    });
+    let pointers = [
+        "/server_id",
+        "/resource_uri",
+        "/operation",
+        "/version_id",
+        "/state_digest",
+        "/active_version_id",
+        "/active_version_id_present",
+        "/active",
+        "/is_archived",
+        "/graph_digest",
+        "/mutation_digest",
+        "/idempotency_key",
+        "/provider",
+        "/side_effect",
+    ];
+    let constraints = pointers
+        .into_iter()
+        .map(|pointer| InputConstraint {
+            pointer: pointer.into(),
+            expected: normalized.pointer(pointer).cloned().unwrap_or(Value::Null),
+        })
+        .collect();
+    let now = u64::try_from(chrono::Utc::now().timestamp_millis())
+        .expect("current timestamp should fit in u64");
+    ApprovalToken::approved(
+        guard["approvalRef"].as_str().expect("approval reference"),
+        now.saturating_sub(1_000),
+        now.saturating_add(60_000),
+        "operator:test",
+        ApprovalScope::Execution(ExecutionScope {
+            connector_id: "fcp.n8n".into(),
+            method_pattern: operation.into(),
+            request_object_id: None,
+            input_hash: None,
+            input_constraints: constraints,
+        }),
+        ZoneId::work(),
+        Some(vec![1_u8]),
+    )
+}
+
 fn unrelated_approval_token(input: &Value) -> ApprovalToken {
     let mut token = approval_token(input);
     if let ApprovalScope::Execution(scope) = &mut token.scope {
@@ -184,6 +335,11 @@ fn authorized_params(operation: &str, input: &Value) -> Value {
     });
     if operation == "n8n.workflows.activate" {
         params["approval_tokens"] = json!([approval_token(input)]);
+    } else if matches!(
+        operation,
+        "n8n.workflows.create_draft" | "n8n.workflows.update_draft"
+    ) {
+        params["approval_tokens"] = json!([draft_approval_token(operation, input)]);
     }
     params
 }
@@ -191,6 +347,23 @@ fn authorized_params(operation: &str, input: &Value) -> Value {
 async fn invoke(connector: &N8nConnector, operation: &str, input: Value) -> FcpResult<Value> {
     connector
         .handle_invoke(authorized_params(operation, &input))
+        .await
+}
+
+async fn invoke_with_approval(
+    connector: &N8nConnector,
+    operation: &str,
+    input: Value,
+    approval: ApprovalToken,
+) -> FcpResult<Value> {
+    let capability = capability_token(operation, &input);
+    connector
+        .handle_invoke(json!({
+            "operation": operation,
+            "input": input,
+            "capability_token": capability,
+            "approval_tokens": [approval],
+        }))
         .await
 }
 
@@ -340,6 +513,122 @@ impl Respond for MediatedProjectsResponse {
             "egress": decision,
         }))
     }
+}
+
+#[derive(Clone)]
+struct DraftReply {
+    status: u16,
+    body: Value,
+}
+
+#[derive(Clone)]
+struct MediatedDraftResponse {
+    replies: Arc<Mutex<Vec<DraftReply>>>,
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
+impl MediatedDraftResponse {
+    fn new(replies: Vec<DraftReply>) -> (Self, Arc<Mutex<Vec<Value>>>) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                replies: Arc::new(Mutex::new(replies)),
+                requests: Arc::clone(&requests),
+            },
+            requests,
+        )
+    }
+}
+
+impl Respond for MediatedDraftResponse {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let envelope: Value = serde_json::from_slice(&request.body).unwrap();
+        self.requests.lock().unwrap().push(envelope.clone());
+        let reply = self.replies.lock().unwrap().remove(0);
+        let context = &envelope["context"];
+        let mut decision = json!({
+            "connector_id": context["connector_id"],
+            "operation_id": context["operation_id"],
+            "zone_id": context["zone_id"],
+            "request_id": context["request_id"],
+            "execution_mode": "host_egress_proxy",
+            "constraint_source": "managed_connector_config.operation_network_constraints",
+            "decision": "allow",
+            "resolved_host": "n8n.example.com",
+            "resolved_port": 443,
+            "credential_injected": true,
+            "elapsed_ms": 1,
+        });
+        if let Some(correlation_id) = context.get("correlation_id") {
+            decision["correlation_id"] = correlation_id.clone();
+        }
+        let body = serde_json::to_vec(&reply.body).unwrap();
+        ResponseTemplate::new(200).set_body_json(json!({
+            "status": reply.status,
+            "headers": [],
+            "body": format!(
+                "base64:{}",
+                base64::engine::general_purpose::STANDARD.encode(body)
+            ),
+            "egress": decision,
+        }))
+    }
+}
+
+fn digest_domain(domain: &[u8], value: &Value) -> String {
+    let canonical = canonical_json(value);
+    let bytes = serde_json::to_vec(&canonical).expect("digest JSON");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(&bytes);
+    format!("blake3-256:{}", hasher.finalize().to_hex())
+}
+
+fn workflow_state_digest_for_fixture(workflow: &Value) -> String {
+    let active_version = workflow["activeVersion"].clone();
+    let published = active_version.as_object().map(|published| {
+        json!({
+            "versionId": published["versionId"],
+            "nodes": published["nodes"],
+            "connections": published["connections"],
+        })
+    });
+    digest_domain(
+        b"fwc-n8n.state-digest.v1",
+        &json!({
+            "schema": "fwc-n8n.workflow-state.v1",
+            "id": workflow["id"],
+            "name": workflow.get("name").cloned().unwrap_or(Value::Null),
+            "description": workflow.get("description").cloned().unwrap_or(Value::Null),
+            "projectId": workflow.get("projectId").cloned().unwrap_or(Value::Null),
+            "folderId": workflow
+                .get("parentFolderId")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "versionId": workflow["versionId"],
+            "active": workflow["active"],
+            "activeVersionId": workflow["activeVersionId"],
+            "isArchived": workflow["isArchived"],
+            "createdAt": workflow.get("createdAt").cloned().unwrap_or(Value::Null),
+            "updatedAt": workflow.get("updatedAt").cloned().unwrap_or(Value::Null),
+            "tags": workflow.get("tags").cloned().unwrap_or(Value::Null),
+            "draft": {
+                "nodes": workflow["nodes"],
+                "connections": workflow["connections"],
+            },
+            "published": published,
+        }),
+    )
+}
+
+fn mediated_request_payload(envelope: &Value) -> Value {
+    let encoded = envelope["body"].as_str().expect("mediated body");
+    let encoded = encoded.strip_prefix("base64:").expect("base64 body");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("mediated body base64");
+    serde_json::from_slice(&bytes).expect("mediated JSON body")
 }
 
 fn assert_no_untrusted_output(value: &Value) {
@@ -1381,6 +1670,441 @@ async fn mediated_credential_reads_share_operation_resource_and_safe_get_contrac
 }
 
 #[fcp_async_core::runtime::test]
+async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
+    let input = json!({
+        "name": "Created workflow",
+        "project_id": "project-1",
+        "graph": {
+            "nodes": [{"id": "node-1", "type": "n8n-nodes-base.noOp", "parameters": {}}],
+            "connections": {}
+        },
+        "guard": {
+            "approvalRef": "approval-create",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000101"
+        }
+    });
+    let workflow = json!({
+        "id": "wf-created",
+        "name": "Created workflow",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "projectId": "project-1",
+        "nodes": input["graph"]["nodes"],
+        "connections": {},
+        "activeVersion": null
+    });
+    let (responder, requests) = MediatedDraftResponse::new(vec![
+        DraftReply {
+            status: 200,
+            body: json!({"id": "wf-created"}),
+        },
+        DraftReply {
+            status: 200,
+            body: workflow,
+        },
+    ]);
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(responder)
+        .mount(&proxy)
+        .await;
+
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    let result = invoke(&c, "n8n.workflows.create_draft", input.clone())
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "verified");
+    assert_eq!(result["id"], "wf-created");
+    assert_eq!(result["provider"], "rest");
+    assert_eq!(result["readback"], "independent_get");
+    assert_eq!(result["active"], false);
+    assert_eq!(result["activeVersionId"], Value::Null);
+    assert_eq!(result["isArchived"], false);
+
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one write followed by one independent GET"
+    );
+    assert_eq!(requests[0]["method"], "POST");
+    assert_eq!(
+        requests[0]["url"],
+        "https://n8n.example.com/api/v1/workflows"
+    );
+    assert_eq!(
+        requests[0]["credential_id"],
+        "550e8400-e29b-41d4-a716-446655440000"
+    );
+    assert_eq!(
+        requests[0]["context"]["operation_id"],
+        "n8n.workflows.create_draft"
+    );
+    assert_eq!(
+        requests[0]["context"]["resource_uri"],
+        "fwc-n8n://eec/projects/project%2D1"
+    );
+    assert_eq!(
+        requests[0]["headers"],
+        json!([
+            {"name": "Accept", "value": "application/json"},
+            {"name": "Content-Type", "value": "application/json"}
+        ])
+    );
+    assert_eq!(
+        mediated_request_payload(&requests[0]),
+        json!({
+            "name": "Created workflow",
+            "projectId": "project-1",
+            "nodes": input["graph"]["nodes"],
+            "connections": {}
+        })
+    );
+    assert_eq!(requests[1]["method"], "GET");
+    assert_eq!(
+        requests[1]["url"],
+        "https://n8n.example.com/api/v1/workflows/wf-created"
+    );
+    assert!(requests[1].get("body").is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_draft_credential_change_invalidates_prior_approval_without_raw_secret() {
+    let original = json!({
+        "name": "Credential-bound workflow",
+        "project_id": "project-1",
+        "graph": {
+            "nodes": [{
+                "id": "http-node",
+                "type": "n8n-nodes-base.httpRequest",
+                "credentials": {"httpBasicAuth": {"id": "credential-1"}}
+            }],
+            "connections": {}
+        },
+        "guard": {
+            "approvalRef": "approval-credential-bound",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000105",
+            "precondition": {}
+        }
+    });
+    let approval = draft_approval_token("n8n.workflows.create_draft", &original);
+    let mut changed = original.clone();
+    changed["graph"]["nodes"][0]["credentials"]["httpBasicAuth"]["id"] = json!("credential-2");
+
+    assert_eq!(draft_graph_digest(&original), draft_graph_digest(&changed));
+    assert_ne!(
+        draft_mutation_digest(&original),
+        draft_mutation_digest(&changed)
+    );
+    let serialized_approval = serde_json::to_string(&approval).expect("approval JSON");
+    assert!(serialized_approval.contains(&draft_mutation_digest(&original)));
+    assert!(!serialized_approval.contains("credential-1"));
+    assert!(!serialized_approval.contains("credential-2"));
+    let ApprovalScope::Execution(scope) = &approval.scope else {
+        panic!("draft approval must use execution scope");
+    };
+    assert!(scope.input_constraints.iter().any(|constraint| {
+        constraint.pointer == "/mutation_digest"
+            && constraint.expected == json!(draft_mutation_digest(&original))
+    }));
+
+    let proxy = MockServer::start().await;
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    let result = invoke_with_approval(&c, "n8n.workflows.create_draft", changed, approval).await;
+    assert!(matches!(result, Err(FcpError::CapabilityDenied { .. })));
+    assert!(
+        proxy.received_requests().await.unwrap().is_empty(),
+        "credential-only approval mismatch must fail before provider dispatch"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_draft_update_preserves_lifecycle_and_published_state() {
+    let published = json!({
+        "versionId": "published-v1",
+        "nodes": [{"id": "published-node"}],
+        "connections": {}
+    });
+    let baseline = json!({
+        "id": "wf-existing",
+        "name": "Existing workflow",
+        "settings": {
+            "executionOrder": "v1",
+            "saveDataErrorExecution": "all"
+        },
+        "staticData": {"marker": "baseline-static"},
+        "pinData": {"node-1": [{"json": {"marker": "baseline-pin"}}]},
+        "active": true,
+        "versionId": "draft-v1",
+        "activeVersionId": "published-v1",
+        "isArchived": true,
+        "nodes": [{"id": "old-node"}],
+        "connections": {},
+        "activeVersion": published
+    });
+    let updated = json!({
+        "id": "wf-existing",
+        "name": "Existing workflow",
+        "settings": {
+            "executionOrder": "v1",
+            "saveDataErrorExecution": "all"
+        },
+        "staticData": {"marker": "baseline-static"},
+        "pinData": {"node-1": [{"json": {"marker": "baseline-pin"}}]},
+        "active": true,
+        "versionId": "draft-v2",
+        "activeVersionId": "published-v1",
+        "isArchived": true,
+        "nodes": [{"id": "new-node"}],
+        "connections": {},
+        "activeVersion": published
+    });
+    let input = json!({
+        "id": "wf-existing",
+        "graph": {
+            "nodes": [{"id": "new-node"}],
+            "connections": {}
+        },
+        "guard": {
+            "approvalRef": "approval-update",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000102",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": "published-v1",
+                "active": true,
+                "isArchived": true,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let (responder, requests) = MediatedDraftResponse::new(vec![
+        DraftReply {
+            status: 200,
+            body: baseline,
+        },
+        DraftReply {
+            status: 204,
+            body: json!({}),
+        },
+        DraftReply {
+            status: 200,
+            body: updated,
+        },
+    ]);
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(responder)
+        .mount(&proxy)
+        .await;
+
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    let result = invoke(&c, "n8n.workflows.update_draft", input)
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "verified");
+    assert_eq!(result["versionId"], "draft-v2");
+    assert_eq!(result["active"], true);
+    assert_eq!(result["activeVersionId"], "published-v1");
+    assert_eq!(result["isArchived"], true);
+
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3, "preflight GET, one PUT, independent GET");
+    assert_eq!(requests[0]["method"], "GET");
+    assert_eq!(requests[1]["method"], "PUT");
+    assert_eq!(
+        requests[1]["url"],
+        "https://n8n.example.com/api/v1/workflows/wf-existing"
+    );
+    assert_eq!(
+        requests[1]["context"]["operation_id"],
+        "n8n.workflows.update_draft"
+    );
+    assert_eq!(
+        requests[1]["context"]["resource_uri"],
+        "fwc-n8n://eec/workflows/wf%2Dexisting"
+    );
+    assert_eq!(
+        mediated_request_payload(&requests[1]),
+        json!({
+            "name": "Existing workflow",
+            "settings": {
+                "executionOrder": "v1",
+                "saveDataErrorExecution": "all"
+            },
+            "staticData": {"marker": "baseline-static"},
+            "pinData": {"node-1": [{"json": {"marker": "baseline-pin"}}]},
+            "nodes": [{"id": "new-node"}],
+            "connections": {}
+        })
+    );
+    for lifecycle_field in ["active", "activeVersionId", "isArchived", "versionId"] {
+        assert!(
+            mediated_request_payload(&requests[1])
+                .get(lifecycle_field)
+                .is_none(),
+            "PUT must not infer lifecycle field {lifecycle_field}"
+        );
+    }
+    assert!(requests[1]["body"].as_str().is_some());
+    assert_eq!(requests[2]["method"], "GET");
+    assert_eq!(
+        requests[2]["url"],
+        "https://n8n.example.com/api/v1/workflows/wf-existing"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_draft_stale_precondition_stops_before_write() {
+    let baseline = json!({
+        "id": "wf-stale",
+        "name": "Stale workflow",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "old-node"}],
+        "connections": {},
+        "activeVersion": null
+    });
+    let input = json!({
+        "id": "wf-stale",
+        "graph": {"nodes": [{"id": "new-node"}], "connections": {}},
+        "guard": {
+            "approvalRef": "approval-stale",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000103",
+            "precondition": {
+                "versionId": "stale-version",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let (responder, requests) = MediatedDraftResponse::new(vec![DraftReply {
+        status: 200,
+        body: baseline,
+    }]);
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(responder)
+        .mount(&proxy)
+        .await;
+
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    assert!(
+        invoke(&c, "n8n.workflows.update_draft", input)
+            .await
+            .is_err()
+    );
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], "GET");
+    assert!(requests.iter().all(|request| request["method"] != "PUT"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_draft_readback_mismatch_stops_without_fallback() {
+    let input = json!({
+        "name": "Mismatch workflow",
+        "project_id": "project-1",
+        "graph": {"nodes": [{"id": "expected-node"}], "connections": {}},
+        "guard": {
+            "approvalRef": "approval-mismatch",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000104"
+        }
+    });
+    let mismatched = json!({
+        "id": "wf-mismatch",
+        "name": "Mismatch workflow",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "different-node"}],
+        "connections": {},
+        "activeVersion": null
+    });
+    let (responder, requests) = MediatedDraftResponse::new(vec![
+        DraftReply {
+            status: 200,
+            body: json!({"id": "wf-mismatch"}),
+        },
+        DraftReply {
+            status: 200,
+            body: mismatched,
+        },
+    ]);
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(responder)
+        .mount(&proxy)
+        .await;
+
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    let error = invoke(&c, "n8n.workflows.create_draft", input)
+        .await
+        .expect_err("mismatched readback must fail closed");
+    assert!(matches!(
+        error,
+        FcpError::External {
+            retryable: false,
+            ..
+        }
+    ));
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["method"], "POST");
+    assert_eq!(requests[1]["method"], "GET");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_draft_unknown_or_malformed_write_never_falls_back_or_retries() {
+    let inputs = [
+        (503, json!({"provider": "unavailable"})),
+        (200, json!("malformed")),
+    ];
+    for (status, body) in inputs {
+        let input = json!({
+            "name": "Unknown workflow",
+            "project_id": "project-1",
+            "graph": {"nodes": [{"id": "node-1"}], "connections": {}},
+            "guard": {
+                "approvalRef": "approval-unknown",
+                "idempotencyKey": format!("00000000-0000-4000-8000-000000000{}", status)
+            }
+        });
+        let (responder, requests) = MediatedDraftResponse::new(vec![DraftReply { status, body }]);
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rpc/egress/http"))
+            .respond_with(responder)
+            .mount(&proxy)
+            .await;
+
+        let c = setup_mediated_connector(&proxy.uri()).await;
+        let error = invoke(&c, "n8n.workflows.create_draft", input)
+            .await
+            .expect_err("ambiguous write must fail closed");
+        assert!(matches!(
+            error,
+            FcpError::External {
+                retryable: false,
+                ..
+            }
+        ));
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "no fallback GET or automatic retry");
+    }
+}
+
+#[fcp_async_core::runtime::test]
 async fn every_credential_read_fails_closed_without_proxy_or_on_proxy_rejection() {
     let cases = [
         ("n8n.workflows.list", json!({})),
@@ -1487,7 +2211,16 @@ async fn mediated_projects_list_host_rejections_and_malformed_payloads_fail_once
             .await
             .expect_err("host rejection must fail closed");
         assert!(!error.to_string().contains("marker.host.rejection"));
-        assert_eq!(proxy.received_requests().await.unwrap().len(), 1);
+        let received = proxy.received_requests().await.unwrap();
+        let request_shapes = received
+            .iter()
+            .map(|request| format!("{} {}", request.method, request.url.path()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            received.len(),
+            1,
+            "host rejection status {host_status} must issue exactly one proxy request; received {request_shapes:?}"
+        );
     }
 
     let malformed_json_proxy = MockServer::start().await;
@@ -1563,10 +2296,10 @@ async fn mediated_projects_list_missing_or_failed_proxy_has_no_direct_fallback()
             .is_err()
     );
 
-    let dead_proxy = MockServer::start().await;
-    let dead_proxy_url = dead_proxy.uri();
-    drop(dead_proxy);
-    let c = setup_mediated_connector(&dead_proxy_url).await;
+    // Keep the transport-failure endpoint outside wiremock's ephemeral port
+    // pool. Dropping a MockServer here lets another parallel test immediately
+    // reuse the same port, turning this request into cross-test traffic.
+    let c = setup_mediated_connector("http://127.0.0.1:1").await;
     assert!(invoke(&c, "n8n.projects.list", json!({})).await.is_err());
 }
 

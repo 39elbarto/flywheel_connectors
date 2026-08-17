@@ -48,6 +48,16 @@ pub enum N8nError {
     /// Provider returned a structurally malformed response.
     #[error("Malformed provider response")]
     MalformedProviderResponse,
+
+    /// A mutation transport/response failed after the provider attempt could
+    /// have been accepted.  Callers must reconcile by read-only GET and never
+    /// automatically repeat the write.
+    #[error("n8n draft write outcome is unknown; reconcile by readback and do not retry")]
+    UnknownOutcome,
+
+    /// The independent workflow readback did not match the guarded write.
+    #[error("n8n draft readback did not match the guarded write")]
+    ReadbackMismatch,
 }
 
 impl N8nError {
@@ -68,6 +78,10 @@ impl N8nError {
             Self::NotFound { .. } => "n8n resource was not found".into(),
             Self::InvalidInput(message) => format!("invalid n8n input: {message}"),
             Self::MalformedProviderResponse => "n8n provider returned a malformed response".into(),
+            Self::UnknownOutcome => {
+                "n8n draft write outcome is unknown; reconcile by readback and do not retry".into()
+            }
+            Self::ReadbackMismatch => "n8n draft readback did not match the guarded write".into(),
         }
     }
 
@@ -143,6 +157,22 @@ impl N8nError {
             Self::MalformedProviderResponse => FcpError::External {
                 service: "n8n".into(),
                 message: "Malformed provider response".into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+            Self::UnknownOutcome => FcpError::External {
+                service: "n8n".into(),
+                message:
+                    "Draft write outcome unknown; reconcile by readback; automatic retry forbidden"
+                        .into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+            Self::ReadbackMismatch => FcpError::External {
+                service: "n8n".into(),
+                message: "Draft write readback mismatch".into(),
                 status_code: None,
                 retryable: false,
                 retry_after: None,

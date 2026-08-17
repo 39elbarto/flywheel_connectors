@@ -3,12 +3,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-#[cfg(target_os = "linux")]
-use std::io::Write;
-use std::io::{Cursor, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Cursor, Read, Write};
 #[cfg(target_os = "linux")]
 use std::net::Shutdown;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream as StdUnixStream;
 #[cfg(unix)]
@@ -58,6 +59,8 @@ use fcp_evidence::{
     OwnerMigrationVerificationContext, SoftwareBillOfMaterials, SupplyChainAttestation,
     TrustedV3OwnerMap, verify_hybrid_owner_object,
 };
+#[cfg(test)]
+use fcp_host::ConnectorLaunchBinding;
 use fcp_host::{
     AdaptiveWarmPoolConfig, AdaptiveWarmPoolController, BatchExecutor, BatchInvokeRequest,
     BatchInvokeResponse, BatchOperation, BatchOperationError, BatchOptions, BatchScheduleHint,
@@ -72,13 +75,13 @@ use fcp_host::{
     ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
     ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
-    ConnectorInventoryResponse, ConnectorLaunchBinding, ConnectorLifecycleMode, ConnectorRegistry,
-    ConnectorSummary, CredentialCooldown, CredentialLease, CredentialMutationOutcome,
-    CredentialPayload, CredentialPoolError, CredentialPoolKey, CredentialPoolRegistry,
-    CredentialPoolStrategy, CredentialPoolView, CredentialUpsertMode, DiscoveryEndpoint,
-    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
-    EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse,
-    GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus, HostPreflightRequest,
+    ConnectorInventoryResponse, ConnectorLifecycleMode, ConnectorRegistry, ConnectorSummary,
+    CredentialCooldown, CredentialLease, CredentialMutationOutcome, CredentialPayload,
+    CredentialPoolError, CredentialPoolKey, CredentialPoolRegistry, CredentialPoolStrategy,
+    CredentialPoolView, CredentialUpsertMode, DiscoveryEndpoint, DiscoveryFilter,
+    DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService, EventAcknowledgeRequest,
+    EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse, GateOutcome,
+    HostAdminStateStore, HostHealthResponse, HostHealthStatus, HostPreflightRequest,
     HostSimulateRequest, HostSimulateResponse, IntrospectionResponse, JournalQueryRequest,
     JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse,
     LocalPlacementController, LocalPlacementPlan, LocalPlacementPressureSnapshot,
@@ -132,12 +135,12 @@ use fcp_policy::{
     RequestDescriptor, TRUTH_PRECEDENCE_DEFAULT_ENV,
 };
 use fcp_prelude::{
-    ApprovalToken, CapabilityConstraints, CapabilityVerifier, ConnectorStateCanonicalStatus,
-    CorrelationId, CostEstimateConfidence, CredentialId, Decision, FcpError, InstanceId,
-    Lease as CoreLease, LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey,
-    PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject,
-    TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind, Uuid, ZoneId, ZonePolicyObject,
-    simulate_policy_decision,
+    ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityVerifier,
+    ConnectorStateCanonicalStatus, CorrelationId, CostEstimateConfidence, CredentialId, Decision,
+    ExecutionScope, FcpError, InputConstraint, InstanceId, Lease as CoreLease,
+    LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
+    ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject, TailscaleNodeId, TransportMode,
+    UsageMetric, UsageMetricKind, Uuid, ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{
@@ -167,6 +170,8 @@ use hyper::body::Incoming;
 use hyper_util::{
     server::conn::auto::Builder as HyperConnectionBuilder, service::TowerToHyperService,
 };
+#[cfg(unix)]
+use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
@@ -381,6 +386,21 @@ const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
     "n8n.workflows.get",
     "n8n.workflows.list",
 ];
+const N8N_WRITE_OPERATIONS: [&str; 2] =
+    ["n8n.workflows.create_draft", "n8n.workflows.update_draft"];
+const N8N_RUN_ONCE_OPERATIONS: [&str; 11] = [
+    "n8n.credentials.list",
+    "n8n.executions.get",
+    "n8n.executions.list",
+    "n8n.folders.get",
+    "n8n.folders.list",
+    "n8n.projects.list",
+    "n8n.tags.list",
+    "n8n.workflows.get",
+    "n8n.workflows.list",
+    "n8n.workflows.create_draft",
+    "n8n.workflows.update_draft",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -481,7 +501,7 @@ impl TrustedResourceBinding {
             ));
         }
         let expected = match request.connector_id.as_str() {
-            "fcp.n8n" if N8N_READ_ONLY_OPERATIONS.contains(&request.operation.as_str()) => {
+            "fcp.n8n" if N8N_RUN_ONCE_OPERATIONS.contains(&request.operation.as_str()) => {
                 expected_n8n_read_only_resource_uri(
                     self.server_id,
                     request.operation.as_str(),
@@ -2831,6 +2851,7 @@ impl SubprocessRegistry {
     /// Unscoped callers (discovery/legacy tests) remain persistent-only. A
     /// per-invocation request must arrive with the exact plan returned by
     /// verified preflight, so this path never launches it.
+    #[allow(dead_code)] // Retained for the next host lifecycle wiring packet.
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
         let plan = self.per_invocation_execution_plan(&request).await?;
         if plan.is_some() {
@@ -2861,6 +2882,7 @@ impl SubprocessRegistry {
     /// Production gates in `verify_live_request` MUST use this helper
     /// (one call per request) instead of the per-field accessors.
     /// Returns `None` when the connector is unknown.
+    #[allow(dead_code)] // Retained for the next host lifecycle wiring packet.
     async fn allow_list_snapshot(&self, connector_id: &ConnectorId) -> Option<AllowListSnapshot> {
         let state = self.state.read().await;
         state.connectors.get(connector_id).map(|entry| {
@@ -2916,6 +2938,7 @@ impl SubprocessRegistry {
     /// launch binding, and fixed launch material on one trusted snapshot. The
     /// method intentionally does not touch the filesystem, inspect request
     /// payloads/tokens, mutate sandbox support flags, or spawn a process.
+    #[allow(dead_code)] // Retained for the next host lifecycle wiring packet.
     async fn per_invocation_execution_plan(
         &self,
         request: &InvokeRequest,
@@ -3255,6 +3278,7 @@ impl SubprocessRegistry {
     /// routed through a host egress proxy or OS/WASI sandbox, so strict runtime
     /// enforcement must fail closed here instead of pretending static manifest
     /// metadata is enough.
+    #[allow(dead_code)] // Retained for the next host lifecycle wiring packet.
     async fn enforce_runtime_network_policy(&self, request: &InvokeRequest) -> HostResult<()> {
         let snapshot = self
             .runtime_network_policy_snapshot(&request.connector_id, &request.operation)
@@ -4325,7 +4349,8 @@ fn owned_handshake_zone_dir(
 ) -> HostResult<Option<String>> {
     if fixed_read_only_landlock_active {
         let approved = (connector_id.as_str() == "fcp.n8n"
-            && N8N_READ_ONLY_OPERATIONS.contains(&operation.as_str()))
+            && (N8N_READ_ONLY_OPERATIONS.contains(&operation.as_str())
+                || N8N_WRITE_OPERATIONS.contains(&operation.as_str())))
             || (connector_id.as_str() == "fcp.mcp-bridge"
                 && operation.as_str() == N8N_OFFICIAL_MCP_PROVIDER_OPERATION);
         if !approved {
@@ -4551,6 +4576,33 @@ mod owned_per_invocation_unit_tests {
             owned_handshake_zone_dir(
                 &ConnectorId::from_static("fcp.test"),
                 &tools_list,
+                &zone_id,
+                None,
+                true,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fixed_filesystem_boundary_admits_only_typed_n8n_draft_writes() {
+        let zone_id: ZoneId = ZoneId::work();
+        let connector_id = ConnectorId::from_static("fcp.n8n");
+        for operation in N8N_WRITE_OPERATIONS {
+            let zone_dir = owned_handshake_zone_dir(
+                &connector_id,
+                &OperationId::from_static(operation),
+                &zone_id,
+                None,
+                true,
+            )
+            .expect("typed draft write should pass fixed filesystem boundary");
+            assert!(zone_dir.is_none());
+        }
+        assert!(
+            owned_handshake_zone_dir(
+                &connector_id,
+                &OperationId::from_static("n8n.workflows.activate"),
                 &zone_id,
                 None,
                 true,
@@ -6600,9 +6652,10 @@ run-once reads exactly one bounded InvokeRequest JSON value from stdin and
 writes one InvokeResponse JSON value to stdout. It uses only a selected
 per-invocation connector from the trusted inventory and never binds a listener.
 
-n8n-run-once reads the closed fwc.n8n.host-run-once.v1 read-only envelope,
-issues a request-scoped capability from trusted manifest metadata, and uses the
-same per-invocation connector path without binding a listener.
+n8n-run-once reads the closed fwc.n8n.host-run-once.v1 envelope for existing
+reads and typed draft writes, issues a request-scoped capability from trusted
+manifest metadata, and uses the same per-invocation connector path without
+binding a listener.
 ",
         env!("CARGO_PKG_VERSION")
     );
@@ -9762,6 +9815,142 @@ fn n8n_read_only_input_id<'a>(input: &'a Value, field: &str) -> HostResult<&'a s
     Ok(value)
 }
 
+fn validate_n8n_draft_input(operation: &str, input: &Value) -> HostResult<()> {
+    let object = input.as_object().ok_or_else(|| {
+        HostError::InvalidFilter("n8n draft write input must be an object".to_string())
+    })?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "id" | "name" | "project_id" | "parent_folder_id" | "graph" | "guard"
+        )
+    }) {
+        return Err(HostError::InvalidFilter(
+            "n8n draft write input contains an unsupported field".to_string(),
+        ));
+    }
+    let graph = object
+        .get("graph")
+        .and_then(Value::as_object)
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft graph is invalid".to_string()))?;
+    if graph.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "nodes" | "connections" | "settings" | "staticData" | "pinData"
+        )
+    }) || graph
+        .get("nodes")
+        .and_then(Value::as_array)
+        .is_none_or(|nodes| nodes.len() > 10_000 || nodes.iter().any(|node| !node.is_object()))
+        || graph
+            .get("connections")
+            .and_then(Value::as_object)
+            .is_none()
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n draft graph is invalid".to_string(),
+        ));
+    }
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft guard is invalid".to_string()))?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition"
+        )
+    }) || guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| Uuid::parse_str(value).is_err())
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n draft guard is invalid".to_string(),
+        ));
+    }
+    let empty_precondition = serde_json::Map::new();
+    let precondition = match guard.get("precondition") {
+        Some(value) => value.as_object().ok_or_else(|| {
+            HostError::InvalidFilter("n8n draft guard precondition is invalid".to_string())
+        })?,
+        None => &empty_precondition,
+    };
+    if precondition.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "versionId" | "activeVersionId" | "active" | "isArchived" | "stateDigest"
+        )
+    }) {
+        return Err(HostError::InvalidFilter(
+            "n8n draft guard precondition contains an unsupported field".to_string(),
+        ));
+    }
+    match operation {
+        "n8n.workflows.create_draft" => {
+            if object.contains_key("id")
+                || object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| value.trim().is_empty() || value.len() > 256)
+                || object
+                    .get("project_id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| value.is_empty())
+            {
+                return Err(HostError::InvalidFilter(
+                    "n8n create_draft requires name and project_id and forbids id".to_string(),
+                ));
+            }
+        }
+        "n8n.workflows.update_draft" => {
+            n8n_read_only_input_id(input, "id")?;
+            for field in ["versionId", "active", "isArchived", "stateDigest"] {
+                if !precondition.contains_key(field) {
+                    return Err(HostError::InvalidFilter(format!(
+                        "n8n update_draft requires precondition.{field}"
+                    )));
+                }
+            }
+            if !precondition.contains_key("activeVersionId")
+                || precondition
+                    .get("versionId")
+                    .and_then(Value::as_str)
+                    .is_none()
+                || precondition
+                    .get("stateDigest")
+                    .and_then(Value::as_str)
+                    .is_none()
+                || precondition
+                    .get("active")
+                    .and_then(Value::as_bool)
+                    .is_none()
+                || precondition
+                    .get("isArchived")
+                    .and_then(Value::as_bool)
+                    .is_none()
+                || !precondition
+                    .get("activeVersionId")
+                    .is_some_and(|value| value.is_null() || value.as_str().is_some())
+            {
+                return Err(HostError::InvalidFilter(
+                    "n8n update_draft lifecycle precondition is invalid".to_string(),
+                ));
+            }
+        }
+        _ => {
+            return Err(HostError::InvalidFilter(
+                "n8n draft write operation is not allowed".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn encode_n8n_resource_segment(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(value.len());
@@ -9793,6 +9982,14 @@ fn expected_n8n_read_only_resource_uri(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
+        "n8n.workflows.create_draft" => Ok(format!(
+            "{root}/projects/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "project_id")?)
+        )),
+        "n8n.workflows.update_draft" => Ok(format!(
+            "{root}/workflows/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
+        )),
         "n8n.executions.get" => Ok(format!(
             "{root}/workflows/{}/executions/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "workflow_id")?),
@@ -9818,11 +10015,14 @@ fn build_n8n_read_only_run_once_plan(
     config: &ManagedConnectorConfig,
 ) -> HostResult<N8nReadOnlyRunOncePlan> {
     if input.schema != N8N_READ_ONLY_RUN_ONCE_SCHEMA
-        || !N8N_READ_ONLY_OPERATIONS.contains(&input.operation.as_str())
+        || !N8N_RUN_ONCE_OPERATIONS.contains(&input.operation.as_str())
     {
         return Err(HostError::InvalidFilter(
             "n8n read-only run-once operation is not allowed".to_string(),
         ));
+    }
+    if N8N_WRITE_OPERATIONS.contains(&input.operation.as_str()) {
+        validate_n8n_draft_input(&input.operation, &input.input)?;
     }
     let expected_resource_uri =
         expected_n8n_read_only_resource_uri(input.server_id, &input.operation, &input.input)?;
@@ -9831,7 +10031,7 @@ fn build_n8n_read_only_run_once_plan(
             "n8n read-only run-once resource binding was denied".to_string(),
         ));
     }
-    let operation = OperationId::new(input.operation).map_err(|_| {
+    let operation = OperationId::new(input.operation.clone()).map_err(|_| {
         HostError::InvalidFilter("n8n read-only run-once operation is invalid".to_string())
     })?;
     if config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation {
@@ -9852,6 +10052,11 @@ fn build_n8n_read_only_run_once_plan(
     let zone_id = input.zone_id.parse::<ZoneId>().map_err(|_| {
         HostError::InvalidFilter("n8n read-only run-once zone is invalid".to_string())
     })?;
+    if N8N_WRITE_OPERATIONS.contains(&input.operation.as_str()) && zone_id != ZoneId::work() {
+        return Err(HostError::PreflightFailed(
+            "n8n draft writes require the z:work zone".to_string(),
+        ));
+    }
     let deadline_ms = input
         .deadline_ms
         .unwrap_or(N8N_READ_ONLY_RUN_ONCE_DEFAULT_DEADLINE_MS);
@@ -9963,6 +10168,487 @@ fn build_n8n_official_mcp_run_once_plan(
         correlation_id,
         credential_binding,
     })
+}
+
+fn canonical_json_for_n8n_run_once(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            let mut canonical = serde_json::Map::new();
+            for (key, child) in entries {
+                canonical.insert(key.clone(), canonical_json_for_n8n_run_once(child));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(array) => {
+            Value::Array(array.iter().map(canonical_json_for_n8n_run_once).collect())
+        }
+        scalar => scalar.clone(),
+    }
+}
+
+fn n8n_run_once_digest(domain: &[u8], value: &Value) -> String {
+    let canonical = canonical_json_for_n8n_run_once(value);
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(&bytes);
+    format!("blake3-256:{}", hasher.finalize().to_hex())
+}
+
+fn n8n_run_once_graph_digest(input: &Value) -> HostResult<String> {
+    let graph = input
+        .get("graph")
+        .and_then(Value::as_object)
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft graph is invalid".to_string()))?;
+    let nodes = graph
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft nodes are invalid".to_string()))?;
+    let mut semantic_nodes = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let mut node = node
+            .as_object()
+            .cloned()
+            .ok_or_else(|| HostError::InvalidFilter("n8n draft node is invalid".to_string()))?;
+        node.remove("credentials");
+        semantic_nodes.push(Value::Object(node));
+    }
+    let connections = graph
+        .get("connections")
+        .cloned()
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft connections are invalid".to_string()))?;
+    Ok(n8n_run_once_digest(
+        b"fwc-n8n.graph-digest.v1",
+        &json!({"nodes": semantic_nodes, "connections": connections}),
+    ))
+}
+
+fn n8n_run_once_mutation_digest(input: &Value) -> HostResult<String> {
+    let graph = input
+        .get("graph")
+        .and_then(Value::as_object)
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft graph is invalid".to_string()))?;
+    Ok(n8n_run_once_digest(
+        b"fwc-n8n.mutation-digest.v1",
+        &json!({
+            "id": input.get("id").cloned().unwrap_or(Value::Null),
+            "name": input.get("name").cloned().unwrap_or(Value::Null),
+            "project_id": input.get("project_id").cloned().unwrap_or(Value::Null),
+            "parent_folder_id": input.get("parent_folder_id").cloned().unwrap_or(Value::Null),
+            "graph": {
+                "nodes": graph.get("nodes").cloned().unwrap_or(Value::Null),
+                "connections": graph.get("connections").cloned().unwrap_or(Value::Null),
+                "settings": graph.get("settings").cloned().unwrap_or(Value::Null),
+                "staticData": graph.get("staticData").cloned().unwrap_or(Value::Null),
+                "pinData": graph.get("pinData").cloned().unwrap_or(Value::Null),
+            },
+        }),
+    ))
+}
+
+fn n8n_run_once_approval_material(
+    plan: &N8nReadOnlyRunOncePlan,
+) -> HostResult<(Value, String, String)> {
+    if !N8N_WRITE_OPERATIONS.contains(&plan.operation.as_str()) {
+        return Err(HostError::InvalidFilter(
+            "n8n approval material requires a typed write".to_string(),
+        ));
+    }
+    let graph_digest = n8n_run_once_graph_digest(&plan.input)?;
+    let mutation_digest = n8n_run_once_mutation_digest(&plan.input)?;
+    let precondition = plan
+        .input
+        .get("guard")
+        .and_then(Value::as_object)
+        .and_then(|guard| guard.get("precondition"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft precondition is invalid".to_string()))?;
+    let material = json!({
+        "server_id": plan.server_id.as_str(),
+        "resource_uri": plan.resource_uri.clone(),
+        "operation": plan.operation.as_str(),
+        "version_id": precondition.get("versionId").cloned().unwrap_or(Value::Null),
+        "state_digest": precondition.get("stateDigest").cloned().unwrap_or(Value::Null),
+        "active_version_id": precondition.get("activeVersionId").cloned().unwrap_or(Value::Null),
+        "active_version_id_present": precondition.contains_key("activeVersionId"),
+        "active": precondition.get("active").cloned().unwrap_or(Value::Null),
+        "is_archived": precondition.get("isArchived").cloned().unwrap_or(Value::Null),
+        "graph_digest": graph_digest.clone(),
+        "mutation_digest": mutation_digest.clone(),
+        "idempotency_key": plan.input.pointer("/guard/idempotencyKey").cloned().unwrap_or(Value::Null),
+        "provider": "rest",
+        "side_effect": "draft_only",
+    });
+    Ok((material, graph_digest, mutation_digest))
+}
+
+fn mint_n8n_draft_approval(
+    plan: &N8nReadOnlyRunOncePlan,
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+) -> HostResult<ApprovalToken> {
+    let (material, _graph_digest, _mutation_digest) = n8n_run_once_approval_material(plan)?;
+    let constraints = [
+        "/server_id",
+        "/resource_uri",
+        "/operation",
+        "/version_id",
+        "/state_digest",
+        "/active_version_id",
+        "/active_version_id_present",
+        "/active",
+        "/is_archived",
+        "/graph_digest",
+        "/mutation_digest",
+        "/idempotency_key",
+        "/provider",
+        "/side_effect",
+    ]
+    .into_iter()
+    .map(|pointer| InputConstraint {
+        pointer: pointer.to_string(),
+        expected: material.pointer(pointer).cloned().unwrap_or(Value::Null),
+    })
+    .collect::<Vec<_>>();
+    let approval_ref = plan
+        .input
+        .pointer("/guard/approvalRef")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft approvalRef is missing".to_string()))?;
+    let issued_at_ms = n8n_run_once_now_ms();
+    let expires_at_ms = issued_at_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000);
+    let mut token = ApprovalToken::approved(
+        approval_ref,
+        issued_at_ms,
+        expires_at_ms,
+        "host:fwc-n8n",
+        ApprovalScope::Execution(ExecutionScope {
+            connector_id: "fcp.n8n".to_string(),
+            method_pattern: plan.operation.to_string(),
+            request_object_id: None,
+            input_hash: None,
+            input_constraints: constraints,
+        }),
+        plan.zone_id.clone(),
+        None,
+    );
+    let bytes = approval_token_signing_bytes(&token)?;
+    token.signature = Some(signing_key.sign(&bytes).to_bytes().to_vec());
+    Ok(token)
+}
+
+fn n8n_run_once_now_ms() -> u64 {
+    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+#[cfg(unix)]
+struct N8nRunOnceClaim {
+    _lock: Flock<File>,
+    claim_digest: String,
+    receipts_dir: PathBuf,
+}
+
+#[cfg(unix)]
+fn ensure_n8n_private_dir(path: &FsPath, owner_uid: u32) -> HostResult<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| {
+                HostError::Unavailable(
+                    "n8n run-once runtime permissions could not be set".to_string(),
+                )
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => {
+            return Err(HostError::Unavailable(
+                "n8n run-once runtime directory is unavailable".to_string(),
+            ));
+        }
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        HostError::Unavailable("n8n run-once runtime directory is unavailable".to_string())
+    })?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != owner_uid
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n run-once runtime directory ownership or mode is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn n8n_run_once_runtime_dir() -> HostResult<PathBuf> {
+    let owner_uid = fs::metadata("/proc/self")
+        .map_err(|_| {
+            HostError::Unavailable("n8n run-once runtime owner is unavailable".to_string())
+        })?
+        .uid();
+    let parent = PathBuf::from(format!("/run/user/{owner_uid}"));
+    let parent_metadata = fs::symlink_metadata(&parent).map_err(|_| {
+        HostError::Unavailable("n8n per-user runtime directory is unavailable".to_string())
+    })?;
+    if !parent_metadata.is_dir()
+        || parent_metadata.file_type().is_symlink()
+        || parent_metadata.uid() != owner_uid
+        || parent_metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n per-user runtime directory ownership or mode is invalid".to_string(),
+        ));
+    }
+    let root = parent.join("fwc-n8n");
+    ensure_n8n_private_dir(&root, owner_uid)?;
+    for name in ["locks", "consumed", "receipts"] {
+        ensure_n8n_private_dir(&root.join(name), owner_uid)?;
+    }
+    Ok(root)
+}
+
+#[cfg(not(unix))]
+fn n8n_run_once_runtime_dir() -> HostResult<PathBuf> {
+    Err(HostError::Unavailable(
+        "n8n write run-once is unsupported on this platform".to_string(),
+    ))
+}
+
+#[cfg(unix)]
+fn n8n_run_once_claim(plan: &N8nReadOnlyRunOncePlan) -> HostResult<N8nRunOnceClaim> {
+    n8n_run_once_claim_at(plan, &n8n_run_once_runtime_dir()?)
+}
+
+#[cfg(unix)]
+fn n8n_run_once_claim_at(
+    plan: &N8nReadOnlyRunOncePlan,
+    root: &FsPath,
+) -> HostResult<N8nRunOnceClaim> {
+    let lock_identity = if plan.operation.as_str() == "n8n.workflows.create_draft" {
+        json!({
+            "server": plan.server_id.as_str(),
+            "project": plan.input.get("project_id").cloned().unwrap_or(Value::Null),
+            "idempotency": plan.input.pointer("/guard/idempotencyKey").cloned().unwrap_or(Value::Null),
+        })
+    } else {
+        json!({
+            "server": plan.server_id.as_str(),
+            "workflow": plan.input.get("id").cloned().unwrap_or(Value::Null),
+            "family": "draft-write",
+        })
+    };
+    let lock_digest = n8n_run_once_digest(b"fwc-n8n.run-once-lock.v1", &lock_identity);
+    let claim_identity = json!({
+        "lock": lock_digest,
+        "operation": plan.operation.as_str(),
+        "resource": plan.resource_uri,
+        "idempotency": plan.input.pointer("/guard/idempotencyKey").cloned().unwrap_or(Value::Null),
+    });
+    let claim_digest = n8n_run_once_digest(b"fwc-n8n.run-once-claim.v1", &claim_identity);
+    let lock_path = root.join("locks").join(format!("{lock_digest}.lock"));
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .map_err(|_| HostError::Unavailable("n8n run-once lock is unavailable".to_string()))?;
+    let metadata = lock_file
+        .metadata()
+        .map_err(|_| HostError::Unavailable("n8n run-once lock is unavailable".to_string()))?;
+    let owner_uid = fs::metadata("/proc/self")
+        .map_err(|_| {
+            HostError::Unavailable("n8n run-once runtime owner is unavailable".to_string())
+        })?
+        .uid();
+    if !metadata.is_file()
+        || metadata.uid() != owner_uid
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n run-once lock ownership or mode is invalid".to_string(),
+        ));
+    }
+    let lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(
+        |(_lock_file, error)| {
+            if error == nix::errno::Errno::EWOULDBLOCK {
+                HostError::PreflightFailed("n8n run-once lock conflict".to_string())
+            } else {
+                HostError::Unavailable("n8n run-once lock is unavailable".to_string())
+            }
+        },
+    )?;
+    let approval_ref = plan
+        .input
+        .pointer("/guard/approvalRef")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::InvalidFilter("n8n draft approvalRef is missing".to_string()))?;
+    let approval_digest = n8n_run_once_digest(
+        b"fwc-n8n.approval-ref.v1",
+        &Value::String(approval_ref.to_string()),
+    );
+    let approval_marker_path = root
+        .join("consumed")
+        .join(format!("approval-{approval_digest}.marker"));
+    let mut approval_marker = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&approval_marker_path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                HostError::PreflightFailed("n8n run-once approval was already consumed".to_string())
+            } else {
+                HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
+            }
+        })?;
+    let approval_marker_payload = json!({
+        "schema": "fwc.n8n.run-once-claim.v1",
+        "approvalDigest": approval_digest,
+        "lockDigest": lock_digest,
+        "createdAtMs": n8n_run_once_now_ms(),
+        "resultClass": "pending",
+    });
+    approval_marker
+        .write_all(approval_marker_payload.to_string().as_bytes())
+        .and_then(|_| approval_marker.sync_all())
+        .map_err(|_| {
+            HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
+        })?;
+    let marker_path = root.join("consumed").join(format!("{claim_digest}.marker"));
+    let mut marker = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&marker_path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                HostError::PreflightFailed("n8n run-once approval was already consumed".to_string())
+            } else {
+                HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
+            }
+        })?;
+    let marker_payload = json!({
+        "schema": "fwc.n8n.run-once-claim.v1",
+        "claimDigest": claim_digest,
+        "lockDigest": lock_digest,
+        "createdAtMs": n8n_run_once_now_ms(),
+        "resultClass": "pending",
+    });
+    marker
+        .write_all(marker_payload.to_string().as_bytes())
+        .and_then(|_| marker.sync_all())
+        .map_err(|_| {
+            HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
+        })?;
+    Ok(N8nRunOnceClaim {
+        _lock: lock,
+        claim_digest,
+        receipts_dir: root.join("receipts"),
+    })
+}
+
+#[cfg(unix)]
+impl N8nRunOnceClaim {
+    fn write_intent(
+        &self,
+        plan: &N8nReadOnlyRunOncePlan,
+        request: &InvokeRequest,
+    ) -> HostResult<()> {
+        let (material, _graph_digest, mutation_digest) = n8n_run_once_approval_material(plan)?;
+        let state_digest = material
+            .get("state_digest")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let input_digest = hex::encode(request_input_hash(&request.input)?);
+        let idempotency_digest = n8n_run_once_digest(
+            b"fwc-n8n.idempotency-key.v1",
+            plan.input
+                .pointer("/guard/idempotencyKey")
+                .unwrap_or(&Value::Null),
+        );
+        let payload = json!({
+            "schema": "fwc.n8n.run-once-receipt.v1",
+            "phase": "intent",
+            "operation": plan.operation.as_str(),
+            "server": plan.server_id.as_str(),
+            "resourceDigest": n8n_run_once_digest(b"fwc-n8n.resource.v1", &Value::String(plan.resource_uri.clone())),
+            "mutationDigest": mutation_digest,
+            "stateDigest": state_digest,
+            "inputDigest": input_digest,
+            "idempotencyKeyHash": idempotency_digest,
+            "correlationId": request.correlation_id.as_ref().map(ToString::to_string),
+            "timestampMs": n8n_run_once_now_ms(),
+            "resultClass": "pending",
+        });
+        let path = self
+            .receipts_dir
+            .join(format!("{}.intent.json", self.claim_digest));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| {
+                HostError::Unavailable("n8n run-once intent receipt is unavailable".to_string())
+            })?;
+        file.write_all(payload.to_string().as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| {
+                HostError::Unavailable("n8n run-once intent receipt is unavailable".to_string())
+            })
+    }
+
+    fn write_receipt(
+        &self,
+        plan: &N8nReadOnlyRunOncePlan,
+        request: &InvokeRequest,
+        result_class: &str,
+    ) -> HostResult<()> {
+        let (material, _graph_digest, mutation_digest) = n8n_run_once_approval_material(plan)?;
+        let payload = json!({
+            "schema": "fwc.n8n.run-once-receipt.v1",
+            "phase": "outcome",
+            "operation": plan.operation.as_str(),
+            "server": plan.server_id.as_str(),
+            "resourceDigest": n8n_run_once_digest(b"fwc-n8n.resource.v1", &Value::String(plan.resource_uri.clone())),
+            "mutationDigest": mutation_digest,
+            "stateDigest": material.get("state_digest").cloned().unwrap_or(Value::Null),
+            "inputDigest": hex::encode(request_input_hash(&request.input)?),
+            "idempotencyKeyHash": n8n_run_once_digest(
+                b"fwc-n8n.idempotency-key.v1",
+                plan.input.pointer("/guard/idempotencyKey").unwrap_or(&Value::Null),
+            ),
+            "correlationId": request.correlation_id.as_ref().map(ToString::to_string),
+            "timestampMs": n8n_run_once_now_ms(),
+            "resultClass": result_class,
+        });
+        let path = self
+            .receipts_dir
+            .join(format!("{}.receipt.json", self.claim_digest));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| {
+                HostError::Unavailable("n8n run-once outcome receipt is unavailable".to_string())
+            })?;
+        file.write_all(payload.to_string().as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|_| {
+                HostError::Unavailable("n8n run-once outcome receipt is unavailable".to_string())
+            })
+    }
 }
 
 #[allow(dead_code)] // Consumed by the next host-owned n8n one-shot wiring packet.
@@ -10660,6 +11346,22 @@ fn accept_n8n_run_once_invoke_response(response: InvokeResponse) -> HostResult<I
     Ok(response)
 }
 
+fn n8n_unknown_outcome_error(error: &FcpError) -> bool {
+    matches!(
+        error,
+        FcpError::External {
+            service,
+            status_code: None,
+            message,
+            ..
+        } if service == "n8n"
+            && {
+                let message = message.to_ascii_lowercase();
+                message.contains("outcome unknown") || message.contains("readback mismatch")
+            }
+    )
+}
+
 fn run_once_error_code(error: &HostError) -> &'static str {
     match error {
         HostError::ConnectorNotFound(_) => "connector_not_found",
@@ -11082,9 +11784,15 @@ async fn async_run_once(telemetry_config: TelemetryConfig) -> HostResult<InvokeR
 fn build_n8n_read_only_invoke_request(
     plan: N8nReadOnlyRunOncePlan,
     capability_token: fcp_core::CapabilityToken,
+    approval_token: Option<ApprovalToken>,
 ) -> (InvokeRequest, TrustedResourceBinding) {
     let request_id = RequestId::random();
     let connector_id = ConnectorId::from_static("fcp.n8n");
+    let idempotency_key = plan
+        .input
+        .pointer("/guard/idempotencyKey")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     let trusted_resource = TrustedResourceBinding {
         server_id: plan.server_id,
         connector_id: connector_id.clone(),
@@ -11103,12 +11811,12 @@ fn build_n8n_read_only_invoke_request(
         capability_token,
         holder_proof: None,
         context: None,
-        idempotency_key: None,
+        idempotency_key,
         lease_seq: None,
         deadline_ms: Some(plan.deadline_ms),
         correlation_id: plan.correlation_id,
         provenance: None,
-        approval_tokens: Vec::new(),
+        approval_tokens: approval_token.into_iter().collect(),
     };
     (request, trusted_resource)
 }
@@ -11342,6 +12050,16 @@ async fn async_n8n_read_only_run_once(
         .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
     let plan = build_n8n_read_only_run_once_plan(high_level_input, &selected_config)
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+    let is_write = N8N_WRITE_OPERATIONS.contains(&plan.operation.as_str());
+    let approval_signing_key = is_write.then(fcp_crypto::ed25519::Ed25519SigningKey::generate);
+    let approval_token = if let Some(signing_key) = approval_signing_key.as_ref() {
+        Some(
+            mint_n8n_draft_approval(&plan, signing_key)
+                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
+        )
+    } else {
+        None
+    };
     let credential =
         read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?
@@ -11371,7 +12089,9 @@ async fn async_n8n_read_only_run_once(
         telemetry_config,
         loaded_configs,
         Some(signing_key.verifying_key()),
-        None,
+        approval_signing_key
+            .as_ref()
+            .map(fcp_crypto::ed25519::Ed25519SigningKey::verifying_key),
         zone_policies,
     )
     .await
@@ -11417,16 +12137,63 @@ async fn async_n8n_read_only_run_once(
     let capability_token =
         capability_token_from_cbor_b64(&token_b64, "n8n read-only run-once capability")
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
-    let (request, trusted_resource) = build_n8n_read_only_invoke_request(plan, capability_token);
-
-    invoke_handler_inner(state, HeaderMap::new(), request, Some(trusted_resource))
-        .await
-        .map(|Json(response)| response)
-        .map_err(|(status, _)| {
-            emit_n8n_run_once_invoke_diagnostic(n8n_run_once_dispatch_diagnostic(status));
-            n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke)
-        })
-        .and_then(accept_n8n_run_once_invoke_response)
+    #[cfg(unix)]
+    let claim = if is_write {
+        Some(
+            n8n_run_once_claim(&plan)
+                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    if is_write {
+        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
+    }
+    let (request, trusted_resource) =
+        build_n8n_read_only_invoke_request(plan.clone(), capability_token, approval_token);
+    #[cfg(unix)]
+    if let Some(claim) = claim.as_ref() {
+        claim
+            .write_intent(&plan, &request)
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+    }
+    let invoke_result = invoke_handler_inner(
+        state,
+        HeaderMap::new(),
+        request.clone(),
+        Some(trusted_resource),
+    )
+    .await
+    .map(|Json(response)| response)
+    .map_err(|(status, _)| {
+        emit_n8n_run_once_invoke_diagnostic(n8n_run_once_dispatch_diagnostic(status));
+        n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke)
+    });
+    #[cfg(unix)]
+    if let Some(claim) = claim.as_ref() {
+        let result_class = match invoke_result.as_ref() {
+            Ok(response)
+                if matches!(response.status, InvokeStatus::Ok) && response.error.is_none() =>
+            {
+                "success"
+            }
+            Ok(response)
+                if response
+                    .error
+                    .as_ref()
+                    .is_some_and(n8n_unknown_outcome_error) =>
+            {
+                "unknown"
+            }
+            Err(_) => "unknown",
+            _ => "failed",
+        };
+        claim
+            .write_receipt(&plan, &request, result_class)
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))?;
+    }
+    invoke_result.and_then(accept_n8n_run_once_invoke_response)
 }
 
 async fn async_n8n_official_mcp_run_once(
@@ -31191,6 +31958,367 @@ done"#;
         }
     }
 
+    fn run_once_n8n_draft_test_config() -> ManagedConnectorConfig {
+        ManagedConnectorConfig {
+            id: "fcp.n8n".to_string(),
+            binary: "/bin/fcp-n8n".to_string(),
+            manifest_path: None,
+            name: Some("n8n".to_string()),
+            description: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            config: Some(json!({
+                "credential_id": "11111111-1111-1111-1111-111111111111",
+                "base_url": "https://n8n.example.test",
+                "server_id": "eec"
+            })),
+            categories: Vec::new(),
+            version: None,
+            allowed_zones: vec![ZoneId::work().to_string()],
+            allowed_operations: N8N_RUN_ONCE_OPERATIONS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            enforce_operation_network_constraints: false,
+            enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
+            lifecycle_mode: ConnectorLifecycleMode::PerInvocation,
+            launch_binding: None,
+            operation_network_constraints: BTreeMap::new(),
+        }
+    }
+
+    fn n8n_draft_test_input(operation: &str, idempotency_key: &str) -> N8nReadOnlyRunOnceInput {
+        let (resource_uri, input) = if operation == "n8n.workflows.create_draft" {
+            (
+                "fwc-n8n://eec/projects/project%2D1",
+                json!({
+                    "name": "Draft",
+                    "project_id": "project-1",
+                    "graph": {"nodes": [], "connections": {}},
+                    "guard": {
+                        "approvalRef": "chat-approval-1",
+                        "idempotencyKey": idempotency_key,
+                        "precondition": {}
+                    }
+                }),
+            )
+        } else {
+            (
+                "fwc-n8n://eec/workflows/workflow%2D1",
+                json!({
+                    "id": "workflow-1",
+                    "graph": {"nodes": [], "connections": {}},
+                    "guard": {
+                        "approvalRef": "chat-approval-2",
+                        "idempotencyKey": idempotency_key,
+                        "precondition": {
+                            "versionId": "version-1",
+                            "activeVersionId": null,
+                            "active": false,
+                            "isArchived": false,
+                            "stateDigest": "blake3-256:state"
+                        }
+                    }
+                }),
+            )
+        };
+        N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: operation.to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: resource_uri.to_string(),
+            input,
+            deadline_ms: None,
+            correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+        }
+    }
+
+    fn n8n_mutation_digest_golden_input(credential_id: &str) -> Value {
+        json!({
+            "graph": {
+                "connections": {},
+                "nodes": [{
+                    "credentials": {
+                        "httpBasicAuth": {"id": credential_id}
+                    },
+                    "id": "http-node",
+                    "type": "n8n-nodes-base.httpRequest"
+                }],
+                "pinData": null,
+                "settings": null,
+                "staticData": null
+            },
+            "id": null,
+            "name": "Credential-bound workflow",
+            "parent_folder_id": null,
+            "project_id": "project-1"
+        })
+    }
+
+    #[test]
+    fn n8n_draft_mutation_digest_matches_connector_golden_vectors() {
+        let credential_one =
+            n8n_run_once_mutation_digest(&n8n_mutation_digest_golden_input("credential-1"))
+                .expect("credential-1 mutation digest");
+        let credential_two =
+            n8n_run_once_mutation_digest(&n8n_mutation_digest_golden_input("credential-2"))
+                .expect("credential-2 mutation digest");
+
+        assert_eq!(
+            (credential_one.as_str(), credential_two.as_str()),
+            (
+                "blake3-256:7212822de8377b803f190acbd0ced3692ba0f408a0fd2d20cb908f861730495e",
+                "blake3-256:ac12da2c49bc33dae099d866cc17b694b6302b2db50ff2fa22cf0a0350760907"
+            )
+        );
+        assert_ne!(credential_one, credential_two);
+    }
+
+    #[test]
+    fn n8n_draft_approval_binds_all_fourteen_redaction_safe_pointers() {
+        let config = run_once_n8n_draft_test_config();
+        let plan = build_n8n_read_only_run_once_plan(
+            n8n_draft_test_input(
+                "n8n.workflows.update_draft",
+                "33333333-4444-4555-8666-777777777777",
+            ),
+            &config,
+        )
+        .expect("typed update plan");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let token = mint_n8n_draft_approval(&plan, &signing_key).expect("host approval");
+        let ApprovalScope::Execution(scope) = &token.scope else {
+            panic!("draft approval must use execution scope");
+        };
+        assert_eq!(scope.input_constraints.len(), 14);
+        assert!(
+            scope
+                .input_constraints
+                .iter()
+                .any(
+                    |constraint| constraint.pointer == "/active_version_id_present"
+                        && constraint.expected == Value::Bool(true)
+                )
+        );
+        verify_approval_tokens(&[token], Some(&signing_key.verifying_key()))
+            .expect("fresh host approval verifies");
+    }
+
+    #[test]
+    fn n8n_draft_create_requires_exact_project_resource_uri() {
+        let config = run_once_n8n_draft_test_config();
+        let mut input = n8n_draft_test_input(
+            "n8n.workflows.create_draft",
+            "99999999-aaaa-4bbb-8ccc-dddddddddddd",
+        );
+        input.resource_uri = "fwc-n8n://eec".to_string();
+
+        let error = build_n8n_read_only_run_once_plan(input, &config)
+            .err()
+            .expect("instance-wide create target must fail closed");
+        assert!(error.to_string().contains("resource binding was denied"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn n8n_draft_claim_rejects_lock_conflict_then_replay_without_dispatch() {
+        let config = run_once_n8n_draft_test_config();
+        let plan = build_n8n_read_only_run_once_plan(
+            n8n_draft_test_input(
+                "n8n.workflows.update_draft",
+                "44444444-5555-4666-8777-888888888888",
+            ),
+            &config,
+        )
+        .expect("typed update plan");
+        let root = tempfile::tempdir().expect("claim state root");
+        for name in ["locks", "consumed", "receipts"] {
+            std::fs::create_dir(root.path().join(name)).expect("claim subdirectory");
+        }
+        let first = n8n_run_once_claim_at(&plan, root.path()).expect("first claim");
+        let conflict = n8n_run_once_claim_at(&plan, root.path())
+            .err()
+            .expect("lock conflict");
+        assert!(conflict.to_string().contains("lock conflict"));
+        drop(first);
+        let mut reused_approval = plan.input.clone();
+        reused_approval["guard"]["idempotencyKey"] = json!("66666666-7777-4888-8999-000000000000");
+        let mut reused_input = plan.clone();
+        reused_input.input = reused_approval;
+        let replay_plan = build_n8n_read_only_run_once_plan(
+            N8nReadOnlyRunOnceInput {
+                schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+                server_id: N8nReadOnlyServerId::Eec,
+                operation: "n8n.workflows.update_draft".to_string(),
+                zone_id: ZoneId::work().to_string(),
+                resource_uri: "fwc-n8n://eec/workflows/workflow%2D1".to_string(),
+                input: reused_input.input,
+                deadline_ms: None,
+                correlation_id: None,
+            },
+            &config,
+        )
+        .expect("reused approval plan");
+        let replay = n8n_run_once_claim_at(&replay_plan, root.path())
+            .err()
+            .expect("replay");
+        assert!(replay.to_string().contains("already consumed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn n8n_private_runtime_directory_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("runtime parent");
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).expect("real directory");
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700))
+            .expect("private directory mode");
+        let alias = root.path().join("alias");
+        symlink(&real, &alias).expect("runtime symlink");
+        let owner_uid = std::fs::metadata(&real).expect("real metadata").uid();
+
+        let error = ensure_n8n_private_dir(&alias, owner_uid)
+            .err()
+            .expect("symlink must fail closed");
+        assert!(error.to_string().contains("ownership or mode is invalid"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn n8n_draft_outcome_receipt_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let config = run_once_n8n_draft_test_config();
+        let plan = build_n8n_read_only_run_once_plan(
+            n8n_draft_test_input(
+                "n8n.workflows.create_draft",
+                "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+            ),
+            &config,
+        )
+        .expect("typed create plan");
+        let root = tempfile::tempdir().expect("claim state root");
+        for name in ["locks", "consumed", "receipts"] {
+            std::fs::create_dir(root.path().join(name)).expect("claim subdirectory");
+        }
+        let claim = n8n_run_once_claim_at(&plan, root.path()).expect("first claim");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let (request, _) = build_n8n_read_only_invoke_request(
+            plan.clone(),
+            test_capability_token(
+                &signing_key,
+                "n8n.workflows.write",
+                "n8n.workflows.create_draft",
+                ZoneId::work().as_str(),
+            ),
+            None,
+        );
+        let victim = root.path().join("victim");
+        std::fs::write(&victim, "unchanged").expect("victim fixture");
+        let receipt = root
+            .path()
+            .join("receipts")
+            .join(format!("{}.receipt.json", claim.claim_digest));
+        symlink(&victim, &receipt).expect("receipt symlink");
+
+        assert!(claim.write_receipt(&plan, &request, "success").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim readback"),
+            "unchanged"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn n8n_draft_intent_is_written_before_dispatch_and_redacts_input() {
+        let config = run_once_n8n_draft_test_config();
+        let plan = build_n8n_read_only_run_once_plan(
+            n8n_draft_test_input(
+                "n8n.workflows.create_draft",
+                "55555555-6666-4777-8888-999999999999",
+            ),
+            &config,
+        )
+        .expect("typed create plan");
+        let root = tempfile::tempdir().expect("claim state root");
+        for name in ["locks", "consumed", "receipts"] {
+            std::fs::create_dir(root.path().join(name)).expect("claim subdirectory");
+        }
+        let claim = n8n_run_once_claim_at(&plan, root.path()).expect("first claim");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let (request, _) = build_n8n_read_only_invoke_request(
+            plan.clone(),
+            test_capability_token(
+                &signing_key,
+                "n8n.workflows.write",
+                "n8n.workflows.create_draft",
+                ZoneId::work().as_str(),
+            ),
+            None,
+        );
+        claim.write_intent(&plan, &request).expect("intent receipt");
+        let intent = std::fs::read_to_string(
+            root.path()
+                .join("receipts")
+                .join(format!("{}.intent.json", claim.claim_digest)),
+        )
+        .expect("intent file");
+        assert!(intent.contains("\"phase\":\"intent\""));
+        assert!(!intent.contains("Draft"));
+        assert!(!intent.contains("connections"));
+
+        claim
+            .write_receipt(&plan, &request, "success")
+            .expect("success receipt");
+        let receipt = std::fs::read_to_string(
+            root.path()
+                .join("receipts")
+                .join(format!("{}.receipt.json", claim.claim_digest)),
+        )
+        .expect("outcome receipt");
+        assert!(receipt.contains("\"phase\":\"outcome\""));
+        assert!(receipt.contains("\"resultClass\":\"success\""));
+        assert!(!receipt.contains("Draft"));
+        assert!(!receipt.contains("connections"));
+    }
+
+    #[test]
+    fn n8n_draft_unknown_outcome_is_classified_without_retry() {
+        let unknown = FcpError::External {
+            service: "n8n".to_string(),
+            message:
+                "Draft write outcome unknown; reconcile by readback; automatic retry forbidden"
+                    .to_string(),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        };
+        assert!(n8n_unknown_outcome_error(&unknown));
+
+        let readback_mismatch = FcpError::External {
+            service: "n8n".to_string(),
+            message: "Draft write readback mismatch".to_string(),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        };
+        assert!(n8n_unknown_outcome_error(&readback_mismatch));
+
+        let retryable_status = FcpError::External {
+            service: "n8n".to_string(),
+            message: "Draft write outcome unknown".to_string(),
+            status_code: Some(503),
+            retryable: true,
+            retry_after: None,
+        };
+        assert!(!n8n_unknown_outcome_error(&retryable_status));
+    }
+
     #[test]
     fn n8n_read_only_contract_rejects_unknown_fields_and_trailing_values() {
         let injected = json!({
@@ -31371,6 +32499,7 @@ done"#;
                 "n8n.workflows.get",
                 ZoneId::private().as_str(),
             ),
+            None,
         );
         assert_eq!(request.connector_id.as_str(), "fcp.n8n");
         assert_eq!(request.operation.as_str(), "n8n.workflows.get");
@@ -31479,6 +32608,7 @@ done"#;
                 "n8n.workflows.list",
                 ZoneId::private().as_str(),
             ),
+            None,
         );
         assert!(request.correlation_id.is_none());
     }

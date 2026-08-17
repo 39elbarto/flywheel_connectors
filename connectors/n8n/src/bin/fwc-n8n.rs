@@ -108,6 +108,10 @@ enum HostRunOnceOperation {
     WorkflowsGet,
     #[serde(rename = "n8n.workflows.list")]
     WorkflowsList,
+    #[serde(rename = "n8n.workflows.create_draft")]
+    WorkflowsCreateDraft,
+    #[serde(rename = "n8n.workflows.update_draft")]
+    WorkflowsUpdateDraft,
 }
 
 impl HostRunOnceOperation {
@@ -123,6 +127,8 @@ impl HostRunOnceOperation {
             "n8n.tags.list" => Ok(Self::TagsList),
             "n8n.workflows.get" => Ok(Self::WorkflowsGet),
             "n8n.workflows.list" => Ok(Self::WorkflowsList),
+            "n8n.workflows.create_draft" => Ok(Self::WorkflowsCreateDraft),
+            "n8n.workflows.update_draft" => Ok(Self::WorkflowsUpdateDraft),
             _ => Err(AppError::new("operation_not_allowed")),
         }
     }
@@ -138,7 +144,9 @@ impl HostRunOnceOperation {
             | Self::ProjectsList
             | Self::TagsList
             | Self::WorkflowsGet
-            | Self::WorkflowsList => BrokerCredentialPurpose::RestApi,
+            | Self::WorkflowsList
+            | Self::WorkflowsCreateDraft
+            | Self::WorkflowsUpdateDraft => BrokerCredentialPurpose::RestApi,
         }
     }
 }
@@ -711,6 +719,21 @@ fn validate_host_run_once_input(
             &["project_id"],
         ),
         HostRunOnceOperation::WorkflowsGet => (&["id"], &["id"]),
+        HostRunOnceOperation::WorkflowsCreateDraft => (
+            &["name", "project_id", "parent_folder_id", "graph", "guard"],
+            &["name", "project_id", "graph", "guard"],
+        ),
+        HostRunOnceOperation::WorkflowsUpdateDraft => (
+            &[
+                "id",
+                "name",
+                "project_id",
+                "parent_folder_id",
+                "graph",
+                "guard",
+            ],
+            &["id", "graph", "guard"],
+        ),
     };
     if object.keys().any(|key| !allowed.contains(&key.as_str()))
         || required.iter().any(|key| !object.contains_key(*key))
@@ -747,7 +770,90 @@ fn validate_host_run_once_input(
             host_run_once_input_id(input, "id")?;
             Ok(())
         }
+        HostRunOnceOperation::WorkflowsCreateDraft | HostRunOnceOperation::WorkflowsUpdateDraft => {
+            validate_workflow_draft_input(operation, object)
+        }
     }
+}
+
+fn validate_workflow_draft_input(
+    operation: HostRunOnceOperation,
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    let graph = object
+        .get("graph")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if graph.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "nodes" | "connections" | "settings" | "staticData" | "pinData"
+        )
+    }) || graph.get("nodes").and_then(Value::as_array).is_none()
+        || graph
+            .get("connections")
+            .and_then(Value::as_object)
+            .is_none()
+        || graph
+            .get("nodes")
+            .and_then(Value::as_array)
+            .is_some_and(|nodes| nodes.len() > 10_000 || nodes.iter().any(|node| !node.is_object()))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition"
+        )
+    }) || guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let empty_precondition = serde_json::Map::new();
+    let precondition = guard
+        .get("precondition")
+        .map(|value| {
+            value
+                .as_object()
+                .ok_or_else(|| AppError::new("invalid_operation_input"))
+        })
+        .transpose()?
+        .unwrap_or(&empty_precondition);
+    if precondition.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "versionId" | "activeVersionId" | "active" | "isArchived" | "stateDigest"
+        )
+    }) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    if matches!(operation, HostRunOnceOperation::WorkflowsUpdateDraft)
+        && ![
+            "versionId",
+            "activeVersionId",
+            "active",
+            "isArchived",
+            "stateDigest",
+        ]
+        .iter()
+        .all(|field| precondition.contains_key(*field))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    Ok(())
 }
 
 fn validate_page_input(object: &serde_json::Map<String, Value>) -> Result<(), AppError> {
@@ -797,6 +903,14 @@ fn expected_host_run_once_resource_uri(
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList => Ok(root),
         HostRunOnceOperation::WorkflowsGet => Ok(format!(
+            "{root}/workflows/{}",
+            encode_host_resource_segment(host_run_once_input_id(input, "id")?)
+        )),
+        HostRunOnceOperation::WorkflowsCreateDraft => Ok(format!(
+            "{root}/projects/{}",
+            encode_host_resource_segment(host_run_once_input_id(input, "project_id")?)
+        )),
+        HostRunOnceOperation::WorkflowsUpdateDraft => Ok(format!(
             "{root}/workflows/{}",
             encode_host_resource_segment(host_run_once_input_id(input, "id")?)
         )),
@@ -1457,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn host_run_once_maps_all_ten_operations_to_canonical_resources() {
+    fn host_run_once_maps_allowed_operations_to_canonical_resources() {
         let cases = [
             (
                 "n8n.capabilities.inspect",
@@ -1489,6 +1603,39 @@ mod tests {
                 "fwc-n8n://eec/workflows/workflow%2D1",
             ),
             ("n8n.workflows.list", json!({}), "fwc-n8n://eec"),
+            (
+                "n8n.workflows.create_draft",
+                json!({
+                    "name": "Draft",
+                    "project_id": "project-1",
+                    "graph": {"nodes": [], "connections": {}},
+                    "guard": {
+                        "approvalRef": "chat-approval-1",
+                        "idempotencyKey": "11111111-2222-4333-8444-555555555555",
+                        "precondition": {}
+                    }
+                }),
+                "fwc-n8n://eec/projects/project%2D1",
+            ),
+            (
+                "n8n.workflows.update_draft",
+                json!({
+                    "id": "workflow-1",
+                    "graph": {"nodes": [], "connections": {}},
+                    "guard": {
+                        "approvalRef": "chat-approval-2",
+                        "idempotencyKey": "22222222-3333-4444-8555-666666666666",
+                        "precondition": {
+                            "versionId": "version-1",
+                            "activeVersionId": null,
+                            "active": false,
+                            "isArchived": false,
+                            "stateDigest": "blake3-256:state"
+                        }
+                    }
+                }),
+                "fwc-n8n://eec/workflows/workflow%2D1",
+            ),
         ];
 
         for (operation, input, resource_uri) in cases {
@@ -1666,6 +1813,55 @@ mod tests {
             .expect_err("unknown, secret, missing, or out-of-range input must be denied");
             assert_eq!(error.code, "invalid_operation_input");
         }
+
+        let create_with_id = json!({
+            "id": "workflow-1",
+            "name": "Draft",
+            "project_id": "project-1",
+            "graph": {"nodes": [], "connections": {}},
+            "guard": {
+                "approvalRef": "approval",
+                "idempotencyKey": "11111111-2222-4333-8444-555555555555",
+                "precondition": {}
+            }
+        });
+        let operation =
+            HostRunOnceOperation::parse("n8n.workflows.create_draft").expect("create operation");
+        assert_eq!(
+            build_host_run_once_envelope(
+                operation,
+                host_input(HostRunOnceServerId::Eec, create_with_id),
+            )
+            .expect_err("create must reject caller-selected id")
+            .code,
+            "invalid_operation_input"
+        );
+
+        let update_without_active_version = json!({
+            "id": "workflow-1",
+            "graph": {"nodes": [], "connections": {}},
+            "guard": {
+                "approvalRef": "approval",
+                "idempotencyKey": "22222222-3333-4444-8555-666666666666",
+                "precondition": {
+                    "versionId": "version-1",
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:state"
+                }
+            }
+        });
+        let operation =
+            HostRunOnceOperation::parse("n8n.workflows.update_draft").expect("update operation");
+        assert_eq!(
+            build_host_run_once_envelope(
+                operation,
+                host_input(HostRunOnceServerId::Eec, update_without_active_version),
+            )
+            .expect_err("update must require explicit activeVersionId")
+            .code,
+            "invalid_operation_input"
+        );
     }
 
     #[test]

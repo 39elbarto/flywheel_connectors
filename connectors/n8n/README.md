@@ -1,14 +1,14 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements three per-invocation paths behind the same verified wrapper boundary: nine typed REST reads, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The owner-gated host deployment uses immutable twelve-artifact release `release-20260817-nqm817-34`, the socket-activated credential broker, and the transient delegated-cgroup launcher. Read-only `n8n.workflows.list(limit=1)` acceptance has passed against both EEC and Hetzner, local `search_nodes` acceptance has passed, and broker-backed official-MCP discovery has returned 34 tools from each server. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. All bundle, host, connector, broker, and request-scope processes were absent at 0, 5, and 30 seconds after use. Existing opt-in MCP profiles remain the fallback.
-> **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.21`
+> **Status**: Source implements three per-invocation provider paths behind the same verified wrapper boundary: nine typed REST reads plus guarded REST draft create/update, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The installed owner-gated deployment remains immutable release `release-20260817-nqm817-34`; it has accepted the read-only, local-knowledge, and official-discovery paths but does not yet contain or authorize the source-only draft-write packet. Draft writes still require a separate release and an owner-approved disposable-workflow live acceptance with rollback. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. All bundle, host, connector, broker, and request-scope processes were absent at 0, 5, and 30 seconds after the accepted read-only operations. Existing opt-in MCP profiles remain the fallback.
+> **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
 > **n8n API reference**: https://docs.n8n.io/api/api-reference/
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus a capability- and approval-gated workflow lifecycle operation that is intentionally unavailable until a mediated write path is delivered.
+This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation and update. The broader workflow lifecycle operation remains intentionally unavailable until its separate mediated path is delivered.
 
 The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client or credential secret/value manager, and it does not provide project-management writes, variable management, audit access, webhook trigger runtime, event subscriptions, n8n CLI replacement, or general HTTP proxy behavior.
 
@@ -26,13 +26,16 @@ The current crate exposes these operations:
 - `n8n.tags.list`
 - `n8n.folders.list`
 - `n8n.folders.get`
+- `n8n.workflows.create_draft`
+- `n8n.workflows.update_draft`
 
 Important runtime truths:
 
 - Package and binary name are `fcp-n8n`.
 - The crate also builds the operator wrapper `fwc-n8n`. Its current commands are
-  `resolve`, `route <public-operation>`, `run-once <host-read-operation>`, and
-  `status`. `run-once` accepts the nine Phase-1 host reads plus the closed
+  `resolve`, `route <public-operation>`, `run-once <host-operation>`, and
+  `status`. `run-once` accepts the nine Phase-1 host reads, guarded
+  `n8n.workflows.create_draft` and `n8n.workflows.update_draft`, plus the closed
   `n8n.capabilities.inspect` operation, a strict
   EEC-or-Hetzner payload, bounded deadline, and optional UUID correlation ID.
   CLI framing has a fixed five-second maximum, and the operation deadline is
@@ -50,6 +53,18 @@ Important runtime truths:
   Per-operation input keys and scalar bounds mirror the manifest, so arbitrary
   headers, credentials, tokens, URLs, commands, paths, or nested payloads
   cannot enter the host-launch request.
+  Draft writes are REST-only and accept a full typed graph, current-chat
+  `approvalRef`, and UUID idempotency key. Update additionally requires the
+  exact version, explicit `activeVersionId`, `active`, `isArchived`, and
+  credential-sensitive state digest. The host mints a fresh short-lived
+  approval bound to the exact normalized mutation, takes a per-resource lock,
+  consumes the approval once, writes redaction-safe intent/outcome receipts,
+  performs one provider attempt, and requires independent GET readback. It
+  never retries an unknown result and never implicitly publishes, activates,
+  deactivates, archives, or changes credential objects. Runtime files live
+  under a private fixed `/run/user/<uid>/fwc-n8n` tree and reject symlink or
+  hard-link substitution. This source path has mock/local proof only until the
+  owner approves a disposable-workflow live acceptance and rollback.
   For `n8n.capabilities.inspect`, the same wrapper requests only the distinct
   official-MCP credential purpose and selects a separate immutable inventory.
   `fcp-host` translates that public operation only to `mcp.tools.list`, issues

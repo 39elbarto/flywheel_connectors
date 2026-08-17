@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4d98e3ab4585f4cd39196a4c90d346bace4e1b47d0ad4bb3f0ad3780b78c776f"
+interface_hash = "blake3-256:fcp.interface.v2:4f8b98425107fb38e8f7929e030ea0e53ec6d5481ae7957149dad3dc45662b8b"
 
 [connector]
 id = "fcp.n8n"
@@ -821,6 +821,202 @@ related = [
     "n8n.workflows.list",
 ]
 
+[provides.operations."n8n.workflows.create_draft"]
+description = "Create an inactive n8n workflow draft and verify it by independent readback"
+capability = "n8n.workflows.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.workflows.create_draft".input_schema]
+additionalProperties = false
+required = [
+    "graph",
+    "guard",
+    "name",
+    "project_id",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.graph]
+additionalProperties = false
+required = [
+    "nodes",
+    "connections",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.graph.properties.connections]
+type = "object"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.graph.properties.nodes]
+maxItems = 10000
+type = "array"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.graph.properties.pinData]
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.graph.properties.settings]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.graph.properties.staticData]
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard]
+additionalProperties = false
+required = [
+    "approvalRef",
+    "idempotencyKey",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard.properties.approvalRef]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard.properties.idempotencyKey]
+format = "uuid"
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard.properties.precondition]
+additionalProperties = false
+required = []
+type = "object"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard.properties.precondition.properties.active]
+type = "boolean"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard.properties.precondition.properties.activeVersionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard.properties.precondition.properties.isArchived]
+type = "boolean"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard.properties.precondition.properties.stateDigest]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.guard.properties.precondition.properties.versionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.name]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.parent_folder_id]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".input_schema.properties.project_id]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema]
+additionalProperties = false
+required = [
+    "status",
+    "operation",
+    "id",
+    "versionId",
+    "graphDigest",
+    "stateDigest",
+    "active",
+    "activeVersionId",
+    "isArchived",
+    "lifecycle",
+    "readback",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.active]
+type = "boolean"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.activeVersionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.graphDigest]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.id]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.isArchived]
+type = "boolean"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.lifecycle]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.operation]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.published]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.readback]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.retry]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.stateDigest]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.status]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.versionId]
+type = "string"
+
+[provides.operations."n8n.workflows.create_draft".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.workflows.create_draft".ai_hints]
+when_to_use = "Create a draft only after current-chat approval is bound to the exact graph and server."
+common_mistakes = [
+    "This operation never publishes, activates, or archives a workflow.",
+    "A timeout or malformed write response is unknown; reconcile with GET and never retry automatically.",
+]
+examples = ['{"name":"Daily report","project_id":"project-1","graph":{"nodes":[],"connections":{}},"guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000001"}}']
+related = [
+    "n8n.workflows.get",
+    "n8n.workflows.update_draft",
+]
+
 [provides.operations."n8n.workflows.get"]
 description = "Get a specific workflow by ID"
 capability = "n8n.workflows.read"
@@ -1126,6 +1322,211 @@ related = [
     "n8n.workflows.activate",
 ]
 
+[provides.operations."n8n.workflows.update_draft"]
+description = "Update an n8n workflow draft with full lifecycle preconditions and verify readback"
+capability = "n8n.workflows.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.workflows.update_draft".input_schema]
+additionalProperties = false
+required = [
+    "graph",
+    "guard",
+    "id",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.graph]
+additionalProperties = false
+required = [
+    "nodes",
+    "connections",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.graph.properties.connections]
+type = "object"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.graph.properties.nodes]
+maxItems = 10000
+type = "array"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.graph.properties.pinData]
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.graph.properties.settings]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.graph.properties.staticData]
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard]
+additionalProperties = false
+required = [
+    "approvalRef",
+    "idempotencyKey",
+    "precondition",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard.properties.approvalRef]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard.properties.idempotencyKey]
+format = "uuid"
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard.properties.precondition]
+additionalProperties = false
+required = [
+    "versionId",
+    "activeVersionId",
+    "active",
+    "isArchived",
+    "stateDigest",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard.properties.precondition.properties.active]
+type = "boolean"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard.properties.precondition.properties.activeVersionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard.properties.precondition.properties.isArchived]
+type = "boolean"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard.properties.precondition.properties.stateDigest]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.guard.properties.precondition.properties.versionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.id]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.name]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.parent_folder_id]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".input_schema.properties.project_id]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema]
+additionalProperties = false
+required = [
+    "status",
+    "operation",
+    "id",
+    "versionId",
+    "graphDigest",
+    "stateDigest",
+    "active",
+    "activeVersionId",
+    "isArchived",
+    "lifecycle",
+    "readback",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.active]
+type = "boolean"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.activeVersionId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.graphDigest]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.id]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.isArchived]
+type = "boolean"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.lifecycle]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.operation]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.published]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.readback]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.retry]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.stateDigest]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.status]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".output_schema.properties.versionId]
+type = "string"
+
+[provides.operations."n8n.workflows.update_draft".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.workflows.update_draft".ai_hints]
+when_to_use = "Update a draft only when current-chat approval matches the full version/lifecycle precondition and exact graph digest."
+common_mistakes = [
+    "The full versionId, explicit activeVersionId (null or value), active, isArchived, and stateDigest precondition is required.",
+    "A successful draft update preserves published and lifecycle state; ambiguous writes are never retried automatically.",
+]
+examples = ['{"id":"1001","graph":{"nodes":[],"connections":{}},"guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000002","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:..."}}}']
+related = [
+    "n8n.workflows.get",
+    "n8n.workflows.create_draft",
+]
+
 [sandbox]
 profile = "strict"
 memory_mb = 256
@@ -1189,13 +1590,15 @@ burst = 20
 scope = "instance"
 
 [rate_limits.operation_pools]
-"n8n.folders.get" = ["n8n.folders.read"]
-"n8n.workflows.list" = ["n8n.workflows.read"]
-"n8n.folders.list" = ["n8n.folders.read"]
-"n8n.projects.list" = ["n8n.projects.read"]
-"n8n.tags.list" = ["n8n.tags.read"]
 "n8n.executions.get" = ["n8n.executions.read"]
+"n8n.projects.list" = ["n8n.projects.read"]
 "n8n.credentials.list" = ["n8n.credentials.metadata.read"]
-"n8n.executions.list" = ["n8n.executions.read"]
+"n8n.folders.list" = ["n8n.folders.read"]
+"n8n.workflows.list" = ["n8n.workflows.read"]
+"n8n.folders.get" = ["n8n.folders.read"]
 "n8n.workflows.activate" = ["n8n.workflows.write"]
 "n8n.workflows.get" = ["n8n.workflows.read"]
+"n8n.workflows.update_draft" = ["n8n.workflows.write"]
+"n8n.tags.list" = ["n8n.tags.read"]
+"n8n.executions.list" = ["n8n.executions.read"]
+"n8n.workflows.create_draft" = ["n8n.workflows.write"]

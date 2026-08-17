@@ -153,6 +153,12 @@ pub struct WorkflowDetail {
     pub updated_at: Option<String>,
     pub nodes: Vec<Value>,
     pub connections: Value,
+    #[serde(default)]
+    pub settings: Option<Value>,
+    #[serde(default, rename = "staticData")]
+    pub static_data: Option<Value>,
+    #[serde(default, rename = "pinData")]
+    pub pin_data: Option<Value>,
     #[serde(rename = "activeVersion")]
     pub active_version: RequiredNullable<WorkflowVersion>,
     #[serde(default)]
@@ -166,6 +172,66 @@ pub struct WorkflowVersion {
     pub version_id: String,
     pub nodes: Vec<Value>,
     pub connections: Value,
+}
+
+/// Typed graph supplied to a guarded draft mutation.  Lifecycle fields are
+/// deliberately absent: callers cannot request publish, activation, or
+/// archival through this packet.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDraftGraph {
+    pub nodes: Vec<Value>,
+    pub connections: Value,
+    #[serde(default)]
+    pub settings: Option<Value>,
+    #[serde(default, rename = "staticData")]
+    pub static_data: Option<Value>,
+    #[serde(default, rename = "pinData")]
+    pub pin_data: Option<Value>,
+}
+
+/// Version/lifecycle precondition attached to a draft mutation approval.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftMutationPrecondition {
+    #[serde(default, rename = "versionId")]
+    pub version_id: Option<String>,
+    #[serde(default, rename = "activeVersionId")]
+    pub active_version_id: Option<RequiredNullable<String>>,
+    #[serde(default)]
+    pub active: Option<bool>,
+    #[serde(default, rename = "isArchived")]
+    pub is_archived: Option<bool>,
+    #[serde(default, rename = "stateDigest")]
+    pub state_digest: Option<String>,
+}
+
+/// One-use approval and idempotency binding for a draft mutation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DraftMutationGuard {
+    #[serde(rename = "approvalRef")]
+    pub approval_ref: String,
+    #[serde(rename = "idempotencyKey")]
+    pub idempotency_key: String,
+    #[serde(default)]
+    pub precondition: DraftMutationPrecondition,
+}
+
+/// Common typed input for `create_draft` and `update_draft`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDraftMutationInput {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default, rename = "project_id")]
+    pub project_id: Option<String>,
+    #[serde(default, rename = "parent_folder_id")]
+    pub parent_folder_id: Option<String>,
+    pub graph: WorkflowDraftGraph,
+    pub guard: DraftMutationGuard,
 }
 
 /// Deserialize-only provider workflow tag DTO.
@@ -321,7 +387,7 @@ pub struct WorkflowView {
 
 /// Serialize-only graph summary. Raw nodes, connections, Code source, and
 /// credential references remain inside the connector process.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkflowGraphSummary {
     #[serde(rename = "versionId")]
     pub version_id: String,

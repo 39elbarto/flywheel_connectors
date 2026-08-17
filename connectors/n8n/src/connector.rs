@@ -9,9 +9,9 @@ use fcp_manifest::HostEgressContext;
 use fcp_prelude::{
     AgentHint, ApprovalMode, ApprovalScope, ApprovalToken, BaseConnector, CapabilityGrant,
     CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps,
-    FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, OperationId,
-    OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, StepId, ZoneId,
+    FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, InputConstraint,
+    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
+    RecipeId, RiskLevel, SafetyTier, SelfCheckReport, SessionId, StepId, ZoneId,
 };
 use fcp_sdk::ConnectorRuntimeConfig;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -29,8 +29,9 @@ use crate::{
     },
     error::{N8nError, N8nResult},
     types::{
-        CredentialMetadataView, FolderListView, ListView, WorkflowDetail, WorkflowGraphSummary,
-        WorkflowStateView, WorkflowVersion,
+        CredentialMetadataView, DraftMutationPrecondition, FolderListView, ListView,
+        WorkflowDetail, WorkflowDraftMutationInput, WorkflowGraphSummary, WorkflowStateView,
+        WorkflowVersion,
     },
 };
 
@@ -191,6 +192,23 @@ const SERVER_IDS: [&str; 3] = ["eec", "hetzner", "legacy"];
 struct ActivationTarget {
     resource_uri: String,
     normalized_input: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct DraftWritePlan {
+    workflow_id: Option<String>,
+    graph_digest: String,
+    normalized_approval_input: Value,
+    provider_payload: Value,
+}
+
+#[derive(Debug, Clone)]
+struct DraftBaseline {
+    state: WorkflowStateView,
+    name: Option<String>,
+    settings: Option<Value>,
+    static_data: Option<Value>,
+    pin_data: Option<Value>,
 }
 
 struct HostRequestAttribution {
@@ -578,6 +596,17 @@ impl N8nConnector {
             self.require_execution_approval(operation, target, &params)?;
         }
 
+        let draft_plan = if matches!(
+            operation,
+            "n8n.workflows.create_draft" | "n8n.workflows.update_draft"
+        ) {
+            let plan = self.prepare_draft_write(operation, &input, canonical_resource)?;
+            self.require_draft_approval(operation, &input, &plan, &params)?;
+            Some(plan)
+        } else {
+            None
+        };
+
         if operation == "n8n.workflows.activate" {
             return Err(FcpError::CapabilityDenied {
                 capability: "n8n.workflows.write".into(),
@@ -633,6 +662,18 @@ impl N8nConnector {
                     .await
             }
             "n8n.folders.get" => self.invoke_folders_get(client, &input, Some(context)).await,
+            "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
+                self.invoke_workflow_draft_write(
+                    client,
+                    operation,
+                    &input,
+                    draft_plan.as_ref().ok_or(FcpError::Internal {
+                        message: "draft write plan was not prepared".into(),
+                    })?,
+                    Some(context),
+                )
+                .await
+            }
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -728,6 +769,151 @@ impl N8nConnector {
             return Err(N8nError::MalformedProviderResponse);
         }
         Ok(serde_json::to_value(normalize_workflow_state(workflow)?)?)
+    }
+
+    async fn invoke_workflow_draft_write(
+        &self,
+        client: &N8nClient,
+        operation: &str,
+        input: &Value,
+        plan: &DraftWritePlan,
+        context: Option<HostEgressContext>,
+    ) -> Result<Value, N8nError> {
+        let typed: WorkflowDraftMutationInput = serde_json::from_value(input.clone())
+            .map_err(|_| N8nError::InvalidInput("invalid guarded workflow draft input".into()))?;
+
+        let (baseline, provider_payload) = if operation == "n8n.workflows.update_draft" {
+            let workflow_id = plan
+                .workflow_id
+                .as_deref()
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            let workflow = client
+                .get_workflow_typed(workflow_id, context.clone())
+                .await?;
+            if workflow.id != workflow_id {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            let state = normalize_workflow_state(workflow.clone())?;
+            verify_draft_input_precondition(input, &state)?;
+            let mut provider_payload = plan
+                .provider_payload
+                .as_object()
+                .cloned()
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            if !provider_payload.contains_key("name") {
+                let name = workflow
+                    .name
+                    .clone()
+                    .ok_or(N8nError::MalformedProviderResponse)?;
+                provider_payload.insert("name".into(), Value::String(name));
+            }
+            if !provider_payload.contains_key("settings") {
+                if let Some(settings) = &workflow.settings {
+                    provider_payload.insert("settings".into(), settings.clone());
+                }
+            }
+            if !provider_payload.contains_key("staticData") {
+                if let Some(static_data) = &workflow.static_data {
+                    provider_payload.insert("staticData".into(), static_data.clone());
+                }
+            }
+            if !provider_payload.contains_key("pinData") {
+                if let Some(pin_data) = &workflow.pin_data {
+                    provider_payload.insert("pinData".into(), pin_data.clone());
+                }
+            }
+            (
+                Some(DraftBaseline {
+                    state,
+                    name: workflow.name.clone(),
+                    settings: workflow.settings.clone(),
+                    static_data: workflow.static_data.clone(),
+                    pin_data: workflow.pin_data.clone(),
+                }),
+                Value::Object(provider_payload),
+            )
+        } else {
+            (None, plan.provider_payload.clone())
+        };
+
+        let workflow_id = match operation {
+            "n8n.workflows.create_draft" => {
+                client
+                    .create_workflow_draft(&provider_payload, context.clone())
+                    .await?
+            }
+            "n8n.workflows.update_draft" => {
+                let workflow_id = plan
+                    .workflow_id
+                    .as_deref()
+                    .ok_or(N8nError::MalformedProviderResponse)?;
+                client
+                    .update_workflow_draft(workflow_id, &provider_payload, context.clone())
+                    .await?;
+                workflow_id.to_owned()
+            }
+            _ => return Err(N8nError::InvalidInput("unsupported draft operation".into())),
+        };
+
+        let readback = client
+            .get_workflow_typed(&workflow_id, context)
+            .await
+            .map_err(|_| N8nError::UnknownOutcome)?;
+        if readback.id != workflow_id {
+            return Err(N8nError::ReadbackMismatch);
+        }
+        let state = normalize_workflow_state(readback.clone())?;
+        let expected_name = typed.name.as_deref().or_else(|| {
+            baseline
+                .as_ref()
+                .and_then(|baseline| baseline.name.as_deref())
+        });
+        let expected_settings = typed.graph.settings.as_ref().or_else(|| {
+            baseline
+                .as_ref()
+                .and_then(|baseline| baseline.settings.as_ref())
+        });
+        let expected_static_data = typed.graph.static_data.as_ref().or_else(|| {
+            baseline
+                .as_ref()
+                .and_then(|baseline| baseline.static_data.as_ref())
+        });
+        let expected_pin_data = typed.graph.pin_data.as_ref().or_else(|| {
+            baseline
+                .as_ref()
+                .and_then(|baseline| baseline.pin_data.as_ref())
+        });
+        verify_draft_readback(
+            operation,
+            plan,
+            baseline.as_ref(),
+            &state,
+            expected_name,
+            expected_settings,
+            expected_static_data,
+            expected_pin_data,
+            readback.settings.as_ref(),
+            readback.static_data.as_ref(),
+            readback.pin_data.as_ref(),
+        )?;
+
+        serde_json::to_value(json!({
+            "status": "verified",
+            "operation": operation,
+            "provider": "rest",
+            "lifecycle": "draft_only",
+            "retry": "never_automatic",
+            "readback": "independent_get",
+            "id": state.id,
+            "versionId": state.version_id,
+            "graphDigest": state.draft.graph_digest,
+            "stateDigest": state.state_digest,
+            "active": state.active,
+            "activeVersionId": state.active_version_id,
+            "isArchived": state.is_archived,
+            "published": state.published,
+        }))
+        .map_err(N8nError::from)
     }
 
     async fn invoke_projects_list(
@@ -913,6 +1099,140 @@ impl N8nConnector {
             .ok_or_else(|| N8nError::InvalidInput("connector is not configured".into()))
     }
 
+    fn prepare_draft_write(
+        &self,
+        operation: &str,
+        input: &Value,
+        resource_uri: &str,
+    ) -> FcpResult<DraftWritePlan> {
+        let typed: WorkflowDraftMutationInput =
+            serde_json::from_value(input.clone()).map_err(|_| FcpError::InvalidRequest {
+                code: 1005,
+                message: "Invalid guarded workflow draft input".into(),
+            })?;
+        validate_draft_input_presence(operation, input).map_err(|error| error.to_fcp_error())?;
+        validate_draft_mutation(operation, &typed).map_err(|error| error.to_fcp_error())?;
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let graph_digest = workflow_graph_digest(&typed.graph.nodes, &typed.graph.connections)
+            .map_err(|error| error.to_fcp_error())?;
+        let mutation_digest = draft_mutation_digest(input).map_err(|error| error.to_fcp_error())?;
+        let precondition = input
+            .get("guard")
+            .and_then(Value::as_object)
+            .and_then(|guard| guard.get("precondition"))
+            .and_then(Value::as_object);
+        let normalized_approval_input = json!({
+            "server_id": config.server_id,
+            "resource_uri": resource_uri,
+            "operation": operation,
+            "version_id": precondition
+                .and_then(|value| value.get("versionId"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "state_digest": precondition
+                .and_then(|value| value.get("stateDigest"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "active_version_id": precondition
+                .and_then(|value| value.get("activeVersionId"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "active_version_id_present": precondition
+                .is_some_and(|value| value.contains_key("activeVersionId")),
+            "active": precondition
+                .and_then(|value| value.get("active"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "is_archived": precondition
+                .and_then(|value| value.get("isArchived"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "graph_digest": graph_digest.clone(),
+            "mutation_digest": mutation_digest,
+            "idempotency_key": typed.guard.idempotency_key,
+            "provider": "rest",
+            "side_effect": "draft_only",
+        });
+
+        let mut provider_payload = serde_json::Map::new();
+        if let Some(name) = typed.name.as_deref() {
+            provider_payload.insert("name".into(), Value::String(name.to_owned()));
+        }
+        if let Some(project_id) = typed.project_id.as_deref() {
+            provider_payload.insert("projectId".into(), Value::String(project_id.to_owned()));
+        }
+        if let Some(folder_id) = typed.parent_folder_id.as_deref() {
+            provider_payload.insert("parentFolderId".into(), Value::String(folder_id.to_owned()));
+        }
+        provider_payload.insert("nodes".into(), Value::Array(typed.graph.nodes.clone()));
+        provider_payload.insert("connections".into(), typed.graph.connections.clone());
+        if let Some(settings) = &typed.graph.settings {
+            provider_payload.insert("settings".into(), settings.clone());
+        }
+        if let Some(static_data) = &typed.graph.static_data {
+            provider_payload.insert("staticData".into(), static_data.clone());
+        }
+        if let Some(pin_data) = &typed.graph.pin_data {
+            provider_payload.insert("pinData".into(), pin_data.clone());
+        }
+
+        Ok(DraftWritePlan {
+            workflow_id: typed.id,
+            graph_digest,
+            normalized_approval_input,
+            provider_payload: Value::Object(provider_payload),
+        })
+    }
+
+    fn require_draft_approval(
+        &self,
+        operation: &str,
+        input: &Value,
+        plan: &DraftWritePlan,
+        params: &Value,
+    ) -> FcpResult<()> {
+        let typed: WorkflowDraftMutationInput =
+            serde_json::from_value(input.clone()).map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid guarded workflow draft input".into(),
+            })?;
+        let approval_values = params
+            .get("approval_tokens")
+            .and_then(Value::as_array)
+            .ok_or_else(|| FcpError::CapabilityDenied {
+                capability: "n8n.workflows.write".into(),
+                reason: "draft mutation requires approval_tokens".into(),
+            })?;
+        let approvals: Vec<ApprovalToken> = approval_values
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid approval token".into(),
+            })?;
+        let matching = approvals
+            .iter()
+            .filter(|approval| {
+                is_matching_draft_approval(
+                    approval,
+                    operation,
+                    &typed.guard.approval_ref,
+                    self.zone_id.as_ref(),
+                    &plan.normalized_approval_input,
+                    current_time_ms(),
+                )
+            })
+            .count();
+        if matching != 1 {
+            return Err(FcpError::CapabilityDenied {
+                capability: "n8n.workflows.write".into(),
+                reason: "draft mutation requires exactly one matching approval bound to resource, operation, version, graph, and expiry".into(),
+            });
+        }
+        Ok(())
+    }
+
     fn resource_uris_for_operation(
         &self,
         operation: &str,
@@ -930,6 +1250,11 @@ impl N8nConnector {
             | "n8n.projects.list"
             | "n8n.credentials.list"
             | "n8n.tags.list" => instance_resource_uri(server_id),
+            "n8n.workflows.create_draft" => {
+                let project_id =
+                    require_str(input, "project_id").map_err(|error| error.to_fcp_error())?;
+                project_resource_uri(server_id, project_id).map_err(|error| error.to_fcp_error())?
+            }
             "n8n.folders.list" => {
                 let project_id = parse_folder_list_input(input)
                     .map_err(|error| error.to_fcp_error())?
@@ -944,7 +1269,7 @@ impl N8nConnector {
                 folder_resource_uri(server_id, folder_input.folder_id)
                     .map_err(|error| error.to_fcp_error())?
             }
-            "n8n.workflows.get" | "n8n.workflows.activate" => {
+            "n8n.workflows.get" | "n8n.workflows.activate" | "n8n.workflows.update_draft" => {
                 let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
                 workflow_resource_uri(server_id, workflow_id)
                     .map_err(|error| error.to_fcp_error())?
@@ -1066,6 +1391,244 @@ fn is_matching_execution_approval(
         && has_exact_activation_constraints(&scope.input_constraints, &target.normalized_input)
 }
 
+fn validate_draft_mutation(operation: &str, input: &WorkflowDraftMutationInput) -> N8nResult<()> {
+    let guard = &input.guard;
+    if guard.approval_ref.trim().is_empty()
+        || guard.approval_ref.len() > 256
+        || guard.approval_ref.chars().any(char::is_control)
+    {
+        return Err(N8nError::InvalidInput(
+            "guard.approvalRef must be a bounded non-empty token reference".into(),
+        ));
+    }
+    if uuid::Uuid::parse_str(&guard.idempotency_key).is_err() {
+        return Err(N8nError::InvalidInput(
+            "guard.idempotencyKey must be a UUID".into(),
+        ));
+    }
+    if !input.graph.connections.is_object() {
+        return Err(N8nError::InvalidInput(
+            "graph.connections must be an object".into(),
+        ));
+    }
+    if input.graph.nodes.len() > 10_000 {
+        return Err(N8nError::InvalidInput(
+            "graph.nodes exceeds the bounded draft limit".into(),
+        ));
+    }
+    if input.graph.nodes.iter().any(|node| !node.is_object()) {
+        return Err(N8nError::InvalidInput(
+            "graph.nodes must contain objects".into(),
+        ));
+    }
+    if input.name.as_deref().is_some_and(|name| {
+        name.trim().is_empty() || name.len() > 256 || name.chars().any(char::is_control)
+    }) {
+        return Err(N8nError::InvalidInput(
+            "name must be a bounded non-empty string".into(),
+        ));
+    }
+    for (value, label) in [
+        (input.id.as_deref(), "workflow id"),
+        (input.project_id.as_deref(), "project id"),
+        (input.parent_folder_id.as_deref(), "parent folder id"),
+    ] {
+        if let Some(value) = value {
+            sanitize_path_segment(value, label)?;
+        }
+    }
+
+    let precondition = &guard.precondition;
+    match operation {
+        "n8n.workflows.create_draft" => {
+            if input.id.is_some() || input.name.as_deref().is_none_or(str::is_empty) {
+                return Err(N8nError::InvalidInput(
+                    "create_draft requires name and must not include id".into(),
+                ));
+            }
+            if input.project_id.as_deref().is_none_or(str::is_empty) {
+                return Err(N8nError::InvalidInput(
+                    "create_draft requires project_id".into(),
+                ));
+            }
+            if precondition.version_id.is_some()
+                || precondition.state_digest.is_some()
+                || precondition.active_version_id.is_some()
+                || precondition.active.is_some_and(|active| active)
+                || precondition.is_archived.is_some_and(|archived| archived)
+            {
+                return Err(N8nError::InvalidInput(
+                    "create_draft cannot carry an existing workflow lifecycle precondition".into(),
+                ));
+            }
+        }
+        "n8n.workflows.update_draft" => {
+            let Some(id) = input.id.as_deref() else {
+                return Err(N8nError::InvalidInput("update_draft requires id".into()));
+            };
+            sanitize_path_segment(id, "workflow id")?;
+            if precondition.version_id.is_none()
+                || precondition.state_digest.is_none()
+                || precondition.active.is_none()
+                || precondition.is_archived.is_none()
+            {
+                return Err(N8nError::InvalidInput(
+                    "update_draft requires the full version and lifecycle precondition".into(),
+                ));
+            }
+        }
+        _ => return Err(N8nError::InvalidInput("unsupported draft operation".into())),
+    }
+    Ok(())
+}
+
+fn validate_draft_input_presence(operation: &str, input: &Value) -> N8nResult<()> {
+    if operation != "n8n.workflows.update_draft" {
+        return Ok(());
+    }
+    let precondition = input
+        .get("guard")
+        .and_then(Value::as_object)
+        .and_then(|guard| guard.get("precondition"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| N8nError::InvalidInput("update_draft requires precondition".into()))?;
+    if !precondition.contains_key("activeVersionId") {
+        return Err(N8nError::InvalidInput(
+            "update_draft requires explicit activeVersionId (null or value)".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_draft_input_precondition(input: &Value, state: &WorkflowStateView) -> N8nResult<()> {
+    let precondition = input
+        .get("guard")
+        .and_then(Value::as_object)
+        .and_then(|guard| guard.get("precondition"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| N8nError::InvalidInput("update_draft requires precondition".into()))?;
+    let version_id = precondition
+        .get("versionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| N8nError::InvalidInput("update_draft requires versionId".into()))?;
+    let state_digest = precondition
+        .get("stateDigest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| N8nError::InvalidInput("update_draft requires stateDigest".into()))?;
+    let active_version_id = match precondition.get("activeVersionId") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(N8nError::InvalidInput(
+                "activeVersionId must be a string or explicit null".into(),
+            ));
+        }
+        None => {
+            return Err(N8nError::InvalidInput(
+                "update_draft requires explicit activeVersionId".into(),
+            ));
+        }
+    };
+    let active = precondition
+        .get("active")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| N8nError::InvalidInput("update_draft requires active".into()))?;
+    let is_archived = precondition
+        .get("isArchived")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| N8nError::InvalidInput("update_draft requires isArchived".into()))?;
+    if version_id != state.version_id
+        || state_digest != state.state_digest
+        || active_version_id != state.active_version_id.as_deref()
+        || active != state.active
+        || is_archived != state.is_archived
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow draft lifecycle precondition is stale".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_draft_precondition(
+    precondition: &DraftMutationPrecondition,
+    state: &WorkflowStateView,
+) -> N8nResult<()> {
+    if precondition.version_id.as_deref() != Some(state.version_id.as_str())
+        || precondition.state_digest.as_deref() != Some(state.state_digest.as_str())
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow draft precondition is stale".into(),
+        ));
+    }
+    if let Some(expected) = &precondition.active_version_id
+        && expected.clone().into_option() != state.active_version_id
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow activeVersionId precondition does not match".into(),
+        ));
+    }
+    if precondition
+        .active
+        .is_some_and(|active| active != state.active)
+        || precondition
+            .is_archived
+            .is_some_and(|archived| archived != state.is_archived)
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow lifecycle precondition does not match".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_draft_readback(
+    operation: &str,
+    plan: &DraftWritePlan,
+    baseline: Option<&DraftBaseline>,
+    state: &WorkflowStateView,
+    expected_name: Option<&str>,
+    expected_settings: Option<&Value>,
+    expected_static_data: Option<&Value>,
+    expected_pin_data: Option<&Value>,
+    actual_settings: Option<&Value>,
+    actual_static_data: Option<&Value>,
+    actual_pin_data: Option<&Value>,
+) -> N8nResult<()> {
+    if state.draft.graph_digest != plan.graph_digest
+        || expected_name.is_some_and(|name| Some(name) != state.name.as_deref())
+        || expected_settings != actual_settings
+        || expected_static_data != actual_static_data
+        || expected_pin_data != actual_pin_data
+    {
+        return Err(N8nError::ReadbackMismatch);
+    }
+    match (operation, baseline) {
+        ("n8n.workflows.create_draft", None) => {
+            if state.active
+                || state.is_archived
+                || state.active_version_id.is_some()
+                || state.published.is_some()
+            {
+                return Err(N8nError::ReadbackMismatch);
+            }
+        }
+        ("n8n.workflows.update_draft", Some(baseline)) => {
+            if state.version_id == baseline.state.version_id
+                || state.published != baseline.state.published
+                || state.active != baseline.state.active
+                || state.is_archived != baseline.state.is_archived
+                || state.active_version_id != baseline.state.active_version_id
+            {
+                return Err(N8nError::ReadbackMismatch);
+            }
+        }
+        _ => return Err(N8nError::ReadbackMismatch),
+    }
+    Ok(())
+}
+
 /// Build the provisioning recipe for the `n8n` connector.
 pub fn provisioning_recipe() -> ProvisioningRecipe {
     ProvisioningRecipe::new(
@@ -1177,6 +1740,70 @@ fn has_exact_activation_constraints(
         })
 }
 
+fn is_matching_draft_approval(
+    approval: &ApprovalToken,
+    operation: &str,
+    approval_ref: &str,
+    zone_id: Option<&ZoneId>,
+    normalized_input: &Value,
+    now_ms: u64,
+) -> bool {
+    if approval.token_id != approval_ref
+        || approval.signature.as_ref().is_none_or(Vec::is_empty)
+        || !approval.is_valid(now_ms)
+        || zone_id != Some(&approval.zone_id)
+    {
+        return false;
+    }
+    let ApprovalScope::Execution(scope) = &approval.scope else {
+        return false;
+    };
+    if scope.connector_id != "fcp.n8n"
+        || scope.method_pattern != operation
+        || scope.request_object_id.is_some()
+    {
+        return false;
+    }
+    if let Some(expected_hash) = scope.input_hash {
+        if approval_input_hash(normalized_input) != expected_hash {
+            return false;
+        }
+    }
+    has_exact_draft_constraints(&scope.input_constraints, normalized_input)
+}
+
+fn has_exact_draft_constraints(constraints: &[InputConstraint], input: &Value) -> bool {
+    const REQUIRED_POINTERS: [&str; 14] = [
+        "/server_id",
+        "/resource_uri",
+        "/operation",
+        "/version_id",
+        "/state_digest",
+        "/active_version_id",
+        "/active_version_id_present",
+        "/active",
+        "/is_archived",
+        "/graph_digest",
+        "/mutation_digest",
+        "/idempotency_key",
+        "/provider",
+        "/side_effect",
+    ];
+    constraints.len() == REQUIRED_POINTERS.len()
+        && REQUIRED_POINTERS.iter().all(|pointer| {
+            constraints.iter().any(|constraint| {
+                constraint.pointer == *pointer
+                    && input.pointer(pointer) == Some(&constraint.expected)
+            })
+        })
+}
+
+fn approval_input_hash(input: &Value) -> [u8; 32] {
+    let canonical = canonical_json(input);
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    *blake3::hash(&bytes).as_bytes()
+}
+
 fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1193,6 +1820,7 @@ fn manifest_hash() -> String {
 
 const GRAPH_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.graph-digest.v1";
 const STATE_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.state-digest.v1";
+const MUTATION_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.mutation-digest.v1";
 
 fn normalize_workflow_state(workflow: WorkflowDetail) -> N8nResult<WorkflowStateView> {
     let WorkflowDetail {
@@ -1209,6 +1837,9 @@ fn normalize_workflow_state(workflow: WorkflowDetail) -> N8nResult<WorkflowState
         updated_at,
         nodes,
         connections,
+        settings: _settings,
+        static_data: _static_data,
+        pin_data: _pin_data,
         active_version,
         tags,
     } = workflow;
@@ -1288,6 +1919,41 @@ fn workflow_graph_digest(nodes: &[Value], connections: &Value) -> N8nResult<Stri
         &json!({
             "nodes": semantic_nodes,
             "connections": connections,
+        }),
+    )
+}
+
+fn draft_mutation_digest(input: &Value) -> N8nResult<String> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| N8nError::InvalidInput("draft mutation input must be an object".into()))?;
+    let graph = object
+        .get("graph")
+        .and_then(Value::as_object)
+        .ok_or_else(|| N8nError::InvalidInput("draft mutation graph must be an object".into()))?;
+    digest_canonical_json(
+        MUTATION_DIGEST_DOMAIN_V1,
+        &json!({
+            "id": object.get("id").cloned().unwrap_or(Value::Null),
+            "name": object.get("name").cloned().unwrap_or(Value::Null),
+            "project_id": object.get("project_id").cloned().unwrap_or(Value::Null),
+            "parent_folder_id": object
+                .get("parent_folder_id")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "graph": {
+                "nodes": graph.get("nodes").cloned().unwrap_or(Value::Null),
+                "connections": graph
+                    .get("connections")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "settings": graph.get("settings").cloned().unwrap_or(Value::Null),
+                "staticData": graph
+                    .get("staticData")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "pinData": graph.get("pinData").cloned().unwrap_or(Value::Null),
+            },
         }),
     )
 }
@@ -1487,6 +2153,14 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
                 })?;
             Ok(())
         }
+        "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
+            validate_draft_input_presence(operation, input)?;
+            let typed: WorkflowDraftMutationInput =
+                serde_json::from_value(input.clone()).map_err(|_| {
+                    N8nError::InvalidInput("invalid guarded workflow draft input".into())
+                })?;
+            validate_draft_mutation(operation, &typed)
+        }
         "n8n.executions.get" => {
             require_exact_object(input, &["workflow_id", "id"], "execution get input")?;
             require_str(input, "workflow_id")?;
@@ -1561,10 +2235,12 @@ fn op_info(
         risk_level,
         description: Some(summary.into()),
         rate_limit: None,
-        requires_approval: Some(if id == "n8n.workflows.activate" {
-            ApprovalMode::Policy
-        } else {
-            ApprovalMode::None
+        requires_approval: Some(match id {
+            "n8n.workflows.activate" => ApprovalMode::Policy,
+            "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
+                ApprovalMode::Interactive
+            }
+            _ => ApprovalMode::None,
         }),
         safety_tier,
         idempotency,
@@ -1827,6 +2503,110 @@ fn list_input_schema() -> serde_json::Value {
     })
 }
 
+fn workflow_draft_input_schema(update: bool) -> serde_json::Value {
+    let mut required = vec!["graph", "guard"];
+    let mut guard_required = vec!["approvalRef", "idempotencyKey"];
+    if update {
+        guard_required.push("precondition");
+    }
+    let precondition_required = if update {
+        vec![
+            "versionId",
+            "activeVersionId",
+            "active",
+            "isArchived",
+            "stateDigest",
+        ]
+    } else {
+        Vec::new()
+    };
+    if update {
+        required.push("id");
+    } else {
+        required.extend(["name", "project_id"]);
+    }
+    let mut properties = serde_json::Map::from_iter([
+        (
+            "name".to_string(),
+            json!({"type": "string", "minLength": 1, "maxLength": 256}),
+        ),
+        ("project_id".to_string(), json!({"type": "string"})),
+        ("parent_folder_id".to_string(), json!({"type": "string"})),
+        (
+            "graph".to_string(),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["nodes", "connections"],
+                "properties": {
+                    "nodes": {"type": "array", "maxItems": 10000},
+                    "connections": {"type": "object"},
+                    "settings": {"type": ["object", "null"]},
+                    "staticData": {},
+                    "pinData": {},
+                },
+            }),
+        ),
+        (
+            "guard".to_string(),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": guard_required,
+                "properties": {
+                    "approvalRef": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "idempotencyKey": {"type": "string", "format": "uuid"},
+                    "precondition": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": precondition_required,
+                        "properties": {
+                            "versionId": {"type": ["string", "null"]},
+                            "activeVersionId": {"type": ["string", "null"]},
+                            "active": {"type": "boolean"},
+                            "isArchived": {"type": "boolean"},
+                            "stateDigest": {"type": ["string", "null"]},
+                        },
+                    },
+                },
+            }),
+        ),
+    ]);
+    if update {
+        properties.insert("id".to_string(), json!({"type": "string"}));
+    }
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": required,
+        "properties": properties,
+    })
+}
+
+fn workflow_draft_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "operation", "id", "versionId", "graphDigest", "stateDigest", "active", "activeVersionId", "isArchived", "lifecycle", "readback"],
+        "properties": {
+            "status": {"type": "string"},
+            "operation": {"type": "string"},
+            "provider": {"type": "string"},
+            "lifecycle": {"type": "string"},
+            "retry": {"type": "string"},
+            "readback": {"type": "string"},
+            "id": {"type": "string"},
+            "versionId": {"type": "string"},
+            "graphDigest": {"type": "string"},
+            "stateDigest": {"type": "string"},
+            "active": {"type": "boolean"},
+            "activeVersionId": {"type": ["string", "null"]},
+            "isArchived": {"type": "boolean"},
+            "published": {"type": ["object", "null"]},
+        },
+    })
+}
+
 /// Build the operations info for introspection.
 fn operations_info() -> Vec<OperationInfo> {
     vec![
@@ -1872,6 +2652,50 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("n8n.workflows.list"),
                     CapabilityId::from_static("n8n.workflows.activate"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.workflows.create_draft",
+            "Create an inactive n8n workflow draft and verify it by independent readback",
+            workflow_draft_input_schema(false),
+            workflow_draft_output_schema(),
+            "n8n.workflows.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Create a draft only after current-chat approval is bound to the exact graph and server.".into(),
+                common_mistakes: vec![
+                    "This operation never publishes, activates, or archives a workflow.".into(),
+                    "A timeout or malformed write response is unknown; reconcile with GET and never retry automatically.".into(),
+                ],
+                examples: vec![r#"{"name":"Daily report","project_id":"project-1","graph":{"nodes":[],"connections":{}},"guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000001"}}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.workflows.update_draft"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.workflows.update_draft",
+            "Update an n8n workflow draft with full lifecycle preconditions and verify readback",
+            workflow_draft_input_schema(true),
+            workflow_draft_output_schema(),
+            "n8n.workflows.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Update a draft only when current-chat approval matches the full version/lifecycle precondition and exact graph digest.".into(),
+                common_mistakes: vec![
+                    "The full versionId, explicit activeVersionId (null or value), active, isArchived, and stateDigest precondition is required.".into(),
+                    "A successful draft update preserves published and lifecycle state; ambiguous writes are never retried automatically.".into(),
+                ],
+                examples: vec![r#"{"id":"1001","graph":{"nodes":[],"connections":{}},"guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000002","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:..."}}}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.workflows.create_draft"),
                 ],
             },
         ),
@@ -2074,6 +2898,7 @@ fn operations_info() -> Vec<OperationInfo> {
 mod tests {
     use super::*;
     use crate::types::RequiredNullable;
+    use fcp_prelude::ExecutionScope;
 
     fn digest_test_workflow() -> WorkflowDetail {
         serde_json::from_value(json!({
@@ -2103,6 +2928,45 @@ mod tests {
 
     fn normalized_state_digest(workflow: WorkflowDetail) -> String {
         normalize_workflow_state(workflow).unwrap().state_digest
+    }
+
+    fn mutation_digest_golden_input(credential_id: &str) -> Value {
+        json!({
+            "graph": {
+                "connections": {},
+                "nodes": [{
+                    "credentials": {
+                        "httpBasicAuth": {"id": credential_id}
+                    },
+                    "id": "http-node",
+                    "type": "n8n-nodes-base.httpRequest"
+                }],
+                "pinData": null,
+                "settings": null,
+                "staticData": null
+            },
+            "id": null,
+            "name": "Credential-bound workflow",
+            "parent_folder_id": null,
+            "project_id": "project-1"
+        })
+    }
+
+    #[test]
+    fn draft_mutation_digest_matches_host_golden_vectors() {
+        let credential_one = draft_mutation_digest(&mutation_digest_golden_input("credential-1"))
+            .expect("credential-1 mutation digest");
+        let credential_two = draft_mutation_digest(&mutation_digest_golden_input("credential-2"))
+            .expect("credential-2 mutation digest");
+
+        assert_eq!(
+            (credential_one.as_str(), credential_two.as_str()),
+            (
+                "blake3-256:7212822de8377b803f190acbd0ced3692ba0f408a0fd2d20cb908f861730495e",
+                "blake3-256:ac12da2c49bc33dae099d866cc17b694b6302b2db50ff2fa22cf0a0350760907"
+            )
+        );
+        assert_ne!(credential_one, credential_two);
     }
 
     #[test]
@@ -2474,9 +3338,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_10_operations() {
+    fn operations_info_has_12_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 12);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -2484,6 +3348,24 @@ mod tests {
         assert!(operation_ids.contains(&"n8n.folders.list"));
         assert!(operation_ids.contains(&"n8n.folders.get"));
         assert!(operation_ids.contains(&"n8n.credentials.list"));
+        assert!(operation_ids.contains(&"n8n.workflows.create_draft"));
+        assert!(operation_ids.contains(&"n8n.workflows.update_draft"));
+    }
+
+    #[test]
+    fn draft_operation_schemas_match_create_and_update_id_rules() {
+        let operations = operations_info();
+        let create = operations
+            .iter()
+            .find(|operation| operation.id.as_ref() == "n8n.workflows.create_draft")
+            .expect("create draft operation");
+        let update = operations
+            .iter()
+            .find(|operation| operation.id.as_ref() == "n8n.workflows.update_draft")
+            .expect("update draft operation");
+
+        assert!(create.input_schema.pointer("/properties/id").is_none());
+        assert!(update.input_schema.pointer("/properties/id").is_some());
     }
 
     #[test]
@@ -3307,5 +4189,254 @@ mod tests {
     #[test]
     fn is_local_test_host_rejects_other() {
         assert!(!is_local_test_host("example.com"));
+    }
+
+    #[test]
+    fn active_workflow_update_preserves_lifecycle_and_published_graph() {
+        let mut baseline = digest_test_workflow();
+        baseline.active = true;
+        baseline.version_id = "draft-v2".into();
+        baseline.active_version_id = RequiredNullable::Value("published-v1".into());
+        baseline.active_version = RequiredNullable::Value(WorkflowVersion {
+            version_id: "published-v1".into(),
+            nodes: baseline.nodes.clone(),
+            connections: baseline.connections.clone(),
+        });
+        let baseline_state = normalize_workflow_state(baseline.clone()).unwrap();
+
+        let mut updated = baseline;
+        updated.version_id = "draft-v3".into();
+        updated.nodes[0]["position"] = json!([320, 180]);
+        let updated_state = normalize_workflow_state(updated).unwrap();
+        let plan = DraftWritePlan {
+            workflow_id: Some("workflow-1".into()),
+            graph_digest: updated_state.draft.graph_digest.clone(),
+            normalized_approval_input: json!({}),
+            provider_payload: json!({}),
+        };
+
+        verify_draft_readback(
+            "n8n.workflows.update_draft",
+            &plan,
+            Some(&DraftBaseline {
+                state: baseline_state.clone(),
+                name: None,
+                settings: None,
+                static_data: None,
+                pin_data: None,
+            }),
+            &updated_state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("active lifecycle must remain unchanged");
+
+        let mut deactivated = updated_state;
+        deactivated.active = false;
+        assert!(matches!(
+            verify_draft_readback(
+                "n8n.workflows.update_draft",
+                &plan,
+                Some(&DraftBaseline {
+                    state: baseline_state,
+                    name: None,
+                    settings: None,
+                    static_data: None,
+                    pin_data: None,
+                }),
+                &deactivated,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            Err(N8nError::ReadbackMismatch)
+        ));
+    }
+
+    #[test]
+    fn update_precondition_rejects_each_version_and_lifecycle_mismatch() {
+        let mut workflow = digest_test_workflow();
+        workflow.active = true;
+        workflow.version_id = "draft-v2".into();
+        workflow.active_version_id = RequiredNullable::Value("published-v1".into());
+        workflow.active_version = RequiredNullable::Value(WorkflowVersion {
+            version_id: "published-v1".into(),
+            nodes: workflow.nodes.clone(),
+            connections: workflow.connections.clone(),
+        });
+        let state = normalize_workflow_state(workflow).unwrap();
+        let base = DraftMutationPrecondition {
+            version_id: Some(state.version_id.clone()),
+            active_version_id: Some(RequiredNullable::Value(
+                state.active_version_id.clone().unwrap(),
+            )),
+            active: Some(state.active),
+            is_archived: Some(state.is_archived),
+            state_digest: Some(state.state_digest.clone()),
+        };
+
+        let mut mismatches = Vec::new();
+        let mut wrong_version = base.clone();
+        wrong_version.version_id = Some("stale-version".into());
+        mismatches.push(wrong_version);
+        let mut wrong_digest = base.clone();
+        wrong_digest.state_digest = Some("blake3-256:stale".into());
+        mismatches.push(wrong_digest);
+        let mut wrong_active_version = base.clone();
+        wrong_active_version.active_version_id = Some(RequiredNullable::Null);
+        mismatches.push(wrong_active_version);
+        let mut wrong_active = base.clone();
+        wrong_active.active = Some(false);
+        mismatches.push(wrong_active);
+        let mut wrong_archived = base;
+        wrong_archived.is_archived = Some(true);
+        mismatches.push(wrong_archived);
+
+        for mismatch in mismatches {
+            assert!(matches!(
+                verify_draft_precondition(&mismatch, &state),
+                Err(N8nError::InvalidInput(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn create_readback_accepts_inactive_unpublished_draft() {
+        let workflow = digest_test_workflow();
+        let state = normalize_workflow_state(workflow).unwrap();
+        let plan = DraftWritePlan {
+            workflow_id: None,
+            graph_digest: state.draft.graph_digest.clone(),
+            normalized_approval_input: json!({}),
+            provider_payload: json!({}),
+        };
+        verify_draft_readback(
+            "n8n.workflows.create_draft",
+            &plan,
+            None,
+            &state,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create readback should preserve draft-only lifecycle");
+    }
+
+    #[test]
+    fn draft_approval_requires_exact_binding_and_expiry() {
+        let normalized = json!({
+            "server_id": "eec",
+            "resource_uri": "fwc-n8n://eec/workflows/1001",
+            "operation": "n8n.workflows.update_draft",
+            "version_id": "draft-v1",
+            "state_digest": "blake3-256:state",
+            "active_version_id": null,
+            "active_version_id_present": true,
+            "active": false,
+            "is_archived": false,
+            "graph_digest": "blake3-256:graph",
+            "mutation_digest": "blake3-256:mutation",
+            "idempotency_key": "00000000-0000-4000-8000-000000000001",
+            "provider": "rest",
+            "side_effect": "draft_only",
+        });
+        let pointers = [
+            "/server_id",
+            "/resource_uri",
+            "/operation",
+            "/version_id",
+            "/state_digest",
+            "/active_version_id",
+            "/active_version_id_present",
+            "/active",
+            "/is_archived",
+            "/graph_digest",
+            "/mutation_digest",
+            "/idempotency_key",
+            "/provider",
+            "/side_effect",
+        ];
+        let constraints = pointers
+            .into_iter()
+            .map(|pointer| InputConstraint {
+                pointer: pointer.into(),
+                expected: normalized.pointer(pointer).cloned().unwrap_or(Value::Null),
+            })
+            .collect();
+        let now = current_time_ms();
+        let token = ApprovalToken::approved(
+            "approval-1",
+            now.saturating_sub(1_000),
+            now.saturating_add(60_000),
+            "operator:test",
+            ApprovalScope::Execution(ExecutionScope {
+                connector_id: "fcp.n8n".into(),
+                method_pattern: "n8n.workflows.update_draft".into(),
+                request_object_id: None,
+                input_hash: None,
+                input_constraints: constraints,
+            }),
+            ZoneId::work(),
+            Some(vec![1]),
+        );
+        assert!(is_matching_draft_approval(
+            &token,
+            "n8n.workflows.update_draft",
+            "approval-1",
+            Some(&ZoneId::work()),
+            &normalized,
+            now,
+        ));
+
+        let mut mismatched = normalized.clone();
+        mismatched["graph_digest"] = json!("blake3-256:other");
+        assert!(!is_matching_draft_approval(
+            &token,
+            "n8n.workflows.update_draft",
+            "approval-1",
+            Some(&ZoneId::work()),
+            &mismatched,
+            now,
+        ));
+        let expired = ApprovalToken::approved(
+            token.token_id.clone(),
+            now.saturating_sub(2_000),
+            now,
+            token.issuer.clone(),
+            token.scope.clone(),
+            token.zone_id.clone(),
+            token.signature.clone(),
+        );
+        assert!(!is_matching_draft_approval(
+            &expired,
+            "n8n.workflows.update_draft",
+            "approval-1",
+            Some(&ZoneId::work()),
+            &normalized,
+            now,
+        ));
+    }
+
+    #[test]
+    fn unknown_draft_write_outcome_is_not_retryable() {
+        assert!(!N8nError::UnknownOutcome.is_retryable());
+        assert!(
+            N8nError::UnknownOutcome
+                .safe_summary()
+                .contains("do not retry")
+        );
     }
 }

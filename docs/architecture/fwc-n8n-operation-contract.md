@@ -15,9 +15,12 @@ No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
 Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
-`run-once`, and `status`. `run-once` supports nine Phase-1 REST reads, two local
-knowledge/validation operations, and one official-MCP discovery operation,
-`n8n.capabilities.inspect`. Official discovery accepts only EEC or Hetzner and
+`run-once`, and `status`. `run-once` supports nine Phase-1 REST reads, guarded
+REST draft create/update, two local knowledge/validation operations, and one
+official-MCP discovery operation, `n8n.capabilities.inspect`. The draft-write
+packet is source-only: the installed immutable release remains the accepted
+read-only/discovery bundle until a separate owner-gated release and disposable
+workflow live acceptance with rollback. Official discovery accepts only EEC or Hetzner and
 an empty operation input. It requests a separate official-MCP broker purpose,
 selects a fixed per-server `fcp.mcp-bridge` inventory, and maps internally only
 to `mcp.tools.list`. The host issues a one-call `mcp.tools.read` capability,
@@ -304,8 +307,8 @@ guarantees, not permission to replay.
 | `n8n.workflows.search` | `n8n.workflows.read` | Safe / Low | None | None | REST | workflow preview URIs | 128 KiB |
 | `n8n.workflows.get` | `n8n.workflows.read` | Safe / Medium | None | None | REST | normalized state fields | 2 MiB full |
 | `n8n.workflows.compare` | `n8n.workflows.read` | Safe / Medium | None | None | official MCP | both version URIs/digests | 512 KiB |
-| `n8n.workflows.create_draft` | `n8n.workflows.write` | Risky / Medium | Interactive | BestEffort | official MCP | new URI; draft/readback state | 512 KiB |
-| `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | official MCP | draft version/digest; published unchanged | 512 KiB |
+| `n8n.workflows.create_draft` | `n8n.workflows.write` | Risky / Medium | Interactive | BestEffort | typed REST | new URI; draft/readback state | 512 KiB |
+| `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST | draft version/digest; published unchanged | 512 KiB |
 | `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | REST or official MCP | all normalized state fields | 256 KiB |
 | `n8n.workflows.versions` | `n8n.workflows.versions` | action-dependent | action-dependent | action-dependent | local MCP/API | version URI/state readback | 256 KiB |
 | `n8n.workflows.execute` | `n8n.executions.start` | action-dependent | action-dependent | action-dependent | official MCP | workflow version and execution URI | 256 KiB |

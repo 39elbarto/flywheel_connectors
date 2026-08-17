@@ -5,15 +5,15 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use fcp_manifest::{
-    HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader, HostEgressHttpRequest,
-    HostEgressHttpResponse,
+    Base64Bytes, HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader,
+    HostEgressHttpRequest, HostEgressHttpResponse,
 };
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::HostEgressProxyError;
 #[cfg(test)]
 use fcp_sdk::migration::InheritedChannelStage;
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
-use reqwest::{Client, Response, StatusCode, Url};
+use reqwest::{Client, Method, Response, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use tracing::{debug, instrument};
 
@@ -337,11 +337,90 @@ impl N8nClient {
         }
     }
 
-    async fn get_url_mediated(
+    /// Perform the single provider mutation attempt used by the guarded draft
+    /// state machine. Credential references route through the verified
+    /// host-egress proxy; direct API-key requests remain loopback-test-only.
+    async fn write_json(
         &self,
+        method: Method,
         url: Url,
+        body: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        if matches!(self.auth, N8nAuth::CredentialId(_)) {
+            let context = context.ok_or_else(|| {
+                N8nError::InvalidInput("credential_id requires verified request attribution".into())
+            })?;
+            return self.write_json_mediated(method, url, body, context).await;
+        }
+        self.ensure_provider_egress_allowed()?;
+        let req = self
+            .add_auth(self.client.request(method, url))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(body);
+        let response = req.send().await.map_err(|_| N8nError::UnknownOutcome)?;
+        let status = response.status();
+        if !status.is_success() {
+            if status.is_server_error() {
+                let _ = read_bounded_body(response).await;
+                return Err(N8nError::UnknownOutcome);
+            }
+            return self.handle_error(status, response).await;
+        }
+        let body = read_bounded_body(response)
+            .await
+            .map_err(|_| N8nError::UnknownOutcome)?;
+        decode_success_body(status, &body).map_err(|_| N8nError::UnknownOutcome)
+    }
+
+    async fn write_json_mediated(
+        &self,
+        method: Method,
+        url: Url,
+        body: &serde_json::Value,
         context: HostEgressContext,
     ) -> N8nResult<serde_json::Value> {
+        let body = serde_json::to_vec(body)?;
+        let response = self
+            .host_egress_http(
+                &url,
+                method,
+                vec![
+                    HostEgressHttpHeader {
+                        name: "Accept".to_string(),
+                        value: "application/json".to_string(),
+                    },
+                    HostEgressHttpHeader {
+                        name: "Content-Type".to_string(),
+                        value: "application/json".to_string(),
+                    },
+                ],
+                Some(Base64Bytes::from_vec(body)),
+                context,
+                true,
+            )
+            .await?;
+        let status = StatusCode::from_u16(response.status).map_err(|_| N8nError::UnknownOutcome)?;
+        if status.is_server_error() {
+            return Err(N8nError::UnknownOutcome);
+        }
+        if status.is_success() {
+            return decode_success_body(status, response.body.as_bytes())
+                .map_err(|_| N8nError::UnknownOutcome);
+        }
+        decode_mediated_response(&response)
+    }
+
+    async fn host_egress_http(
+        &self,
+        url: &Url,
+        method: Method,
+        headers: Vec<HostEgressHttpHeader>,
+        body: Option<Base64Bytes>,
+        context: HostEgressContext,
+        write: bool,
+    ) -> N8nResult<HostEgressHttpResponse> {
         let credential_id = match &self.auth {
             N8nAuth::CredentialId(credential_id) => credential_id,
             N8nAuth::ApiKey(_) => {
@@ -364,19 +443,46 @@ impl N8nClient {
         let request = HostEgressHttpRequest {
             context: context.clone(),
             url: url.to_string(),
-            method: "GET".to_string(),
-            headers: vec![HostEgressHttpHeader {
-                name: "Accept".to_string(),
-                value: "application/json".to_string(),
-            }],
-            body: None,
+            method: method.as_str().to_string(),
+            headers,
+            body,
             credential_id: Some(credential_id.to_string()),
         };
-        let response = proxy
-            .http(&request)
-            .await
-            .map_err(|error| map_host_egress_error(&error))?;
-        validate_host_egress_decision(&response.egress, &context, &url)?;
+        let response = proxy.http(&request).await.map_err(|error| {
+            if write {
+                N8nError::UnknownOutcome
+            } else {
+                map_host_egress_error(&error)
+            }
+        })?;
+        validate_host_egress_decision(&response.egress, &context, url).map_err(|_| {
+            if write {
+                N8nError::UnknownOutcome
+            } else {
+                N8nError::MalformedProviderResponse
+            }
+        })?;
+        Ok(response)
+    }
+
+    async fn get_url_mediated(
+        &self,
+        url: Url,
+        context: HostEgressContext,
+    ) -> N8nResult<serde_json::Value> {
+        let response = self
+            .host_egress_http(
+                &url,
+                Method::GET,
+                vec![HostEgressHttpHeader {
+                    name: "Accept".to_string(),
+                    value: "application/json".to_string(),
+                }],
+                None,
+                context,
+                false,
+            )
+            .await?;
         decode_mediated_response(&response)
     }
 
@@ -618,6 +724,36 @@ impl N8nClient {
         context: Option<HostEgressContext>,
     ) -> N8nResult<WorkflowDetail> {
         decode_typed(self.get_workflow(id, context).await?)
+    }
+
+    /// Attempt one draft create and return only the provider-assigned ID.
+    pub(crate) async fn create_workflow_draft(
+        &self,
+        payload: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<String> {
+        let url = self.resolve_path("/workflows")?;
+        let response = self.write_json(Method::POST, url, payload, context).await?;
+        response
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or(N8nError::UnknownOutcome)
+    }
+
+    /// Attempt one draft update.  n8n's REST surface uses `PUT` for the
+    /// workflow resource; the independent GET readback happens in the caller.
+    pub(crate) async fn update_workflow_draft(
+        &self,
+        id: &str,
+        payload: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<()> {
+        let url =
+            self.resolve_path_segments(&[("path segment", "workflows"), ("workflow id", id)])?;
+        let _ = self.write_json(Method::PUT, url, payload, context).await?;
+        Ok(())
     }
 
     /// List executions using the typed provider DTO layer.

@@ -256,6 +256,7 @@ impl fmt::Debug for ConnectorRuntimeConfig {
             "host_egress_uds",
             &self.host_egress_uds.as_ref().map(|_| "[configured]"),
         );
+        #[cfg(feature = "connector-http")]
         debug.field(
             "host_egress_inherited_fd",
             &self

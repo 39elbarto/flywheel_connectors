@@ -104,6 +104,13 @@ Secrets are referenced by service name only. They are resolved by the host at
 execution time and never serialized into a request, result, log, receipt, or
 capability snapshot.
 
+The table names the REST API credential. Official MCP uses a separate personal
+access-token purpose and the fixed KeePass services `n8n-eec-mcp` and
+`n8n-hetzner-mcp`. The broker protocol binds server and purpose; it must reject
+REST/MCP substitution and never fall back from one credential class to the
+other. Those MCP services are reserved interface names, not evidence that an
+owner has provisioned them.
+
 ### 3.2 Canonical URI shapes
 
 Every server resource URI includes the server ID. IDs are UTF-8 percent-encoded

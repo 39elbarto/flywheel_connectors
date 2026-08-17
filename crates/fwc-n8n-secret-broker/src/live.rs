@@ -11,7 +11,10 @@ use age::{Decryptor, IdentityFile, NoCallbacks};
 use fcp_n8n_broker_protocol::{ZeroizingSecret, validate_credential_secret};
 use keepass::{Database, DatabaseKey, db::fields};
 
-use crate::{BrokerError, BrokerRequest, BrokerServer, CredentialBackend, SOCKET_PATH};
+use crate::{
+    BrokerCredentialPurpose, BrokerError, BrokerRequest, BrokerServer, CredentialBackend,
+    SOCKET_PATH,
+};
 
 const AGE_IDENTITY_PATH: &str = "/etc/homelab/secrets/age-keys/keepass-master.key";
 const ENCRYPTED_MASTER_PATH: &str = "/etc/homelab/secrets/keepass-master.age";
@@ -22,10 +25,12 @@ const MAX_PLAINTEXT_BYTES: usize = 1 << 20;
 const MAX_KDBX_BYTES: usize = 64 << 20;
 
 /// Fixed service/entry mapping.
-const fn service_name(server: BrokerServer) -> &'static str {
-    match server {
-        BrokerServer::Eec => "n8n-eec",
-        BrokerServer::Hetzner => "n8n-hetzner",
+const fn service_name(request: BrokerRequest) -> &'static str {
+    match (request.server, request.purpose) {
+        (BrokerServer::Eec, BrokerCredentialPurpose::RestApi) => "n8n-eec",
+        (BrokerServer::Hetzner, BrokerCredentialPurpose::RestApi) => "n8n-hetzner",
+        (BrokerServer::Eec, BrokerCredentialPurpose::OfficialMcp) => "n8n-eec-mcp",
+        (BrokerServer::Hetzner, BrokerCredentialPurpose::OfficialMcp) => "n8n-hetzner-mcp",
     }
 }
 
@@ -88,7 +93,7 @@ impl CredentialBackend for LiveBackend {
                 .map_err(|_| ())
             })
             .map_err(|_| BrokerError::new(crate::BrokerErrorCode::BackendFailed))?;
-        let secret = find_password(&db, service_name(request.server))?;
+        let secret = find_password(&db, service_name(request))?;
         drop(db);
         validate_credential_secret(&secret)
             .map_err(|_| BrokerError::new(crate::BrokerErrorCode::InvalidSecret))?;
@@ -288,8 +293,34 @@ mod tests {
 
     #[test]
     fn fixed_service_mapping_is_closed() {
-        assert_eq!(service_name(BrokerServer::Eec), "n8n-eec");
-        assert_eq!(service_name(BrokerServer::Hetzner), "n8n-hetzner");
+        assert_eq!(
+            service_name(BrokerRequest {
+                server: BrokerServer::Eec,
+                purpose: BrokerCredentialPurpose::RestApi,
+            }),
+            "n8n-eec"
+        );
+        assert_eq!(
+            service_name(BrokerRequest {
+                server: BrokerServer::Hetzner,
+                purpose: BrokerCredentialPurpose::RestApi,
+            }),
+            "n8n-hetzner"
+        );
+        assert_eq!(
+            service_name(BrokerRequest {
+                server: BrokerServer::Eec,
+                purpose: BrokerCredentialPurpose::OfficialMcp,
+            }),
+            "n8n-eec-mcp"
+        );
+        assert_eq!(
+            service_name(BrokerRequest {
+                server: BrokerServer::Hetzner,
+                purpose: BrokerCredentialPurpose::OfficialMcp,
+            }),
+            "n8n-hetzner-mcp"
+        );
     }
 
     #[test]

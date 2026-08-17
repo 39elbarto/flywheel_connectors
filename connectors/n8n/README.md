@@ -121,10 +121,17 @@ standalone `fwc-n8n-secret-broker` binary:
   enforces a bounded `RuntimeMaxSec=30s`. The broker exits after one bounded
   request; it is not a daemon and has no caller-selected executable, path,
   environment, or shell.
-- The packaged live-backend build uses only the fixed KeePass mappings
-  `services/n8n-eec` and `services/n8n-hetzner`. The legacy mapping is excluded;
-  secret values and source paths are never placed in unit files or environment
-  variables.
+- The packaged live-backend build uses a closed server-and-purpose mapping.
+  REST API keys remain at `services/n8n-eec` and `services/n8n-hetzner`;
+  distinct official MCP access tokens are reserved at
+  `services/n8n-eec-mcp` and `services/n8n-hetzner-mcp`. The wire protocol keeps
+  the established one-byte REST request for rollout compatibility. Official
+  MCP uses a separate versioned three-byte frame with a fixed prefix, server,
+  and purpose, so a legacy REST frame plus trailing bytes cannot be reinterpreted
+  as another credential class. The official MCP entries are not provisioned by
+  this repository and remain fail-closed until owner-gated installation. The
+  legacy mapping is excluded; secret values and source paths are never placed
+  in unit files or environment variables.
 - The fixed KDBX trust assumption is mode `0600` with owner UID equal to the
   connecting peer UID. Only the age identity and encrypted master files are
   root-owned mode `0600`. With keepass `0.13.20`, parsed entry fields are a map,

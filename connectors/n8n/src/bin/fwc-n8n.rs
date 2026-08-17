@@ -18,7 +18,7 @@ use fcp_n8n::router::{
     CapabilitySnapshot, OperationIntent, ProviderRouter, ResolvedTarget, TargetQuery,
     TargetResolution, TargetResolver,
 };
-use fcp_n8n_broker_protocol::{BrokerClient, BrokerRequest, BrokerServer};
+use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -443,7 +443,10 @@ fn execute_host_run_once(
         client
             .request(
                 &mut transport,
-                BrokerRequest { server },
+                BrokerRequest {
+                    server,
+                    purpose: BrokerCredentialPurpose::RestApi,
+                },
                 request_deadline_at,
             )
             .map_err(map_broker_error)?

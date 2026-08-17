@@ -17,8 +17,10 @@ pub use fcp_secret::{
 
 /// Fixed broker socket path.
 pub const SOCKET_PATH: &str = "/run/fwc/fwc-n8n-secret-broker.sock";
-const REQUEST_FRAME_BYTES: usize = 1;
-const MAX_REQUEST_BYTES: usize = REQUEST_FRAME_BYTES;
+const LEGACY_REQUEST_FRAME_BYTES: usize = 1;
+const PURPOSE_BOUND_REQUEST_FRAME_BYTES: usize = 3;
+const MAX_REQUEST_BYTES: usize = PURPOSE_BOUND_REQUEST_FRAME_BYTES;
+const PURPOSE_BOUND_REQUEST_PREFIX: u8 = 0xf2;
 const MAX_RESPONSE_BYTES: usize =
     fcp_secret::credential_frame::HEADER_BYTES + fcp_secret::credential_frame::MAX_SECRET_BYTES;
 const MAX_ERROR_BYTES: usize = 64;
@@ -50,11 +52,41 @@ impl BrokerServer {
     }
 }
 
+/// Closed credential purpose. REST API keys and official MCP access tokens are
+/// separate credentials and cannot be substituted for one another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrokerCredentialPurpose {
+    /// n8n public REST API key used by `fcp.n8n`.
+    RestApi,
+    /// Personal official n8n MCP access token used by `fcp.mcp-bridge`.
+    OfficialMcp,
+}
+
+impl BrokerCredentialPurpose {
+    const fn wire(self) -> Option<u8> {
+        match self {
+            // Preserve the established one-byte REST request so a newly built
+            // wrapper remains compatible with the currently installed broker.
+            Self::RestApi => None,
+            Self::OfficialMcp => Some(1),
+        }
+    }
+
+    const fn from_wire(value: u8) -> Result<Self, BrokerError> {
+        match value {
+            1 => Ok(Self::OfficialMcp),
+            _ => Err(BrokerError::new(BrokerErrorCode::InvalidRequest)),
+        }
+    }
+}
+
 /// One fixed broker request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BrokerRequest {
     /// Selected fixed n8n server.
     pub server: BrokerServer,
+    /// Fixed credential purpose for that server.
+    pub purpose: BrokerCredentialPurpose,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,21 +233,35 @@ enum BrokerResponse {
     Error(BrokerError),
 }
 
-/// Encode the exact fixed request (one closed server-selector byte).
+/// Encode one closed server-and-purpose request.
+///
+/// REST keeps its legacy one-byte representation. Official MCP uses a separate
+/// versioned three-byte frame (`prefix`, `server`, `purpose`), so a legacy
+/// request plus trailing bytes cannot be reinterpreted as a different
+/// credential class. Arbitrary service names, fields, or paths remain
+/// impossible to express on the wire.
 #[must_use]
 pub fn encode_request(request: BrokerRequest) -> Vec<u8> {
-    vec![request.server.wire()]
+    request.purpose.wire().map_or_else(
+        || vec![request.server.wire()],
+        |purpose| vec![PURPOSE_BOUND_REQUEST_PREFIX, request.server.wire(), purpose],
+    )
 }
 
 fn decode_request(frame: &[u8]) -> Result<BrokerRequest, BrokerError> {
     if frame.len() > MAX_REQUEST_BYTES {
         return Err(BrokerError::new(BrokerErrorCode::RequestOversized));
     }
-    if frame.len() != REQUEST_FRAME_BYTES {
-        return Err(BrokerError::new(BrokerErrorCode::InvalidRequest));
-    }
+    let (server, purpose) = match frame.len() {
+        LEGACY_REQUEST_FRAME_BYTES => (frame[0], BrokerCredentialPurpose::RestApi),
+        PURPOSE_BOUND_REQUEST_FRAME_BYTES if frame[0] == PURPOSE_BOUND_REQUEST_PREFIX => {
+            (frame[1], BrokerCredentialPurpose::from_wire(frame[2])?)
+        }
+        _ => return Err(BrokerError::new(BrokerErrorCode::InvalidRequest)),
+    };
     Ok(BrokerRequest {
-        server: BrokerServer::from_wire(frame[0])?,
+        server: BrokerServer::from_wire(server)?,
+        purpose,
     })
 }
 
@@ -683,12 +729,38 @@ mod tests {
     fn exact_enum_frame_and_trailing_second_request_rejection() {
         let request = BrokerRequest {
             server: BrokerServer::Eec,
+            purpose: BrokerCredentialPurpose::RestApi,
         };
         assert_eq!(encode_request(request), b"\x01");
         assert_eq!(decode_request(&encode_request(request)), Ok(request));
+        for collision in [b"\x01\x01".as_slice(), b"\x02\x01".as_slice()] {
+            assert_eq!(
+                decode_request(collision)
+                    .expect_err("legacy trailing selector must not change credential purpose")
+                    .code(),
+                "invalid_request"
+            );
+        }
+        let official_mcp = BrokerRequest {
+            server: BrokerServer::Hetzner,
+            purpose: BrokerCredentialPurpose::OfficialMcp,
+        };
+        assert_eq!(encode_request(official_mcp), b"\xf2\x02\x01");
         assert_eq!(
-            decode_request(b"\x01x").expect_err("trailing").code(),
-            "request_oversized"
+            decode_request(&encode_request(official_mcp)),
+            Ok(official_mcp)
+        );
+        assert_eq!(
+            decode_request(b"\xf2\x02\x02")
+                .expect_err("unknown purpose")
+                .code(),
+            "invalid_request"
+        );
+        assert_eq!(
+            decode_request(b"\xf3\x02\x01")
+                .expect_err("unknown prefix")
+                .code(),
+            "invalid_request"
         );
         assert_eq!(
             decode_request(b"\x03").expect_err("bad server").code(),
@@ -704,6 +776,7 @@ mod tests {
         };
         let mut request = encode_request(BrokerRequest {
             server: BrokerServer::Eec,
+            purpose: BrokerCredentialPurpose::RestApi,
         });
         request.extend_from_slice(b"second");
         let mut output = Vec::new();
@@ -722,6 +795,7 @@ mod tests {
         };
         let request = encode_request(BrokerRequest {
             server: BrokerServer::Hetzner,
+            purpose: BrokerCredentialPurpose::RestApi,
         });
         let mut output = Vec::new();
         let error = serve_once(&mut request.as_slice(), &mut output, &mut backend)
@@ -748,6 +822,7 @@ mod tests {
                 &mut transport,
                 BrokerRequest {
                     server: BrokerServer::Hetzner,
+                    purpose: BrokerCredentialPurpose::RestApi,
                 },
                 deadline,
             )

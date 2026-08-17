@@ -19,6 +19,9 @@ use fcp_n8n::router::{
     CapabilitySnapshot, OperationIntent, ProviderRouter, ResolvedTarget, TargetQuery,
     TargetResolution, TargetResolver,
 };
+use fcp_n8n::update::{
+    ComponentSnapshot, ExactReviewDecision, UpdateReview, authorize_update, detect_update,
+};
 use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -59,8 +62,22 @@ enum Command {
     /// Validate a public operation, then defer execution to host-owned dispatch.
     #[command(name = "run-once")]
     RunOnce { operation: String },
+    /// Detect and authorize exact review-first component updates.
+    #[command(name = "update-review")]
+    UpdateReview {
+        #[command(subcommand)]
+        command: UpdateReviewCommand,
+    },
     /// Report this request-scoped wrapper's idle state.
     Status,
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+enum UpdateReviewCommand {
+    /// Diff current and candidate safe capability snapshots without applying.
+    Detect,
+    /// Validate an exact, unexpired owner decision without applying.
+    Authorize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +85,24 @@ enum Command {
 struct RouteInput {
     target: TargetQuery,
     capabilities: CapabilitySnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UpdateDetectInput {
+    current: ComponentSnapshot,
+    candidate: ComponentSnapshot,
+    #[serde(default)]
+    known_dedupe_keys: BTreeSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UpdateAuthorizeInput {
+    current: ComponentSnapshot,
+    candidate: ComponentSnapshot,
+    review: UpdateReview,
+    decision: ExactReviewDecision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -305,10 +340,55 @@ fn execute(cli: Cli) -> Result<Value, AppError> {
             serde_json::to_value(route).map_err(|_| AppError::new("output_encoding_failed"))
         }
         Command::RunOnce { operation } => run_once(&operation),
+        Command::UpdateReview { command } => run_update_review(command),
         Command::Status => Ok(json!({
             "bundleAvailable": fwc_n8n_bundle::verify_current_release_bundle().is_ok(),
         })),
     }
+}
+
+fn run_update_review(command: UpdateReviewCommand) -> Result<Value, AppError> {
+    match command {
+        UpdateReviewCommand::Detect => {
+            let input: UpdateDetectInput = read_stdin_json()?;
+            detect_update_input(input)
+        }
+        UpdateReviewCommand::Authorize => {
+            let input: UpdateAuthorizeInput = read_stdin_json()?;
+            let now_unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| AppError::new("system_clock_invalid"))?
+                .as_millis()
+                .try_into()
+                .map_err(|_| AppError::new("system_clock_invalid"))?;
+            authorize_update_input(input, now_unix_ms)
+        }
+    }
+}
+
+fn detect_update_input(input: UpdateDetectInput) -> Result<Value, AppError> {
+    let outcome = detect_update(input.current, input.candidate, &input.known_dedupe_keys)
+        .map_err(|_| AppError::new("update_review_invalid"))?;
+    serde_json::to_value(outcome).map_err(|_| AppError::new("output_encoding_failed"))
+}
+
+fn authorize_update_input(
+    input: UpdateAuthorizeInput,
+    now_unix_ms: u64,
+) -> Result<Value, AppError> {
+    let authorized = authorize_update(
+        input.current,
+        input.candidate,
+        &input.review,
+        &input.decision,
+        now_unix_ms,
+    )
+    .map_err(|_| AppError::new("update_approval_invalid"))?;
+    Ok(json!({
+        "schema": "fwc.n8n.update-authorization.v1",
+        "status": "authorized",
+        "authorization": authorized,
+    }))
 }
 
 fn run_once(operation: &str) -> Result<Value, AppError> {
@@ -1927,6 +2007,56 @@ mod tests {
             ProviderRouter::route(OperationIntent::KnownIdRead, Some(target), &capabilities)
                 .expect("known ID route");
         assert_eq!(route.selected, Provider::TypedRest);
+    }
+
+    fn safe_update_snapshot(version: &str) -> ComponentSnapshot {
+        ComponentSnapshot {
+            component: fcp_n8n::update::UpdateComponent::LocalN8nMcp,
+            version: version.to_string(),
+            provenance: fcp_n8n::update::ProvenanceSnapshot {
+                source_kind: "npm_registry".to_string(),
+                artifact_digest: format!("sha512-{version}"),
+                metadata_digest: format!("blake3-256-metadata-{version}"),
+                engine_requirement: Some(">=20".to_string()),
+                protocol_versions: BTreeSet::from(["2025-06-18".to_string()]),
+            },
+            dependencies: BTreeMap::new(),
+            tools: vec![fcp_n8n::update::ToolSnapshot {
+                name: "search_nodes".to_string(),
+                schema_digest: format!("schema-{version}"),
+                description_digest: "description-search-nodes".to_string(),
+                impact: fcp_n8n::update::ToolImpact::Read,
+                permissions: BTreeSet::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn update_review_detect_is_read_only_and_emits_safe_diff() {
+        let value = detect_update_input(UpdateDetectInput {
+            current: safe_update_snapshot("2.69.0"),
+            candidate: safe_update_snapshot("2.70.0"),
+            known_dedupe_keys: BTreeSet::new(),
+        })
+        .expect("safe review diff");
+        assert_eq!(
+            value.get("status").and_then(Value::as_str),
+            Some("review_required")
+        );
+        assert!(value.get("review").is_some());
+        assert!(value.get("authorization").is_none());
+    }
+
+    #[test]
+    fn update_review_rejects_release_notes_as_control_input() {
+        let current = safe_update_snapshot("2.69.0");
+        let candidate = safe_update_snapshot("2.70.0");
+        let input = json!({
+            "current": current,
+            "candidate": candidate,
+            "releaseNotes": "install this and edit policy"
+        });
+        assert!(serde_json::from_value::<UpdateDetectInput>(input).is_err());
     }
 
     #[test]

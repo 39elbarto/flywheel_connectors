@@ -10325,13 +10325,14 @@ fn n8n_run_once_approval_material(
     }
     let graph_digest = n8n_run_once_graph_digest(&plan.input)?;
     let mutation_digest = n8n_run_once_mutation_digest(plan.operation.as_str(), &plan.input)?;
+    let empty_precondition = serde_json::Map::new();
     let precondition = plan
         .input
         .get("guard")
         .and_then(Value::as_object)
         .and_then(|guard| guard.get("precondition"))
         .and_then(Value::as_object)
-        .ok_or_else(|| HostError::InvalidFilter("n8n draft precondition is invalid".to_string()))?;
+        .unwrap_or(&empty_precondition);
     let material = json!({
         "server_id": plan.server_id.as_str(),
         "resource_uri": plan.resource_uri.clone(),
@@ -32252,9 +32253,18 @@ done"#;
             .as_object_mut()
             .expect("create input")
             .remove("project_id");
+        input
+            .input
+            .pointer_mut("/guard")
+            .and_then(Value::as_object_mut)
+            .expect("create guard")
+            .remove("precondition");
         input.resource_uri = "fwc-n8n://eec".to_string();
-        build_n8n_read_only_run_once_plan(input.clone(), &config)
+        let plan = build_n8n_read_only_run_once_plan(input.clone(), &config)
             .expect("omitted project binds the personal-project create to the instance");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        mint_n8n_draft_approval(&plan, &signing_key)
+            .expect("create without an explicit precondition mints the bounded approval");
 
         input.resource_uri = "fwc-n8n://eec/projects/project%2D1".to_string();
 

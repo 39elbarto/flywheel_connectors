@@ -19,9 +19,7 @@ use fcp_n8n::router::{
     CapabilitySnapshot, OperationIntent, ProviderRouter, ResolvedTarget, TargetQuery,
     TargetResolution, TargetResolver,
 };
-use fcp_n8n::update::{
-    ComponentSnapshot, ExactReviewDecision, UpdateReview, authorize_update, detect_update,
-};
+use fcp_n8n::update::{ComponentSnapshot, detect_update};
 use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -62,7 +60,7 @@ enum Command {
     /// Validate a public operation, then defer execution to host-owned dispatch.
     #[command(name = "run-once")]
     RunOnce { operation: String },
-    /// Detect and authorize exact review-first component updates.
+    /// Detect exact review-first component updates without applying.
     #[command(name = "update-review")]
     UpdateReview {
         #[command(subcommand)]
@@ -76,8 +74,6 @@ enum Command {
 enum UpdateReviewCommand {
     /// Diff current and candidate safe capability snapshots without applying.
     Detect,
-    /// Validate an exact, unexpired owner decision without applying.
-    Authorize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,17 +88,6 @@ struct RouteInput {
 struct UpdateDetectInput {
     current: ComponentSnapshot,
     candidate: ComponentSnapshot,
-    #[serde(default)]
-    known_dedupe_keys: BTreeSet<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct UpdateAuthorizeInput {
-    current: ComponentSnapshot,
-    candidate: ComponentSnapshot,
-    review: UpdateReview,
-    decision: ExactReviewDecision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -353,42 +338,13 @@ fn run_update_review(command: UpdateReviewCommand) -> Result<Value, AppError> {
             let input: UpdateDetectInput = read_stdin_json()?;
             detect_update_input(input)
         }
-        UpdateReviewCommand::Authorize => {
-            let input: UpdateAuthorizeInput = read_stdin_json()?;
-            let now_unix_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| AppError::new("system_clock_invalid"))?
-                .as_millis()
-                .try_into()
-                .map_err(|_| AppError::new("system_clock_invalid"))?;
-            authorize_update_input(input, now_unix_ms)
-        }
     }
 }
 
 fn detect_update_input(input: UpdateDetectInput) -> Result<Value, AppError> {
-    let outcome = detect_update(input.current, input.candidate, &input.known_dedupe_keys)
+    let outcome = detect_update(input.current, input.candidate)
         .map_err(|_| AppError::new("update_review_invalid"))?;
     serde_json::to_value(outcome).map_err(|_| AppError::new("output_encoding_failed"))
-}
-
-fn authorize_update_input(
-    input: UpdateAuthorizeInput,
-    now_unix_ms: u64,
-) -> Result<Value, AppError> {
-    let authorized = authorize_update(
-        input.current,
-        input.candidate,
-        &input.review,
-        &input.decision,
-        now_unix_ms,
-    )
-    .map_err(|_| AppError::new("update_approval_invalid"))?;
-    Ok(json!({
-        "schema": "fwc.n8n.update-authorization.v1",
-        "status": "authorized",
-        "authorization": authorized,
-    }))
 }
 
 fn run_once(operation: &str) -> Result<Value, AppError> {
@@ -2036,7 +1992,6 @@ mod tests {
         let value = detect_update_input(UpdateDetectInput {
             current: safe_update_snapshot("2.69.0"),
             candidate: safe_update_snapshot("2.70.0"),
-            known_dedupe_keys: BTreeSet::new(),
         })
         .expect("safe review diff");
         assert_eq!(

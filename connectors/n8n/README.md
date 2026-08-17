@@ -435,6 +435,30 @@ These are excluded on purpose:
   broad export and debugging surfaces remain non-goals.
 - n8n has a large public API; this connector should grow only through manifest-aligned, capability-gated slices.
 
+## Connector Update Review Gate
+
+The current update subsystem is a review-first contract, not a live updater:
+
+- `fwc-n8n update-review detect` is read-only. It compares normalized snapshots
+  and emits a stable review digest and deduplication key.
+- Authorization and apply are deliberately absent from the public CLI. A future
+  owner-decision adapter must authenticate the owner and issue an opaque,
+  single-use decision with a UUID, a short bounded lifetime, and a persistent
+  replay ledger.
+- Apply accepts only an opaque verified staged-artifact handle. It consumes the
+  authorization, holds a per-component lock, checks the exact active snapshot,
+  and permits only compare-and-swap activation and conditional rollback.
+- The local `n8n-mcp` adapter currently creates fixed npm metadata and staging
+  command specifications only. The specifications require an empty inherited
+  environment and an allowlisted replacement environment. No executor, npm
+  invocation, staging write, release switch, or live apply path exists yet.
+- Registry lifecycle scripts are never executed and are represented only by a
+  digest. Release notes are discarded. Neither registry content nor package
+  content can authorize an update or directly edit documentation or skills.
+
+The installed immutable bundle and the existing opt-in MCP fallback therefore
+remain unchanged by this subsystem.
+
 ## Readiness And Verification Surface
 
 `doctor()`, `health()`, `self_check()`, `simulate()`, and `introspect()` are part of the public closeout contract. They surface:

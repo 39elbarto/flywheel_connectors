@@ -32,3 +32,4 @@ pub mod error;
 pub mod router;
 pub mod types;
 pub mod update;
+pub mod update_local_mcp;

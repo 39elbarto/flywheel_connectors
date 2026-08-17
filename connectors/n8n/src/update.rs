@@ -8,12 +8,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 const REVIEW_SCHEMA: &str = "fwc.n8n.update-review.v1";
 const APPROVAL_SCHEMA: &str = "fwc.n8n.update-approval.v1";
 const MAX_ATOM_BYTES: usize = 256;
 const MAX_TOOLS: usize = 512;
 const MAX_DEPENDENCIES: usize = 512;
+const MAX_APPROVAL_TTL_MS: u64 = 15 * 60 * 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,7 +110,7 @@ pub struct ComponentSnapshot {
 impl ComponentSnapshot {
     fn normalize_and_validate(mut self) -> Result<Self, UpdateError> {
         validate_atom("version", &self.version)?;
-        validate_atom("source_kind", &self.provenance.source_kind)?;
+        validate_identifier("source_kind", &self.provenance.source_kind)?;
         validate_atom("artifact_digest", &self.provenance.artifact_digest)?;
         validate_atom("metadata_digest", &self.provenance.metadata_digest)?;
         if let Some(engine) = &self.provenance.engine_requirement {
@@ -128,11 +130,11 @@ impl ComponentSnapshot {
             return Err(UpdateError::InvalidSnapshot("too_many_tools"));
         }
         for tool in &self.tools {
-            validate_atom("tool_name", &tool.name)?;
+            validate_identifier("tool_name", &tool.name)?;
             validate_atom("schema_digest", &tool.schema_digest)?;
             validate_atom("description_digest", &tool.description_digest)?;
             for permission in &tool.permissions {
-                validate_atom("permission", permission)?;
+                validate_identifier("permission", permission)?;
             }
         }
         self.tools.sort_by(|left, right| left.name.cmp(&right.name));
@@ -222,40 +224,59 @@ pub enum DetectionOutcome {
     },
     ReviewRequired {
         review: Box<UpdateReview>,
-        duplicate: bool,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDecision {
     Approved,
     Deferred,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct ExactReviewDecision {
-    pub schema: String,
-    pub decision: ReviewDecision,
-    pub component: UpdateComponent,
-    pub current_version: String,
-    pub candidate_version: String,
-    pub candidate_artifact_digest: String,
-    pub review_digest: String,
-    pub approval_ref: String,
-    pub expires_at_unix_ms: u64,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerPrincipal {
+    Owner,
 }
 
-impl ExactReviewDecision {
-    pub fn new(
+/// Opaque result of a trusted owner-decision provider read.
+///
+/// It is intentionally not deserializable and has no public constructor. The
+/// future `ClickUp` adapter must authenticate the provider response and create
+/// this value inside the crate before any authorization is possible.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedOwnerDecision {
+    schema: String,
+    decision_id: String,
+    principal: OwnerPrincipal,
+    decision: ReviewDecision,
+    component: UpdateComponent,
+    current_version: String,
+    candidate_version: String,
+    candidate_artifact_digest: String,
+    review_digest: String,
+    approval_ref: String,
+    issued_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+}
+
+impl VerifiedOwnerDecision {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_trusted_source(
+        decision_id: impl Into<String>,
+        principal: OwnerPrincipal,
         decision: ReviewDecision,
         review: &UpdateReview,
         approval_ref: impl Into<String>,
+        issued_at_unix_ms: u64,
         expires_at_unix_ms: u64,
     ) -> Self {
         Self {
             schema: APPROVAL_SCHEMA.to_string(),
+            decision_id: decision_id.into(),
+            principal,
             decision,
             component: review.component,
             current_version: review.current_version.clone(),
@@ -263,18 +284,63 @@ impl ExactReviewDecision {
             candidate_artifact_digest: review.candidate_artifact_digest.clone(),
             review_digest: review.review_digest.clone(),
             approval_ref: approval_ref.into(),
+            issued_at_unix_ms,
             expires_at_unix_ms,
         }
     }
 }
 
+/// Opaque handle proving that a component adapter verified one staged artifact.
+///
+/// The snapshot alone is insufficient for apply. Component adapters must bind
+/// it to an immutable stage id and independent verification digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedCandidate {
+    snapshot: ComponentSnapshot,
+    stage_id: String,
+    verification_digest: String,
+}
+
+impl VerifiedCandidate {
+    pub(crate) fn from_verified_stage(
+        snapshot: ComponentSnapshot,
+        stage_id: impl Into<String>,
+        verification_digest: impl Into<String>,
+    ) -> Result<Self, UpdateError> {
+        let snapshot = snapshot.normalize_and_validate()?;
+        let stage_id = stage_id.into();
+        let verification_digest = verification_digest.into();
+        if Uuid::parse_str(&stage_id).is_err() {
+            return Err(UpdateError::InvalidSnapshot("stage_id_invalid"));
+        }
+        validate_digest("verification_digest", &verification_digest)?;
+        Ok(Self {
+            snapshot,
+            stage_id,
+            verification_digest,
+        })
+    }
+
+    pub const fn snapshot(&self) -> &ComponentSnapshot {
+        &self.snapshot
+    }
+}
+
+pub trait DecisionLedger {
+    /// Atomically consume one trusted decision. Returns false for replay.
+    fn consume_once(&mut self, decision_id: &str, review_digest: &str)
+    -> Result<bool, UpdateError>;
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizedUpdate {
     component: UpdateComponent,
     current: ComponentSnapshot,
-    candidate: ComponentSnapshot,
+    candidate: VerifiedCandidate,
     review_digest: String,
+    decision_id: String,
     approval_ref: String,
     expires_at_unix_ms: u64,
 }
@@ -289,7 +355,7 @@ impl AuthorizedUpdate {
     }
 
     pub const fn candidate(&self) -> &ComponentSnapshot {
-        &self.candidate
+        self.candidate.snapshot()
     }
 }
 
@@ -317,16 +383,31 @@ pub enum BackendError {
 }
 
 pub trait UpdateBackend {
+    /// Atomically acquire the component lock and compare the active snapshot.
+    fn begin_exact(
+        &mut self,
+        current: &ComponentSnapshot,
+        candidate: &VerifiedCandidate,
+    ) -> Result<(), BackendError>;
+
     fn active_snapshot(
         &mut self,
         component: UpdateComponent,
     ) -> Result<ComponentSnapshot, BackendError>;
 
-    fn activate_exact(&mut self, candidate: &ComponentSnapshot) -> Result<(), BackendError>;
+    fn activate_exact(&mut self, candidate: &VerifiedCandidate) -> Result<(), BackendError>;
 
     fn smoke_exact(&mut self, expected: &ComponentSnapshot) -> Result<SmokeReport, BackendError>;
 
-    fn rollback_exact(&mut self, previous: &ComponentSnapshot) -> Result<(), BackendError>;
+    /// Compare active against the failed candidate and restore the previous
+    /// exact version while the component lock is still held.
+    fn rollback_exact(
+        &mut self,
+        failed_candidate: &VerifiedCandidate,
+        previous: &ComponentSnapshot,
+    ) -> Result<(), BackendError>;
+
+    fn finish(&mut self);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -345,6 +426,7 @@ pub struct ApplyReceipt {
     pub previous_version: String,
     pub candidate_version: String,
     pub review_digest: String,
+    pub decision_id: String,
     pub approval_ref: String,
     pub candidate_smoke: Option<SmokeReport>,
     pub rollback_smoke: Option<SmokeReport>,
@@ -359,7 +441,9 @@ pub enum UpdateError {
     ApprovalMismatch,
     ApprovalExpired,
     ApprovalNotApproved,
+    ApprovalReplay,
     ActivePreconditionMismatch,
+    RollbackFailed(Box<ApplyReceipt>),
     Encoding,
 }
 
@@ -371,7 +455,9 @@ impl std::fmt::Display for UpdateError {
             Self::ApprovalMismatch => "approval_mismatch",
             Self::ApprovalExpired => "approval_expired",
             Self::ApprovalNotApproved => "approval_not_approved",
+            Self::ApprovalReplay => "approval_replay",
             Self::ActivePreconditionMismatch => "active_precondition_mismatch",
+            Self::RollbackFailed(_) => "rollback_failed",
             Self::Encoding => "encoding_failed",
         };
         write!(formatter, "n8n update review failed: {code}")
@@ -383,7 +469,6 @@ impl std::error::Error for UpdateError {}
 pub fn detect_update(
     current: ComponentSnapshot,
     candidate: ComponentSnapshot,
-    known_dedupe_keys: &BTreeSet<String>,
 ) -> Result<DetectionOutcome, UpdateError> {
     let current = current.normalize_and_validate()?;
     let candidate = candidate.normalize_and_validate()?;
@@ -420,26 +505,25 @@ pub fn detect_update(
         &review.candidate_snapshot_digest,
         &review.review_digest,
     ))?;
-    let duplicate = known_dedupe_keys.contains(&review.dedupe_key);
     Ok(DetectionOutcome::ReviewRequired {
         review: Box::new(review),
-        duplicate,
     })
 }
 
-pub fn authorize_update(
+pub fn authorize_update<L: DecisionLedger>(
     current: ComponentSnapshot,
-    candidate: ComponentSnapshot,
+    candidate: VerifiedCandidate,
     review: &UpdateReview,
-    decision: &ExactReviewDecision,
+    decision: &VerifiedOwnerDecision,
+    ledger: &mut L,
     now_unix_ms: u64,
 ) -> Result<AuthorizedUpdate, UpdateError> {
     let current = current.normalize_and_validate()?;
-    let candidate = candidate.normalize_and_validate()?;
+    let candidate_snapshot = candidate.snapshot.clone().normalize_and_validate()?;
     let DetectionOutcome::ReviewRequired {
         review: expected_review,
         ..
-    } = detect_update(current.clone(), candidate.clone(), &BTreeSet::new())?
+    } = detect_update(current.clone(), candidate_snapshot.clone())?
     else {
         return Err(UpdateError::ApprovalMismatch);
     };
@@ -448,13 +532,26 @@ pub fn authorize_update(
     }
     validate_atom("approval_ref", &decision.approval_ref)
         .map_err(|_| UpdateError::InvalidDecision("invalid_approval_ref"))?;
+    if Uuid::parse_str(&decision.decision_id).is_err() {
+        return Err(UpdateError::InvalidDecision("invalid_decision_id"));
+    }
     if decision.schema != APPROVAL_SCHEMA {
         return Err(UpdateError::InvalidDecision("invalid_approval_schema"));
+    }
+    if decision.principal != OwnerPrincipal::Owner {
+        return Err(UpdateError::InvalidDecision("invalid_owner_principal"));
     }
     if decision.decision != ReviewDecision::Approved {
         return Err(UpdateError::ApprovalNotApproved);
     }
-    if decision.expires_at_unix_ms <= now_unix_ms {
+    if decision.issued_at_unix_ms > now_unix_ms
+        || decision.expires_at_unix_ms <= now_unix_ms
+        || decision.expires_at_unix_ms <= decision.issued_at_unix_ms
+        || decision
+            .expires_at_unix_ms
+            .saturating_sub(decision.issued_at_unix_ms)
+            > MAX_APPROVAL_TTL_MS
+    {
         return Err(UpdateError::ApprovalExpired);
     }
     let expected = (
@@ -472,55 +569,67 @@ pub fn authorize_update(
         decision.review_digest.as_str(),
     );
     let current_version_matches = current.version == review.current_version;
-    let candidate_version_matches = candidate.version == review.candidate_version;
+    let candidate_version_matches = candidate_snapshot.version == review.candidate_version;
     let current_matches_review = current.component == review.component
         && current_version_matches
         && current.digest()? == review.current_snapshot_digest;
-    let candidate_matches_review = candidate.component == review.component
+    let candidate_matches_review = candidate_snapshot.component == review.component
         && candidate_version_matches
-        && candidate.provenance.artifact_digest == review.candidate_artifact_digest
-        && candidate.digest()? == review.candidate_snapshot_digest;
+        && candidate_snapshot.provenance.artifact_digest == review.candidate_artifact_digest
+        && candidate_snapshot.digest()? == review.candidate_snapshot_digest;
     let snapshots_match_review = current_matches_review && candidate_matches_review;
     if expected != supplied || !snapshots_match_review {
         return Err(UpdateError::ApprovalMismatch);
+    }
+    if !ledger.consume_once(&decision.decision_id, &review.review_digest)? {
+        return Err(UpdateError::ApprovalReplay);
     }
     Ok(AuthorizedUpdate {
         component: review.component,
         current,
         candidate,
         review_digest: review.review_digest.clone(),
+        decision_id: decision.decision_id.clone(),
         approval_ref: decision.approval_ref.clone(),
         expires_at_unix_ms: decision.expires_at_unix_ms,
     })
 }
 
+/// Consumes the authorization so one successful authorization cannot be reused
+/// for a second activation attempt.
+#[allow(clippy::needless_pass_by_value)]
 pub fn apply_authorized<B: UpdateBackend>(
     backend: &mut B,
-    authorized: &AuthorizedUpdate,
+    authorized: AuthorizedUpdate,
     now_unix_ms: u64,
 ) -> Result<ApplyReceipt, UpdateError> {
     if authorized.expires_at_unix_ms <= now_unix_ms {
         return Err(UpdateError::ApprovalExpired);
     }
+    backend
+        .begin_exact(&authorized.current, &authorized.candidate)
+        .map_err(|_| UpdateError::ActivePreconditionMismatch)?;
     let active = backend
         .active_snapshot(authorized.component)
-        .map_err(|_| UpdateError::ActivePreconditionMismatch)?
-        .normalize_and_validate()?;
+        .map_err(|_| UpdateError::ActivePreconditionMismatch)
+        .and_then(ComponentSnapshot::normalize_and_validate);
+    let Ok(active) = active else {
+        backend.finish();
+        return Err(UpdateError::ActivePreconditionMismatch);
+    };
     if active != authorized.current {
+        backend.finish();
         return Err(UpdateError::ActivePreconditionMismatch);
     }
 
     let activation = backend.activate_exact(&authorized.candidate);
     if activation.is_err() {
-        return Ok(rollback_receipt(
-            backend,
-            authorized,
-            None,
-            "activation_failed",
-        ));
+        let result = rollback_receipt(backend, &authorized, None, "activation_failed");
+        backend.finish();
+        return result;
     }
 
-    let candidate_smoke = backend.smoke_exact(&authorized.candidate).ok();
+    let candidate_smoke = backend.smoke_exact(authorized.candidate()).ok();
     let active_candidate = backend
         .active_snapshot(authorized.component)
         .ok()
@@ -528,27 +637,32 @@ pub fn apply_authorized<B: UpdateBackend>(
     if candidate_smoke
         .as_ref()
         .is_some_and(SmokeReport::valid_for_apply)
-        && active_candidate.as_ref() == Some(&authorized.candidate)
+        && active_candidate.as_ref() == Some(authorized.candidate())
     {
-        return Ok(ApplyReceipt {
+        let receipt = ApplyReceipt {
             status: ApplyStatus::Applied,
             component: authorized.component,
             previous_version: authorized.current.version.clone(),
-            candidate_version: authorized.candidate.version.clone(),
+            candidate_version: authorized.candidate().version.clone(),
             review_digest: authorized.review_digest.clone(),
+            decision_id: authorized.decision_id.clone(),
             approval_ref: authorized.approval_ref.clone(),
             candidate_smoke,
             rollback_smoke: None,
             failure_code: None,
-        });
+        };
+        backend.finish();
+        return Ok(receipt);
     }
 
-    Ok(rollback_receipt(
+    let result = rollback_receipt(
         backend,
-        authorized,
+        &authorized,
         candidate_smoke,
         "candidate_smoke_failed",
-    ))
+    );
+    backend.finish();
+    result
 }
 
 fn rollback_receipt<B: UpdateBackend>(
@@ -556,8 +670,10 @@ fn rollback_receipt<B: UpdateBackend>(
     authorized: &AuthorizedUpdate,
     candidate_smoke: Option<SmokeReport>,
     failure_code: &str,
-) -> ApplyReceipt {
-    let rollback_call_ok = backend.rollback_exact(&authorized.current).is_ok();
+) -> Result<ApplyReceipt, UpdateError> {
+    let rollback_call_ok = backend
+        .rollback_exact(&authorized.candidate, &authorized.current)
+        .is_ok();
     let rollback_smoke = if rollback_call_ok {
         backend.smoke_exact(&authorized.current).ok()
     } else {
@@ -574,7 +690,7 @@ fn rollback_receipt<B: UpdateBackend>(
         && rollback_smoke
             .as_ref()
             .is_some_and(SmokeReport::valid_for_apply);
-    ApplyReceipt {
+    let receipt = ApplyReceipt {
         status: if rollback_verified {
             ApplyStatus::RolledBack
         } else {
@@ -582,12 +698,18 @@ fn rollback_receipt<B: UpdateBackend>(
         },
         component: authorized.component,
         previous_version: authorized.current.version.clone(),
-        candidate_version: authorized.candidate.version.clone(),
+        candidate_version: authorized.candidate().version.clone(),
         review_digest: authorized.review_digest.clone(),
+        decision_id: authorized.decision_id.clone(),
         approval_ref: authorized.approval_ref.clone(),
         candidate_smoke,
         rollback_smoke,
         failure_code: Some(failure_code.to_string()),
+    };
+    if rollback_verified {
+        Ok(receipt)
+    } else {
+        Err(UpdateError::RollbackFailed(Box::new(receipt)))
     }
 }
 
@@ -710,6 +832,31 @@ fn validate_atom(field: &'static str, value: &str) -> Result<(), UpdateError> {
     Ok(())
 }
 
+fn validate_identifier(field: &'static str, value: &str) -> Result<(), UpdateError> {
+    validate_atom(field, value)?;
+    if value
+        .bytes()
+        .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')))
+    {
+        return Err(UpdateError::InvalidSnapshot(field));
+    }
+    Ok(())
+}
+
+fn validate_digest(field: &'static str, value: &str) -> Result<(), UpdateError> {
+    let Some(hex) = value.strip_prefix("blake3-256:") else {
+        return Err(UpdateError::InvalidSnapshot(field));
+    };
+    if hex.len() != 64
+        || hex
+            .bytes()
+            .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
+    {
+        return Err(UpdateError::InvalidSnapshot(field));
+    }
+    Ok(())
+}
+
 fn canonical_digest<T: Serialize>(value: &T) -> Result<String, UpdateError> {
     let bytes = serde_json::to_vec(value).map_err(|_| UpdateError::Encoding)?;
     Ok(format!("blake3-256:{}", blake3::hash(&bytes).to_hex()))
@@ -755,18 +902,55 @@ mod tests {
             ],
         );
         let DetectionOutcome::ReviewRequired { review, .. } =
-            detect_update(current.clone(), candidate.clone(), &BTreeSet::new()).unwrap()
+            detect_update(current.clone(), candidate.clone()).unwrap()
         else {
             panic!("expected review");
         };
         (current, candidate, *review)
     }
 
+    fn verified_candidate(candidate: ComponentSnapshot) -> VerifiedCandidate {
+        VerifiedCandidate::from_verified_stage(
+            candidate,
+            "11111111-2222-4333-8444-555555555555",
+            format!("blake3-256:{}", "a".repeat(64)),
+        )
+        .unwrap()
+    }
+
+    fn owner_decision(review: &UpdateReview, decision: ReviewDecision) -> VerifiedOwnerDecision {
+        VerifiedOwnerDecision::from_trusted_source(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            OwnerPrincipal::Owner,
+            decision,
+            review,
+            "clickup-task-1",
+            900,
+            2_000,
+        )
+    }
+
+    #[derive(Default)]
+    struct FakeLedger {
+        consumed: BTreeSet<(String, String)>,
+    }
+
+    impl DecisionLedger for FakeLedger {
+        fn consume_once(
+            &mut self,
+            decision_id: &str,
+            review_digest: &str,
+        ) -> Result<bool, UpdateError> {
+            Ok(self
+                .consumed
+                .insert((decision_id.to_string(), review_digest.to_string())))
+        }
+    }
+
     #[test]
     fn no_change_returns_stable_snapshot_digest() {
         let current = snapshot("2.69.0", vec![tool("search_nodes", ToolImpact::Read)]);
-        let outcome =
-            detect_update(current.clone(), current, &BTreeSet::new()).expect("detect no change");
+        let outcome = detect_update(current.clone(), current).expect("detect no change");
         assert!(matches!(outcome, DetectionOutcome::NoChange { .. }));
     }
 
@@ -791,7 +975,7 @@ mod tests {
         changed.schema_digest = "schema-new".to_string();
         let candidate = snapshot("2.70.0", vec![changed]);
         let DetectionOutcome::ReviewRequired { review, .. } =
-            detect_update(current, candidate, &BTreeSet::new()).unwrap()
+            detect_update(current, candidate).unwrap()
         else {
             panic!("expected review");
         };
@@ -814,7 +998,7 @@ mod tests {
         );
         let candidate = snapshot("2.70.0", vec![tool("search_nodes", ToolImpact::Read)]);
         let DetectionOutcome::ReviewRequired { review, .. } =
-            detect_update(current, candidate, &BTreeSet::new()).unwrap()
+            detect_update(current, candidate).unwrap()
         else {
             panic!("expected review");
         };
@@ -824,24 +1008,30 @@ mod tests {
     }
 
     #[test]
-    fn same_candidate_is_deduplicated() {
-        let (current, candidate, review) = review_pair();
-        let known = BTreeSet::from([review.dedupe_key]);
-        let DetectionOutcome::ReviewRequired { duplicate, .. } =
-            detect_update(current, candidate, &known).unwrap()
+    fn same_candidate_has_stable_dedupe_key_for_trusted_store() {
+        let (current, candidate, first) = review_pair();
+        let DetectionOutcome::ReviewRequired { review: second } =
+            detect_update(current, candidate).unwrap()
         else {
             panic!("expected review");
         };
-        assert!(duplicate);
+        assert_eq!(first.dedupe_key, second.dedupe_key);
     }
 
     #[test]
     fn deferred_decision_cannot_authorize_apply() {
         let (current, candidate, review) = review_pair();
-        let decision =
-            ExactReviewDecision::new(ReviewDecision::Deferred, &review, "clickup-task-1", 2_000);
+        let decision = owner_decision(&review, ReviewDecision::Deferred);
+        let mut ledger = FakeLedger::default();
         assert_eq!(
-            authorize_update(current, candidate, &review, &decision, 1_000),
+            authorize_update(
+                current,
+                verified_candidate(candidate),
+                &review,
+                &decision,
+                &mut ledger,
+                1_000,
+            ),
             Err(UpdateError::ApprovalNotApproved)
         );
     }
@@ -849,9 +1039,17 @@ mod tests {
     #[test]
     fn exact_unexpired_approval_authorizes_candidate() {
         let (current, candidate, review) = review_pair();
-        let decision =
-            ExactReviewDecision::new(ReviewDecision::Approved, &review, "clickup-task-1", 2_000);
-        let authorized = authorize_update(current, candidate, &review, &decision, 1_000).unwrap();
+        let decision = owner_decision(&review, ReviewDecision::Approved);
+        let mut ledger = FakeLedger::default();
+        let authorized = authorize_update(
+            current,
+            verified_candidate(candidate),
+            &review,
+            &decision,
+            &mut ledger,
+            1_000,
+        )
+        .unwrap();
         assert_eq!(authorized.component(), UpdateComponent::LocalN8nMcp);
         assert_eq!(authorized.candidate().version, "2.70.0");
     }
@@ -859,12 +1057,76 @@ mod tests {
     #[test]
     fn approval_for_other_version_is_rejected() {
         let (current, candidate, review) = review_pair();
-        let mut decision =
-            ExactReviewDecision::new(ReviewDecision::Approved, &review, "clickup-task-1", 2_000);
+        let mut decision = owner_decision(&review, ReviewDecision::Approved);
         decision.candidate_version = "2.71.0".to_string();
+        let mut ledger = FakeLedger::default();
         assert_eq!(
-            authorize_update(current, candidate, &review, &decision, 1_000),
+            authorize_update(
+                current,
+                verified_candidate(candidate),
+                &review,
+                &decision,
+                &mut ledger,
+                1_000,
+            ),
             Err(UpdateError::ApprovalMismatch)
+        );
+    }
+
+    #[test]
+    fn owner_decision_requires_uuid_and_bounded_ttl() {
+        let (current, candidate, review) = review_pair();
+        let verified = verified_candidate(candidate);
+        let mut ledger = FakeLedger::default();
+
+        let mut invalid_id = owner_decision(&review, ReviewDecision::Approved);
+        invalid_id.decision_id = "caller-approved".to_string();
+        assert_eq!(
+            authorize_update(
+                current.clone(),
+                verified.clone(),
+                &review,
+                &invalid_id,
+                &mut ledger,
+                1_000,
+            ),
+            Err(UpdateError::InvalidDecision("invalid_decision_id"))
+        );
+
+        let mut excessive_ttl = owner_decision(&review, ReviewDecision::Approved);
+        excessive_ttl.issued_at_unix_ms = 1_000;
+        excessive_ttl.expires_at_unix_ms = 1_000 + MAX_APPROVAL_TTL_MS + 1;
+        assert_eq!(
+            authorize_update(
+                current,
+                verified,
+                &review,
+                &excessive_ttl,
+                &mut ledger,
+                1_001,
+            ),
+            Err(UpdateError::ApprovalExpired)
+        );
+    }
+
+    #[test]
+    fn owner_decision_is_consumed_once() {
+        let (current, candidate, review) = review_pair();
+        let verified = verified_candidate(candidate);
+        let decision = owner_decision(&review, ReviewDecision::Approved);
+        let mut ledger = FakeLedger::default();
+        authorize_update(
+            current.clone(),
+            verified.clone(),
+            &review,
+            &decision,
+            &mut ledger,
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(
+            authorize_update(current, verified, &review, &decision, &mut ledger, 1_000,),
+            Err(UpdateError::ApprovalReplay)
         );
     }
 
@@ -873,21 +1135,40 @@ mod tests {
         active: ComponentSnapshot,
         candidate_smoke_passes: bool,
         rollback_fails: bool,
+        replace_after_failed_smoke: Option<ComponentSnapshot>,
+        locked: bool,
         activations: usize,
         rollbacks: usize,
     }
 
     impl UpdateBackend for FakeBackend {
+        fn begin_exact(
+            &mut self,
+            current: &ComponentSnapshot,
+            _candidate: &VerifiedCandidate,
+        ) -> Result<(), BackendError> {
+            if self.locked || &self.active != current {
+                return Err(BackendError::ActivationFailed);
+            }
+            self.locked = true;
+            Ok(())
+        }
+
         fn active_snapshot(
             &mut self,
             _component: UpdateComponent,
         ) -> Result<ComponentSnapshot, BackendError> {
-            Ok(self.active.clone())
+            self.locked
+                .then(|| self.active.clone())
+                .ok_or(BackendError::ActiveReadFailed)
         }
 
-        fn activate_exact(&mut self, candidate: &ComponentSnapshot) -> Result<(), BackendError> {
+        fn activate_exact(&mut self, candidate: &VerifiedCandidate) -> Result<(), BackendError> {
+            if !self.locked {
+                return Err(BackendError::ActivationFailed);
+            }
             self.activations += 1;
-            self.active = candidate.clone();
+            self.active = candidate.snapshot().clone();
             Ok(())
         }
 
@@ -897,6 +1178,11 @@ mod tests {
         ) -> Result<SmokeReport, BackendError> {
             let candidate = expected.version == "2.70.0";
             let passed = !candidate || self.candidate_smoke_passes;
+            if candidate && !passed {
+                if let Some(replacement) = self.replace_after_failed_smoke.take() {
+                    self.active = replacement;
+                }
+            }
             Ok(SmokeReport {
                 passed,
                 check_ids: vec!["tools_list".to_string(), "zero_idle".to_string()],
@@ -905,22 +1191,37 @@ mod tests {
             })
         }
 
-        fn rollback_exact(&mut self, previous: &ComponentSnapshot) -> Result<(), BackendError> {
+        fn rollback_exact(
+            &mut self,
+            failed_candidate: &VerifiedCandidate,
+            previous: &ComponentSnapshot,
+        ) -> Result<(), BackendError> {
             self.rollbacks += 1;
-            if self.rollback_fails {
+            if !self.locked || self.rollback_fails || self.active != *failed_candidate.snapshot() {
                 return Err(BackendError::RollbackFailed);
             }
             self.active = previous.clone();
             Ok(())
         }
+
+        fn finish(&mut self) {
+            self.locked = false;
+        }
     }
 
     fn authorized_pair() -> (ComponentSnapshot, AuthorizedUpdate) {
         let (current, candidate, review) = review_pair();
-        let decision =
-            ExactReviewDecision::new(ReviewDecision::Approved, &review, "clickup-task-1", 2_000);
-        let authorized =
-            authorize_update(current.clone(), candidate, &review, &decision, 1_000).unwrap();
+        let decision = owner_decision(&review, ReviewDecision::Approved);
+        let mut ledger = FakeLedger::default();
+        let authorized = authorize_update(
+            current.clone(),
+            verified_candidate(candidate),
+            &review,
+            &decision,
+            &mut ledger,
+            1_000,
+        )
+        .unwrap();
         (current, authorized)
     }
 
@@ -931,14 +1232,17 @@ mod tests {
             active: current,
             candidate_smoke_passes: true,
             rollback_fails: false,
+            replace_after_failed_smoke: None,
+            locked: false,
             activations: 0,
             rollbacks: 0,
         };
-        let receipt = apply_authorized(&mut backend, &authorized, 1_500).unwrap();
+        let receipt = apply_authorized(&mut backend, authorized, 1_500).unwrap();
         assert_eq!(receipt.status, ApplyStatus::Applied);
         assert_eq!(backend.active.version, "2.70.0");
         assert_eq!(backend.activations, 1);
         assert_eq!(backend.rollbacks, 0);
+        assert!(!backend.locked);
     }
 
     #[test]
@@ -948,10 +1252,12 @@ mod tests {
             active: current,
             candidate_smoke_passes: false,
             rollback_fails: false,
+            replace_after_failed_smoke: None,
+            locked: false,
             activations: 0,
             rollbacks: 0,
         };
-        let receipt = apply_authorized(&mut backend, &authorized, 1_500).unwrap();
+        let receipt = apply_authorized(&mut backend, authorized, 1_500).unwrap();
         assert_eq!(receipt.status, ApplyStatus::RolledBack);
         assert_eq!(backend.active.version, "2.69.0");
         assert_eq!(backend.activations, 1);
@@ -966,11 +1272,13 @@ mod tests {
             active: snapshot("2.68.0", vec![tool("search_nodes", ToolImpact::Read)]),
             candidate_smoke_passes: true,
             rollback_fails: false,
+            replace_after_failed_smoke: None,
+            locked: false,
             activations: 0,
             rollbacks: 0,
         };
         assert_eq!(
-            apply_authorized(&mut backend, &authorized, 1_500),
+            apply_authorized(&mut backend, authorized, 1_500),
             Err(UpdateError::ActivePreconditionMismatch)
         );
         assert_eq!(backend.activations, 0);
@@ -983,11 +1291,13 @@ mod tests {
             active: current,
             candidate_smoke_passes: true,
             rollback_fails: false,
+            replace_after_failed_smoke: None,
+            locked: false,
             activations: 0,
             rollbacks: 0,
         };
         assert_eq!(
-            apply_authorized(&mut backend, &authorized, 2_000),
+            apply_authorized(&mut backend, authorized, 2_000),
             Err(UpdateError::ApprovalExpired)
         );
         assert_eq!(backend.activations, 0);
@@ -997,11 +1307,38 @@ mod tests {
     fn manipulated_diff_cannot_be_authorized() {
         let (current, candidate, mut review) = review_pair();
         review.diff.flags.remove(&UpdateFlag::Breaking);
-        let decision =
-            ExactReviewDecision::new(ReviewDecision::Approved, &review, "clickup-task-1", 2_000);
+        let decision = owner_decision(&review, ReviewDecision::Approved);
+        let mut ledger = FakeLedger::default();
         assert_eq!(
-            authorize_update(current, candidate, &review, &decision, 1_000),
+            authorize_update(
+                current,
+                verified_candidate(candidate),
+                &review,
+                &decision,
+                &mut ledger,
+                1_000,
+            ),
             Err(UpdateError::ApprovalMismatch)
         );
+    }
+
+    #[test]
+    fn conditional_rollback_refuses_to_overwrite_concurrent_replacement() {
+        let (current, authorized) = authorized_pair();
+        let replacement = snapshot("2.71.0", vec![tool("search_nodes", ToolImpact::Read)]);
+        let mut backend = FakeBackend {
+            active: current,
+            candidate_smoke_passes: false,
+            rollback_fails: false,
+            replace_after_failed_smoke: Some(replacement.clone()),
+            locked: false,
+            activations: 0,
+            rollbacks: 0,
+        };
+        let error = apply_authorized(&mut backend, authorized, 1_500)
+            .expect_err("conditional rollback must fail hard");
+        assert!(matches!(error, UpdateError::RollbackFailed(_)));
+        assert_eq!(backend.active, replacement);
+        assert!(!backend.locked);
     }
 }

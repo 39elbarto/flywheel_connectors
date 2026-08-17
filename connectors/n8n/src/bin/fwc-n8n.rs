@@ -721,7 +721,7 @@ fn validate_host_run_once_input(
         HostRunOnceOperation::WorkflowsGet => (&["id"], &["id"]),
         HostRunOnceOperation::WorkflowsCreateDraft => (
             &["name", "project_id", "parent_folder_id", "graph", "guard"],
-            &["name", "project_id", "graph", "guard"],
+            &["name", "graph", "guard"],
         ),
         HostRunOnceOperation::WorkflowsUpdateDraft => (
             &[
@@ -771,15 +771,22 @@ fn validate_host_run_once_input(
             Ok(())
         }
         HostRunOnceOperation::WorkflowsCreateDraft | HostRunOnceOperation::WorkflowsUpdateDraft => {
-            validate_workflow_draft_input(operation, object)
+            validate_workflow_draft_input(operation, input, object)
         }
     }
 }
 
 fn validate_workflow_draft_input(
     operation: HostRunOnceOperation,
+    input: &Value,
     object: &serde_json::Map<String, Value>,
 ) -> Result<(), AppError> {
+    if object.contains_key("project_id") {
+        host_run_once_input_id(input, "project_id")?;
+    }
+    if object.contains_key("parent_folder_id") {
+        host_run_once_input_id(input, "parent_folder_id")?;
+    }
     let graph = object
         .get("graph")
         .and_then(Value::as_object)
@@ -906,10 +913,15 @@ fn expected_host_run_once_resource_uri(
             "{root}/workflows/{}",
             encode_host_resource_segment(host_run_once_input_id(input, "id")?)
         )),
-        HostRunOnceOperation::WorkflowsCreateDraft => Ok(format!(
-            "{root}/projects/{}",
-            encode_host_resource_segment(host_run_once_input_id(input, "project_id")?)
-        )),
+        HostRunOnceOperation::WorkflowsCreateDraft => input
+            .get("project_id")
+            .map(|_| {
+                Ok(format!(
+                    "{root}/projects/{}",
+                    encode_host_resource_segment(host_run_once_input_id(input, "project_id")?)
+                ))
+            })
+            .unwrap_or(Ok(root)),
         HostRunOnceOperation::WorkflowsUpdateDraft => Ok(format!(
             "{root}/workflows/{}",
             encode_host_resource_segment(host_run_once_input_id(input, "id")?)
@@ -1616,6 +1628,19 @@ mod tests {
                     }
                 }),
                 "fwc-n8n://eec/projects/project%2D1",
+            ),
+            (
+                "n8n.workflows.create_draft",
+                json!({
+                    "name": "Personal draft",
+                    "graph": {"nodes": [], "connections": {}},
+                    "guard": {
+                        "approvalRef": "chat-approval-personal",
+                        "idempotencyKey": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                        "precondition": {}
+                    }
+                }),
+                "fwc-n8n://eec",
             ),
             (
                 "n8n.workflows.update_draft",

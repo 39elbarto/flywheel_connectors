@@ -9898,14 +9898,13 @@ fn validate_n8n_draft_input(operation: &str, input: &Value) -> HostResult<()> {
                     .get("name")
                     .and_then(Value::as_str)
                     .is_none_or(|value| value.trim().is_empty() || value.len() > 256)
-                || object
-                    .get("project_id")
-                    .and_then(Value::as_str)
-                    .is_none_or(|value| value.is_empty())
             {
                 return Err(HostError::InvalidFilter(
-                    "n8n create_draft requires name and project_id and forbids id".to_string(),
+                    "n8n create_draft requires name and forbids id".to_string(),
                 ));
+            }
+            if object.contains_key("project_id") {
+                n8n_read_only_input_id(input, "project_id")?;
             }
         }
         "n8n.workflows.update_draft" => {
@@ -9983,10 +9982,15 @@ fn expected_n8n_read_only_resource_uri(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
-        "n8n.workflows.create_draft" => Ok(format!(
-            "{root}/projects/{}",
-            encode_n8n_resource_segment(n8n_read_only_input_id(input, "project_id")?)
-        )),
+        "n8n.workflows.create_draft" => input
+            .get("project_id")
+            .map(|_| {
+                Ok(format!(
+                    "{root}/projects/{}",
+                    encode_n8n_resource_segment(n8n_read_only_input_id(input, "project_id")?)
+                ))
+            })
+            .unwrap_or(Ok(root)),
         "n8n.workflows.update_draft" => Ok(format!(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
@@ -32189,17 +32193,26 @@ done"#;
     }
 
     #[test]
-    fn n8n_draft_create_requires_exact_project_resource_uri() {
+    fn n8n_draft_create_binds_project_or_personal_resource_uri() {
         let config = run_once_n8n_draft_test_config();
         let mut input = n8n_draft_test_input(
             "n8n.workflows.create_draft",
             "99999999-aaaa-4bbb-8ccc-dddddddddddd",
         );
+        input
+            .input
+            .as_object_mut()
+            .expect("create input")
+            .remove("project_id");
         input.resource_uri = "fwc-n8n://eec".to_string();
+        build_n8n_read_only_run_once_plan(input.clone(), &config)
+            .expect("omitted project binds the personal-project create to the instance");
+
+        input.resource_uri = "fwc-n8n://eec/projects/project%2D1".to_string();
 
         let error = build_n8n_read_only_run_once_plan(input, &config)
             .err()
-            .expect("instance-wide create target must fail closed");
+            .expect("personal-project create must reject a mismatched project resource");
         assert!(error.to_string().contains("resource binding was denied"));
     }
 

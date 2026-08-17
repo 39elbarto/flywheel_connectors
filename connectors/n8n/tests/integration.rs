@@ -60,13 +60,13 @@ fn resource_uri(operation: &str, input: &Value) -> String {
             let id = utf8_percent_encode(id, NON_ALPHANUMERIC);
             format!("fwc-n8n://{TEST_SERVER_ID}/workflows/{id}")
         }
-        "n8n.workflows.create_draft" => {
-            let project_id = input["project_id"]
-                .as_str()
-                .expect("project id for draft approval");
-            let project_id = utf8_percent_encode(project_id, NON_ALPHANUMERIC);
-            format!("fwc-n8n://{TEST_SERVER_ID}/projects/{project_id}")
-        }
+        "n8n.workflows.create_draft" => input["project_id"].as_str().map_or_else(
+            || format!("fwc-n8n://{TEST_SERVER_ID}"),
+            |project_id| {
+                let project_id = utf8_percent_encode(project_id, NON_ALPHANUMERIC);
+                format!("fwc-n8n://{TEST_SERVER_ID}/projects/{project_id}")
+            },
+        ),
         "n8n.workflows.update_draft" => {
             let id = input["id"]
                 .as_str()
@@ -1684,7 +1684,6 @@ async fn mediated_credential_reads_share_operation_resource_and_safe_get_contrac
 async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
     let input = json!({
         "name": "Created workflow",
-        "project_id": "project-1",
         "graph": {
             "nodes": [{"id": "node-1", "type": "n8n-nodes-base.noOp", "parameters": {}}],
             "connections": {}
@@ -1701,7 +1700,7 @@ async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
         "versionId": "draft-v1",
         "activeVersionId": null,
         "isArchived": false,
-        "projectId": "project-1",
+        "projectId": null,
         "nodes": input["graph"]["nodes"],
         "connections": {},
         "settings": {"availableInMCP": true, "callerPolicy": "workflowsFromSameOwner"},
@@ -1755,10 +1754,7 @@ async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
         requests[0]["context"]["operation_id"],
         "n8n.workflows.create_draft"
     );
-    assert_eq!(
-        requests[0]["context"]["resource_uri"],
-        "fwc-n8n://eec/projects/project%2D1"
-    );
+    assert_eq!(requests[0]["context"]["resource_uri"], "fwc-n8n://eec");
     assert_eq!(
         requests[0]["headers"],
         json!([
@@ -1770,7 +1766,6 @@ async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
         mediated_request_payload(&requests[0]),
         json!({
             "name": "Created workflow",
-            "projectId": "project-1",
             "nodes": input["graph"]["nodes"],
             "connections": {},
             "settings": {"availableInMCP": true}

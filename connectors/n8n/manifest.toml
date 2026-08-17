@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4f8b98425107fb38e8f7929e030ea0e53ec6d5481ae7957149dad3dc45662b8b"
+interface_hash = "blake3-256:fcp.interface.v2:7c654a5f333de3b3d92f69bb0a6d4e5009e2b6b01a68f7e4b924f1338de5e85b"
 
 [connector]
 id = "fcp.n8n"
@@ -836,7 +836,6 @@ required = [
     "graph",
     "guard",
     "name",
-    "project_id",
 ]
 type = "object"
 
@@ -920,6 +919,7 @@ type = "string"
 type = "string"
 
 [provides.operations."n8n.workflows.create_draft".input_schema.properties.project_id]
+description = "Optional target project; omitted means the API-key owner's personal project"
 type = "string"
 
 [provides.operations."n8n.workflows.create_draft".output_schema]
@@ -1430,6 +1430,7 @@ type = "string"
 type = "string"
 
 [provides.operations."n8n.workflows.update_draft".input_schema.properties.project_id]
+description = "Optional project field; omitted preserves the workflow's existing project"
 type = "string"
 
 [provides.operations."n8n.workflows.update_draft".output_schema]
@@ -1590,15 +1591,15 @@ burst = 20
 scope = "instance"
 
 [rate_limits.operation_pools]
-"n8n.executions.get" = ["n8n.executions.read"]
-"n8n.projects.list" = ["n8n.projects.read"]
 "n8n.credentials.list" = ["n8n.credentials.metadata.read"]
-"n8n.folders.list" = ["n8n.folders.read"]
-"n8n.workflows.list" = ["n8n.workflows.read"]
-"n8n.folders.get" = ["n8n.folders.read"]
-"n8n.workflows.activate" = ["n8n.workflows.write"]
-"n8n.workflows.get" = ["n8n.workflows.read"]
-"n8n.workflows.update_draft" = ["n8n.workflows.write"]
+"n8n.executions.get" = ["n8n.executions.read"]
 "n8n.tags.list" = ["n8n.tags.read"]
-"n8n.executions.list" = ["n8n.executions.read"]
+"n8n.workflows.list" = ["n8n.workflows.read"]
+"n8n.workflows.activate" = ["n8n.workflows.write"]
+"n8n.projects.list" = ["n8n.projects.read"]
+"n8n.folders.get" = ["n8n.folders.read"]
+"n8n.folders.list" = ["n8n.folders.read"]
+"n8n.workflows.update_draft" = ["n8n.workflows.write"]
 "n8n.workflows.create_draft" = ["n8n.workflows.write"]
+"n8n.workflows.get" = ["n8n.workflows.read"]
+"n8n.executions.list" = ["n8n.executions.read"]

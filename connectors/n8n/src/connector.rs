@@ -1273,9 +1273,12 @@ impl N8nConnector {
             | "n8n.credentials.list"
             | "n8n.tags.list" => instance_resource_uri(server_id),
             "n8n.workflows.create_draft" => {
-                let project_id =
-                    require_str(input, "project_id").map_err(|error| error.to_fcp_error())?;
-                project_resource_uri(server_id, project_id).map_err(|error| error.to_fcp_error())?
+                if let Some(project_id) = input.get("project_id").and_then(Value::as_str) {
+                    project_resource_uri(server_id, project_id)
+                        .map_err(|error| error.to_fcp_error())?
+                } else {
+                    instance_resource_uri(server_id)
+                }
             }
             "n8n.folders.list" => {
                 let project_id = parse_folder_list_input(input)
@@ -1528,11 +1531,6 @@ fn validate_draft_mutation(operation: &str, input: &WorkflowDraftMutationInput) 
             if input.id.is_some() || input.name.as_deref().is_none_or(str::is_empty) {
                 return Err(N8nError::InvalidInput(
                     "create_draft requires name and must not include id".into(),
-                ));
-            }
-            if input.project_id.as_deref().is_none_or(str::is_empty) {
-                return Err(N8nError::InvalidInput(
-                    "create_draft requires project_id".into(),
                 ));
             }
             if precondition.version_id.is_some()
@@ -2609,14 +2607,24 @@ fn workflow_draft_input_schema(update: bool) -> serde_json::Value {
     if update {
         required.push("id");
     } else {
-        required.extend(["name", "project_id"]);
+        required.push("name");
     }
     let mut properties = serde_json::Map::from_iter([
         (
             "name".to_string(),
             json!({"type": "string", "minLength": 1, "maxLength": 256}),
         ),
-        ("project_id".to_string(), json!({"type": "string"})),
+        (
+            "project_id".to_string(),
+            json!({
+                "type": "string",
+                "description": if update {
+                    "Optional project field; omitted preserves the workflow's existing project"
+                } else {
+                    "Optional target project; omitted means the API-key owner's personal project"
+                }
+            }),
+        ),
         ("parent_folder_id".to_string(), json!({"type": "string"})),
         (
             "graph".to_string(),
@@ -3495,6 +3503,17 @@ mod tests {
 
         assert!(create.input_schema.pointer("/properties/id").is_none());
         assert!(update.input_schema.pointer("/properties/id").is_some());
+        assert!(
+            create
+                .input_schema
+                .pointer("/properties/project_id")
+                .is_some()
+        );
+        assert!(
+            create.input_schema["required"]
+                .as_array()
+                .is_some_and(|required| !required.iter().any(|field| field == "project_id"))
+        );
     }
 
     #[test]

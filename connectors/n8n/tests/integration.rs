@@ -218,15 +218,19 @@ fn draft_graph_digest(input: &Value) -> String {
     format!("blake3-256:{}", hasher.finalize().to_hex())
 }
 
-fn draft_mutation_digest(input: &Value) -> String {
+fn draft_mutation_digest(operation: &str, input: &Value) -> String {
     let graph = input["graph"].as_object().expect("draft graph object");
+    let create = operation == "n8n.workflows.create_draft";
     let settings = match graph.get("settings") {
-        None | Some(Value::Null) => json!({"availableInMCP": true}),
+        None | Some(Value::Null) if create => json!({"availableInMCP": false}),
+        None | Some(Value::Null) => json!({}),
         Some(Value::Object(settings)) => {
             let mut settings = settings.clone();
-            settings
-                .entry("availableInMCP")
-                .or_insert_with(|| Value::Bool(true));
+            if create {
+                settings
+                    .entry("availableInMCP")
+                    .or_insert_with(|| Value::Bool(false));
+            }
             Value::Object(settings)
         }
         Some(value) => value.clone(),
@@ -275,7 +279,7 @@ fn draft_approval_token(operation: &str, input: &Value) -> ApprovalToken {
             .cloned()
             .unwrap_or(Value::Null),
         "graph_digest": draft_graph_digest(input),
-        "mutation_digest": draft_mutation_digest(input),
+        "mutation_digest": draft_mutation_digest(operation, input),
         "idempotency_key": guard["idempotencyKey"],
         "provider": "rest",
         "side_effect": "draft_only",
@@ -1703,7 +1707,7 @@ async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
         "projectId": null,
         "nodes": input["graph"]["nodes"],
         "connections": {},
-        "settings": {"availableInMCP": true, "callerPolicy": "workflowsFromSameOwner"},
+        "settings": {"availableInMCP": false, "callerPolicy": "workflowsFromSameOwner"},
         "activeVersion": null
     });
     let (responder, requests) = MediatedDraftResponse::new(vec![
@@ -1768,7 +1772,7 @@ async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
             "name": "Created workflow",
             "nodes": input["graph"]["nodes"],
             "connections": {},
-            "settings": {"availableInMCP": true}
+            "settings": {"availableInMCP": false}
         })
     );
     assert_eq!(requests[1]["method"], "GET");
@@ -1806,7 +1810,7 @@ async fn mediated_draft_create_canonicalizes_supplied_settings() {
         "connections": {},
         "settings": {
             "executionOrder": "v1",
-            "availableInMCP": true,
+            "availableInMCP": false,
             "callerPolicy": "workflowsFromSameOwner"
         },
         "activeVersion": null
@@ -1835,7 +1839,7 @@ async fn mediated_draft_create_canonicalizes_supplied_settings() {
     let requests = requests.lock().unwrap().clone();
     assert_eq!(
         mediated_request_payload(&requests[0])["settings"],
-        json!({"executionOrder": "v1", "availableInMCP": true})
+        json!({"executionOrder": "v1", "availableInMCP": false})
     );
 }
 
@@ -1843,7 +1847,7 @@ async fn mediated_draft_create_canonicalizes_supplied_settings() {
 async fn mediated_draft_settings_rejection_stops_before_provider_dispatch() {
     let proxy = MockServer::start().await;
     let c = setup_mediated_connector(&proxy.uri()).await;
-    for (index, setting) in [json!(false), json!("true"), json!({"nested": true})]
+    for (index, setting) in [json!(true), json!("true"), json!({"nested": true})]
         .into_iter()
         .enumerate()
     {
@@ -1893,11 +1897,14 @@ async fn mediated_draft_credential_change_invalidates_prior_approval_without_raw
 
     assert_eq!(draft_graph_digest(&original), draft_graph_digest(&changed));
     assert_ne!(
-        draft_mutation_digest(&original),
-        draft_mutation_digest(&changed)
+        draft_mutation_digest("n8n.workflows.create_draft", &original),
+        draft_mutation_digest("n8n.workflows.create_draft", &changed)
     );
     let serialized_approval = serde_json::to_string(&approval).expect("approval JSON");
-    assert!(serialized_approval.contains(&draft_mutation_digest(&original)));
+    assert!(serialized_approval.contains(&draft_mutation_digest(
+        "n8n.workflows.create_draft",
+        &original
+    )));
     assert!(!serialized_approval.contains("credential-1"));
     assert!(!serialized_approval.contains("credential-2"));
     let ApprovalScope::Execution(scope) = &approval.scope else {
@@ -1905,7 +1912,11 @@ async fn mediated_draft_credential_change_invalidates_prior_approval_without_raw
     };
     assert!(scope.input_constraints.iter().any(|constraint| {
         constraint.pointer == "/mutation_digest"
-            && constraint.expected == json!(draft_mutation_digest(&original))
+            && constraint.expected
+                == json!(draft_mutation_digest(
+                    "n8n.workflows.create_draft",
+                    &original
+                ))
     }));
 
     let proxy = MockServer::start().await;

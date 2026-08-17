@@ -781,7 +781,7 @@ impl N8nConnector {
     ) -> Result<Value, N8nError> {
         let typed: WorkflowDraftMutationInput = serde_json::from_value(input.clone())
             .map_err(|_| N8nError::InvalidInput("invalid guarded workflow draft input".into()))?;
-        let canonical_settings = canonical_draft_settings(input)?;
+        let canonical_settings = canonical_draft_settings(operation, input)?;
         let settings_supplied = draft_settings_supplied(input);
 
         let (baseline, provider_payload) = if operation == "n8n.workflows.update_draft" {
@@ -797,11 +797,6 @@ impl N8nConnector {
             }
             let state = normalize_workflow_state(workflow.clone())?;
             verify_draft_input_precondition(input, &state)?;
-            if !settings_supplied && !settings_available_in_mcp(workflow.settings.as_ref()) {
-                return Err(N8nError::InvalidInput(
-                    "update_draft baseline settings must preserve availableInMCP=true".into(),
-                ));
-            }
             let mut provider_payload = plan
                 .provider_payload
                 .as_object()
@@ -1133,11 +1128,12 @@ impl N8nConnector {
         validate_draft_input_presence(operation, input).map_err(|error| error.to_fcp_error())?;
         validate_draft_mutation(operation, &typed).map_err(|error| error.to_fcp_error())?;
         let canonical_settings =
-            canonical_draft_settings(input).map_err(|error| error.to_fcp_error())?;
+            canonical_draft_settings(operation, input).map_err(|error| error.to_fcp_error())?;
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
         let graph_digest = workflow_graph_digest(&typed.graph.nodes, &typed.graph.connections)
             .map_err(|error| error.to_fcp_error())?;
-        let mutation_digest = draft_mutation_digest(input).map_err(|error| error.to_fcp_error())?;
+        let mutation_digest =
+            draft_mutation_digest(operation, input).map_err(|error| error.to_fcp_error())?;
         let precondition = input
             .get("guard")
             .and_then(Value::as_object)
@@ -1423,16 +1419,33 @@ fn draft_settings_supplied(input: &Value) -> bool {
         .is_some_and(|graph| graph.contains_key("settings"))
 }
 
-fn canonical_draft_settings(input: &Value) -> N8nResult<Value> {
+fn canonical_draft_settings(operation: &str, input: &Value) -> N8nResult<Value> {
     let graph = input
         .get("graph")
         .and_then(Value::as_object)
         .ok_or_else(|| N8nError::InvalidInput("draft mutation graph must be an object".into()))?;
+    let create = match operation {
+        "n8n.workflows.create_draft" => true,
+        "n8n.workflows.update_draft" => false,
+        _ => {
+            return Err(N8nError::InvalidInput(
+                "unsupported draft settings operation".into(),
+            ));
+        }
+    };
     let Some(raw_settings) = graph.get("settings") else {
-        return Ok(json!({"availableInMCP": true}));
+        return Ok(if create {
+            json!({"availableInMCP": false})
+        } else {
+            json!({})
+        });
     };
     if raw_settings.is_null() {
-        return Ok(json!({"availableInMCP": true}));
+        return Ok(if create {
+            json!({"availableInMCP": false})
+        } else {
+            json!({})
+        });
     }
     let Some(settings) = raw_settings.as_object() else {
         return Err(N8nError::InvalidInput(
@@ -1440,31 +1453,30 @@ fn canonical_draft_settings(input: &Value) -> N8nResult<Value> {
         ));
     };
     let mut canonical = settings.clone();
-    match canonical.get("availableInMCP") {
-        None => {
-            canonical.insert("availableInMCP".into(), Value::Bool(true));
+    match (create, canonical.get("availableInMCP")) {
+        (true, None) => {
+            canonical.insert("availableInMCP".into(), Value::Bool(false));
         }
-        Some(Value::Bool(true)) => {}
-        Some(Value::Bool(false)) => {
+        (true, Some(Value::Bool(false))) | (false, None) => {}
+        (true, Some(Value::Bool(true))) => {
             return Err(N8nError::InvalidInput(
-                "graph.settings.availableInMCP=false is not permitted".into(),
+                "draft creation cannot enable MCP access; use the separately approved MCP access operation after activation and Webhook eligibility checks"
+                    .into(),
             ));
         }
-        Some(_) => {
+        (false, Some(_)) => {
             return Err(N8nError::InvalidInput(
-                "graph.settings.availableInMCP must be boolean true".into(),
+                "draft update cannot change availableInMCP; use the separately approved MCP access operation"
+                    .into(),
+            ));
+        }
+        (true, Some(_)) => {
+            return Err(N8nError::InvalidInput(
+                "graph.settings.availableInMCP must be boolean false for draft creation".into(),
             ));
         }
     }
     Ok(Value::Object(canonical))
-}
-
-fn settings_available_in_mcp(settings: Option<&Value>) -> bool {
-    settings
-        .and_then(Value::as_object)
-        .and_then(|settings| settings.get("availableInMCP"))
-        .and_then(Value::as_bool)
-        == Some(true)
 }
 
 fn settings_include_expected(expected: Option<&Value>, actual: Option<&Value>) -> bool {
@@ -1678,8 +1690,7 @@ fn verify_draft_readback(
     actual_static_data: Option<&Value>,
     actual_pin_data: Option<&Value>,
 ) -> N8nResult<()> {
-    if !settings_available_in_mcp(actual_settings)
-        || state.draft.graph_digest != plan.graph_digest
+    if state.draft.graph_digest != plan.graph_digest
         || expected_name.is_some_and(|name| Some(name) != state.name.as_deref())
         || !settings_include_expected(expected_settings, actual_settings)
         || expected_static_data != actual_static_data
@@ -2006,7 +2017,7 @@ fn workflow_graph_digest(nodes: &[Value], connections: &Value) -> N8nResult<Stri
     )
 }
 
-fn draft_mutation_digest(input: &Value) -> N8nResult<String> {
+fn draft_mutation_digest(operation: &str, input: &Value) -> N8nResult<String> {
     let object = input
         .as_object()
         .ok_or_else(|| N8nError::InvalidInput("draft mutation input must be an object".into()))?;
@@ -2014,7 +2025,7 @@ fn draft_mutation_digest(input: &Value) -> N8nResult<String> {
         .get("graph")
         .and_then(Value::as_object)
         .ok_or_else(|| N8nError::InvalidInput("draft mutation graph must be an object".into()))?;
-    let settings = canonical_draft_settings(input)?;
+    let settings = canonical_draft_settings(operation, input)?;
     digest_canonical_json(
         MUTATION_DIGEST_DOMAIN_V1,
         &json!({
@@ -2635,7 +2646,14 @@ fn workflow_draft_input_schema(update: bool) -> serde_json::Value {
                 "properties": {
                     "nodes": {"type": "array", "maxItems": 10000},
                     "connections": {"type": "object"},
-                    "settings": {"type": ["object", "null"]},
+                    "settings": {
+                        "type": ["object", "null"],
+                        "description": if update {
+                            "Optional settings patch merged with the current settings; availableInMCP cannot be changed by draft update"
+                        } else {
+                            "Optional settings for the inactive draft; availableInMCP is forced to false and must be enabled later by a separate eligible MCP-access operation"
+                        }
+                    },
                     "staticData": {},
                     "pinData": {},
                 },
@@ -2762,6 +2780,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Create a draft only after current-chat approval is bound to the exact graph and server.".into(),
                 common_mistakes: vec![
                     "This operation never publishes, activates, or archives a workflow.".into(),
+                    "A new inactive draft is created with availableInMCP=false; MCP access requires a separate approval after n8n activation and Webhook eligibility checks.".into(),
                     "A timeout or malformed write response is unknown; reconcile with GET and never retry automatically.".into(),
                 ],
                 examples: vec![r#"{"name":"Daily report","project_id":"project-1","graph":{"nodes":[],"connections":{}},"guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000001"}}"#.into()],
@@ -2784,6 +2803,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Update a draft only when current-chat approval matches the full version/lifecycle precondition and exact graph digest.".into(),
                 common_mistakes: vec![
                     "The full versionId, explicit activeVersionId (null or value), active, isArchived, and stateDigest precondition is required.".into(),
+                    "Draft update preserves availableInMCP and rejects attempts to change it; use the separate MCP-access operation.".into(),
                     "A successful draft update preserves published and lifecycle state; ambiguous writes are never retried automatically.".into(),
                 ],
                 examples: vec![r#"{"id":"1001","graph":{"nodes":[],"connections":{}},"guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000002","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:..."}}}"#.into()],
@@ -3049,44 +3069,54 @@ mod tests {
 
     #[test]
     fn draft_mutation_digest_matches_host_golden_vectors() {
-        let credential_one = draft_mutation_digest(&mutation_digest_golden_input("credential-1"))
-            .expect("credential-1 mutation digest");
-        let credential_two = draft_mutation_digest(&mutation_digest_golden_input("credential-2"))
-            .expect("credential-2 mutation digest");
+        let credential_one = draft_mutation_digest(
+            "n8n.workflows.create_draft",
+            &mutation_digest_golden_input("credential-1"),
+        )
+        .expect("credential-1 mutation digest");
+        let credential_two = draft_mutation_digest(
+            "n8n.workflows.create_draft",
+            &mutation_digest_golden_input("credential-2"),
+        )
+        .expect("credential-2 mutation digest");
 
         assert_eq!(
             (credential_one.as_str(), credential_two.as_str()),
             (
-                "blake3-256:d4cc7e66bdefef56a3201f0f531c99d883690cc8d229f4b8cd012d0c8968acc1",
-                "blake3-256:c8f382aa1eef11ee3b467fb14e906ceef93deee876ea9505a750b1e5c5c1fcb3"
+                "blake3-256:d34cb28e2a1b6d54e559a6e2b25219b3ffc825daad1582e3a2fbde1ac69c80ad",
+                "blake3-256:c1f951ef0958caacd4526da532b481f63eb2620b4fd1f6719a150a5f16997e64"
             )
         );
         assert_ne!(credential_one, credential_two);
     }
 
     #[test]
-    fn canonical_draft_settings_enforces_available_in_mcp() {
+    fn canonical_draft_settings_separates_drafts_from_mcp_access() {
         let base = json!({"graph": {"nodes": [], "connections": {}}});
         assert_eq!(
-            canonical_draft_settings(&base).unwrap(),
-            json!({"availableInMCP": true})
+            canonical_draft_settings("n8n.workflows.create_draft", &base).unwrap(),
+            json!({"availableInMCP": false})
         );
 
         let mut explicit_null = base.clone();
         explicit_null["graph"]["settings"] = Value::Null;
         assert_eq!(
-            canonical_draft_settings(&explicit_null).unwrap(),
-            json!({"availableInMCP": true})
+            canonical_draft_settings("n8n.workflows.create_draft", &explicit_null).unwrap(),
+            json!({"availableInMCP": false})
         );
 
-        let mut object = base;
+        let mut object = base.clone();
         object["graph"]["settings"] = json!({"executionOrder": "v1"});
         assert_eq!(
-            canonical_draft_settings(&object).unwrap(),
-            json!({"executionOrder": "v1", "availableInMCP": true})
+            canonical_draft_settings("n8n.workflows.create_draft", &object).unwrap(),
+            json!({"executionOrder": "v1", "availableInMCP": false})
         );
 
-        for value in [json!(false), json!("true"), Value::Null] {
+        let mut explicit_false = base.clone();
+        explicit_false["graph"]["settings"] = json!({"availableInMCP": false});
+        assert!(canonical_draft_settings("n8n.workflows.create_draft", &explicit_false).is_ok());
+
+        for value in [json!(true), json!("true"), Value::Null] {
             let mut rejected = json!({"graph": {"nodes": [], "connections": {}}});
             rejected["graph"]["settings"] = if value.is_null() {
                 json!({"availableInMCP": null})
@@ -3094,14 +3124,28 @@ mod tests {
                 json!({"availableInMCP": value})
             };
             assert!(matches!(
-                canonical_draft_settings(&rejected),
+                canonical_draft_settings("n8n.workflows.create_draft", &rejected),
                 Err(N8nError::InvalidInput(_))
             ));
         }
+
+        assert_eq!(
+            canonical_draft_settings("n8n.workflows.update_draft", &base).unwrap(),
+            json!({})
+        );
+        let mut update_settings = base.clone();
+        update_settings["graph"]["settings"] = json!({"executionOrder": "v1"});
+        assert!(canonical_draft_settings("n8n.workflows.update_draft", &update_settings).is_ok());
+        update_settings["graph"]["settings"] = json!({"availableInMCP": false});
+        assert!(matches!(
+            canonical_draft_settings("n8n.workflows.update_draft", &update_settings),
+            Err(N8nError::InvalidInput(_))
+        ));
+
         let mut non_object = json!({"graph": {"nodes": [], "connections": {}}});
         non_object["graph"]["settings"] = json!(true);
         assert!(matches!(
-            canonical_draft_settings(&non_object),
+            canonical_draft_settings("n8n.workflows.create_draft", &non_object),
             Err(N8nError::InvalidInput(_))
         ));
     }

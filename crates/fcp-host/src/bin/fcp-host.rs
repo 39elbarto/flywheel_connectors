@@ -137,10 +137,10 @@ use fcp_policy::{
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityVerifier,
     ConnectorStateCanonicalStatus, CorrelationId, CostEstimateConfidence, CredentialId, Decision,
-    ExecutionScope, FcpError, InputConstraint, InstanceId, Lease as CoreLease,
-    LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
-    ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject, TailscaleNodeId, TransportMode,
-    UsageMetric, UsageMetricKind, Uuid, ZoneId, ZonePolicyObject, simulate_policy_decision,
+    ExecutionScope, FcpError, InstanceId, Lease as CoreLease, LeasePurpose as CoreLeasePurpose,
+    ObjectId, ObjectIdKey, PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier,
+    StoredObject, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind, Uuid, ZoneId,
+    ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{
@@ -10361,29 +10361,8 @@ fn mint_n8n_draft_approval(
     plan: &N8nReadOnlyRunOncePlan,
     signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
 ) -> HostResult<ApprovalToken> {
-    let (material, _graph_digest, _mutation_digest) = n8n_run_once_approval_material(plan)?;
-    let constraints = [
-        "/server_id",
-        "/resource_uri",
-        "/operation",
-        "/version_id",
-        "/state_digest",
-        "/active_version_id",
-        "/active_version_id_present",
-        "/active",
-        "/is_archived",
-        "/graph_digest",
-        "/mutation_digest",
-        "/idempotency_key",
-        "/provider",
-        "/side_effect",
-    ]
-    .into_iter()
-    .map(|pointer| InputConstraint {
-        pointer: pointer.to_string(),
-        expected: material.pointer(pointer).cloned().unwrap_or(Value::Null),
-    })
-    .collect::<Vec<_>>();
+    n8n_run_once_approval_material(plan)?;
+    let input_hash = request_input_hash(&plan.input)?;
     let approval_ref = plan
         .input
         .pointer("/guard/approvalRef")
@@ -10400,8 +10379,8 @@ fn mint_n8n_draft_approval(
             connector_id: "fcp.n8n".to_string(),
             method_pattern: plan.operation.to_string(),
             request_object_id: None,
-            input_hash: None,
-            input_constraints: constraints,
+            input_hash: Some(input_hash),
+            input_constraints: Vec::new(),
         }),
         plan.zone_id.clone(),
         None,
@@ -18570,6 +18549,7 @@ async fn invoke_handler_inner(
     {
         Ok(verified) => verified,
         Err(error) => {
+            emit_n8n_run_once_host_error_diagnostic(&error);
             let reason = error.to_string();
             // br-mvax3: deny path MUST append a hash-linked audit event so
             // the README "every operation produces an audit event" claim is
@@ -32299,7 +32279,7 @@ done"#;
     }
 
     #[test]
-    fn n8n_draft_approval_binds_all_fourteen_redaction_safe_pointers() {
+    fn n8n_draft_approval_binds_exact_request_input_hash() {
         let config = run_once_n8n_draft_test_config();
         let plan = build_n8n_read_only_run_once_plan(
             n8n_draft_test_input(
@@ -32314,18 +32294,91 @@ done"#;
         let ApprovalScope::Execution(scope) = &token.scope else {
             panic!("draft approval must use execution scope");
         };
-        assert_eq!(scope.input_constraints.len(), 14);
-        assert!(
-            scope
-                .input_constraints
-                .iter()
-                .any(
-                    |constraint| constraint.pointer == "/active_version_id_present"
-                        && constraint.expected == Value::Bool(true)
-                )
+        assert!(scope.input_constraints.is_empty());
+        assert_eq!(
+            scope.input_hash,
+            Some(request_input_hash(&plan.input).unwrap())
+        );
+        let mut changed_input = plan.input.clone();
+        changed_input["graph"]["nodes"] = json!([{"id": "changed"}]);
+        assert_ne!(
+            scope.input_hash,
+            Some(request_input_hash(&changed_input).unwrap())
         );
         verify_approval_tokens(&[token], Some(&signing_key.verifying_key()))
             .expect("fresh host approval verifies");
+    }
+
+    #[test]
+    fn n8n_draft_approval_allows_only_the_exact_policy_input() {
+        let config = run_once_n8n_draft_test_config();
+        let plan = build_n8n_read_only_run_once_plan(
+            n8n_draft_test_input(
+                "n8n.workflows.create_draft",
+                "12121212-3434-4567-8abc-def012345678",
+            ),
+            &config,
+        )
+        .expect("typed create plan");
+        let approval_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let approval = mint_n8n_draft_approval(&plan, &approval_key).expect("host approval");
+        let capability_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let (request, _) = build_n8n_read_only_invoke_request(
+            plan,
+            test_capability_token(
+                &capability_key,
+                "n8n.workflows.write",
+                "n8n.workflows.create_draft",
+                ZoneId::work().as_str(),
+            ),
+            Some(approval),
+        );
+        let exact_hash = request_input_hash(&request.input).expect("exact request input hash");
+        let exact = simulate_policy_decision(&PolicySimulationInput {
+            zone_policy: host_runtime_policy(ZoneId::work()),
+            invoke_request: request.clone(),
+            transport: TransportMode::Lan,
+            checkpoint_fresh: true,
+            revocation_fresh: true,
+            execution_approval_required: true,
+            sanitizer_receipts: Vec::new(),
+            related_object_ids: Vec::new(),
+            request_object_id: None,
+            request_input_hash: Some(exact_hash),
+            safety_tier: SafetyTier::Risky,
+            principal: Some("agent:fwc-n8n".to_string()),
+            capability_id: Some("n8n.workflows.write".to_string()),
+            provenance_record: None,
+            now_ms: Some(n8n_run_once_now_ms()),
+            posture_attestation: None,
+        })
+        .expect("exact policy simulation");
+        assert_eq!(exact.decision, Decision::Allow);
+
+        let mut changed_request = request;
+        changed_request.input["name"] = json!("Changed after approval");
+        let changed_hash =
+            request_input_hash(&changed_request.input).expect("changed request input hash");
+        let changed = simulate_policy_decision(&PolicySimulationInput {
+            zone_policy: host_runtime_policy(ZoneId::work()),
+            invoke_request: changed_request,
+            transport: TransportMode::Lan,
+            checkpoint_fresh: true,
+            revocation_fresh: true,
+            execution_approval_required: true,
+            sanitizer_receipts: Vec::new(),
+            related_object_ids: Vec::new(),
+            request_object_id: None,
+            request_input_hash: Some(changed_hash),
+            safety_tier: SafetyTier::Risky,
+            principal: Some("agent:fwc-n8n".to_string()),
+            capability_id: Some("n8n.workflows.write".to_string()),
+            provenance_record: None,
+            now_ms: Some(n8n_run_once_now_ms()),
+            posture_attestation: None,
+        })
+        .expect("changed policy simulation");
+        assert_eq!(changed.decision, Decision::Deny);
     }
 
     #[test]

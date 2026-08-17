@@ -2561,6 +2561,7 @@ fn resolve_per_invocation_network_constraints(
             ))
         })?;
         expected.host_allow = vec![binding.host_allow];
+        expected.port_allow = vec![binding.port_allow];
     }
 
     let managed_constraints = config
@@ -4006,13 +4007,24 @@ async fn owned_rpc(
 
 #[cfg(target_os = "linux")]
 fn owned_operation_matches(trusted: &OperationInfo, observed: &OperationInfo) -> HostResult<bool> {
-    let trusted = serde_json::to_value(trusted).map_err(|_| {
+    let mut trusted = serde_json::to_value(trusted).map_err(|_| {
         HostError::Internal("failed to encode trusted operation metadata".to_string())
     })?;
-    let observed = serde_json::to_value(observed).map_err(|_| {
+    let mut observed = serde_json::to_value(observed).map_err(|_| {
         HostError::RegistryError("failed to encode connector operation metadata".to_string())
     })?;
+    normalize_owned_operation_approval_none(&mut trusted);
+    normalize_owned_operation_approval_none(&mut observed);
     Ok(owned_operation_serialized_matches(&trusted, &observed))
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_owned_operation_approval_none(operation: &mut Value) {
+    if operation.get("requires_approval").and_then(Value::as_str) == Some("none") {
+        if let Some(operation) = operation.as_object_mut() {
+            operation.remove("requires_approval");
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -4407,18 +4419,21 @@ async fn invoke_owned_per_invocation(
         Arc::clone(&activated),
         Arc::clone(&shutting_down),
     ));
-    let mut handle =
-        match OwnedInvocationHandle::launch(spec, child_endpoint, OwnedInvocationConfig::default())
-            .await
-        {
-            Ok(handle) => handle,
-            Err(error) => {
-                shutting_down.store(true, Ordering::Release);
-                let _ = host_shutdown.shutdown(Shutdown::Both);
-                let _ = egress_task.await;
-                return Err(owned_invocation_error(error));
-            }
-        };
+    let mut handle = match OwnedInvocationHandle::launch(
+        spec,
+        child_endpoint,
+        owned_invocation_config(&plan.connector_id, &plan.operation),
+    )
+    .await
+    {
+        Ok(handle) => handle,
+        Err(error) => {
+            shutting_down.store(true, Ordering::Release);
+            let _ = host_shutdown.shutdown(Shutdown::Both);
+            let _ = egress_task.await;
+            return Err(owned_invocation_error(error));
+        }
+    };
     let operation_result = owned_run_protocol(&mut handle, &plan, &request, &activated).await;
     owned_finalize(
         handle,
@@ -4428,6 +4443,24 @@ async fn invoke_owned_per_invocation(
         operation_result,
     )
     .await
+}
+
+#[cfg(target_os = "linux")]
+fn owned_invocation_config(
+    connector_id: &ConnectorId,
+    operation: &OperationId,
+) -> OwnedInvocationConfig {
+    let mut config = OwnedInvocationConfig::default();
+    if connector_id.as_str() == "fcp.mcp-bridge"
+        && operation.as_str() == N8N_OFFICIAL_MCP_PROVIDER_OPERATION
+    {
+        // Official n8n emits its tools catalog as one buffered SSE response.
+        // Keep the general connector RPC ceiling conservative while allowing
+        // this closed read-only path to carry the untrusted catalog to the
+        // wrapper that strips descriptions and schemas before model output.
+        config.max_frame_bytes = 2 * 1024 * 1024;
+    }
+    config
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -4456,6 +4489,25 @@ mod owned_per_invocation_unit_tests {
                 .expect("inspect untouched state root")
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn official_mcp_catalog_has_a_bounded_larger_owned_rpc_frame() {
+        let connector_id = ConnectorId::from_static("fcp.mcp-bridge");
+        let operation = OperationId::from_static(N8N_OFFICIAL_MCP_PROVIDER_OPERATION);
+        assert_eq!(
+            owned_invocation_config(&connector_id, &operation).max_frame_bytes,
+            2 * 1024 * 1024
+        );
+
+        assert_eq!(
+            owned_invocation_config(
+                &ConnectorId::from_static("fcp.n8n"),
+                &OperationId::from_static("n8n.workflows.list"),
+            )
+            .max_frame_bytes,
+            OwnedInvocationConfig::default().max_frame_bytes
         );
     }
 
@@ -4514,6 +4566,27 @@ mod owned_per_invocation_unit_tests {
         let mut mismatch = trusted.clone();
         mismatch["input_schema"]["required"] = json!(["id"]);
         assert!(!owned_operation_serialized_matches(&trusted, &mismatch));
+    }
+
+    #[test]
+    fn explicit_and_omitted_approval_none_are_semantically_identical() {
+        let mut explicit = json!({
+            "id": "mcp.tools.list",
+            "input_schema": {"type": "object"},
+            "requires_approval": "none"
+        });
+        let mut omitted = json!({
+            "id": "mcp.tools.list",
+            "input_schema": {"type": "object"}
+        });
+        normalize_owned_operation_approval_none(&mut explicit);
+        normalize_owned_operation_approval_none(&mut omitted);
+        assert!(owned_operation_serialized_matches(&explicit, &omitted));
+
+        let mut policy = omitted.clone();
+        policy["requires_approval"] = json!("policy");
+        normalize_owned_operation_approval_none(&mut policy);
+        assert!(!owned_operation_serialized_matches(&omitted, &policy));
     }
 
     #[test]
@@ -10196,6 +10269,11 @@ enum N8nRunOnceExternalProvenanceDiagnostic {
     ConnectorEgressRequestMalformed,
     ConnectorEgressResponseTooLarge,
     ConnectorEgressResponseMalformed,
+    ConnectorMcpInitialize,
+    ConnectorMcpInitialized,
+    ConnectorMcpResponseHeaders,
+    ConnectorMcpResponseBody,
+    ConnectorMcpDecision,
 }
 
 #[cfg(target_os = "linux")]
@@ -10227,6 +10305,11 @@ impl N8nRunOnceExternalProvenanceDiagnostic {
             Self::ConnectorEgressResponseMalformed => {
                 "external.connector_egress_response_malformed"
             }
+            Self::ConnectorMcpInitialize => "external.connector_mcp_initialize",
+            Self::ConnectorMcpInitialized => "external.connector_mcp_initialized",
+            Self::ConnectorMcpResponseHeaders => "external.connector_mcp_response_headers",
+            Self::ConnectorMcpResponseBody => "external.connector_mcp_response_body",
+            Self::ConnectorMcpDecision => "external.connector_mcp_decision",
         }
     }
 }
@@ -10236,65 +10319,100 @@ fn child_external_provenance_diagnostic(
     error: &Value,
 ) -> Option<N8nRunOnceExternalProvenanceDiagnostic> {
     let status = child_external_status_code(error)?;
-    if !(500..=599).contains(&status)
-        || error.pointer("/details/service").and_then(Value::as_str) != Some("n8n")
-    {
+    if !(500..=599).contains(&status) {
         return None;
     }
+    let service = error.pointer("/details/service").and_then(Value::as_str)?;
     let message = error.get("message").and_then(Value::as_str)?;
-    let provider_message =
-        format!("External service error: n8n - n8n provider returned HTTP {status}");
-    if message == provider_message {
+    if service == "n8n"
+        && message == format!("External service error: n8n - n8n provider returned HTTP {status}")
+    {
         return Some(N8nRunOnceExternalProvenanceDiagnostic::Provider5xx);
     }
-    match message {
-        "External service error: n8n - host egress proxy rejected mediated request" => {
+    let detail = match service {
+        "n8n" => message.strip_prefix("External service error: n8n - ")?,
+        "mcp-bridge" => message.strip_prefix("External service error: mcp-bridge - ")?,
+        _ => return None,
+    };
+    match detail {
+        "host egress proxy rejected mediated request" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::HostProxyRejected)
         }
-        "External service error: n8n - host egress proxy transport failed" => {
+        "host egress proxy transport failed" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressTransport)
         }
-        "External service error: n8n - host egress proxy inherited channel failed" => {
+        "host egress proxy inherited channel failed" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedChannel)
         }
-        "External service error: n8n - host egress proxy inherited channel request id exhausted" => {
+        "host egress proxy inherited channel request id exhausted" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedRequestId)
         }
-        "External service error: n8n - host egress proxy inherited channel was unavailable or poisoned" => {
+        "host egress proxy inherited channel was unavailable or poisoned" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedPoisoned)
         }
-        "External service error: n8n - host egress proxy inherited channel write failed" => {
+        "host egress proxy inherited channel write failed" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedWrite)
         }
-        "External service error: n8n - host egress proxy inherited channel read failed" => {
+        "host egress proxy inherited channel read failed" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedRead)
         }
-        "External service error: n8n - host egress proxy inherited channel reached EOF" => {
+        "host egress proxy inherited channel reached EOF" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedReadEof)
         }
-        "External service error: n8n - host egress proxy inherited channel returned an invalid frame" => {
+        "host egress proxy inherited channel returned an invalid frame" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedFrame)
         }
-        "External service error: n8n - host egress proxy inherited channel returned invalid JSON" => {
+        "host egress proxy inherited channel returned invalid JSON" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedJson)
         }
-        "External service error: n8n - host egress proxy inherited channel returned an invalid response" => {
+        "host egress proxy inherited channel returned an invalid response" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedValidation)
         }
-        "External service error: n8n - host egress proxy inherited channel timed out" => {
+        "host egress proxy inherited channel timed out" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressInheritedTimeout)
         }
-        "External service error: n8n - host egress proxy request exceeded the configured limit" => {
+        "host egress proxy request exceeded the configured limit" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressRequestTooLarge)
         }
-        "External service error: n8n - host egress proxy request envelope was malformed" => {
+        "host egress proxy request envelope was malformed" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressRequestMalformed)
         }
-        "External service error: n8n - host egress proxy response exceeded the configured limit" => {
+        "host egress proxy response exceeded the configured limit" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressResponseTooLarge)
         }
-        "External service error: n8n - host egress proxy returned a malformed response envelope" => {
+        "host egress proxy returned a malformed response envelope" => {
             Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorEgressResponseMalformed)
+        }
+        "MCP initialize response had invalid content type"
+        | "MCP initialize response was malformed"
+        | "MCP initialize response was invalid"
+            if service == "mcp-bridge" =>
+        {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorMcpInitialize)
+        }
+        "MCP initialized notification was not accepted" if service == "mcp-bridge" => {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorMcpInitialized)
+        }
+        "MCP provider returned invalid response headers"
+        | "MCP provider returned duplicate response headers"
+        | "MCP provider returned an invalid content type"
+            if service == "mcp-bridge" =>
+        {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorMcpResponseHeaders)
+        }
+        "MCP provider response exceeded the configured size limit"
+        | "MCP provider response could not be read"
+        | "MCP provider returned a malformed response"
+        | "MCP provider transport failed"
+            if service == "mcp-bridge" =>
+        {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorMcpResponseBody)
+        }
+        "host egress proxy returned an invalid decision"
+        | "host egress proxy returned an invalid status"
+            if service == "mcp-bridge" =>
+        {
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorMcpDecision)
         }
         _ => None,
     }
@@ -10676,6 +10794,9 @@ fn run_once_n8n_credential_binding_for_zone(
     Ok(RunOnceCredentialBinding {
         credential_id,
         host_allow: host.to_ascii_lowercase(),
+        port_allow: parsed.port_or_known_default().ok_or_else(|| {
+            HostError::InvalidFilter("run-once fcp.n8n credential config is invalid".to_string())
+        })?,
         server_id: server_id.to_string(),
         kind: RunOnceCredentialKind::RestApiKey,
     })
@@ -10749,18 +10870,6 @@ fn run_once_n8n_official_mcp_credential_binding_for_zone(
     let host = parsed.host_str().ok_or_else(|| {
         HostError::InvalidFilter("run-once official MCP credential config is invalid".to_string())
     })?;
-    if parsed.scheme() != "https"
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || parsed.port_or_known_default() != Some(443)
-        || parsed.path() != "/mcp-server/http"
-    {
-        return Err(HostError::InvalidFilter(
-            "run-once official MCP credential config is invalid".to_string(),
-        ));
-    }
     let server_id = config
         .get("server_id")
         .and_then(Value::as_str)
@@ -10770,9 +10879,27 @@ fn run_once_n8n_official_mcp_credential_binding_for_zone(
                 "run-once official MCP credential config is invalid".to_string(),
             )
         })?;
+    let expected_port = match server_id {
+        "eec" => 443,
+        "hetzner" => 8443,
+        _ => unreachable!("server id was validated above"),
+    };
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.port_or_known_default() != Some(expected_port)
+        || parsed.path() != "/mcp-server/http"
+    {
+        return Err(HostError::InvalidFilter(
+            "run-once official MCP credential config is invalid".to_string(),
+        ));
+    }
     Ok(RunOnceCredentialBinding {
         credential_id,
         host_allow: host.to_ascii_lowercase(),
+        port_allow: expected_port,
         server_id: server_id.to_string(),
         kind: RunOnceCredentialKind::OfficialMcpAccessToken,
     })
@@ -19404,6 +19531,15 @@ mod tests {
                     .contains("PRIVATE-CONTENT-CANARY")
             );
         }
+
+        let mcp_bridge = json!({
+            "message": "External service error: mcp-bridge - MCP initialize response was malformed",
+            "details": {"service": "mcp-bridge", "status_code": 502}
+        });
+        assert_eq!(
+            child_external_provenance_diagnostic(&mcp_bridge),
+            Some(N8nRunOnceExternalProvenanceDiagnostic::ConnectorMcpInitialize)
+        );
 
         for error in [
             json!({
@@ -30846,6 +30982,7 @@ done"#;
             plan.credential_binding.host_allow,
             "n8n.europeaneyecenter.com"
         );
+        assert_eq!(plan.credential_binding.port_allow, 443);
 
         let mut smuggled = n8n_official_mcp_test_input();
         smuggled.input = json!({"name": "n8n_update_full_workflow"});
@@ -30860,6 +30997,27 @@ done"#;
             json!("warn");
         assert!(
             build_n8n_official_mcp_run_once_plan(n8n_official_mcp_test_input(), &unsafe_scan,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn n8n_official_mcp_binding_enforces_hetzner_port_8443() {
+        let mut config = run_once_n8n_official_mcp_test_config();
+        config.config.as_mut().expect("test config")["server_id"] = json!("hetzner");
+        config.config.as_mut().expect("test config")["mcp_url"] =
+            json!("https://n8nhet.levilaser.com:8443/mcp-server/http");
+
+        let binding =
+            run_once_n8n_official_mcp_credential_binding_for_zone(&config, &ZoneId::private())
+                .expect("Hetzner official MCP binding");
+        assert_eq!(binding.host_allow, "n8nhet.levilaser.com");
+        assert_eq!(binding.port_allow, 8443);
+
+        config.config.as_mut().expect("test config")["mcp_url"] =
+            json!("https://n8nhet.levilaser.com/mcp-server/http");
+        assert!(
+            run_once_n8n_official_mcp_credential_binding_for_zone(&config, &ZoneId::private(),)
                 .is_err()
         );
     }

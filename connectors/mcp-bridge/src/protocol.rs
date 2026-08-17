@@ -11,7 +11,7 @@ pub const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
 pub const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const OLDEST_LEGACY_PROTOCOL_VERSION: &str = "2025-06-18";
 pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-pub const MAX_SSE_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 pub const MAX_SSE_EVENTS: usize = 256;
 pub const MAX_SESSION_ID_BYTES: usize = 256;
 pub const MAX_PUBLIC_ID_BYTES: usize = 256;
@@ -1706,6 +1706,30 @@ mod tests {
         .as_bytes();
         let parsed = parse_response("text/event-stream", body, 9).unwrap();
         assert_eq!(parsed.id, 9);
+    }
+
+    #[test]
+    fn sse_accepts_one_bounded_large_catalog_line() {
+        let description = "x".repeat(80 * 1024);
+        let response = serde_json::to_string(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {"tools": [{"name": "large", "description": description}]}
+        }))
+        .unwrap();
+        let body = format!("data: {response}\n\n");
+        assert!(body.len() > 64 * 1024);
+        assert!(body.len() < MAX_SSE_LINE_BYTES);
+
+        let parsed = parse_response("text/event-stream", body.as_bytes(), 9).unwrap();
+        assert_eq!(
+            parsed
+                .result
+                .as_ref()
+                .and_then(|result| result["tools"][0]["description"].as_str())
+                .map(str::len),
+            Some(80 * 1024)
+        );
     }
 
     #[test]

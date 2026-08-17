@@ -12,7 +12,7 @@ use fcp_prelude::{
     CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, InputConstraint, OperationId, OperationInfo,
     ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, SelfCheckReport,
-    SessionId, StepId, ZoneId, log_redaction::redact_url,
+    SessionId, StepId, Uuid, ZoneId, log_redaction::redact_url,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,58 @@ struct ApprovalTarget {
     resource_uri: String,
     normalized_input: serde_json::Value,
     payload_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HostRequestAttribution {
+    request_id: String,
+    correlation_id: Option<String>,
+}
+
+fn host_request_attribution(
+    params: &serde_json::Value,
+) -> FcpResult<Option<HostRequestAttribution>> {
+    let correlation_id = match params.get("correlation_id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(
+            Uuid::parse_str(value)
+                .map_err(|_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Invalid host correlation ID".into(),
+                })?
+                .to_string(),
+        ),
+        Some(_) => {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid host correlation ID".into(),
+            });
+        }
+    };
+
+    let Some(request_id) = params.get("id") else {
+        if correlation_id.is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Host correlation requires a request ID".into(),
+            });
+        }
+        return Ok(None);
+    };
+    let request_id = request_id.as_str().filter(|value| {
+        !value.is_empty()
+            && value.len() <= 256
+            && value.trim() == *value
+            && !value.chars().any(char::is_control)
+    });
+    let request_id = request_id.ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "Invalid host request ID".into(),
+    })?;
+    Ok(Some(HostRequestAttribution {
+        request_id: request_id.to_string(),
+        correlation_id,
+    }))
 }
 
 impl Default for SamplingConfig {
@@ -702,6 +754,7 @@ impl McpBridgeConnector {
     #[instrument(skip(self, params))]
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.base.check_ready()?;
+        let host_attribution = host_request_attribution(&params)?;
 
         let operation = params
             .get("operation")
@@ -770,6 +823,7 @@ impl McpBridgeConnector {
                 canonical_resource,
                 &verified_token,
                 request_number,
+                host_attribution.as_ref(),
             )?)
         } else {
             None
@@ -1082,19 +1136,26 @@ impl McpBridgeConnector {
         resource_uri: &str,
         token: &CapabilityToken<S>,
         request_number: u64,
+        host_attribution: Option<&HostRequestAttribution>,
     ) -> FcpResult<HostEgressContext> {
         let zone_id = self.zone_id.as_ref().ok_or(FcpError::NotHandshaken)?;
         let session_id = self.session_id.as_ref().ok_or(FcpError::NotHandshaken)?;
         let token_cbor = token.raw().to_cbor().map_err(|_| FcpError::Internal {
             message: "verified capability token could not be serialized".into(),
         })?;
+        let request_id = host_attribution.map_or_else(
+            || format!("{session_id}:{request_number}"),
+            |attribution| attribution.request_id.clone(),
+        );
+        let correlation_id =
+            host_attribution.and_then(|attribution| attribution.correlation_id.clone());
         Ok(HostEgressContext {
             connector_id: "fcp.mcp-bridge".into(),
             operation_id: operation.into(),
             resource_uri: resource_uri.into(),
             zone_id: zone_id.to_string(),
-            request_id: format!("{session_id}:{request_number}"),
-            correlation_id: None,
+            request_id,
+            correlation_id,
             capability_token_cbor_b64: base64::engine::general_purpose::STANDARD.encode(token_cbor),
         })
     }
@@ -1935,6 +1996,38 @@ mod tests {
 
     fn strict_mcp_bridge_manifest() -> Result<ConnectorManifest, String> {
         ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn host_request_attribution_preserves_owned_invocation_identity() {
+        let correlation_id = Uuid::new_v4().to_string();
+        let attribution = host_request_attribution(&json!({
+            "id": "outer-request-1",
+            "correlation_id": correlation_id,
+        }))
+        .expect("valid host attribution")
+        .expect("host attribution present");
+        assert_eq!(attribution.request_id, "outer-request-1");
+        assert_eq!(
+            attribution.correlation_id.as_deref(),
+            Some(correlation_id.as_str())
+        );
+
+        assert!(host_request_attribution(&json!({})).unwrap().is_none());
+    }
+
+    #[test]
+    fn host_request_attribution_rejects_partial_or_malformed_identity() {
+        let correlation_id = Uuid::new_v4().to_string();
+        for value in [
+            json!({"correlation_id": correlation_id}),
+            json!({"id": ""}),
+            json!({"id": " request"}),
+            json!({"id": 7}),
+            json!({"id": "request", "correlation_id": "not-a-uuid"}),
+        ] {
+            assert!(host_request_attribution(&value).is_err());
+        }
     }
 
     #[test]

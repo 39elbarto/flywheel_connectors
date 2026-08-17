@@ -78,7 +78,10 @@ impl McpBridgeError {
             Self::Unauthorized => "MCP provider authentication failed".into(),
             Self::Forbidden => "MCP provider denied the request".into(),
             Self::NotFound { .. } => "MCP provider endpoint was not found".into(),
-            Self::Api { status_code, .. } => format!("MCP provider returned HTTP {status_code}"),
+            Self::Api {
+                status_code,
+                message,
+            } => safe_api_summary(*status_code, message),
         }
     }
 
@@ -209,6 +212,45 @@ impl McpBridgeError {
     }
 }
 
+fn safe_api_summary(status_code: u16, message: &str) -> String {
+    const FIXED_DIAGNOSTICS: &[&str] = &[
+        "host egress proxy inherited channel failed",
+        "host egress proxy inherited channel request id exhausted",
+        "host egress proxy inherited channel was unavailable or poisoned",
+        "host egress proxy inherited channel write failed",
+        "host egress proxy inherited channel read failed",
+        "host egress proxy inherited channel reached EOF",
+        "host egress proxy inherited channel returned an invalid frame",
+        "host egress proxy inherited channel returned invalid JSON",
+        "host egress proxy inherited channel returned an invalid response",
+        "host egress proxy inherited channel timed out",
+        "host egress proxy rejected mediated request",
+        "host egress proxy request exceeded the configured limit",
+        "host egress proxy request envelope was malformed",
+        "host egress proxy response exceeded the configured limit",
+        "host egress proxy returned a malformed response envelope",
+        "host egress proxy transport failed",
+        "host egress proxy returned an invalid decision",
+        "host egress proxy returned an invalid status",
+        "MCP initialize response had invalid content type",
+        "MCP initialize response was malformed",
+        "MCP initialize response was invalid",
+        "MCP initialized notification was not accepted",
+        "MCP provider returned invalid response headers",
+        "MCP provider returned duplicate response headers",
+        "MCP provider returned an invalid content type",
+        "MCP provider response exceeded the configured size limit",
+        "MCP provider response could not be read",
+        "MCP provider returned a malformed response",
+        "MCP provider transport failed",
+    ];
+    if FIXED_DIAGNOSTICS.contains(&message) {
+        message.to_string()
+    } else {
+        format!("MCP provider returned HTTP {status_code}")
+    }
+}
+
 impl ConnectorErrorMapping for McpBridgeError {
     fn from_async_error(error: AsyncError) -> Self {
         match error {
@@ -262,6 +304,26 @@ mod tests {
                 message: "err".into()
             }
             .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_summary_preserves_only_fixed_content_free_diagnostics() {
+        assert_eq!(
+            McpBridgeError::Api {
+                status_code: 502,
+                message: "MCP initialize response was malformed".into(),
+            }
+            .safe_summary(),
+            "MCP initialize response was malformed"
+        );
+        assert_eq!(
+            McpBridgeError::Api {
+                status_code: 502,
+                message: "provider body PRIVATE-CONTENT-CANARY".into(),
+            }
+            .safe_summary(),
+            "MCP provider returned HTTP 502"
         );
     }
 

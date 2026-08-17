@@ -23,7 +23,7 @@ use crate::{
         ClientCapabilities, ClientInfo, HttpHeaderPlan, LegacySession, McpMethod,
         Modern400Decision, ProtocolEra, ProtocolVersion, classify_modern_400,
         inject_modern_metadata, legacy_initialize_request, legacy_initialized_notification,
-        parse_legacy_initialize_response, parse_response,
+        parse_legacy_initialize_result, parse_response,
     },
     types::JsonRpcRequest,
 };
@@ -500,25 +500,27 @@ impl McpClient {
                 message: "MCP initialize response had invalid content type".into(),
             }
         })?;
-        if content_media_type(&content_type) != "application/json" {
-            return Err(McpBridgeError::Api {
-                status_code: 502,
-                message: "MCP initialize response had invalid content type".into(),
-            });
-        }
-        let value: serde_json::Value =
-            serde_json::from_slice(&response.body).map_err(|_| McpBridgeError::Api {
+        let parsed = parse_response(&content_type, &response.body, request_id).map_err(|_| {
+            McpBridgeError::Api {
                 status_code: 502,
                 message: "MCP initialize response was malformed".into(),
+            }
+        })?;
+        let result = parsed.result.ok_or_else(|| McpBridgeError::Api {
+            status_code: 502,
+            message: "MCP initialize response was invalid".into(),
+        })?;
+        let initialized =
+            parse_legacy_initialize_result(&result).map_err(|_| McpBridgeError::Api {
+                status_code: 502,
+                message: "MCP initialize response was invalid".into(),
             })?;
         let session_header = single_header(&response.headers, "mcp-session-id")?;
-        let initialized =
-            parse_legacy_initialize_response(&value, request_id, session_header.as_deref())
-                .map_err(|_| McpBridgeError::Api {
-                    status_code: 502,
-                    message: "MCP initialize response was invalid".into(),
-                })?;
-        let session = initialized.session;
+        let session = LegacySession::from_initialize(&initialized, session_header.as_deref())
+            .map_err(|_| McpBridgeError::Api {
+                status_code: 502,
+                message: "MCP initialize response was invalid".into(),
+            })?;
 
         let notification_id = self.next_id();
         let notification = legacy_initialized_notification();
@@ -628,9 +630,13 @@ impl McpClient {
                 "mcp_url must not target private, tailnet, localhost, or IP-literal production hosts".into(),
             ));
         }
-        if !local && parsed.port().is_some_and(|port| port != 443) {
+        if !local
+            && parsed
+                .port()
+                .is_some_and(|port| !matches!(port, 443 | 8443))
+        {
             return Err(McpBridgeError::InvalidInput(
-                "mcp_url must use production HTTPS port 443".into(),
+                "mcp_url must use an approved production HTTPS port (443 or 8443)".into(),
             ));
         }
         let path = parsed.path();
@@ -982,15 +988,6 @@ fn normalize_content_type(value: &str) -> String {
     }
 }
 
-fn content_media_type(value: &str) -> String {
-    value
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-}
-
 fn map_provider_status(status: u16, retry_after: Option<u64>) -> McpBridgeError {
     match status {
         401 => McpBridgeError::Unauthorized,
@@ -1165,6 +1162,25 @@ mod tests {
                 "capabilities": {"tools": {}}
             }),
         );
+        if let Some(session_id) = session_id {
+            response = response.insert_header("Mcp-Session-Id", session_id);
+        }
+        response
+    }
+
+    fn initialize_sse_response(id: u64, session_id: Option<&str>) -> ResponseTemplate {
+        let body = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": "2025-11-25",
+                "serverInfo": {"name": "wiremock", "version": "1"},
+                "capabilities": {"tools": {}}
+            }
+        }))
+        .expect("serialize SSE initialize fixture");
+        let mut response = ResponseTemplate::new(200)
+            .set_body_raw(format!("data: {body}\n\n"), "text/event-stream");
         if let Some(session_id) = session_id {
             response = response.insert_header("Mcp-Session-Id", session_id);
         }
@@ -1427,6 +1443,28 @@ mod tests {
             client.base_url.as_str(),
             "https://n8n.example.com/mcp-server/http"
         );
+    }
+
+    #[test]
+    fn client_new_accepts_bounded_alternate_https_port() {
+        let auth = McpAuth {
+            api_key: None,
+            credential_id: None,
+        };
+        let client = McpClient::new(auth, "https://n8n.example.com:8443/mcp-server/http").unwrap();
+        assert_eq!(
+            client.base_url.as_str(),
+            "https://n8n.example.com:8443/mcp-server/http"
+        );
+    }
+
+    #[test]
+    fn client_new_rejects_unapproved_production_https_port() {
+        let auth = McpAuth {
+            api_key: None,
+            credential_id: None,
+        };
+        assert!(McpClient::new(auth, "https://n8n.example.com:8444/mcp-server/http").is_err());
     }
 
     #[test]
@@ -2132,6 +2170,35 @@ mod tests {
             assert!(matches!(error, McpBridgeError::Api { .. }));
             assert_eq!(server.received_requests().await.unwrap().len(), 3);
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn wiremock_legacy_initialize_accepts_sse_response() {
+        let server = MockServer::start().await;
+        mount_sequence(
+            &server,
+            vec![
+                ResponseTemplate::new(400).set_body_string("legacy server"),
+                initialize_sse_response(2, Some("session-a")),
+                ResponseTemplate::new(202),
+                rpc_response(200, 4, json!({"tools": []})),
+            ],
+        )
+        .await;
+        let client = loopback_client(&server);
+
+        let result = client.rpc_call("tools/list", json!({})).await.unwrap();
+        assert_eq!(result, json!({"tools": []}));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            request_methods(&requests),
+            vec![
+                "tools/list",
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+            ]
+        );
     }
 
     #[fcp_async_core::runtime::test]

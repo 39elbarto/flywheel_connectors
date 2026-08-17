@@ -31,11 +31,11 @@ sorted tool names, SHA-256 input/output schema digests, and explicit
 
 The immutable bundle contract now requires twelve exact artifacts, including
 `fcp-mcp-bridge`, its manifest, and separate EEC/Hetzner official-MCP
-inventories. The currently installed release predates that bundle expansion,
-and the reserved `n8n-eec-mcp` / `n8n-hetzner-mcp` owner entries are not yet
-provisioned. Therefore live official-MCP use remains unavailable and fails
-closed until a separately accepted release installation and server-by-server
-read-only acceptance. Bundle verification currently
+inventories. Immutable release `release-20260817-nqm817-34` is installed, the
+distinct `n8n-eec-mcp` / `n8n-hetzner-mcp` owner entries are provisioned, and
+server-by-server read-only capability discovery has passed with 34 tools on
+each server. Every discovered capability remains `unknown`/`unreviewed` and
+`tools/call` remains unavailable through the public surface. Bundle verification currently
 trusts root ownership, restrictive filesystem modes, and serialized atomic
 privileged updates locally. Its path-based checks do not defend against a
 concurrent malicious root updater, and it does not claim signature
@@ -112,8 +112,9 @@ The table names the REST API credential. Official MCP uses a separate personal
 access-token purpose and the fixed KeePass services `n8n-eec-mcp` and
 `n8n-hetzner-mcp`. The broker protocol binds server and purpose; it must reject
 REST/MCP substitution and never fall back from one credential class to the
-other. Those MCP services are reserved interface names, not evidence that an
-owner has provisioned them.
+other. The service names alone are not provisioning evidence; current
+provisioning is established by the 2026-08-17 broker-backed live discovery
+readback, without exposing either value.
 
 ### 3.2 Canonical URI shapes
 

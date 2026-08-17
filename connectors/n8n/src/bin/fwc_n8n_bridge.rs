@@ -20,6 +20,7 @@ use super::{HostRunOnceEnvelope, HostRunOnceServerId};
 const MAX_CREDENTIAL_BYTES: usize = 4096;
 const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_OFFICIAL_MCP_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 const PROCESS_GRACE: Duration = Duration::from_millis(100);
 #[cfg(target_os = "linux")]
@@ -286,6 +287,15 @@ fn process_spec(
         fixed_env,
         network_disabled: false,
     })
+}
+
+#[cfg(target_os = "linux")]
+const fn max_output_bytes(operation: super::HostRunOnceOperation) -> usize {
+    if matches!(operation, super::HostRunOnceOperation::CapabilitiesInspect) {
+        MAX_OFFICIAL_MCP_OUTPUT_BYTES
+    } else {
+        MAX_OUTPUT_BYTES
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -801,7 +811,7 @@ pub fn run_process(
     workers.push(stdin_worker);
     let Ok(stdout_worker) = spawn_bounded_reader(
         stdout,
-        MAX_OUTPUT_BYTES,
+        max_output_bytes(envelope.operation),
         cancel.clone(),
         operation_deadline_at,
     ) else {
@@ -1496,6 +1506,19 @@ fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn official_mcp_has_a_scoped_larger_host_output_limit() {
+        assert_eq!(
+            max_output_bytes(crate::HostRunOnceOperation::CapabilitiesInspect),
+            MAX_OFFICIAL_MCP_OUTPUT_BYTES
+        );
+        assert_eq!(
+            max_output_bytes(crate::HostRunOnceOperation::WorkflowsList),
+            MAX_OUTPUT_BYTES
+        );
+    }
     use crate::HostRunOnceOperation;
 
     #[cfg(target_os = "linux")]

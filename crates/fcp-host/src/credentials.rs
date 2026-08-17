@@ -60,6 +60,8 @@ pub struct RunOnceCredentialBinding {
     pub credential_id: CredentialId,
     /// Exact destination hostname derived from the trusted base URL.
     pub host_allow: String,
+    /// Exact destination port derived from the trusted base URL.
+    pub port_allow: u16,
     /// Trusted n8n server selector for redacted operational telemetry.
     pub server_id: String,
     /// Fixed authentication shape selected from trusted connector inventory.
@@ -2262,6 +2264,7 @@ mod tests {
         let binding = RunOnceCredentialBinding {
             credential_id: cred(0x44),
             host_allow: "n8n.example.test".to_string(),
+            port_allow: 443,
             server_id: "eec".to_string(),
             kind: RunOnceCredentialKind::RestApiKey,
         };
@@ -2299,6 +2302,7 @@ mod tests {
         let binding = RunOnceCredentialBinding {
             credential_id: cred(0x45),
             host_allow: "n8n.example.test".to_string(),
+            port_allow: 443,
             server_id: "eec".to_string(),
             kind: RunOnceCredentialKind::OfficialMcpAccessToken,
         };
@@ -2325,6 +2329,7 @@ mod tests {
         let binding = RunOnceCredentialBinding {
             credential_id: cred(0x55),
             host_allow: "n8n.example.test".to_string(),
+            port_allow: 443,
             server_id: "hetzner".to_string(),
             kind: RunOnceCredentialKind::RestApiKey,
         };

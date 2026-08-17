@@ -27,6 +27,7 @@ use std::io::{BufRead, Write};
 
 use anyhow::Result;
 use fcp_async_core::runtime::Builder;
+use fcp_core::{FcpError, FcpResult, InvokeRequest, InvokeResponse, RequestId};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use fcp_mcp_bridge::connector::McpBridgeConnector;
@@ -95,7 +96,7 @@ async fn handle_message(connector: &mut McpBridgeConnector, message: &str) -> se
         "doctor" => connector.handle_doctor().await,
         "self_check" => connector.handle_self_check().await,
         "introspect" => connector.handle_introspect().await,
-        "invoke" => connector.handle_invoke(params).await,
+        "invoke" => handle_invoke(connector, params).await,
         "simulate" => connector.handle_simulate(params).await,
         "shutdown" => connector.handle_shutdown(params).await,
         _ => Err(fcp_core::FcpError::InvalidRequest {
@@ -132,5 +133,62 @@ async fn handle_message(connector: &mut McpBridgeConnector, message: &str) -> se
             }
             response
         }
+    }
+}
+
+async fn handle_invoke(
+    connector: &McpBridgeConnector,
+    params: serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let request: InvokeRequest =
+        serde_json::from_value(params.clone()).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid invoke request: {error}"),
+        })?;
+    serialize_invoke_response(request.id, connector.handle_invoke(params).await)
+}
+
+fn serialize_invoke_response(
+    request_id: RequestId,
+    outcome: FcpResult<serde_json::Value>,
+) -> FcpResult<serde_json::Value> {
+    let response = match outcome {
+        Ok(output) => InvokeResponse::ok(request_id, output),
+        Err(error) => InvokeResponse::error(request_id, error),
+    };
+    serde_json::to_value(response).map_err(|error| FcpError::Internal {
+        message: format!("Failed to serialize invoke response: {error}"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invoke_results_use_normative_response_envelope() {
+        let success = serialize_invoke_response(
+            RequestId::new("test-success"),
+            Ok(serde_json::json!({"accepted": true})),
+        )
+        .expect("serialize successful invoke response");
+        assert_eq!(success["type"], "response");
+        assert_eq!(success["id"], "test-success");
+        assert_eq!(success["status"], "ok");
+        assert_eq!(success["result"]["accepted"], true);
+
+        let failure = serialize_invoke_response(
+            RequestId::new("test-failure"),
+            Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "rejected".to_string(),
+            }),
+        )
+        .expect("serialize failed invoke response");
+        assert_eq!(failure["type"], "response");
+        assert_eq!(failure["id"], "test-failure");
+        assert_eq!(failure["status"], "error");
+        assert!(failure.get("error").is_some());
+        assert!(failure.get("result").is_none());
     }
 }

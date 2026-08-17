@@ -503,13 +503,31 @@ fn verify_inventory_binding(
         return Err(BundleError::new(BundleErrorCode::InventoryBinding));
     }
     if expected_connector_id == "fcp.mcp-bridge" {
-        let expected_url = match expected_server_id {
-            "eec" => "https://n8n.europeaneyecenter.com/mcp-server/http",
-            "hetzner" => "https://n8nhet.levilaser.com/mcp-server/http",
+        let (expected_url, expected_host, expected_port) = match expected_server_id {
+            "eec" => (
+                "https://n8n.europeaneyecenter.com/mcp-server/http",
+                "n8n.europeaneyecenter.com",
+                443,
+            ),
+            "hetzner" => (
+                "https://n8nhet.levilaser.com:8443/mcp-server/http",
+                "n8nhet.levilaser.com",
+                8443,
+            ),
             _ => return Err(BundleError::new(BundleErrorCode::InventoryBinding)),
         };
+        let exact_host = entry
+            .pointer("/operation_network_constraints/mcp.tools.list/host_allow")
+            .and_then(Value::as_array)
+            .is_some_and(|hosts| hosts.len() == 1 && hosts[0].as_str() == Some(expected_host));
+        let exact_port = entry
+            .pointer("/operation_network_constraints/mcp.tools.list/port_allow")
+            .and_then(Value::as_array)
+            .is_some_and(|ports| ports.len() == 1 && ports[0].as_u64() == Some(expected_port));
         if !exact("/config/mcp_url", expected_url)
             || !exact("/config/security/description_scan", "block")
+            || !exact_host
+            || !exact_port
             || entry
                 .pointer("/allowed_operations")
                 .and_then(Value::as_array)
@@ -849,7 +867,12 @@ mod tests {
             let manifest = self.artifact("manifests/fcp-mcp-bridge.toml");
             let mcp_url = match server_id {
                 "eec" => "https://n8n.europeaneyecenter.com/mcp-server/http",
-                "hetzner" => "https://n8nhet.levilaser.com/mcp-server/http",
+                "hetzner" => "https://n8nhet.levilaser.com:8443/mcp-server/http",
+                _ => panic!("unsupported fixture server"),
+            };
+            let (mcp_host, mcp_port) = match server_id {
+                "eec" => ("n8n.europeaneyecenter.com", 443),
+                "hetzner" => ("n8nhet.levilaser.com", 8443),
                 _ => panic!("unsupported fixture server"),
             };
             let value = serde_json::json!([{
@@ -864,6 +887,12 @@ mod tests {
                 },
                 "allowed_zones": ["z:work"],
                 "allowed_operations": ["mcp.tools.list"],
+                "operation_network_constraints": {
+                    "mcp.tools.list": {
+                        "host_allow": [mcp_host],
+                        "port_allow": [mcp_port]
+                    }
+                },
                 "runtime_network_enforcement": "host_egress_proxy",
                 "lifecycle_mode": "per_invocation",
                 "launch_binding": {
@@ -1025,6 +1054,29 @@ mod tests {
             verify_release_bundle_for_owner(&stale_inventory.executable, stale_inventory.owner)
                 .expect_err("stale inventory binding")
                 .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        let wrong_official_port = ReleaseFixture::new();
+        let inventory_path = wrong_official_port.artifact("inventory/hetzner-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["operation_network_constraints"]["mcp.tools.list"]["port_allow"] =
+            serde_json::json!([443]);
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode inventory with wrong official port"),
+        )
+        .expect("write inventory with wrong official port");
+        wrong_official_port.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(
+                &wrong_official_port.executable,
+                wrong_official_port.owner,
+            )
+            .expect_err("wrong official port binding")
+            .code(),
             BundleErrorCode::InventoryBinding
         );
     }

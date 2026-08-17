@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements three per-invocation paths behind the same verified wrapper boundary: nine typed REST reads, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The owner-gated host deployment uses immutable twelve-artifact release `release-20260817-nqm817-25`, the socket-activated credential broker, and the transient delegated-cgroup launcher. Read-only `n8n.workflows.list(limit=1)` acceptance has passed against both EEC and Hetzner, local `search_nodes` acceptance has passed, and all connector/host/request-cgroup processes were absent at 0, 5, and 30 seconds after use. The distinct official-MCP KeePass token entries are still absent, so official discovery remains fail-closed pending owner provisioning and live acceptance. Existing opt-in MCP profiles remain the fallback.
+> **Status**: Source implements three per-invocation paths behind the same verified wrapper boundary: nine typed REST reads, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The owner-gated host deployment uses immutable twelve-artifact release `release-20260817-nqm817-34`, the socket-activated credential broker, and the transient delegated-cgroup launcher. Read-only `n8n.workflows.list(limit=1)` acceptance has passed against both EEC and Hetzner, local `search_nodes` acceptance has passed, and broker-backed official-MCP discovery has returned 34 tools from each server. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. All bundle, host, connector, broker, and request-scope processes were absent at 0, 5, and 30 seconds after use. Existing opt-in MCP profiles remain the fallback.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -109,6 +109,7 @@ Important runtime truths:
   sibling `fcp-mcp-bridge` executable for that action; the REST action still
   admits only `fcp-n8n`.
 - The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The code path has synchronous bundle/hash checks, whole-CLI stdin/deadline enforcement, nested process-group teardown proof, and the reviewed fixed credential broker. Missing release, broker, credential, or delegated-cgroup prerequisites fail closed.
+- Live official-MCP acceptance on 2026-08-17 used only `n8n.capabilities.inspect` and did not call any discovered tool. EEC completed in 1,448 ms with sampled aggregate peaks of 35,048 KiB RSS, 32,516 KiB PSS, and 32,504 KiB private memory. Hetzner completed in 3,396 ms with peaks of 35,100 KiB RSS, 32,576 KiB PSS, and 32,564 KiB private memory. The 20 ms sampler observed at most two concurrent bundle processes; separate idle checks found zero bundle, broker, or running-scope processes immediately, after 5 seconds, and after 30 seconds. These are host snapshots, not long-term performance guarantees; comparative routing benchmarks remain a separate task.
 - The host compares the connector's selected-operation introspection with trusted manifest metadata before activating egress, binds every egress frame to connector, operation, zone, request, correlation, and capability-token context, and proves child reap plus process-group absence before returning.
 - Each n8n run-once invocation generates a fresh host-owned connector instance ID in memory, passes that exact ID through the owned handshake, and issues the capability token with the matching instance claim. A stale or inventory-pinned instance value is replaced for the one-shot launch, and a different connector instance cannot reuse the token.
 - `credential_id` must be a valid UUID.
@@ -169,9 +170,11 @@ The tracked unit files remain installation templates. On the current owner
 host, the exact broker binary and units are installed, the socket is enabled
 and listening at zero idle service processes, `/run/fwc` is
 `root:fwc-n8n-broker 0750`, the socket is `root:fwc-n8n-broker 0660`, and the
-owner user is a member of that group. Existing opt-in Codex MCP profiles remain
-the fallback until official-MCP token provisioning and full live acceptance
-are complete.
+owner user is a member of that group. The distinct EEC and Hetzner official-MCP
+entries are provisioned and passed broker-backed read-only discovery acceptance
+without exposing their values. Existing opt-in Codex MCP profiles remain the
+fallback until the owner separately accepts the capability policy and any
+future write surface.
 
 Reference installation commands for another host:
 

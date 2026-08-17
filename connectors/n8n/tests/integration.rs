@@ -220,6 +220,17 @@ fn draft_graph_digest(input: &Value) -> String {
 
 fn draft_mutation_digest(input: &Value) -> String {
     let graph = input["graph"].as_object().expect("draft graph object");
+    let settings = match graph.get("settings") {
+        None | Some(Value::Null) => json!({"availableInMCP": true}),
+        Some(Value::Object(settings)) => {
+            let mut settings = settings.clone();
+            settings
+                .entry("availableInMCP")
+                .or_insert_with(|| Value::Bool(true));
+            Value::Object(settings)
+        }
+        Some(value) => value.clone(),
+    };
     let canonical = canonical_json(&json!({
         "id": input.get("id").cloned().unwrap_or(Value::Null),
         "name": input.get("name").cloned().unwrap_or(Value::Null),
@@ -231,7 +242,7 @@ fn draft_mutation_digest(input: &Value) -> String {
         "graph": {
             "nodes": graph.get("nodes").cloned().unwrap_or(Value::Null),
             "connections": graph.get("connections").cloned().unwrap_or(Value::Null),
-            "settings": graph.get("settings").cloned().unwrap_or(Value::Null),
+            "settings": settings,
             "staticData": graph.get("staticData").cloned().unwrap_or(Value::Null),
             "pinData": graph.get("pinData").cloned().unwrap_or(Value::Null),
         },
@@ -1693,6 +1704,7 @@ async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
         "projectId": "project-1",
         "nodes": input["graph"]["nodes"],
         "connections": {},
+        "settings": {"availableInMCP": true, "callerPolicy": "workflowsFromSameOwner"},
         "activeVersion": null
     });
     let (responder, requests) = MediatedDraftResponse::new(vec![
@@ -1760,7 +1772,8 @@ async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
             "name": "Created workflow",
             "projectId": "project-1",
             "nodes": input["graph"]["nodes"],
-            "connections": {}
+            "connections": {},
+            "settings": {"availableInMCP": true}
         })
     );
     assert_eq!(requests[1]["method"], "GET");
@@ -1769,6 +1782,95 @@ async fn mediated_draft_create_proves_exact_write_then_independent_readback() {
         "https://n8n.example.com/api/v1/workflows/wf-created"
     );
     assert!(requests[1].get("body").is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_draft_create_canonicalizes_supplied_settings() {
+    let input = json!({
+        "name": "Settings workflow",
+        "project_id": "project-1",
+        "graph": {
+            "nodes": [],
+            "connections": {},
+            "settings": {"executionOrder": "v1"}
+        },
+        "guard": {
+            "approvalRef": "approval-settings",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000106"
+        }
+    });
+    let workflow = json!({
+        "id": "wf-settings",
+        "name": "Settings workflow",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "projectId": "project-1",
+        "nodes": [],
+        "connections": {},
+        "settings": {
+            "executionOrder": "v1",
+            "availableInMCP": true,
+            "callerPolicy": "workflowsFromSameOwner"
+        },
+        "activeVersion": null
+    });
+    let (responder, requests) = MediatedDraftResponse::new(vec![
+        DraftReply {
+            status: 200,
+            body: json!({"id": "wf-settings"}),
+        },
+        DraftReply {
+            status: 200,
+            body: workflow,
+        },
+    ]);
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(responder)
+        .mount(&proxy)
+        .await;
+
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    invoke(&c, "n8n.workflows.create_draft", input)
+        .await
+        .expect("supplied settings create should verify");
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(
+        mediated_request_payload(&requests[0])["settings"],
+        json!({"executionOrder": "v1", "availableInMCP": true})
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_draft_settings_rejection_stops_before_provider_dispatch() {
+    let proxy = MockServer::start().await;
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    for (index, setting) in [json!(false), json!("true"), json!({"nested": true})]
+        .into_iter()
+        .enumerate()
+    {
+        let input = json!({
+            "name": "Rejected settings workflow",
+            "project_id": "project-1",
+            "graph": {"nodes": [], "connections": {}, "settings": {"availableInMCP": setting}},
+            "guard": {
+                "approvalRef": "approval-rejected-settings",
+                "idempotencyKey": format!("00000000-0000-4000-8000-0000000001{:02}", index + 7)
+            }
+        });
+        assert!(
+            invoke(&c, "n8n.workflows.create_draft", input)
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        proxy.received_requests().await.unwrap().is_empty(),
+        "rejected settings must not dispatch to provider"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -1833,14 +1935,15 @@ async fn mediated_draft_update_preserves_lifecycle_and_published_state() {
         "name": "Existing workflow",
         "settings": {
             "executionOrder": "v1",
-            "saveDataErrorExecution": "all"
+            "saveDataErrorExecution": "all",
+            "availableInMCP": true
         },
         "staticData": {"marker": "baseline-static"},
         "pinData": {"node-1": [{"json": {"marker": "baseline-pin"}}]},
         "active": true,
         "versionId": "draft-v1",
         "activeVersionId": "published-v1",
-        "isArchived": true,
+        "isArchived": false,
         "nodes": [{"id": "old-node"}],
         "connections": {},
         "activeVersion": published
@@ -1850,14 +1953,15 @@ async fn mediated_draft_update_preserves_lifecycle_and_published_state() {
         "name": "Existing workflow",
         "settings": {
             "executionOrder": "v1",
-            "saveDataErrorExecution": "all"
+            "saveDataErrorExecution": "all",
+            "availableInMCP": true
         },
         "staticData": {"marker": "baseline-static"},
         "pinData": {"node-1": [{"json": {"marker": "baseline-pin"}}]},
         "active": true,
         "versionId": "draft-v2",
         "activeVersionId": "published-v1",
-        "isArchived": true,
+        "isArchived": false,
         "nodes": [{"id": "new-node"}],
         "connections": {},
         "activeVersion": published
@@ -1875,7 +1979,7 @@ async fn mediated_draft_update_preserves_lifecycle_and_published_state() {
                 "versionId": "draft-v1",
                 "activeVersionId": "published-v1",
                 "active": true,
-                "isArchived": true,
+                "isArchived": false,
                 "stateDigest": workflow_state_digest_for_fixture(&baseline)
             }
         }
@@ -1909,7 +2013,7 @@ async fn mediated_draft_update_preserves_lifecycle_and_published_state() {
     assert_eq!(result["versionId"], "draft-v2");
     assert_eq!(result["active"], true);
     assert_eq!(result["activeVersionId"], "published-v1");
-    assert_eq!(result["isArchived"], true);
+    assert_eq!(result["isArchived"], false);
 
     let requests = requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 3, "preflight GET, one PUT, independent GET");
@@ -1933,7 +2037,8 @@ async fn mediated_draft_update_preserves_lifecycle_and_published_state() {
             "name": "Existing workflow",
             "settings": {
                 "executionOrder": "v1",
-                "saveDataErrorExecution": "all"
+                "saveDataErrorExecution": "all",
+                "availableInMCP": true
             },
             "staticData": {"marker": "baseline-static"},
             "pinData": {"node-1": [{"json": {"marker": "baseline-pin"}}]},
@@ -1955,6 +2060,114 @@ async fn mediated_draft_update_preserves_lifecycle_and_published_state() {
         requests[2]["url"],
         "https://n8n.example.com/api/v1/workflows/wf-existing"
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn mediated_draft_update_canonicalizes_supplied_settings_and_preserves_lifecycle() {
+    let published = json!({
+        "versionId": "published-v1",
+        "nodes": [{"id": "published-node"}],
+        "connections": {}
+    });
+    let baseline = json!({
+        "id": "wf-settings-update",
+        "name": "Settings update workflow",
+        "settings": {
+            "executionOrder": "v1",
+            "saveDataSuccessExecution": "all",
+            "availableInMCP": true
+        },
+        "active": true,
+        "versionId": "draft-v1",
+        "activeVersionId": "published-v1",
+        "isArchived": false,
+        "nodes": [{"id": "old-node"}],
+        "connections": {},
+        "activeVersion": published
+    });
+    let updated = json!({
+        "id": "wf-settings-update",
+        "name": "Settings update workflow",
+        "settings": {
+            "executionOrder": "v2",
+            "saveDataSuccessExecution": "all",
+            "availableInMCP": true,
+            "callerPolicy": "workflowsFromSameOwner"
+        },
+        "active": true,
+        "versionId": "draft-v2",
+        "activeVersionId": "published-v1",
+        "isArchived": false,
+        "nodes": [{"id": "new-node"}],
+        "connections": {},
+        "activeVersion": published
+    });
+    let input = json!({
+        "id": "wf-settings-update",
+        "graph": {
+            "nodes": [{"id": "new-node"}],
+            "connections": {},
+            "settings": {"executionOrder": "v2"}
+        },
+        "guard": {
+            "approvalRef": "approval-settings-update",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000110",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": "published-v1",
+                "active": true,
+                "isArchived": false,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let (responder, requests) = MediatedDraftResponse::new(vec![
+        DraftReply {
+            status: 200,
+            body: baseline,
+        },
+        DraftReply {
+            status: 204,
+            body: json!({}),
+        },
+        DraftReply {
+            status: 200,
+            body: updated,
+        },
+    ]);
+    let proxy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rpc/egress/http"))
+        .respond_with(responder)
+        .mount(&proxy)
+        .await;
+
+    let c = setup_mediated_connector(&proxy.uri()).await;
+    let result = invoke(&c, "n8n.workflows.update_draft", input)
+        .await
+        .expect("supplied settings update should verify");
+    assert_eq!(result["active"], true);
+    assert_eq!(result["activeVersionId"], "published-v1");
+    assert_eq!(result["isArchived"], false);
+
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3, "preflight GET, one PUT, independent GET");
+    assert_eq!(
+        mediated_request_payload(&requests[1])["settings"],
+        json!({
+            "executionOrder": "v2",
+            "saveDataSuccessExecution": "all",
+            "availableInMCP": true
+        })
+    );
+    for lifecycle_field in ["active", "activeVersionId", "isArchived", "versionId"] {
+        assert!(
+            mediated_request_payload(&requests[1])
+                .get(lifecycle_field)
+                .is_none(),
+            "PUT must not infer lifecycle field {lifecycle_field}"
+        );
+    }
 }
 
 #[fcp_async_core::runtime::test]

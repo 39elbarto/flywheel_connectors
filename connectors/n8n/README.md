@@ -1,8 +1,8 @@
 # n8n Connector Security Contract
 
-> **Status**: Source now implements three per-invocation paths behind the same verified wrapper boundary: nine typed REST reads, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. Official discovery uses a distinct broker purpose, bearer-token credential profile, fixed `fcp-mcp-bridge` binary, fixed per-server inventory, and only provider operation `mcp.tools.list`; arbitrary remote method or `tools/call` input is not representable. The expanded twelve-artifact bundle and owner-gated MCP token entries are not installed yet, so the deployed release remains fail-closed for this new path. Real-host EEC/Hetzner acceptance remains pending.
+> **Status**: Source implements three per-invocation paths behind the same verified wrapper boundary: nine typed REST reads, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The owner-gated host deployment uses immutable twelve-artifact release `release-20260817-nqm817-25`, the socket-activated credential broker, and the transient delegated-cgroup launcher. Read-only `n8n.workflows.list(limit=1)` acceptance has passed against both EEC and Hetzner, local `search_nodes` acceptance has passed, and all connector/host/request-cgroup processes were absent at 0, 5, and 30 seconds after use. The distinct official-MCP KeePass token entries are still absent, so official discovery remains fail-closed pending owner provisioning and live acceptance. Existing opt-in MCP profiles remain the fallback.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.21`
-> **Verification script**: none tracked; use the commands below
+> **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
 > **n8n API reference**: https://docs.n8n.io/api/api-reference/
 
@@ -45,8 +45,8 @@ Important runtime truths:
   bounded response/deadline, inherited credential frame, fixed release cwd, and
   in-memory lifecycle state. Stdin/stdout/stderr are nonblocking and share one
   cancellation/deadline budget; teardown errors take precedence over worker
-  errors. In the current repository-only state, missing owner-gated broker or
-  release installation fails closed before provider access.
+  errors. A missing owner-gated broker, release, or credential entry fails
+  closed before provider access.
   Per-operation input keys and scalar bounds mirror the manifest, so arbitrary
   headers, credentials, tokens, URLs, commands, paths, or nested payloads
   cannot enter the host-launch request.
@@ -80,12 +80,17 @@ Important runtime truths:
   or other official-MCP operations. All provider execution remains behind a
   host-owned boundary.
 - `fwc-n8n status` is process-scan-free and reports only
-  `{"bundleAvailable":true|false}`. It derives the release root from the
+  `{"bundleAvailable":true|false}`. The installed
+  [`fwc-n8n-launcher`](../../deploy/bin/fwc-n8n-launcher) starts each command in
+  a transient `systemd-run --user --scope` unit with `Delegate=yes`, then the
+  canonical release executable derives the release root from its own path.
+  The transient scope is collected after the command; no n8n-specific host
+  daemon or persistent cgroup is introduced. The verifier checks the
   canonical current executable and verifies the exact versioned bundle layout,
   receipt, ownership/mode policy (including rejection of special mode bits),
   link counts, and BLAKE3 digests. A dev/test executable safely reports
   `false`. This is deliberately not named `bridgeInstalled`: it does not claim
-  that the owner-gated broker, units, or live acceptance are installed. Root
+  that the broker, credentials, or live provider acceptance are ready. Root
   ownership, restrictive modes, and serialized atomic privileged updates are
   the current local trust root; path-based verification does not defend against
   a concurrent malicious root updater. This verifier also does not claim
@@ -103,7 +108,7 @@ Important runtime truths:
   `n8n-official-mcp-run-once-supervised`. Landlock admits only the immutable
   sibling `fcp-mcp-bridge` executable for that action; the REST action still
   admits only `fcp-n8n`.
-- The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The code path has synchronous bundle/hash checks, whole-CLI stdin/deadline enforcement, nested process-group teardown proof, and the reviewed fixed credential broker. Deployment still fails closed until the separate owner gate installs and accepts those artifacts.
+- The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The code path has synchronous bundle/hash checks, whole-CLI stdin/deadline enforcement, nested process-group teardown proof, and the reviewed fixed credential broker. Missing release, broker, credential, or delegated-cgroup prerequisites fail closed.
 - The host compares the connector's selected-operation introspection with trusted manifest metadata before activating egress, binds every egress frame to connector, operation, zone, request, correlation, and capability-token context, and proves child reap plus process-group absence before returning.
 - Each n8n run-once invocation generates a fresh host-owned connector instance ID in memory, passes that exact ID through the owned handshake, and issues the capability token with the matching instance claim. A stale or inventory-pinned instance value is replaced for the one-shot launch, and a different connector instance cannot reuse the token.
 - `credential_id` must be a valid UUID.
@@ -116,7 +121,7 @@ Important runtime truths:
 - Reconfigure and shutdown clear client, verifier, zone, session, configured, and handshaken state.
 - `self_check()` performs its read-only probe only on the loopback test path; production direct egress fails before provider traffic.
 
-## Standalone secret broker (owner-gated; not installed)
+## Standalone secret broker (owner-gated)
 
 The repository carries a zero-idle systemd socket-activation template for the
 standalone `fwc-n8n-secret-broker` binary:
@@ -127,8 +132,8 @@ standalone `fwc-n8n-secret-broker` binary:
   [`fwc-n8n-secret-broker.conf`](../../deploy/tmpfiles.d/fwc-n8n-secret-broker.conf)
   establishes the runtime directory as root-owned with mode `0750`; the
   socket is root-owned with mode `0660` and the owner-approved
-  `fwc-n8n-broker` group is the only non-root access path. That group is a
-  deployment placeholder and is not provisioned by this repository. The
+  `fwc-n8n-broker` group is the only non-root access path. The group is an
+  owner-provisioned deployment prerequisite rather than repository state. The
   broker's metadata check requires the socket GID to match the runtime-directory
   GID before serving a request.
 - [`fwc-n8n-secret-broker@.service`](../../deploy/systemd/fwc-n8n-secret-broker@.service)
@@ -160,12 +165,15 @@ standalone `fwc-n8n-secret-broker` binary:
   generated KDBX files are unsupported; this contract must not be read as raw
   duplicate-field detection.
 
-These unit files are repository templates only. Existing opt-in Codex MCP
-profiles remain the fallback until the owner accepts the broker preflight,
-installs the exact binary and units, provisions the authorized group, and
-completes a narrow readback. None of those owner actions has been executed.
+The tracked unit files remain installation templates. On the current owner
+host, the exact broker binary and units are installed, the socket is enabled
+and listening at zero idle service processes, `/run/fwc` is
+`root:fwc-n8n-broker 0750`, the socket is `root:fwc-n8n-broker 0660`, and the
+owner user is a member of that group. Existing opt-in Codex MCP profiles remain
+the fallback until official-MCP token provisioning and full live acceptance
+are complete.
 
-Owner-approved future commands (all **NOT EXECUTED** here):
+Reference installation commands for another host:
 
 The binary source below is a placeholder for a previously built and verified
 standalone live-backend artifact. This runbook does not prescribe an ambiguous
@@ -424,7 +432,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - credential metadata list success, bounded pagination and cursor handling, owner/admin/scope caveat documentation, malformed required-field rejection, provider status/timeout/bad-JSON mapping, canonical resource binding, host-proxy envelope, no-fallback behavior, and hostile secret-field discard
 - direct provider response bounds for declared and chunked oversized success/error bodies, a boundary-safe response, and a short configured timeout
 - table-driven connector-to-proxy envelope/response handling for every advertised read, including exact operation/resource pairs and logical resources distinct from HTTPS transport URLs
-- focused host authorization source coverage with a non-wildcard token: matching logical resource accepted, mismatched logical resource rejected, and valid logical resource plus disallowed transport rejected by network policy; execution remains pending the resource-gated verification owner
+- focused host authorization source coverage with a non-wildcard token: matching logical resource accepted, mismatched logical resource rejected, and valid logical resource plus disallowed transport rejected by network policy; current-host read-only REST acceptance has also passed against both configured servers
 - tag list typed projection, timestamp/unknown-field redaction, bounded pagination, input/cursor validation, provider error mapping, timeout, malformed JSON, and capability/simulation parity
 - folder list/get projection and redaction, exact encoded paths and JSON query values, root/nested parent handling, defaults/bounds, invalid-input no-HTTP behavior, capability-resource binding, required-field rejection, safe 400/401/403/404/429/500/503 mapping, malformed JSON, configured timeout, and simulation parity
 - invoke rejection for unknown operation and missing required inputs
@@ -445,6 +453,24 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - `connectors/n8n/tests/integration.rs` contains the runtime contract proof surface, including hostile provider-payload redaction fixtures.
 
 ## Verification Bundle
+
+The static provider build must apply `+crt-static` only to the final
+`fcp-n8n` crate invocation:
+
+```bash
+cargo rustc -p fcp-n8n --bin fcp-n8n --release -- -C target-feature=+crt-static
+```
+
+Do not set global `RUSTFLAGS=-Ctarget-feature=+crt-static` for this build. A
+globally static dependency graph can start directly yet terminate under the
+mandatory owned-invocation network seccomp before answering `introspect`.
+Before assembling a release, run the ignored real-artifact smoke explicitly:
+
+```bash
+FCP_N8N_OWNED_SMOKE_BINARY=/absolute/path/to/fcp-n8n \
+  cargo test -p fcp-host --test n8n_owned_static_smoke \
+  static_n8n_connector_introspects_under_owned_network_filter -- --ignored --exact
+```
 
 Run these after changing this connector contract:
 
@@ -467,7 +493,7 @@ cargo fmt --all -- --check
 ## Operator Guidance
 
 - Configure an n8n public API root, commonly shaped like `https://n8n.example.com/api/v1`.
-- A host credential reference is accepted and every advertised read uses a bounded proxy envelope carrying its canonical logical resource independently of its HTTPS target. Treat production readiness as pending until the focused real-host narrow-token test is run.
+- A host credential reference is accepted and every advertised read uses a bounded proxy envelope carrying its canonical logical resource independently of its HTTPS target. Current-host read-only acceptance has passed for EEC and Hetzner; repeat the focused test for every new release, credential rotation, or server migration.
 - Direct API-key mode is for loopback fixtures only in this packet; production egress requires host mediation.
 - Treat workflow activation as deferred: capability and approval checks are enforced, but no provider lifecycle request is emitted.
 - Use `self_check()` as a safe readiness/probe report. Production and credential-reference modes report failure before provider traffic.

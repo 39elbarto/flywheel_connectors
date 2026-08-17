@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+readonly FWC_N8N_REAL=/usr/local/lib/fwc-n8n/current/bin/fwc-n8n
+readonly SYSTEMD_RUN=/usr/bin/systemd-run
+
+if [ ! -x "$FWC_N8N_REAL" ]; then
+    printf '%s\n' 'fwc-n8n: immutable current release is unavailable' >&2
+    exit 127
+fi
+
+exec "$SYSTEMD_RUN" \
+    --user \
+    --scope \
+    --quiet \
+    --collect \
+    --property=Delegate=yes \
+    -- \
+    "$FWC_N8N_REAL" "$@"

@@ -9,9 +9,9 @@ use fcp_manifest::HostEgressContext;
 use fcp_prelude::{
     AgentHint, ApprovalMode, ApprovalScope, ApprovalToken, BaseConnector, CapabilityGrant,
     CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps,
-    FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, InputConstraint,
-    OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType,
-    RecipeId, RiskLevel, SafetyTier, SelfCheckReport, SessionId, StepId, ZoneId,
+    FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, OperationId,
+    OperationInfo, ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, StepId, ZoneId,
 };
 use fcp_sdk::ConnectorRuntimeConfig;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -198,7 +198,6 @@ struct ActivationTarget {
 struct DraftWritePlan {
     workflow_id: Option<String>,
     graph_digest: String,
-    normalized_approval_input: Value,
     provider_payload: Value,
 }
 
@@ -600,8 +599,8 @@ impl N8nConnector {
             operation,
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft"
         ) {
-            let plan = self.prepare_draft_write(operation, &input, canonical_resource)?;
-            self.require_draft_approval(operation, &input, &plan, &params)?;
+            let plan = self.prepare_draft_write(operation, &input)?;
+            self.require_draft_approval(operation, &input, &params)?;
             Some(plan)
         } else {
             None
@@ -1114,12 +1113,7 @@ impl N8nConnector {
             .ok_or_else(|| N8nError::InvalidInput("connector is not configured".into()))
     }
 
-    fn prepare_draft_write(
-        &self,
-        operation: &str,
-        input: &Value,
-        resource_uri: &str,
-    ) -> FcpResult<DraftWritePlan> {
+    fn prepare_draft_write(&self, operation: &str, input: &Value) -> FcpResult<DraftWritePlan> {
         let typed: WorkflowDraftMutationInput =
             serde_json::from_value(input.clone()).map_err(|_| FcpError::InvalidRequest {
                 code: 1005,
@@ -1129,48 +1123,8 @@ impl N8nConnector {
         validate_draft_mutation(operation, &typed).map_err(|error| error.to_fcp_error())?;
         let canonical_settings =
             canonical_draft_settings(operation, input).map_err(|error| error.to_fcp_error())?;
-        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
         let graph_digest = workflow_graph_digest(&typed.graph.nodes, &typed.graph.connections)
             .map_err(|error| error.to_fcp_error())?;
-        let mutation_digest =
-            draft_mutation_digest(operation, input).map_err(|error| error.to_fcp_error())?;
-        let precondition = input
-            .get("guard")
-            .and_then(Value::as_object)
-            .and_then(|guard| guard.get("precondition"))
-            .and_then(Value::as_object);
-        let normalized_approval_input = json!({
-            "server_id": config.server_id,
-            "resource_uri": resource_uri,
-            "operation": operation,
-            "version_id": precondition
-                .and_then(|value| value.get("versionId"))
-                .cloned()
-                .unwrap_or(Value::Null),
-            "state_digest": precondition
-                .and_then(|value| value.get("stateDigest"))
-                .cloned()
-                .unwrap_or(Value::Null),
-            "active_version_id": precondition
-                .and_then(|value| value.get("activeVersionId"))
-                .cloned()
-                .unwrap_or(Value::Null),
-            "active_version_id_present": precondition
-                .is_some_and(|value| value.contains_key("activeVersionId")),
-            "active": precondition
-                .and_then(|value| value.get("active"))
-                .cloned()
-                .unwrap_or(Value::Null),
-            "is_archived": precondition
-                .and_then(|value| value.get("isArchived"))
-                .cloned()
-                .unwrap_or(Value::Null),
-            "graph_digest": graph_digest.clone(),
-            "mutation_digest": mutation_digest,
-            "idempotency_key": typed.guard.idempotency_key,
-            "provider": "rest",
-            "side_effect": "draft_only",
-        });
 
         let mut provider_payload = serde_json::Map::new();
         if let Some(name) = typed.name.as_deref() {
@@ -1197,7 +1151,6 @@ impl N8nConnector {
         Ok(DraftWritePlan {
             workflow_id: typed.id,
             graph_digest,
-            normalized_approval_input,
             provider_payload: Value::Object(provider_payload),
         })
     }
@@ -1206,7 +1159,6 @@ impl N8nConnector {
         &self,
         operation: &str,
         input: &Value,
-        plan: &DraftWritePlan,
         params: &Value,
     ) -> FcpResult<()> {
         let typed: WorkflowDraftMutationInput =
@@ -1237,7 +1189,7 @@ impl N8nConnector {
                     operation,
                     &typed.guard.approval_ref,
                     self.zone_id.as_ref(),
-                    &plan.normalized_approval_input,
+                    input,
                     current_time_ms(),
                 )
             })
@@ -1839,7 +1791,7 @@ fn is_matching_draft_approval(
     operation: &str,
     approval_ref: &str,
     zone_id: Option<&ZoneId>,
-    normalized_input: &Value,
+    request_input: &Value,
     now_ms: u64,
 ) -> bool {
     if approval.token_id != approval_ref
@@ -1858,44 +1810,17 @@ fn is_matching_draft_approval(
     {
         return false;
     }
-    if let Some(expected_hash) = scope.input_hash {
-        if approval_input_hash(normalized_input) != expected_hash {
-            return false;
-        }
-    }
-    has_exact_draft_constraints(&scope.input_constraints, normalized_input)
+    let Some(expected_hash) = scope.input_hash else {
+        return false;
+    };
+    scope.input_constraints.is_empty()
+        && approval_input_hash(request_input).is_some_and(|actual| actual == expected_hash)
 }
 
-fn has_exact_draft_constraints(constraints: &[InputConstraint], input: &Value) -> bool {
-    const REQUIRED_POINTERS: [&str; 14] = [
-        "/server_id",
-        "/resource_uri",
-        "/operation",
-        "/version_id",
-        "/state_digest",
-        "/active_version_id",
-        "/active_version_id_present",
-        "/active",
-        "/is_archived",
-        "/graph_digest",
-        "/mutation_digest",
-        "/idempotency_key",
-        "/provider",
-        "/side_effect",
-    ];
-    constraints.len() == REQUIRED_POINTERS.len()
-        && REQUIRED_POINTERS.iter().all(|pointer| {
-            constraints.iter().any(|constraint| {
-                constraint.pointer == *pointer
-                    && input.pointer(pointer) == Some(&constraint.expected)
-            })
-        })
-}
-
-fn approval_input_hash(input: &Value) -> [u8; 32] {
-    let canonical = canonical_json(input);
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    *blake3::hash(&bytes).as_bytes()
+fn approval_input_hash(input: &Value) -> Option<[u8; 32]> {
+    fcp_crypto::canonicalize::to_deterministic_cbor(input)
+        .ok()
+        .map(|bytes| *blake3::hash(&bytes).as_bytes())
 }
 
 fn current_time_ms() -> u64 {
@@ -4403,7 +4328,6 @@ mod tests {
         let plan = DraftWritePlan {
             workflow_id: Some("workflow-1".into()),
             graph_digest: updated_state.draft.graph_digest.clone(),
-            normalized_approval_input: json!({}),
             provider_payload: json!({}),
         };
 
@@ -4508,7 +4432,6 @@ mod tests {
         let plan = DraftWritePlan {
             workflow_id: None,
             graph_digest: state.draft.graph_digest.clone(),
-            normalized_approval_input: json!({}),
             provider_payload: json!({}),
         };
         verify_draft_readback(
@@ -4529,45 +4452,22 @@ mod tests {
 
     #[test]
     fn draft_approval_requires_exact_binding_and_expiry() {
-        let normalized = json!({
-            "server_id": "eec",
-            "resource_uri": "fwc-n8n://eec/workflows/1001",
-            "operation": "n8n.workflows.update_draft",
-            "version_id": "draft-v1",
-            "state_digest": "blake3-256:state",
-            "active_version_id": null,
-            "active_version_id_present": true,
-            "active": false,
-            "is_archived": false,
-            "graph_digest": "blake3-256:graph",
-            "mutation_digest": "blake3-256:mutation",
-            "idempotency_key": "00000000-0000-4000-8000-000000000001",
-            "provider": "rest",
-            "side_effect": "draft_only",
+        let request_input = json!({
+            "id": "1001",
+            "name": "Exact approved draft",
+            "graph": {"nodes": [], "connections": {}},
+            "guard": {
+                "approvalRef": "approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000001",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:state"
+                }
+            }
         });
-        let pointers = [
-            "/server_id",
-            "/resource_uri",
-            "/operation",
-            "/version_id",
-            "/state_digest",
-            "/active_version_id",
-            "/active_version_id_present",
-            "/active",
-            "/is_archived",
-            "/graph_digest",
-            "/mutation_digest",
-            "/idempotency_key",
-            "/provider",
-            "/side_effect",
-        ];
-        let constraints = pointers
-            .into_iter()
-            .map(|pointer| InputConstraint {
-                pointer: pointer.into(),
-                expected: normalized.pointer(pointer).cloned().unwrap_or(Value::Null),
-            })
-            .collect();
         let now = current_time_ms();
         let token = ApprovalToken::approved(
             "approval-1",
@@ -4578,8 +4478,8 @@ mod tests {
                 connector_id: "fcp.n8n".into(),
                 method_pattern: "n8n.workflows.update_draft".into(),
                 request_object_id: None,
-                input_hash: None,
-                input_constraints: constraints,
+                input_hash: approval_input_hash(&request_input),
+                input_constraints: Vec::new(),
             }),
             ZoneId::work(),
             Some(vec![1]),
@@ -4589,18 +4489,44 @@ mod tests {
             "n8n.workflows.update_draft",
             "approval-1",
             Some(&ZoneId::work()),
-            &normalized,
+            &request_input,
             now,
         ));
 
-        let mut mismatched = normalized.clone();
-        mismatched["graph_digest"] = json!("blake3-256:other");
+        let mut mismatched = request_input.clone();
+        mismatched["name"] = json!("Changed after approval");
         assert!(!is_matching_draft_approval(
             &token,
             "n8n.workflows.update_draft",
             "approval-1",
             Some(&ZoneId::work()),
             &mismatched,
+            now,
+        ));
+        let constrained = ApprovalToken::approved(
+            token.token_id.clone(),
+            token.issued_at_ms,
+            token.expires_at_ms,
+            token.issuer.clone(),
+            ApprovalScope::Execution(ExecutionScope {
+                connector_id: "fcp.n8n".into(),
+                method_pattern: "n8n.workflows.update_draft".into(),
+                request_object_id: None,
+                input_hash: approval_input_hash(&request_input),
+                input_constraints: vec![fcp_prelude::InputConstraint {
+                    pointer: "/name".into(),
+                    expected: request_input["name"].clone(),
+                }],
+            }),
+            token.zone_id.clone(),
+            token.signature.clone(),
+        );
+        assert!(!is_matching_draft_approval(
+            &constrained,
+            "n8n.workflows.update_draft",
+            "approval-1",
+            Some(&ZoneId::work()),
+            &request_input,
             now,
         ));
         let expired = ApprovalToken::approved(
@@ -4617,7 +4543,7 @@ mod tests {
             "n8n.workflows.update_draft",
             "approval-1",
             Some(&ZoneId::work()),
-            &normalized,
+            &request_input,
             now,
         ));
     }

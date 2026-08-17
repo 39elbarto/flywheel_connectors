@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_crypto::{
+    canonicalize::to_deterministic_cbor, cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey,
+};
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope, FcpError,
     FcpResult, InputConstraint, ZoneId,
@@ -261,52 +263,7 @@ fn draft_mutation_digest(operation: &str, input: &Value) -> String {
 
 fn draft_approval_token(operation: &str, input: &Value) -> ApprovalToken {
     let guard = &input["guard"];
-    let precondition = &guard["precondition"];
-    let normalized = json!({
-        "server_id": TEST_SERVER_ID,
-        "resource_uri": resource_uri(operation, input),
-        "operation": operation,
-        "version_id": precondition.get("versionId").cloned().unwrap_or(Value::Null),
-        "state_digest": precondition.get("stateDigest").cloned().unwrap_or(Value::Null),
-        "active_version_id": precondition
-            .get("activeVersionId")
-            .cloned()
-            .unwrap_or(Value::Null),
-        "active_version_id_present": precondition.get("activeVersionId").is_some(),
-        "active": precondition.get("active").cloned().unwrap_or(Value::Null),
-        "is_archived": precondition
-            .get("isArchived")
-            .cloned()
-            .unwrap_or(Value::Null),
-        "graph_digest": draft_graph_digest(input),
-        "mutation_digest": draft_mutation_digest(operation, input),
-        "idempotency_key": guard["idempotencyKey"],
-        "provider": "rest",
-        "side_effect": "draft_only",
-    });
-    let pointers = [
-        "/server_id",
-        "/resource_uri",
-        "/operation",
-        "/version_id",
-        "/state_digest",
-        "/active_version_id",
-        "/active_version_id_present",
-        "/active",
-        "/is_archived",
-        "/graph_digest",
-        "/mutation_digest",
-        "/idempotency_key",
-        "/provider",
-        "/side_effect",
-    ];
-    let constraints = pointers
-        .into_iter()
-        .map(|pointer| InputConstraint {
-            pointer: pointer.into(),
-            expected: normalized.pointer(pointer).cloned().unwrap_or(Value::Null),
-        })
-        .collect();
+    let input_hash = draft_input_hash(input);
     let now = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current timestamp should fit in u64");
     ApprovalToken::approved(
@@ -318,12 +275,17 @@ fn draft_approval_token(operation: &str, input: &Value) -> ApprovalToken {
             connector_id: "fcp.n8n".into(),
             method_pattern: operation.into(),
             request_object_id: None,
-            input_hash: None,
-            input_constraints: constraints,
+            input_hash: Some(input_hash),
+            input_constraints: Vec::new(),
         }),
         ZoneId::work(),
         Some(vec![1_u8]),
     )
+}
+
+fn draft_input_hash(input: &Value) -> [u8; 32] {
+    let input_bytes = to_deterministic_cbor(input).expect("draft approval input CBOR");
+    *blake3::hash(&input_bytes).as_bytes()
 }
 
 fn unrelated_approval_token(input: &Value) -> ApprovalToken {
@@ -1901,23 +1863,14 @@ async fn mediated_draft_credential_change_invalidates_prior_approval_without_raw
         draft_mutation_digest("n8n.workflows.create_draft", &changed)
     );
     let serialized_approval = serde_json::to_string(&approval).expect("approval JSON");
-    assert!(serialized_approval.contains(&draft_mutation_digest(
-        "n8n.workflows.create_draft",
-        &original
-    )));
     assert!(!serialized_approval.contains("credential-1"));
     assert!(!serialized_approval.contains("credential-2"));
     let ApprovalScope::Execution(scope) = &approval.scope else {
         panic!("draft approval must use execution scope");
     };
-    assert!(scope.input_constraints.iter().any(|constraint| {
-        constraint.pointer == "/mutation_digest"
-            && constraint.expected
-                == json!(draft_mutation_digest(
-                    "n8n.workflows.create_draft",
-                    &original
-                ))
-    }));
+    assert_eq!(scope.input_hash, Some(draft_input_hash(&original)));
+    assert_ne!(scope.input_hash, Some(draft_input_hash(&changed)));
+    assert!(scope.input_constraints.is_empty());
 
     let proxy = MockServer::start().await;
     let c = setup_mediated_connector(&proxy.uri()).await;

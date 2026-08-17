@@ -1661,8 +1661,10 @@ fn verify_draft_readback(
             }
         }
         ("n8n.workflows.update_draft", Some(baseline)) => {
-            if state.version_id == baseline.state.version_id
-                || state.published != baseline.state.published
+            // n8n may preserve versionId for metadata-only draft updates. The
+            // requested graph/metadata match and independent lifecycle
+            // readback are the authoritative success evidence.
+            if state.published != baseline.state.published
                 || state.active != baseline.state.active
                 || state.is_archived != baseline.state.is_archived
                 || state.active_version_id != baseline.state.active_version_id
@@ -4376,6 +4378,45 @@ mod tests {
             ),
             Err(N8nError::ReadbackMismatch)
         ));
+    }
+
+    #[test]
+    fn metadata_only_update_accepts_unchanged_provider_version_id() {
+        let baseline = digest_test_workflow();
+        let baseline_state = normalize_workflow_state(baseline.clone()).unwrap();
+
+        let mut updated = baseline;
+        updated.name = Some("Renamed workflow".into());
+        updated.updated_at = Some("2026-01-03T00:00:00Z".into());
+        let updated_state = normalize_workflow_state(updated).unwrap();
+        assert_eq!(updated_state.version_id, baseline_state.version_id);
+
+        let plan = DraftWritePlan {
+            workflow_id: Some("workflow-1".into()),
+            graph_digest: updated_state.draft.graph_digest.clone(),
+            provider_payload: json!({}),
+        };
+
+        verify_draft_readback(
+            "n8n.workflows.update_draft",
+            &plan,
+            Some(&DraftBaseline {
+                state: baseline_state,
+                name: Some("Digest test".into()),
+                settings: Some(json!({"availableInMCP": true})),
+                static_data: None,
+                pin_data: None,
+            }),
+            &updated_state,
+            Some("Renamed workflow"),
+            Some(&json!({"availableInMCP": true})),
+            None,
+            None,
+            Some(&json!({"availableInMCP": true})),
+            None,
+            None,
+        )
+        .expect("metadata-only update may keep the provider version id");
     }
 
     #[test]

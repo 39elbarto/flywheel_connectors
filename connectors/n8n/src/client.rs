@@ -346,12 +346,15 @@ impl N8nClient {
         url: Url,
         body: &serde_json::Value,
         context: Option<HostEgressContext>,
+        require_json_response: bool,
     ) -> N8nResult<serde_json::Value> {
         if matches!(self.auth, N8nAuth::CredentialId(_)) {
             let context = context.ok_or_else(|| {
                 N8nError::InvalidInput("credential_id requires verified request attribution".into())
             })?;
-            return self.write_json_mediated(method, url, body, context).await;
+            return self
+                .write_json_mediated(method, url, body, context, require_json_response)
+                .await;
         }
         self.ensure_provider_egress_allowed()?;
         let req = self
@@ -371,7 +374,7 @@ impl N8nClient {
         let body = read_bounded_body(response)
             .await
             .map_err(|_| N8nError::UnknownOutcome)?;
-        decode_success_body(status, &body).map_err(|_| N8nError::UnknownOutcome)
+        decode_write_success(status, &body, require_json_response)
     }
 
     async fn write_json_mediated(
@@ -380,6 +383,7 @@ impl N8nClient {
         url: Url,
         body: &serde_json::Value,
         context: HostEgressContext,
+        require_json_response: bool,
     ) -> N8nResult<serde_json::Value> {
         let body = serde_json::to_vec(body)?;
         let response = self
@@ -406,8 +410,7 @@ impl N8nClient {
             return Err(N8nError::UnknownOutcome);
         }
         if status.is_success() {
-            return decode_success_body(status, response.body.as_bytes())
-                .map_err(|_| N8nError::UnknownOutcome);
+            return decode_write_success(status, response.body.as_bytes(), require_json_response);
         }
         decode_mediated_response(&response)
     }
@@ -733,7 +736,9 @@ impl N8nClient {
         context: Option<HostEgressContext>,
     ) -> N8nResult<String> {
         let url = self.resolve_path("/workflows")?;
-        let response = self.write_json(Method::POST, url, payload, context).await?;
+        let response = self
+            .write_json(Method::POST, url, payload, context, true)
+            .await?;
         response
             .get("id")
             .and_then(serde_json::Value::as_str)
@@ -752,7 +757,9 @@ impl N8nClient {
     ) -> N8nResult<()> {
         let url =
             self.resolve_path_segments(&[("path segment", "workflows"), ("workflow id", id)])?;
-        let _ = self.write_json(Method::PUT, url, payload, context).await?;
+        let _ = self
+            .write_json(Method::PUT, url, payload, context, false)
+            .await?;
         Ok(())
     }
 
@@ -1013,6 +1020,17 @@ fn decode_success_body(status: StatusCode, body: &[u8]) -> N8nResult<serde_json:
     serde_json::from_slice(body).map_err(|_| N8nError::MalformedProviderResponse)
 }
 
+fn decode_write_success(
+    status: StatusCode,
+    body: &[u8],
+    require_json_response: bool,
+) -> N8nResult<serde_json::Value> {
+    if !require_json_response {
+        return Ok(serde_json::json!({}));
+    }
+    decode_success_body(status, body).map_err(|_| N8nError::UnknownOutcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,6 +1103,22 @@ mod tests {
             decode_success_body(StatusCode::NO_CONTENT, b"").unwrap(),
             serde_json::json!({})
         );
+    }
+
+    #[test]
+    fn update_acknowledgement_accepts_empty_success_before_independent_readback() {
+        assert_eq!(
+            decode_write_success(StatusCode::OK, b"", false).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn create_response_still_requires_provider_json() {
+        assert!(matches!(
+            decode_write_success(StatusCode::OK, b"", true),
+            Err(N8nError::UnknownOutcome)
+        ));
     }
 
     #[test]

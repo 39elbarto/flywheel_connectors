@@ -502,6 +502,7 @@ struct DraftReply {
 struct MediatedDraftResponse {
     replies: Arc<Mutex<Vec<DraftReply>>>,
     requests: Arc<Mutex<Vec<Value>>>,
+    empty_second_body: bool,
 }
 
 impl MediatedDraftResponse {
@@ -511,16 +512,27 @@ impl MediatedDraftResponse {
             Self {
                 replies: Arc::new(Mutex::new(replies)),
                 requests: Arc::clone(&requests),
+                empty_second_body: false,
             },
             requests,
         )
+    }
+
+    fn new_with_empty_second_body(replies: Vec<DraftReply>) -> (Self, Arc<Mutex<Vec<Value>>>) {
+        let (mut responder, requests) = Self::new(replies);
+        responder.empty_second_body = true;
+        (responder, requests)
     }
 }
 
 impl Respond for MediatedDraftResponse {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let envelope: Value = serde_json::from_slice(&request.body).unwrap();
-        self.requests.lock().unwrap().push(envelope.clone());
+        let request_number = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(envelope.clone());
+            requests.len()
+        };
         let reply = self.replies.lock().unwrap().remove(0);
         let context = &envelope["context"];
         let mut decision = json!({
@@ -539,7 +551,11 @@ impl Respond for MediatedDraftResponse {
         if let Some(correlation_id) = context.get("correlation_id") {
             decision["correlation_id"] = correlation_id.clone();
         }
-        let body = serde_json::to_vec(&reply.body).unwrap();
+        let body = if self.empty_second_body && request_number == 2 {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&reply.body).unwrap()
+        };
         ResponseTemplate::new(200).set_body_json(json!({
             "status": reply.status,
             "headers": [],
@@ -1943,13 +1959,13 @@ async fn mediated_draft_update_preserves_lifecycle_and_published_state() {
             }
         }
     });
-    let (responder, requests) = MediatedDraftResponse::new(vec![
+    let (responder, requests) = MediatedDraftResponse::new_with_empty_second_body(vec![
         DraftReply {
             status: 200,
             body: baseline,
         },
         DraftReply {
-            status: 204,
+            status: 200,
             body: json!({}),
         },
         DraftReply {

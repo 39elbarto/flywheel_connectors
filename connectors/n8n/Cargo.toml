@@ -50,8 +50,10 @@ tracing-subscriber.workspace = true
 hex.workspace = true
 percent-encoding.workspace = true
 uuid.workspace = true
+rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]
 ciborium.workspace = true
 chrono.workspace = true
 wiremock.workspace = true
+tempfile = "=3.27.0"

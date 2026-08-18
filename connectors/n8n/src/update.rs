@@ -306,15 +306,24 @@ impl VerifiedCandidate {
     pub(crate) fn from_verified_stage(
         snapshot: ComponentSnapshot,
         stage_id: impl Into<String>,
-        verification_digest: impl Into<String>,
+        artifact_evidence_digest: impl Into<String>,
     ) -> Result<Self, UpdateError> {
         let snapshot = snapshot.normalize_and_validate()?;
         let stage_id = stage_id.into();
-        let verification_digest = verification_digest.into();
-        if Uuid::parse_str(&stage_id).is_err() {
+        let artifact_evidence_digest = artifact_evidence_digest.into();
+        let parsed_stage_id = Uuid::parse_str(&stage_id)
+            .map_err(|_| UpdateError::InvalidSnapshot("stage_id_invalid"))?;
+        if parsed_stage_id.to_string() != stage_id {
             return Err(UpdateError::InvalidSnapshot("stage_id_invalid"));
         }
-        validate_digest("verification_digest", &verification_digest)?;
+        validate_digest("artifact_evidence_digest", &artifact_evidence_digest)?;
+        let snapshot_digest = snapshot.digest()?;
+        let verification_digest = canonical_digest(&(
+            "fwc.n8n.verified-stage.v1",
+            &stage_id,
+            &artifact_evidence_digest,
+            &snapshot_digest,
+        ))?;
         Ok(Self {
             snapshot,
             stage_id,
@@ -442,6 +451,8 @@ pub enum UpdateError {
     ApprovalExpired,
     ApprovalNotApproved,
     ApprovalReplay,
+    DecisionLedgerUnavailable,
+    DecisionLedgerCorrupt,
     ActivePreconditionMismatch,
     RollbackFailed(Box<ApplyReceipt>),
     Encoding,
@@ -456,6 +467,8 @@ impl std::fmt::Display for UpdateError {
             Self::ApprovalExpired => "approval_expired",
             Self::ApprovalNotApproved => "approval_not_approved",
             Self::ApprovalReplay => "approval_replay",
+            Self::DecisionLedgerUnavailable => "decision_ledger_unavailable",
+            Self::DecisionLedgerCorrupt => "decision_ledger_corrupt",
             Self::ActivePreconditionMismatch => "active_precondition_mismatch",
             Self::RollbackFailed(_) => "rollback_failed",
             Self::Encoding => "encoding_failed",
@@ -532,7 +545,9 @@ pub fn authorize_update<L: DecisionLedger>(
     }
     validate_atom("approval_ref", &decision.approval_ref)
         .map_err(|_| UpdateError::InvalidDecision("invalid_approval_ref"))?;
-    if Uuid::parse_str(&decision.decision_id).is_err() {
+    let parsed_decision_id = Uuid::parse_str(&decision.decision_id)
+        .map_err(|_| UpdateError::InvalidDecision("invalid_decision_id"))?;
+    if parsed_decision_id.to_string() != decision.decision_id {
         return Err(UpdateError::InvalidDecision("invalid_decision_id"));
     }
     if decision.schema != APPROVAL_SCHEMA {
@@ -1087,6 +1102,20 @@ mod tests {
                 verified.clone(),
                 &review,
                 &invalid_id,
+                &mut ledger,
+                1_000,
+            ),
+            Err(UpdateError::InvalidDecision("invalid_decision_id"))
+        );
+
+        let mut noncanonical_id = owner_decision(&review, ReviewDecision::Approved);
+        noncanonical_id.decision_id = noncanonical_id.decision_id.to_ascii_uppercase();
+        assert_eq!(
+            authorize_update(
+                current.clone(),
+                verified.clone(),
+                &review,
+                &noncanonical_id,
                 &mut ledger,
                 1_000,
             ),

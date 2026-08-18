@@ -448,10 +448,36 @@ The current update subsystem is a review-first contract, not a live updater:
 - Apply accepts only an opaque verified staged-artifact handle. It consumes the
   authorization, holds a per-component lock, checks the exact active snapshot,
   and permits only compare-and-swap activation and conditional rollback.
-- The local `n8n-mcp` adapter currently creates fixed npm metadata and staging
-  command specifications only. The specifications require an empty inherited
-  environment and an allowlisted replacement environment. No executor, npm
-  invocation, staging write, release switch, or live apply path exists yet.
+- The local `n8n-mcp` adapter creates fixed npm metadata and generates each
+  staging plan's canonical UUID-v4 internally; callers cannot choose or reuse
+  the stage identifier. Its Linux
+  verifier anchors the root and all traversal to file descriptors with
+  `openat2`, rejects links and unsafe ownership or modes, enforces actual-byte
+  bounds, and binds the exact registry URL, package manifest, strict lockfile
+  graph, executable entry point, and complete BLAKE3 tree digest. Manifest,
+  lockfile, executable, and receipt re-reads must match the same per-file
+  content digest and file identity captured by the tree pass.
+- A fixed `.registry-artifact.tgz` receipt must be present in the stage and its
+  bytes must match the registry `dist.integrity` SHA-512 SRI before an opaque
+  verified candidate can exist. The candidate artifact digest domain-separates
+  and binds that verified tarball SRI to the extracted-tree digest. The future
+  installer owns atomically creating the new empty version-plus-UUID directory
+  and materializing the receipt from the exact tarball it extracts; its absence
+  or any mismatch fails closed. Specifications require an empty inherited
+  environment and an allowlisted replacement environment.
+- A host-only append-only decision ledger writes and fsyncs a private pending
+  record, atomically commits it with no-replace rename under an anchored
+  root-owned directory fd, then fsyncs the directory. Matching replay is
+  rejected; malformed or colliding committed records fail closed. A crash
+  before commit may leave an ignored pending file but cannot consume the
+  decision. The ledger trust root is not created by the runtime.
+- These primitives are not wired to the public CLI. No executor, npm
+  invocation, staging write, component lock, release switch, or live apply path
+  or registry-receipt materialization exists yet. Activation must re-verify
+  the exact stage digest while holding the future component lock before any
+  switch. The current verifier proves receipt integrity plus stage consistency;
+  without that trusted installer it does not claim that extraction provenance
+  is independently established or that the candidate is activation-ready.
 - Registry lifecycle scripts are never executed and are represented only by a
   digest. Release notes are discarded. Neither registry content nor package
   content can authorize an update or directly edit documentation or skills.

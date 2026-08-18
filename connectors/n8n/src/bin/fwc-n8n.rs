@@ -31,6 +31,9 @@ use uuid::Uuid;
 mod fwc_n8n_bridge;
 #[path = "fwc_n8n_bundle.rs"]
 mod fwc_n8n_bundle;
+#[path = "fwc_n8n_update_host.rs"]
+#[allow(dead_code)]
+mod fwc_n8n_update_host;
 
 const MAX_INPUT_BYTES: usize = 256 * 1024;
 const STDIN_READ_TIMEOUT: Duration = Duration::from_secs(5);

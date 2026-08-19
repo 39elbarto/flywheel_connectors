@@ -54,9 +54,11 @@ root of trust.
 `n8n.targets.resolve`, `n8n.runtime.status`,
 `n8n.node_resources.explore`, and `n8n.evaluations.manage` are not all
 representable by that enum yet. `n8n.mcp_access.reconcile` is now represented
-as a typed REST intent and host operation for bounded dry-run reconciliation.
-Its write branch remains fail-closed until a supported typed n8n admin API is
-proven; the private web bulk endpoint is not an accepted provider surface.
+as a typed REST intent and host operation for bounded dry-run and guarded apply
+reconciliation. The apply path uses only the public workflow REST resource
+with an allow-listed `settings.availableInMCP` payload, then performs an
+independent detail readback. The private web bulk endpoint remains an
+unaccepted provider surface.
 Local, typed REST, local MCP, and any official-MCP operation beyond capability
 inspection must remain behind the host-owned boundary; this wrapper does not
 accept model-supplied commands, paths, environments, URLs, or upstream tool
@@ -329,7 +331,7 @@ guarantees, not permission to replay.
 | `n8n.data_tables.mutate` | `n8n.data_tables.write` | action-dependent | Interactive | BestEffort | official MCP | table/schema/row-count readback | 256 KiB |
 | `n8n.evaluations.manage` | `n8n.evaluations.manage` | action-dependent | action-dependent | action-dependent | local MCP | evaluation URI/status | 256 KiB |
 | `n8n.audit.inspect` | `n8n.audit.read` | Safe / High | None | None | REST/local MCP | instance URI; redacted findings | 512 KiB |
-| `n8n.mcp_access.reconcile` | `n8n.mcp_access.write` | Risky / High | Interactive | BestEffort | typed admin adapter | exact server; availability readback | 256 KiB |
+| `n8n.mcp_access.reconcile` | `n8n.mcp_access.write` | Risky / High | Interactive | BestEffort | typed REST settings adapter | exact server; availability and lifecycle/graph readback | 256 KiB |
 
 ### 5.1 Exact operation inputs and outputs
 
@@ -498,9 +500,16 @@ execution content is not part of the audit result.
 
 `mcp_access.reconcile.scope` is exactly `workflow_ids`, `project`, `folder`, or
 `all_current`; `desired` is a boolean. `dryRun=true` requires no approval and
-performs no writes. `dryRun=false` requires a guard and a prior dry-run digest.
-Project/folder/all-current scopes apply only to workflows present at that time;
-future workflows require a later reconciliation.
+performs no writes. `dryRun=false` requires a matching interactive approval and
+the exact digest from a current dry-run with the same server, scope, selectors,
+desired value, and observed workflow states. Apply sends one settings-only PUT
+per changed workflow, independently reads the workflow back, preserves
+graph/lifecycle invariants, and returns per-workflow exceptions for unknown
+outcomes or mismatches without automatic retry. The current connector lock is
+in-process only; cross-process serialization and a durable reconciliation
+receipt/ledger remain host-acceptance work. Project/folder/all-current scopes
+apply only to workflows present at that time; future workflows require a later
+reconciliation.
 
 ## 6. Provider routing
 
@@ -626,6 +635,7 @@ Create uses `server + project + idempotencyKey` until a resource ID exists.
 | Restore | `isArchived=false`, version/digest preserved; no implicit activation |
 | Version rollback | new current `versionId`, target semantic digest, published state unchanged unless separately approved |
 | Execution start | execution ID, workflow ID, requested mode/version, initial status; later status is a separate read |
+| MCP availability reconciliation | `availableInMCP == desired`; `active`, `activeVersionId`, `versionId`, `isArchived`, and draft/published graph summaries unchanged; per-workflow exception or verified change result |
 | Data table write | table ID, schema digest, affected row count; never row contents in logs |
 | MCP access reconcile | exact current availability set/digest and per-resource exceptions |
 

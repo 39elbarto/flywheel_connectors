@@ -58,6 +58,10 @@ pub enum N8nError {
     /// The independent workflow readback did not match the guarded write.
     #[error("n8n draft readback did not match the guarded write")]
     ReadbackMismatch,
+
+    /// The guarded state changed or an in-process resource lock is held.
+    #[error("n8n operation precondition failed: {0}")]
+    PreconditionFailed(&'static str),
 }
 
 impl N8nError {
@@ -82,6 +86,9 @@ impl N8nError {
                 "n8n draft write outcome is unknown; reconcile by readback and do not retry".into()
             }
             Self::ReadbackMismatch => "n8n draft readback did not match the guarded write".into(),
+            Self::PreconditionFailed(reason) => {
+                format!("n8n operation precondition failed: {reason}")
+            }
         }
     }
 
@@ -174,6 +181,13 @@ impl N8nError {
                 service: "n8n".into(),
                 message: "Draft write readback mismatch".into(),
                 status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+            Self::PreconditionFailed(reason) => FcpError::External {
+                service: "n8n".into(),
+                message: format!("Operation precondition failed: {reason}"),
+                status_code: Some(409),
                 retryable: false,
                 retry_after: None,
             },

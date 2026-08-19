@@ -561,6 +561,18 @@ impl Workflow {
     }
 }
 
+impl WorkflowDetail {
+    /// Return only the provider's explicit MCP availability flag.
+    #[must_use]
+    pub fn available_in_mcp(&self) -> Option<bool> {
+        self.settings
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("availableInMCP"))
+            .and_then(Value::as_bool)
+    }
+}
+
 impl Tag {
     #[must_use]
     pub fn into_view(self) -> TagView {

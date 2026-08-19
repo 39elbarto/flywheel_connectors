@@ -25,7 +25,7 @@ use fcp_prelude::{
 use fcp_sdk::ConnectorRuntimeConfig;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_n8n::connector::N8nConnector;
@@ -44,7 +44,8 @@ fn resource_uri(operation: &str, input: &Value) -> String {
         | "n8n.executions.list"
         | "n8n.projects.list"
         | "n8n.credentials.list"
-        | "n8n.tags.list" => {
+        | "n8n.tags.list"
+        | "n8n.mcp_access.reconcile" => {
             format!("fwc-n8n://{TEST_SERVER_ID}")
         }
         "n8n.folders.list" => {
@@ -113,6 +114,7 @@ fn capability_token_with_options(
         "n8n.workflows.activate" | "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
             "n8n.workflows.write"
         }
+        "n8n.mcp_access.reconcile" => "n8n.mcp_access.write",
         "n8n.workflows.list" | "n8n.workflows.get" => "n8n.workflows.read",
         "n8n.executions.list" | "n8n.executions.get" => "n8n.executions.read",
         "n8n.projects.list" => "n8n.projects.read",
@@ -317,6 +319,8 @@ fn authorized_params(operation: &str, input: &Value) -> Value {
         "n8n.workflows.create_draft" | "n8n.workflows.update_draft"
     ) {
         params["approval_tokens"] = json!([draft_approval_token(operation, input)]);
+    } else if operation == "n8n.mcp_access.reconcile" && input["dryRun"] == json!(false) {
+        params["approval_tokens"] = json!([draft_approval_token(operation, input)]);
     }
     params
 }
@@ -393,7 +397,8 @@ async fn setup_connector_with_runtime_config(
             "n8n.projects.read",
             "n8n.credentials.metadata.read",
             "n8n.tags.read",
-            "n8n.folders.read"
+            "n8n.folders.read",
+            "n8n.mcp_access.write"
         ],
         "requested_instance_id": TEST_INSTANCE_ID
     }))
@@ -565,6 +570,30 @@ impl Respond for MediatedDraftResponse {
             ),
             "egress": decision,
         }))
+    }
+}
+
+#[derive(Clone)]
+struct SequentialJsonResponse {
+    replies: Arc<Mutex<Vec<Value>>>,
+}
+
+impl SequentialJsonResponse {
+    fn new(replies: Vec<Value>) -> Self {
+        Self {
+            replies: Arc::new(Mutex::new(replies)),
+        }
+    }
+}
+
+impl Respond for SequentialJsonResponse {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let body = self
+            .replies
+            .lock()
+            .expect("response sequence lock")
+            .remove(0);
+        ResponseTemplate::new(200).set_body_json(body)
     }
 }
 
@@ -3131,6 +3160,218 @@ async fn tags_list_timeout_uses_shared_transport_error_mapping() {
 }
 
 // -- Workflows Get --
+
+#[fcp_async_core::runtime::test]
+async fn mcp_access_apply_uses_settings_only_and_independent_readback() {
+    let server = MockServer::start().await;
+    let list_response = json!({
+        "data": [{
+            "id": "wf-mcp",
+            "name": "Disposable MCP test",
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "settings": {"availableInMCP": false}
+        }],
+        "nextCursor": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(query_param("limit", "200"))
+        .and(query_param("excludePinnedData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list_response))
+        .mount(&server)
+        .await;
+
+    let baseline = json!({
+        "id": "wf-mcp",
+        "name": "Disposable MCP test",
+        "description": null,
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "projectId": "project-test",
+        "parentFolderId": null,
+        "updatedAt": "2026-08-19T00:00:00Z",
+        "nodes": [{"id": "manual", "type": "n8n-nodes-base.manualTrigger"}],
+        "connections": {},
+        "settings": {"availableInMCP": false},
+        "activeVersion": null
+    });
+    let readback = json!({
+        "id": "wf-mcp",
+        "name": "Disposable MCP test",
+        "description": null,
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "projectId": "project-test",
+        "parentFolderId": null,
+        "updatedAt": "2026-08-19T00:00:01Z",
+        "nodes": [{"id": "manual", "type": "n8n-nodes-base.manualTrigger"}],
+        "connections": {},
+        "settings": {"availableInMCP": true},
+        "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-mcp"))
+        .respond_with(SequentialJsonResponse::new(vec![baseline, readback]))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-mcp"))
+        .and(body_json(json!({
+            "settings": {"availableInMCP": true}
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let dry_input = json!({
+        "scope": "workflow_ids",
+        "workflowIds": ["wf-mcp"],
+        "desired": true,
+        "dryRun": true
+    });
+    let dry_run = invoke(&c, "n8n.mcp_access.reconcile", dry_input)
+        .await
+        .expect("dry-run should succeed");
+    assert_eq!(dry_run["planned"][0]["id"], "wf-mcp");
+    let dry_run_digest = dry_run["readbackDigest"]
+        .as_str()
+        .expect("dry-run digest")
+        .to_owned();
+
+    let apply_input = json!({
+        "scope": "workflow_ids",
+        "workflowIds": ["wf-mcp"],
+        "desired": true,
+        "dryRun": false,
+        "guard": {
+            "approvalRef": "mcp-apply-test",
+            "dryRunDigest": dry_run_digest
+        }
+    });
+    let applied = invoke(&c, "n8n.mcp_access.reconcile", apply_input)
+        .await
+        .expect("apply should succeed");
+    assert_eq!(applied["changed"][0]["id"], "wf-mcp");
+    assert_eq!(applied["changed"][0]["reason"], "updated_and_verified");
+    assert!(applied["exceptions"].as_array().unwrap().is_empty());
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 5, "dry-run list, apply list, GET, PUT, GET");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mcp_access_apply_rejects_stale_digest_before_workflow_read_or_write() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "wf-stale-mcp",
+                "isArchived": false,
+                "settings": {"availableInMCP": false}
+            }]
+        })))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "scope": "workflow_ids",
+        "workflowIds": ["wf-stale-mcp"],
+        "desired": true,
+        "dryRun": false,
+        "guard": {
+            "approvalRef": "mcp-stale",
+            "dryRunDigest": format!("blake3-256:{}", "0".repeat(64))
+        }
+    });
+    let error = invoke(&c, "n8n.mcp_access.reconcile", input)
+        .await
+        .expect_err("stale digest must fail closed");
+    assert!(error.to_string().contains("precondition"));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "only the guarded plan list is allowed");
+}
+
+#[fcp_async_core::runtime::test]
+async fn mcp_access_apply_reports_readback_mismatch_without_retry() {
+    let server = MockServer::start().await;
+    let list_response = json!({
+        "data": [{
+            "id": "wf-mismatch-mcp",
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "settings": {"availableInMCP": false}
+        }]
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(list_response))
+        .mount(&server)
+        .await;
+    let detail = json!({
+        "id": "wf-mismatch-mcp",
+        "name": "Mismatch MCP",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "manual"}],
+        "connections": {},
+        "settings": {"availableInMCP": false},
+        "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-mismatch-mcp"))
+        .respond_with(SequentialJsonResponse::new(vec![detail.clone(), detail]))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-mismatch-mcp"))
+        .and(body_json(json!({
+            "settings": {"availableInMCP": true}
+        })))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let dry_input = json!({
+        "scope": "workflow_ids",
+        "workflowIds": ["wf-mismatch-mcp"],
+        "desired": true,
+        "dryRun": true
+    });
+    let digest = invoke(&c, "n8n.mcp_access.reconcile", dry_input)
+        .await
+        .unwrap()["readbackDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let apply_input = json!({
+        "scope": "workflow_ids",
+        "workflowIds": ["wf-mismatch-mcp"],
+        "desired": true,
+        "dryRun": false,
+        "guard": {"approvalRef": "mcp-mismatch", "dryRunDigest": digest}
+    });
+    let result = invoke(&c, "n8n.mcp_access.reconcile", apply_input)
+        .await
+        .expect("mismatch is a per-workflow exception");
+    assert!(result["changed"].as_array().unwrap().is_empty());
+    assert_eq!(result["exceptions"][0]["reason"], "readback_mismatch");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 5, "no second PUT after mismatched readback");
+}
 
 #[fcp_async_core::runtime::test]
 async fn workflows_get() {

@@ -763,6 +763,30 @@ impl N8nClient {
         Ok(())
     }
 
+    /// Change only the allow-listed official MCP availability setting.
+    ///
+    /// The payload deliberately contains no graph, lifecycle, credential, or
+    /// execution fields. The caller must perform an independent detail GET
+    /// before and after this single provider attempt.
+    pub(crate) async fn update_workflow_mcp_access(
+        &self,
+        id: &str,
+        desired: bool,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<()> {
+        let url =
+            self.resolve_path_segments(&[("path segment", "workflows"), ("workflow id", id)])?;
+        let payload = serde_json::json!({
+            "settings": {
+                "availableInMCP": desired,
+            },
+        });
+        let _ = self
+            .write_json(Method::PUT, url, &payload, context, false)
+            .await?;
+        Ok(())
+    }
+
     /// List executions using the typed provider DTO layer.
     pub(crate) async fn list_executions_typed(
         &self,

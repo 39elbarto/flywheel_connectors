@@ -1,8 +1,8 @@
 //! FCP n8n Connector implementation.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -203,7 +203,7 @@ struct DraftWritePlan {
 }
 
 const MAX_MCP_ACCESS_WORKFLOWS: usize = 1_000;
-const MCP_ACCESS_READBACK_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.mcp-access-readback.v1";
+const MCP_ACCESS_READBACK_DIGEST_DOMAIN_V2: &[u8] = b"fwc-n8n.mcp-access-readback.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -250,7 +250,7 @@ struct McpAccessReconcileInput {
     guard: Option<McpAccessReconcileGuard>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct McpAccessPlanItem {
     id: String,
     #[serde(rename = "availableInMCP")]
@@ -267,6 +267,34 @@ struct McpAccessPlan {
     exceptions: Vec<McpAccessPlanItem>,
     #[serde(rename = "readbackDigest")]
     readback_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpAccessInvariant {
+    id: String,
+    name: Option<String>,
+    description: Option<String>,
+    project_id: Option<String>,
+    folder_id: Option<String>,
+    version_id: String,
+    active: bool,
+    active_version_id: Option<String>,
+    is_archived: bool,
+    draft: WorkflowGraphSummary,
+    published: Option<WorkflowGraphSummary>,
+}
+
+struct McpAccessLockGuard {
+    locks: Arc<Mutex<BTreeSet<String>>>,
+    key: String,
+}
+
+impl Drop for McpAccessLockGuard {
+    fn drop(&mut self) {
+        if let Ok(mut locks) = self.locks.lock() {
+            locks.remove(&self.key);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +366,7 @@ pub struct N8nConnector {
     runtime_config: ConnectorRuntimeConfig,
     request_count: AtomicU64,
     error_count: AtomicU64,
+    mcp_access_locks: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl N8nConnector {
@@ -380,6 +409,7 @@ impl N8nConnector {
             runtime_config,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
+            mcp_access_locks: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 }
@@ -686,10 +716,6 @@ impl N8nConnector {
             let reconcile = parse_mcp_access_input(&input).map_err(|error| error.to_fcp_error())?;
             if !reconcile.dry_run {
                 self.require_mcp_access_approval(&reconcile, &input, &params)?;
-                return Err(FcpError::CapabilityDenied {
-                    capability: "n8n.mcp_access.write".into(),
-                    reason: "typed n8n MCP-access admin adapter is not available; no provider write was attempted".into(),
-                });
             }
         }
 
@@ -846,12 +872,176 @@ impl N8nConnector {
         context: Option<HostEgressContext>,
     ) -> Result<Value, N8nError> {
         let reconcile = parse_mcp_access_input(input)?;
-        if !reconcile.dry_run {
-            return Err(N8nError::InvalidInput(
-                "mcp access writes require the typed admin adapter and are not enabled".into(),
+        let server_id = self.configured_server_id()?;
+        let workflows = self
+            .list_mcp_access_workflows(client, context.clone())
+            .await?;
+        let plan = plan_mcp_access_reconcile(&reconcile, &workflows, server_id)?;
+        if reconcile.dry_run {
+            return serde_json::to_value(plan).map_err(N8nError::from);
+        }
+
+        let guard = reconcile
+            .guard
+            .as_ref()
+            .ok_or(N8nError::MalformedProviderResponse)?;
+        if guard.dry_run_digest != plan.readback_digest {
+            return Err(N8nError::PreconditionFailed(
+                "mcp access dry-run digest is stale",
             ));
         }
 
+        let mut changed = Vec::new();
+        let mut skipped = plan.skipped.clone();
+        let mut exceptions = plan.exceptions.clone();
+        for item in &plan.planned {
+            let lock_key = format!("{server_id}:{}", item.id);
+            let Some(_lock) = self.try_mcp_access_lock(lock_key)? else {
+                exceptions.push(McpAccessPlanItem {
+                    id: item.id.clone(),
+                    available_in_mcp: item.available_in_mcp,
+                    desired: reconcile.desired,
+                    reason: "lock_conflict",
+                });
+                continue;
+            };
+
+            let baseline = match client.get_workflow_typed(&item.id, context.clone()).await {
+                Ok(workflow) if workflow.id == item.id => workflow,
+                Ok(_) => {
+                    exceptions.push(mcp_access_exception(item, reconcile.desired, "id_mismatch"));
+                    continue;
+                }
+                Err(error) => {
+                    exceptions.push(mcp_access_exception(
+                        item,
+                        reconcile.desired,
+                        mcp_access_error_reason(&error),
+                    ));
+                    continue;
+                }
+            };
+            if baseline.is_archived {
+                exceptions.push(mcp_access_exception(
+                    item,
+                    reconcile.desired,
+                    "lifecycle_changed",
+                ));
+                continue;
+            }
+            if baseline.available_in_mcp() != item.available_in_mcp {
+                exceptions.push(mcp_access_exception(
+                    item,
+                    reconcile.desired,
+                    "state_changed_since_dry_run",
+                ));
+                continue;
+            }
+            if baseline.available_in_mcp() == Some(reconcile.desired) {
+                skipped.push(McpAccessPlanItem {
+                    id: item.id.clone(),
+                    available_in_mcp: baseline.available_in_mcp(),
+                    desired: reconcile.desired,
+                    reason: "already_desired_on_recheck",
+                });
+                continue;
+            }
+            let baseline_invariant = match mcp_access_invariant(&baseline) {
+                Ok(invariant) => invariant,
+                Err(error) => {
+                    exceptions.push(mcp_access_exception(
+                        item,
+                        reconcile.desired,
+                        mcp_access_error_reason(&error),
+                    ));
+                    continue;
+                }
+            };
+
+            if let Err(error) = client
+                .update_workflow_mcp_access(&item.id, reconcile.desired, context.clone())
+                .await
+            {
+                exceptions.push(mcp_access_exception(
+                    item,
+                    reconcile.desired,
+                    mcp_access_error_reason(&error),
+                ));
+                continue;
+            }
+
+            let readback = match client.get_workflow_typed(&item.id, context.clone()).await {
+                Ok(workflow) if workflow.id == item.id => workflow,
+                Ok(_) => {
+                    exceptions.push(mcp_access_exception(
+                        item,
+                        reconcile.desired,
+                        "readback_id_mismatch",
+                    ));
+                    continue;
+                }
+                Err(_) => {
+                    exceptions.push(mcp_access_exception(
+                        item,
+                        reconcile.desired,
+                        "readback_unknown",
+                    ));
+                    continue;
+                }
+            };
+            let Ok(readback_invariant) = mcp_access_invariant(&readback) else {
+                exceptions.push(mcp_access_exception(
+                    item,
+                    reconcile.desired,
+                    "readback_malformed",
+                ));
+                continue;
+            };
+            if readback.available_in_mcp() != Some(reconcile.desired) {
+                exceptions.push(mcp_access_exception(
+                    item,
+                    reconcile.desired,
+                    "readback_mismatch",
+                ));
+            } else if readback_invariant != baseline_invariant {
+                exceptions.push(mcp_access_exception(
+                    item,
+                    reconcile.desired,
+                    "readback_lifecycle_or_graph_mismatch",
+                ));
+            } else {
+                changed.push(McpAccessPlanItem {
+                    id: item.id.clone(),
+                    available_in_mcp: readback.available_in_mcp(),
+                    desired: reconcile.desired,
+                    reason: "updated_and_verified",
+                });
+            }
+        }
+
+        let readback_digest = mcp_access_reconcile_digest(
+            &reconcile,
+            server_id,
+            &plan.planned,
+            &changed,
+            &skipped,
+            &exceptions,
+        )?;
+        serde_json::to_value(McpAccessPlan {
+            planned: plan.planned,
+            changed,
+            skipped,
+            exceptions,
+            readback_digest,
+        })
+        .map_err(N8nError::from)
+    }
+
+    async fn list_mcp_access_workflows(
+        &self,
+        client: &N8nClient,
+        context: Option<HostEgressContext>,
+    ) -> Result<Vec<Workflow>, N8nError> {
         let mut workflows = Vec::new();
         let mut cursor = None;
         let mut seen_cursors = BTreeSet::new();
@@ -872,9 +1062,22 @@ impl N8nConnector {
             }
             cursor = Some(next_cursor);
         }
+        Ok(workflows)
+    }
 
-        let plan = plan_mcp_access_reconcile(&reconcile, &workflows)?;
-        serde_json::to_value(plan).map_err(N8nError::from)
+    fn try_mcp_access_lock(&self, key: String) -> Result<Option<McpAccessLockGuard>, N8nError> {
+        let mut locks = self
+            .mcp_access_locks
+            .lock()
+            .map_err(|_| N8nError::PreconditionFailed("mcp access lock is unavailable"))?;
+        if !locks.insert(key.clone()) {
+            return Ok(None);
+        }
+        drop(locks);
+        Ok(Some(McpAccessLockGuard {
+            locks: Arc::clone(&self.mcp_access_locks),
+            key,
+        }))
     }
 
     async fn invoke_workflows_get(
@@ -2471,9 +2674,91 @@ fn is_blake3_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn mcp_access_exception(
+    item: &McpAccessPlanItem,
+    desired: bool,
+    reason: &'static str,
+) -> McpAccessPlanItem {
+    McpAccessPlanItem {
+        id: item.id.clone(),
+        available_in_mcp: item.available_in_mcp,
+        desired,
+        reason,
+    }
+}
+
+const fn mcp_access_error_reason(error: &N8nError) -> &'static str {
+    match error {
+        N8nError::UnknownOutcome => "provider_unknown_outcome",
+        N8nError::ReadbackMismatch => "readback_mismatch",
+        N8nError::Unauthorized => "provider_unauthorized",
+        N8nError::Forbidden => "provider_forbidden",
+        N8nError::NotFound { .. } => "provider_not_found",
+        N8nError::RateLimited { .. } => "provider_rate_limited",
+        N8nError::Api { .. } | N8nError::Http(_) => "provider_error",
+        N8nError::Json(_) | N8nError::MalformedProviderResponse => "provider_malformed",
+        N8nError::InvalidInput(_) => "provider_invalid_input",
+        N8nError::PreconditionFailed(_) => "precondition_failed",
+    }
+}
+
+fn mcp_access_invariant(workflow: &WorkflowDetail) -> N8nResult<McpAccessInvariant> {
+    let state = normalize_workflow_state(workflow.clone())?;
+    Ok(McpAccessInvariant {
+        id: state.id,
+        name: state.name,
+        description: workflow.description.clone(),
+        project_id: state.project_id,
+        folder_id: state.folder_id,
+        version_id: state.version_id,
+        active: state.active,
+        active_version_id: state.active_version_id,
+        is_archived: state.is_archived,
+        draft: state.draft,
+        published: state.published,
+    })
+}
+
+fn sorted_mcp_access_items(items: &[McpAccessPlanItem]) -> Vec<McpAccessPlanItem> {
+    let mut sorted = items.to_vec();
+    sorted.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.reason.cmp(right.reason))
+            .then_with(|| left.desired.cmp(&right.desired))
+    });
+    sorted
+}
+
+fn mcp_access_reconcile_digest(
+    input: &McpAccessReconcileInput,
+    server_id: &str,
+    planned: &[McpAccessPlanItem],
+    changed: &[McpAccessPlanItem],
+    skipped: &[McpAccessPlanItem],
+    exceptions: &[McpAccessPlanItem],
+) -> N8nResult<String> {
+    let mut workflow_ids = input.workflow_ids.clone().unwrap_or_default();
+    workflow_ids.sort();
+    let digest_input = json!({
+        "serverId": server_id,
+        "scope": input.scope.as_str(),
+        "projectId": input.project_id,
+        "folderId": input.folder_id,
+        "workflowIds": workflow_ids,
+        "desired": input.desired,
+        "planned": sorted_mcp_access_items(planned),
+        "changed": sorted_mcp_access_items(changed),
+        "skipped": sorted_mcp_access_items(skipped),
+        "exceptions": sorted_mcp_access_items(exceptions),
+    });
+    digest_canonical_json(MCP_ACCESS_READBACK_DIGEST_DOMAIN_V2, &digest_input)
+}
+
 fn plan_mcp_access_reconcile(
     input: &McpAccessReconcileInput,
     workflows: &[Workflow],
+    server_id: &str,
 ) -> N8nResult<McpAccessPlan> {
     let requested_ids = input
         .workflow_ids
@@ -2533,16 +2818,8 @@ fn plan_mcp_access_reconcile(
         });
     }
 
-    let digest_input = json!({
-        "scope": input.scope.as_str(),
-        "desired": input.desired,
-        "planned": &planned,
-        "changed": &changed,
-        "skipped": &skipped,
-        "exceptions": &exceptions,
-    });
     let readback_digest =
-        digest_canonical_json(MCP_ACCESS_READBACK_DIGEST_DOMAIN_V1, &digest_input)?;
+        mcp_access_reconcile_digest(input, server_id, &planned, &changed, &skipped, &exceptions)?;
     Ok(McpAccessPlan {
         planned,
         changed,
@@ -2619,6 +2896,7 @@ fn op_info(
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
                 ApprovalMode::Interactive
             }
+            "n8n.mcp_access.reconcile" => ApprovalMode::Interactive,
             _ => ApprovalMode::None,
         }),
         safety_tier,
@@ -3367,11 +3645,12 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Run a bounded dry-run to compare the configured server's workflow MCP availability with the requested policy.".into(),
+                when_to_use: "Run a bounded dry-run first; apply only the exact approved digest to explicit workflow MCP availability changes.".into(),
                 common_mistakes: vec![
                     "The configured server identity is authoritative; never infer it from a workflow name.".into(),
                     "dryRun=true performs only bounded workflow metadata reads and does not require approval.".into(),
-                    "dryRun=false is fail-closed until a supported typed n8n admin adapter is implemented; this operation never uses the private web bulk endpoint.".into(),
+                    "dryRun=false requires a matching approval and exact current dry-run digest; writes contain only settings.availableInMCP.".into(),
+                    "A provider timeout or ambiguous result is reported per workflow and is never retried automatically.".into(),
                     "Archived workflows are skipped and unknown archive or availability states are reported as exceptions.".into(),
                 ],
                 examples: vec![r#"{"scope":"all_current","desired":true,"dryRun":true}"#.into()],
@@ -3941,7 +4220,7 @@ mod tests {
             }
         ]))
         .unwrap();
-        let plan = plan_mcp_access_reconcile(&input, &workflows).unwrap();
+        let plan = plan_mcp_access_reconcile(&input, &workflows, "eec").unwrap();
         assert_eq!(plan.planned.len(), 1);
         assert_eq!(plan.planned[0].id, "needs-enable");
         assert!(plan.changed.is_empty());
@@ -3968,7 +4247,7 @@ mod tests {
             }
         ]))
         .unwrap();
-        let plan = plan_mcp_access_reconcile(&input, &workflows).unwrap();
+        let plan = plan_mcp_access_reconcile(&input, &workflows, "eec").unwrap();
         assert_eq!(plan.planned.len(), 1);
         assert_eq!(plan.planned[0].id, "present");
         assert_eq!(plan.exceptions[0].id, "missing");

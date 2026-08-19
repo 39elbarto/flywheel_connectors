@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements four per-invocation provider paths behind the same verified wrapper boundary: typed REST reads plus guarded REST draft create/update, a typed REST-only `n8n.mcp_access.reconcile` dry-run, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The active owner-gated deployment is immutable release `release-20260818-nqm819-44`. EEC and Hetzner reads, local knowledge, and official discovery have live acceptance; guarded create/update has live acceptance on one disposable, inactive, unpublished Hetzner workflow. The MCP-access dry-run performs no writes; its `dryRun=false` path fails closed until a supported typed n8n admin API is proven. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. Bundle, host, connector, and bridge processes were absent immediately, after 5 seconds, and after 30 seconds following the accepted write. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
+> **Status**: Source implements four per-invocation provider paths behind the same verified wrapper boundary: typed REST reads plus guarded REST draft create/update, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The MCP-access apply path is source-verified with wire-level tests and uses only `PUT settings.availableInMCP` plus independent detail readback; it is not yet an installed owner-gated bundle acceptance. A disposable live test on both EEC and Hetzner proved that the current n8n API user accepts this exact settings-only update and that deletion/readback cleanup works. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -83,9 +83,14 @@ Important runtime truths:
   `n8n.targets.resolve`, `n8n.runtime.status`,
   `n8n.node_resources.explore`, and `n8n.evaluations.manage` still need
   dedicated routing intents or host-local dispatch before they can use this
-  command. `n8n.mcp_access.reconcile` is now host-dispatchable for bounded
-  dry-runs; its write branch remains explicitly unavailable until the supported
-  typed admin adapter exists.
+  command. `n8n.mcp_access.reconcile` is host-dispatchable for bounded dry-runs
+  and guarded apply. Apply requires the exact current dry-run digest, one
+  matching interactive approval, an in-process per-workflow lock, one
+  settings-only PUT, and an independent detail readback. A stale digest,
+  unknown provider outcome, or readback mismatch fails closed for that
+  workflow and is never retried. Cross-process serialization and a durable
+  reconciliation receipt/ledger remain host-acceptance work; this source slice
+  must not be presented as a multi-process concurrency guarantee.
 - The library now includes a compact, provider-neutral target resolver and
   provider router. It accepts explicit server, confirmed project mapping,
   workflow/execution provenance, canonical resource URI, or bounded ambiguity;
@@ -350,7 +355,7 @@ This packet documents and verifies:
 | `n8n.folders.get` | `GET /projects/{projectId}/folders/{folderId}` | `n8n.folders.read` | `Safe` | `Low` | `Strict` | `project_id`, `folder_id` |
 | `n8n.workflows.create_draft` | one `POST /workflows`, then independent `GET /workflows/{id}` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | name, typed graph, exact approval reference, UUID idempotency key |
 | `n8n.workflows.update_draft` | baseline `GET`, one `PUT /workflows/{id}`, then independent `GET` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | id, typed graph, full lifecycle/state precondition, exact approval reference, UUID idempotency key |
-| `n8n.mcp_access.reconcile` | bounded paginated `GET /workflows` metadata read; no write in current release | `n8n.mcp_access.write` | `Risky` | `High` | `BestEffort` | scope, desired, dryRun; write guard only when `dryRun=false` |
+| `n8n.mcp_access.reconcile` | dry-run: bounded paginated `GET /workflows`; apply: current-plan reads, one `PUT /workflows/{id}` containing only `settings.availableInMCP`, and independent detail GET | `n8n.mcp_access.write` | `Risky` | `High` | `BestEffort` | scope, desired, dryRun; apply guard with approvalRef and exact dryRunDigest |
 
 Read output boundary:
 - Workflow list items keep the compact metadata projection (`id`, nullable `name` and

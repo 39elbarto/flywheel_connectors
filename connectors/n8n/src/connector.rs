@@ -232,6 +232,8 @@ struct McpAccessReconcileGuard {
     approval_ref: String,
     #[serde(rename = "dryRunDigest")]
     dry_run_digest: String,
+    #[serde(rename = "idempotencyKey")]
+    idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1538,8 +1540,7 @@ impl N8nConnector {
             .as_ref()
             .ok_or_else(|| FcpError::CapabilityDenied {
                 capability: "n8n.mcp_access.write".into(),
-                reason: "mcp access write requires a guard with approvalRef and dryRunDigest"
-                    .into(),
+                reason: "mcp access write requires a guard with approvalRef, dryRunDigest, and idempotencyKey".into(),
             })?;
         let approval_values = params
             .get("approval_tokens")
@@ -2596,9 +2597,10 @@ fn parse_mcp_access_input(input: &Value) -> N8nResult<McpAccessReconcileInput> {
             || guard.dry_run_digest.len() > 256
             || guard.dry_run_digest.trim() != guard.dry_run_digest
             || !is_blake3_digest(&guard.dry_run_digest)
+            || uuid::Uuid::parse_str(&guard.idempotency_key).is_err()
         {
             return Err(N8nError::InvalidInput(
-                "guard approvalRef and dryRunDigest must be bounded non-empty strings".into(),
+                "guard approvalRef, dryRunDigest, and idempotencyKey are invalid".into(),
             ));
         }
     }
@@ -3305,7 +3307,7 @@ fn mcp_access_reconcile_input_schema() -> serde_json::Value {
             "guard": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["approvalRef", "dryRunDigest"],
+                "required": ["approvalRef", "dryRunDigest", "idempotencyKey"],
                 "properties": {
                     "approvalRef": {"type": "string", "minLength": 1, "maxLength": 256},
                     "dryRunDigest": {
@@ -3314,6 +3316,7 @@ fn mcp_access_reconcile_input_schema() -> serde_json::Value {
                         "maxLength": 256,
                         "pattern": "^blake3-256:[0-9a-f]{64}$"
                     },
+                    "idempotencyKey": {"type": "string", "format": "uuid"},
                 },
             },
         },

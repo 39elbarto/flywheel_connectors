@@ -1,6 +1,6 @@
 //! Minimal fcp-host HTTP server with discovery and doctor endpoints.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -388,9 +388,12 @@ const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
     "n8n.workflows.get",
     "n8n.workflows.list",
 ];
-const N8N_WRITE_OPERATIONS: [&str; 2] =
-    ["n8n.workflows.create_draft", "n8n.workflows.update_draft"];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 11] = [
+const N8N_WRITE_OPERATIONS: [&str; 3] = [
+    "n8n.mcp_access.reconcile",
+    "n8n.workflows.create_draft",
+    "n8n.workflows.update_draft",
+];
+const N8N_RUN_ONCE_OPERATIONS: [&str; 12] = [
     "n8n.credentials.list",
     "n8n.executions.get",
     "n8n.executions.list",
@@ -400,6 +403,7 @@ const N8N_RUN_ONCE_OPERATIONS: [&str; 11] = [
     "n8n.tags.list",
     "n8n.workflows.get",
     "n8n.workflows.list",
+    "n8n.mcp_access.reconcile",
     "n8n.workflows.create_draft",
     "n8n.workflows.update_draft",
 ];
@@ -9956,6 +9960,146 @@ fn validate_n8n_draft_input(operation: &str, input: &Value) -> HostResult<()> {
     Ok(())
 }
 
+fn validate_n8n_mcp_access_input(input: &Value) -> HostResult<()> {
+    let object = input.as_object().ok_or_else(|| {
+        HostError::InvalidFilter("n8n MCP access input must be an object".to_string())
+    })?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "scope" | "desired" | "dryRun" | "projectId" | "folderId" | "workflowIds" | "guard"
+        )
+    }) || object.get("scope").and_then(Value::as_str).is_none()
+        || object.get("desired").and_then(Value::as_bool).is_none()
+        || object.get("dryRun").and_then(Value::as_bool).is_none()
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n MCP access input is invalid".to_string(),
+        ));
+    }
+    let scope = object
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::InvalidFilter("n8n MCP access scope is invalid".to_string()))?;
+    if !matches!(scope, "workflow_ids" | "project" | "folder" | "all_current") {
+        return Err(HostError::InvalidFilter(
+            "n8n MCP access scope is invalid".to_string(),
+        ));
+    }
+    let dry_run = object
+        .get("dryRun")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| HostError::InvalidFilter("n8n MCP access dryRun is invalid".to_string()))?;
+    match (dry_run, object.get("guard")) {
+        (true, Some(_)) | (false, None) => {
+            return Err(HostError::InvalidFilter(
+                "n8n MCP access guard presence is invalid".to_string(),
+            ));
+        }
+        (false, Some(Value::Object(guard))) => {
+            if guard.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "approvalRef" | "dryRunDigest" | "idempotencyKey"
+                )
+            }) || guard
+                .get("approvalRef")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+                || guard
+                    .get("dryRunDigest")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| {
+                        value.is_empty() || value.len() > 256 || !is_blake3_digest(value)
+                    })
+                || guard
+                    .get("idempotencyKey")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| Uuid::parse_str(value).is_err())
+            {
+                return Err(HostError::InvalidFilter(
+                    "n8n MCP access guard is invalid".to_string(),
+                ));
+            }
+        }
+        (false, Some(_)) => {
+            return Err(HostError::InvalidFilter(
+                "n8n MCP access guard is invalid".to_string(),
+            ));
+        }
+        (true, None) => {}
+    }
+
+    match scope {
+        "workflow_ids" => {
+            let ids = object
+                .get("workflowIds")
+                .and_then(Value::as_array)
+                .filter(|ids| (1..=1_000).contains(&ids.len()))
+                .ok_or_else(|| {
+                    HostError::InvalidFilter("n8n workflowIds scope is invalid".to_string())
+                })?;
+            if object.contains_key("projectId") || object.contains_key("folderId") {
+                return Err(HostError::InvalidFilter(
+                    "n8n workflowIds scope has conflicting selectors".to_string(),
+                ));
+            }
+            let mut seen = BTreeSet::new();
+            for id in ids {
+                let id = id.as_str().ok_or_else(|| {
+                    HostError::InvalidFilter("n8n workflow ID is invalid".to_string())
+                })?;
+                n8n_read_only_input_id(&json!({"id": id}), "id")?;
+                if !seen.insert(id) {
+                    return Err(HostError::InvalidFilter(
+                        "n8n workflowIds must not contain duplicates".to_string(),
+                    ));
+                }
+            }
+        }
+        "project" => {
+            let project_id = object
+                .get("projectId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| HostError::InvalidFilter("n8n projectId is required".to_string()))?;
+            n8n_read_only_input_id(&json!({"id": project_id}), "id")?;
+            if object.contains_key("folderId") || object.contains_key("workflowIds") {
+                return Err(HostError::InvalidFilter(
+                    "n8n project scope has conflicting selectors".to_string(),
+                ));
+            }
+        }
+        "folder" => {
+            let folder_id = object
+                .get("folderId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| HostError::InvalidFilter("n8n folderId is required".to_string()))?;
+            n8n_read_only_input_id(&json!({"id": folder_id}), "id")?;
+            if object.contains_key("projectId") || object.contains_key("workflowIds") {
+                return Err(HostError::InvalidFilter(
+                    "n8n folder scope has conflicting selectors".to_string(),
+                ));
+            }
+        }
+        "all_current" => {
+            if object.contains_key("projectId")
+                || object.contains_key("folderId")
+                || object.contains_key("workflowIds")
+            {
+                return Err(HostError::InvalidFilter(
+                    "n8n all_current scope has conflicting selectors".to_string(),
+                ));
+            }
+        }
+        _ => {
+            return Err(HostError::InvalidFilter(
+                "n8n MCP access scope is invalid".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn encode_n8n_resource_segment(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut encoded = String::with_capacity(value.len());
@@ -9969,6 +10113,14 @@ fn encode_n8n_resource_segment(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn is_blake3_digest(value: &str) -> bool {
+    value.len() == "blake3-256:".len() + 64
+        && value.starts_with("blake3-256:")
+        && value["blake3-256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn expected_n8n_read_only_resource_uri(
@@ -10000,6 +10152,7 @@ fn expected_n8n_read_only_resource_uri(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
+        "n8n.mcp_access.reconcile" => Ok(root),
         "n8n.executions.get" => Ok(format!(
             "{root}/workflows/{}/executions/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "workflow_id")?),
@@ -10031,7 +10184,9 @@ fn build_n8n_read_only_run_once_plan(
             "n8n read-only run-once operation is not allowed".to_string(),
         ));
     }
-    if N8N_WRITE_OPERATIONS.contains(&input.operation.as_str()) {
+    if input.operation == "n8n.mcp_access.reconcile" {
+        validate_n8n_mcp_access_input(&input.input)?;
+    } else if N8N_WRITE_OPERATIONS.contains(&input.operation.as_str()) {
         validate_n8n_draft_input(&input.operation, &input.input)?;
     }
     let expected_resource_uri =
@@ -10323,6 +10478,49 @@ fn n8n_run_once_mutation_digest(operation: &str, input: &Value) -> HostResult<St
 fn n8n_run_once_approval_material(
     plan: &N8nReadOnlyRunOncePlan,
 ) -> HostResult<(Value, String, String)> {
+    if plan.operation.as_str() == "n8n.mcp_access.reconcile" {
+        let mut input = plan.input.clone();
+        if let Some(guard) = input.get_mut("guard").and_then(Value::as_object_mut) {
+            guard.remove("approvalRef");
+        }
+        let mutation_digest = n8n_run_once_digest(
+            b"fwc-n8n.mcp-access-mutation.v1",
+            &json!({
+                "server_id": plan.server_id.as_str(),
+                "resource_uri": plan.resource_uri,
+                "input": input,
+                "provider": "rest",
+                "side_effect": "settings.availableInMCP",
+            }),
+        );
+        let material = json!({
+            "server_id": plan.server_id.as_str(),
+            "resource_uri": plan.resource_uri,
+            "operation": plan.operation.as_str(),
+            "scope": plan.input.get("scope").cloned().unwrap_or(Value::Null),
+            "desired": plan.input.get("desired").cloned().unwrap_or(Value::Null),
+            "dry_run_digest": plan
+                .input
+                .pointer("/guard/dryRunDigest")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "idempotency_key_hash": n8n_run_once_digest(
+                b"fwc-n8n.idempotency-key.v1",
+                plan.input
+                    .pointer("/guard/idempotencyKey")
+                    .unwrap_or(&Value::Null),
+            ),
+            "state_digest": plan
+                .input
+                .pointer("/guard/dryRunDigest")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "mutation_digest": mutation_digest,
+            "provider": "rest",
+            "side_effect": "settings.availableInMCP",
+        });
+        return Ok((material, String::new(), mutation_digest));
+    }
     if !N8N_WRITE_OPERATIONS.contains(&plan.operation.as_str()) {
         return Err(HostError::InvalidFilter(
             "n8n approval material requires a typed write".to_string(),
@@ -10478,7 +10676,12 @@ fn n8n_run_once_claim_at(
     plan: &N8nReadOnlyRunOncePlan,
     root: &FsPath,
 ) -> HostResult<N8nRunOnceClaim> {
-    let lock_identity = if plan.operation.as_str() == "n8n.workflows.create_draft" {
+    let lock_identity = if plan.operation.as_str() == "n8n.mcp_access.reconcile" {
+        json!({
+            "server": plan.server_id.as_str(),
+            "family": "mcp-access",
+        })
+    } else if plan.operation.as_str() == "n8n.workflows.create_draft" {
         json!({
             "server": plan.server_id.as_str(),
             "project": plan.input.get("project_id").cloned().unwrap_or(Value::Null),
@@ -31921,6 +32124,76 @@ done"#;
             run_once_n8n_official_mcp_credential_binding_for_zone(&config, &ZoneId::private(),)
                 .is_err()
         );
+    }
+
+    fn n8n_mcp_access_test_input(dry_run: bool) -> N8nReadOnlyRunOnceInput {
+        let mut input = json!({
+            "scope": "all_current",
+            "desired": true,
+            "dryRun": dry_run,
+        });
+        if !dry_run {
+            input["guard"] = json!({
+                "approvalRef": "chat-mcp-access-approval",
+                "dryRunDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "idempotencyKey": "11111111-2222-4333-8444-555555555555",
+            });
+        }
+        N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.mcp_access.reconcile".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: "fwc-n8n://eec".to_string(),
+            input,
+            deadline_ms: None,
+            correlation_id: None,
+        }
+    }
+
+    #[test]
+    fn n8n_mcp_access_host_plan_is_explicit_and_material_is_redacted() {
+        let config = run_once_n8n_draft_test_config();
+        let plan = build_n8n_read_only_run_once_plan(n8n_mcp_access_test_input(false), &config)
+            .expect("guarded MCP access plan");
+        assert_eq!(plan.resource_uri, "fwc-n8n://eec");
+        assert_eq!(plan.server_id, N8nReadOnlyServerId::Eec);
+
+        let (material, graph_digest, mutation_digest) =
+            n8n_run_once_approval_material(&plan).expect("MCP access approval material");
+        assert_eq!(graph_digest, "");
+        assert_eq!(
+            material.get("state_digest"),
+            Some(&json!(
+                "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ))
+        );
+        assert_eq!(
+            material.get("side_effect"),
+            Some(&json!("settings.availableInMCP"))
+        );
+        assert!(mutation_digest.starts_with("blake3-256:"));
+        assert!(!material.to_string().contains("chat-mcp-access-approval"));
+        assert!(
+            !material
+                .to_string()
+                .contains("11111111-2222-4333-8444-555555555555")
+        );
+    }
+
+    #[test]
+    fn n8n_mcp_access_host_plan_rejects_missing_idempotency_and_wrong_server_uri() {
+        let config = run_once_n8n_draft_test_config();
+        let mut missing_idempotency = n8n_mcp_access_test_input(false);
+        missing_idempotency.input["guard"]
+            .as_object_mut()
+            .expect("guard object")
+            .remove("idempotencyKey");
+        assert!(build_n8n_read_only_run_once_plan(missing_idempotency, &config).is_err());
+
+        let mut wrong_resource = n8n_mcp_access_test_input(false);
+        wrong_resource.resource_uri = "fwc-n8n://hetzner".to_string();
+        assert!(build_n8n_read_only_run_once_plan(wrong_resource, &config).is_err());
     }
 
     fn n8n_specific_test_lease(

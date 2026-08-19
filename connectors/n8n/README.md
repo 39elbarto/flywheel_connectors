@@ -85,12 +85,13 @@ Important runtime truths:
   dedicated routing intents or host-local dispatch before they can use this
   command. `n8n.mcp_access.reconcile` is host-dispatchable for bounded dry-runs
   and guarded apply. Apply requires the exact current dry-run digest, one
-  matching interactive approval, an in-process per-workflow lock, one
-  settings-only PUT, and an independent detail readback. A stale digest,
-  unknown provider outcome, or readback mismatch fails closed for that
-  workflow and is never retried. Cross-process serialization and a durable
-  reconciliation receipt/ledger remain host-acceptance work; this source slice
-  must not be presented as a multi-process concurrency guarantee.
+  matching interactive approval, a UUID idempotency key, a host run-once
+  server-wide lock, one settings-only PUT, and an independent detail readback.
+  The host writes redacted intent/outcome receipts under its private transient
+  runtime tree. A stale digest, unknown provider outcome, or readback mismatch
+  fails closed for that workflow and is never retried. This is source-level
+  host wiring, not yet an installed owner-gated bundle acceptance or a durable
+  reconciliation ledger; future workflows still require a later bounded run.
 - The library now includes a compact, provider-neutral target resolver and
   provider router. It accepts explicit server, confirmed project mapping,
   workflow/execution provenance, canonical resource URI, or bounded ambiguity;
@@ -355,7 +356,7 @@ This packet documents and verifies:
 | `n8n.folders.get` | `GET /projects/{projectId}/folders/{folderId}` | `n8n.folders.read` | `Safe` | `Low` | `Strict` | `project_id`, `folder_id` |
 | `n8n.workflows.create_draft` | one `POST /workflows`, then independent `GET /workflows/{id}` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | name, typed graph, exact approval reference, UUID idempotency key |
 | `n8n.workflows.update_draft` | baseline `GET`, one `PUT /workflows/{id}`, then independent `GET` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | id, typed graph, full lifecycle/state precondition, exact approval reference, UUID idempotency key |
-| `n8n.mcp_access.reconcile` | dry-run: bounded paginated `GET /workflows`; apply: current-plan reads, one `PUT /workflows/{id}` containing only `settings.availableInMCP`, and independent detail GET | `n8n.mcp_access.write` | `Risky` | `High` | `BestEffort` | scope, desired, dryRun; apply guard with approvalRef and exact dryRunDigest |
+| `n8n.mcp_access.reconcile` | dry-run: bounded paginated `GET /workflows`; apply: current-plan reads, one `PUT /workflows/{id}` containing only `settings.availableInMCP`, and independent detail GET | `n8n.mcp_access.write` | `Risky` | `High` | `BestEffort` | scope, desired, dryRun; apply guard with approvalRef, exact dryRunDigest, and UUID idempotencyKey |
 
 Read output boundary:
 - Workflow list items keep the compact metadata projection (`id`, nullable `name` and

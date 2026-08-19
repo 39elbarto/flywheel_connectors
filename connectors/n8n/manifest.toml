@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:faeae87c44764834bc77b7e278f35eb3c3101fac940638001e22e3148436ff82"
+interface_hash = "blake3-256:fcp.interface.v2:019f000b7601f2e77de6b0fde2cb5d8eecc3e259da75585064b509d390688a7f"
 
 [connector]
 id = "fcp.n8n"
@@ -633,6 +633,7 @@ additionalProperties = false
 required = [
     "approvalRef",
     "dryRunDigest",
+    "idempotencyKey",
 ]
 type = "object"
 
@@ -645,6 +646,10 @@ type = "string"
 maxLength = 256
 minLength = 1
 pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.guard.properties.idempotencyKey]
+format = "uuid"
 type = "string"
 
 [provides.operations."n8n.mcp_access.reconcile".input_schema.properties.projectId]
@@ -1841,16 +1846,16 @@ burst = 20
 scope = "instance"
 
 [rate_limits.operation_pools]
-"n8n.folders.get" = ["n8n.folders.read"]
-"n8n.workflows.activate" = ["n8n.workflows.write"]
-"n8n.executions.list" = ["n8n.executions.read"]
-"n8n.workflows.get" = ["n8n.workflows.read"]
-"n8n.workflows.list" = ["n8n.workflows.read"]
-"n8n.workflows.update_draft" = ["n8n.workflows.write"]
-"n8n.folders.list" = ["n8n.folders.read"]
-"n8n.projects.list" = ["n8n.projects.read"]
 "n8n.credentials.list" = ["n8n.credentials.metadata.read"]
-"n8n.workflows.create_draft" = ["n8n.workflows.write"]
-"n8n.executions.get" = ["n8n.executions.read"]
 "n8n.mcp_access.reconcile" = ["n8n.mcp_access.write"]
+"n8n.executions.get" = ["n8n.executions.read"]
+"n8n.executions.list" = ["n8n.executions.read"]
+"n8n.workflows.activate" = ["n8n.workflows.write"]
+"n8n.workflows.list" = ["n8n.workflows.read"]
+"n8n.folders.list" = ["n8n.folders.read"]
+"n8n.workflows.update_draft" = ["n8n.workflows.write"]
+"n8n.folders.get" = ["n8n.folders.read"]
 "n8n.tags.list" = ["n8n.tags.read"]
+"n8n.workflows.create_draft" = ["n8n.workflows.write"]
+"n8n.workflows.get" = ["n8n.workflows.read"]
+"n8n.projects.list" = ["n8n.projects.read"]

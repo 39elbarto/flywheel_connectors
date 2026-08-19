@@ -316,10 +316,9 @@ fn authorized_params(operation: &str, input: &Value) -> Value {
         params["approval_tokens"] = json!([approval_token(input)]);
     } else if matches!(
         operation,
-        "n8n.workflows.create_draft" | "n8n.workflows.update_draft"
-    ) {
-        params["approval_tokens"] = json!([draft_approval_token(operation, input)]);
-    } else if operation == "n8n.mcp_access.reconcile" && input["dryRun"] == json!(false) {
+        "n8n.workflows.create_draft" | "n8n.workflows.update_draft" | "n8n.mcp_access.reconcile"
+    ) && (operation != "n8n.mcp_access.reconcile" || input["dryRun"] == json!(false))
+    {
         params["approval_tokens"] = json!([draft_approval_token(operation, input)]);
     }
     params
@@ -3253,7 +3252,8 @@ async fn mcp_access_apply_uses_settings_only_and_independent_readback() {
         "dryRun": false,
         "guard": {
             "approvalRef": "mcp-apply-test",
-            "dryRunDigest": dry_run_digest
+            "dryRunDigest": dry_run_digest,
+            "idempotencyKey": "00000000-0000-4000-8000-000000000001"
         }
     });
     let applied = invoke(&c, "n8n.mcp_access.reconcile", apply_input)
@@ -3289,7 +3289,8 @@ async fn mcp_access_apply_rejects_stale_digest_before_workflow_read_or_write() {
         "dryRun": false,
         "guard": {
             "approvalRef": "mcp-stale",
-            "dryRunDigest": format!("blake3-256:{}", "0".repeat(64))
+            "dryRunDigest": format!("blake3-256:{}", "0".repeat(64)),
+            "idempotencyKey": "00000000-0000-4000-8000-000000000002"
         }
     });
     let error = invoke(&c, "n8n.mcp_access.reconcile", input)
@@ -3362,7 +3363,11 @@ async fn mcp_access_apply_reports_readback_mismatch_without_retry() {
         "workflowIds": ["wf-mismatch-mcp"],
         "desired": true,
         "dryRun": false,
-        "guard": {"approvalRef": "mcp-mismatch", "dryRunDigest": digest}
+        "guard": {
+            "approvalRef": "mcp-mismatch",
+            "dryRunDigest": digest,
+            "idempotencyKey": "00000000-0000-4000-8000-000000000003"
+        }
     });
     let result = invoke(&c, "n8n.mcp_access.reconcile", apply_input)
         .await

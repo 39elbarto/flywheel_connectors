@@ -852,30 +852,32 @@ fn validate_mcp_access_input(
         .and_then(Value::as_bool)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
     match (dry_run, object.get("guard")) {
-        (true, Some(_)) => return Err(AppError::new("invalid_operation_input")),
-        (false, None) => return Err(AppError::new("invalid_operation_input")),
         (false, Some(Value::Object(guard))) => {
-            if guard
-                .keys()
-                .any(|key| !matches!(key.as_str(), "approvalRef" | "dryRunDigest"))
-                || guard
-                    .get("approvalRef")
-                    .and_then(Value::as_str)
-                    .is_none_or(|value| {
-                        value.is_empty() || value.len() > 256 || value.trim() != value
-                    })
+            if guard.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "approvalRef" | "dryRunDigest" | "idempotencyKey"
+                )
+            }) || guard
+                .get("approvalRef")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
                 || guard
                     .get("dryRunDigest")
                     .and_then(Value::as_str)
                     .is_none_or(|value| {
                         value.is_empty() || value.len() > 256 || !is_blake3_digest(value)
                     })
+                || guard
+                    .get("idempotencyKey")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
             {
                 return Err(AppError::new("invalid_operation_input"));
             }
         }
-        (false, Some(_)) => return Err(AppError::new("invalid_operation_input")),
         (true, None) => {}
+        _ => return Err(AppError::new("invalid_operation_input")),
     }
 
     match scope {
@@ -1064,11 +1066,14 @@ fn expected_host_run_once_resource_uri(
         | HostRunOnceOperation::ExecutionsList
         | HostRunOnceOperation::ProjectsList
         | HostRunOnceOperation::TagsList
-        | HostRunOnceOperation::WorkflowsList => Ok(root),
-        HostRunOnceOperation::WorkflowsGet => Ok(format!(
-            "{root}/workflows/{}",
-            encode_host_resource_segment(host_run_once_input_id(input, "id")?)
-        )),
+        | HostRunOnceOperation::WorkflowsList
+        | HostRunOnceOperation::McpAccessReconcile => Ok(root),
+        HostRunOnceOperation::WorkflowsGet | HostRunOnceOperation::WorkflowsUpdateDraft => {
+            Ok(format!(
+                "{root}/workflows/{}",
+                encode_host_resource_segment(host_run_once_input_id(input, "id")?)
+            ))
+        }
         HostRunOnceOperation::WorkflowsCreateDraft => input
             .get("project_id")
             .map(|_| {
@@ -1078,11 +1083,6 @@ fn expected_host_run_once_resource_uri(
                 ))
             })
             .unwrap_or(Ok(root)),
-        HostRunOnceOperation::WorkflowsUpdateDraft => Ok(format!(
-            "{root}/workflows/{}",
-            encode_host_resource_segment(host_run_once_input_id(input, "id")?)
-        )),
-        HostRunOnceOperation::McpAccessReconcile => Ok(root),
         HostRunOnceOperation::ExecutionsGet => Ok(format!(
             "{root}/workflows/{}/executions/{}",
             encode_host_resource_segment(host_run_once_input_id(input, "workflow_id")?),

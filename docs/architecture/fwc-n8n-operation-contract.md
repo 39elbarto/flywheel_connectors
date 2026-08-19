@@ -57,8 +57,10 @@ representable by that enum yet. `n8n.mcp_access.reconcile` is now represented
 as a typed REST intent and host operation for bounded dry-run and guarded apply
 reconciliation. The apply path uses only the public workflow REST resource
 with an allow-listed `settings.availableInMCP` payload, then performs an
-independent detail readback. The private web bulk endpoint remains an
-unaccepted provider surface.
+independent detail readback. Host run-once adds a server-wide transient lock,
+UUID idempotency binding, and redacted intent/outcome receipts. The private web
+bulk endpoint remains an unaccepted provider surface; future workflows require
+a later bounded reconciliation run rather than a daemon or implicit policy.
 Local, typed REST, local MCP, and any official-MCP operation beyond capability
 inspection must remain behind the host-owned boundary; this wrapper does not
 accept model-supplied commands, paths, environments, URLs, or upstream tool
@@ -595,7 +597,7 @@ not that human-maintained count, are authoritative:
 | Test/manual execution | Current-chat interactive approval in v1; `test` is not presumed side-effect free |
 | Production execution | Dedicated current-chat approval bound to workflow, published version, input class, and side-effect summary |
 | Data-table/evaluation write | Current-chat interactive approval bound to exact action and resource |
-| Reconcile official MCP availability | Current-chat approval per server after dry-run |
+| Reconcile official MCP availability | Current-chat approval per server after dry-run; UUID idempotency key and host run-once lock |
 | Exact package update | Exact component/version ClickUp record in controlled `Approved` state |
 | Credential mutation | Future-only enhanced approval; unavailable in v1 |
 | Permanent workflow/data/version deletion | Future-only enhanced approval and recovery preflight; unavailable in v1 |

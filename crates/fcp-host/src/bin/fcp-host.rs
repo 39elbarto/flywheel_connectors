@@ -4491,6 +4491,12 @@ fn owned_invocation_config(
         // wrapper that strips descriptions and schemas before model output.
         config.max_frame_bytes = 2 * 1024 * 1024;
     }
+    if connector_id.as_str() == "fcp.n8n" && operation.as_str() == "n8n.mcp_access.reconcile" {
+        // Reconciliation may perform several bounded provider reads before
+        // returning its compact plan. Keep the general RPC ceiling at 10s,
+        // but give this typed operation enough time for its fixed read set.
+        config.rpc_timeout = Duration::from_secs(30);
+    }
     config
 }
 
@@ -8789,6 +8795,8 @@ async fn verify_live_request_with_resource(
     let approval_required = tool
         .approval_mode
         .is_some_and(|mode| !matches!(mode, ApprovalMode::None));
+    let mcp_access_dry_run = request.operation.as_str() == "n8n.mcp_access.reconcile"
+        && request.input.get("dryRun").and_then(Value::as_bool) == Some(true);
     let request_input_hash = request_input_hash(&request.input)?;
     let zone_policy = state.lookup_zone_policy(&request.zone_id).await?;
     let receipt = simulate_policy_decision(&PolicySimulationInput {
@@ -8797,7 +8805,7 @@ async fn verify_live_request_with_resource(
         transport: TransportMode::Lan,
         checkpoint_fresh: true,
         revocation_fresh: true,
-        execution_approval_required: approval_required,
+        execution_approval_required: approval_required && !mcp_access_dry_run,
         sanitizer_receipts: Vec::new(),
         related_object_ids: Vec::new(),
         request_object_id: None,
@@ -12287,8 +12295,18 @@ fn run_n8n_supervisor_gate_before_telemetry() -> HostResult<()> {
     ))
 }
 
-fn n8n_run_once_operation_class_allowed(expected_write: Option<bool>, operation: &str) -> bool {
-    expected_write.is_none_or(|expected| expected == N8N_WRITE_OPERATIONS.contains(&operation))
+fn n8n_run_once_is_write(operation: &str, input: &Value) -> bool {
+    let mcp_access_dry_run = operation == "n8n.mcp_access.reconcile"
+        && input.get("dryRun").and_then(Value::as_bool) == Some(true);
+    N8N_WRITE_OPERATIONS.contains(&operation) && !mcp_access_dry_run
+}
+
+fn n8n_run_once_operation_class_allowed(
+    expected_write: Option<bool>,
+    operation: &str,
+    input: &Value,
+) -> bool {
+    expected_write.is_none_or(|expected| expected == n8n_run_once_is_write(operation, input))
 }
 
 async fn async_n8n_read_only_run_once(
@@ -12309,11 +12327,14 @@ async fn async_n8n_read_only_run_once(
         .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
     let plan = build_n8n_read_only_run_once_plan(high_level_input, &selected_config)
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
-    let is_write = N8N_WRITE_OPERATIONS.contains(&plan.operation.as_str());
-    if !n8n_run_once_operation_class_allowed(expected_write, plan.operation.as_str()) {
+    let is_write = n8n_run_once_is_write(plan.operation.as_str(), &plan.input);
+    let mcp_access_dry_run = plan.operation.as_str() == "n8n.mcp_access.reconcile"
+        && plan.input.get("dryRun").and_then(Value::as_bool) == Some(true);
+    if !n8n_run_once_operation_class_allowed(expected_write, plan.operation.as_str(), &plan.input) {
         return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
     }
-    let approval_signing_key = is_write.then(fcp_crypto::ed25519::Ed25519SigningKey::generate);
+    let approval_signing_key =
+        (is_write && !mcp_access_dry_run).then(fcp_crypto::ed25519::Ed25519SigningKey::generate);
     let approval_token = if let Some(signing_key) = approval_signing_key.as_ref() {
         Some(
             mint_n8n_draft_approval(&plan, signing_key)
@@ -12400,7 +12421,7 @@ async fn async_n8n_read_only_run_once(
         capability_token_from_cbor_b64(&token_b64, "n8n read-only run-once capability")
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
     #[cfg(unix)]
-    let claim = if is_write {
+    let claim = if is_write && !mcp_access_dry_run {
         Some(
             n8n_run_once_claim(&plan)
                 .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
@@ -31706,23 +31727,43 @@ done"#;
     fn supervised_n8n_sandbox_class_must_match_operation_class() {
         assert!(n8n_run_once_operation_class_allowed(
             Some(false),
-            "n8n.workflows.get"
+            "n8n.workflows.get",
+            &Value::Null,
         ));
         assert!(!n8n_run_once_operation_class_allowed(
             Some(false),
-            "n8n.workflows.create_draft"
+            "n8n.workflows.create_draft",
+            &Value::Null,
         ));
         assert!(n8n_run_once_operation_class_allowed(
             Some(true),
-            "n8n.workflows.update_draft"
+            "n8n.workflows.update_draft",
+            &Value::Null,
         ));
         assert!(!n8n_run_once_operation_class_allowed(
             Some(true),
-            "n8n.executions.list"
+            "n8n.executions.list",
+            &Value::Null,
         ));
         assert!(n8n_run_once_operation_class_allowed(
             None,
-            "n8n.workflows.create_draft"
+            "n8n.workflows.create_draft",
+            &Value::Null,
+        ));
+        assert!(n8n_run_once_operation_class_allowed(
+            Some(false),
+            "n8n.mcp_access.reconcile",
+            &serde_json::json!({"dryRun": true}),
+        ));
+        assert!(!n8n_run_once_operation_class_allowed(
+            Some(false),
+            "n8n.mcp_access.reconcile",
+            &serde_json::json!({"dryRun": false}),
+        ));
+        assert!(n8n_run_once_operation_class_allowed(
+            Some(true),
+            "n8n.mcp_access.reconcile",
+            &serde_json::json!({"dryRun": false}),
         ));
     }
 

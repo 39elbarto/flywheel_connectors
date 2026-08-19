@@ -63,6 +63,8 @@ const SUPERVISOR_START_FRAME_LEN: usize = SUPERVISOR_START_PREFIX.len() + 4;
 const CREATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.create_draft"}"#;
 #[cfg(target_os = "linux")]
 const UPDATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.update_draft"}"#;
+#[cfg(target_os = "linux")]
+const MCP_ACCESS_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.mcp_access.reconcile"}"#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BridgeErrorCode {
@@ -218,7 +220,7 @@ pub fn run_verified_host_bridge(
 
     #[cfg(target_os = "linux")]
     {
-        let spec = process_spec(bundle, envelope.server_id, envelope.operation)?;
+        let spec = process_spec(bundle, envelope)?;
         let working_directory = bundle_working_directory(bundle)?;
         let output = run_process(
             &spec,
@@ -247,22 +249,30 @@ fn bundle_working_directory(bundle: &VerifiedBundle) -> Result<&Path, BridgeErro
 #[cfg(target_os = "linux")]
 fn process_spec(
     bundle: &VerifiedBundle,
-    server_id: HostRunOnceServerId,
-    operation: super::HostRunOnceOperation,
+    envelope: &HostRunOnceEnvelope,
 ) -> Result<fcp_sandbox::ProcessSpec, BridgeError> {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::path::Path;
 
     let (host_path, host_digest) = bundle.fcp_host();
-    let official_mcp = matches!(operation, super::HostRunOnceOperation::CapabilitiesInspect);
-    let owner_admission = match operation {
+    let official_mcp = matches!(
+        envelope.operation,
+        super::HostRunOnceOperation::CapabilitiesInspect
+    );
+    let mcp_access_dry_run = matches!(
+        envelope.operation,
+        super::HostRunOnceOperation::McpAccessReconcile
+    ) && envelope.input.get("dryRun").and_then(Value::as_bool)
+        == Some(true);
+    let owner_admission = match envelope.operation {
         super::HostRunOnceOperation::WorkflowsCreateDraft => Some(CREATE_DRAFT_OWNER_ADMISSION),
         super::HostRunOnceOperation::WorkflowsUpdateDraft => Some(UPDATE_DRAFT_OWNER_ADMISSION),
+        super::HostRunOnceOperation::McpAccessReconcile => Some(MCP_ACCESS_OWNER_ADMISSION),
         _ => None,
     };
-    let write = owner_admission.is_some();
-    let (inventory_path, _inventory_digest) = match (server_id, official_mcp) {
+    let write = owner_admission.is_some() && !mcp_access_dry_run;
+    let (inventory_path, _inventory_digest) = match (envelope.server_id, official_mcp) {
         (HostRunOnceServerId::Eec, false) => bundle.inventory_eec(),
         (HostRunOnceServerId::Hetzner, false) => bundle.inventory_hetzner(),
         (HostRunOnceServerId::Eec, true) => bundle.inventory_eec_official_mcp(),
@@ -1540,6 +1550,24 @@ mod tests {
     use crate::HostRunOnceOperation;
 
     #[cfg(target_os = "linux")]
+    fn test_envelope(
+        server_id: HostRunOnceServerId,
+        operation: HostRunOnceOperation,
+        input: Value,
+    ) -> HostRunOnceEnvelope {
+        HostRunOnceEnvelope {
+            schema: "test",
+            server_id,
+            operation,
+            zone_id: "z:work",
+            resource_uri: format!("fwc-n8n://{}", server_id.as_str()),
+            input,
+            deadline_ms: Some(30_000),
+            correlation_id: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn production_spec_has_only_fixed_host_controls() {
         use std::ffi::OsString;
@@ -1551,8 +1579,11 @@ mod tests {
         assert!(!bundle_debug.contains(&"a".repeat(64)));
         let spec = process_spec(
             &bundle,
-            HostRunOnceServerId::Eec,
-            HostRunOnceOperation::WorkflowsGet,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::WorkflowsGet,
+                Value::Null,
+            ),
         )
         .expect("EEC spec");
         assert_eq!(spec.launcher_path, PathBuf::from("/release/bin/fcp-host"));
@@ -1587,8 +1618,11 @@ mod tests {
 
         let hetzner = process_spec(
             &bundle,
-            HostRunOnceServerId::Hetzner,
-            HostRunOnceOperation::WorkflowsGet,
+            &test_envelope(
+                HostRunOnceServerId::Hetzner,
+                HostRunOnceOperation::WorkflowsGet,
+                Value::Null,
+            ),
         )
         .expect("Hetzner spec");
         assert_eq!(
@@ -1600,8 +1634,11 @@ mod tests {
 
         let write = process_spec(
             &bundle,
-            HostRunOnceServerId::Hetzner,
-            HostRunOnceOperation::WorkflowsCreateDraft,
+            &test_envelope(
+                HostRunOnceServerId::Hetzner,
+                HostRunOnceOperation::WorkflowsCreateDraft,
+                Value::Null,
+            ),
         )
         .expect("write spec");
         assert_eq!(
@@ -1630,8 +1667,11 @@ mod tests {
 
         let update = process_spec(
             &bundle,
-            HostRunOnceServerId::Eec,
-            HostRunOnceOperation::WorkflowsUpdateDraft,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::WorkflowsUpdateDraft,
+                Value::Null,
+            ),
         )
         .expect("update spec");
         assert_eq!(
@@ -1641,10 +1681,53 @@ mod tests {
             Some(&OsString::from(UPDATE_DRAFT_OWNER_ADMISSION))
         );
 
+        let mcp_access = process_spec(
+            &bundle,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::McpAccessReconcile,
+                serde_json::json!({"dryRun": false}),
+            ),
+        )
+        .expect("MCP access write spec");
+        assert_eq!(
+            mcp_access.fixed_args,
+            vec![OsString::from("n8n-write-run-once-supervised")]
+        );
+        assert_eq!(
+            mcp_access
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(MCP_ACCESS_OWNER_ADMISSION))
+        );
+
+        let mcp_access_dry_run = process_spec(
+            &bundle,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::McpAccessReconcile,
+                serde_json::json!({"dryRun": true}),
+            ),
+        )
+        .expect("MCP access dry-run spec");
+        assert_eq!(
+            mcp_access_dry_run.fixed_args,
+            vec![OsString::from("n8n-run-once-supervised")]
+        );
+        assert_eq!(
+            mcp_access_dry_run
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(MCP_ACCESS_OWNER_ADMISSION))
+        );
+
         let official = process_spec(
             &bundle,
-            HostRunOnceServerId::Eec,
-            HostRunOnceOperation::CapabilitiesInspect,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::CapabilitiesInspect,
+                Value::Null,
+            ),
         )
         .expect("official MCP spec");
         assert_eq!(

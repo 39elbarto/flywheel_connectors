@@ -55,12 +55,16 @@ root of trust.
 `n8n.node_resources.explore`, and `n8n.evaluations.manage` are not all
 representable by that enum yet. `n8n.mcp_access.reconcile` is now represented
 as a typed REST intent and host operation for bounded dry-run and guarded apply
-reconciliation. The apply path uses only the public workflow REST resource
-with an allow-listed `settings.availableInMCP` payload, then performs an
-independent detail readback. Host run-once adds a server-wide transient lock,
-UUID idempotency binding, and redacted intent/outcome receipts. The private web
-bulk endpoint remains an unaccepted provider surface; future workflows require
-a later bounded reconciliation run rather than a daemon or implicit policy.
+reconciliation. The apply path uses only the public workflow REST resource;
+n8n requires `name`, `nodes`, `connections`, and `settings` in that transport
+payload, while the logical mutation is allow-listed to
+`settings.availableInMCP`. Lifecycle fields and graph semantics are excluded
+from the mutation and verified by an independent detail readback. Host run-once
+adds a server-wide transient lock, UUID idempotency binding, and redacted
+intent/outcome receipts. The installed bundle passed owner-gated disposable
+enable/disable/readback acceptance on EEC and Hetzner. The private web bulk
+endpoint remains an unaccepted provider surface; future workflows require a
+later bounded reconciliation run rather than a daemon or implicit policy.
 Local, typed REST, local MCP, and any official-MCP operation beyond capability
 inspection must remain behind the host-owned boundary; this wrapper does not
 accept model-supplied commands, paths, environments, URLs, or upstream tool
@@ -504,14 +508,15 @@ execution content is not part of the audit result.
 `all_current`; `desired` is a boolean. `dryRun=true` requires no approval and
 performs no writes. `dryRun=false` requires a matching interactive approval and
 the exact digest from a current dry-run with the same server, scope, selectors,
-desired value, and observed workflow states. Apply sends one settings-only PUT
-per changed workflow, independently reads the workflow back, preserves
+desired value, and observed workflow states. Apply sends one full required
+workflow PUT per changed workflow; only `settings.availableInMCP` may change
+logically. It independently reads the workflow back, preserves
 graph/lifecycle invariants, and returns per-workflow exceptions for unknown
-outcomes or mismatches without automatic retry. The current connector lock is
-in-process only; cross-process serialization and a durable reconciliation
-receipt/ledger remain host-acceptance work. Project/folder/all-current scopes
-apply only to workflows present at that time; future workflows require a later
-reconciliation.
+outcomes or mismatches without automatic retry. Host run-once provides the
+cross-process server lock and transient redacted receipts; a durable
+reconciliation receipt/ledger is not yet implemented. Project/folder/all-current
+scopes apply only to workflows present at that time; future workflows require a
+later reconciliation.
 
 ## 6. Provider routing
 

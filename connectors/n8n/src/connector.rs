@@ -30,9 +30,9 @@ use crate::{
     },
     error::{N8nError, N8nResult},
     types::{
-        CredentialMetadataView, DraftMutationPrecondition, FolderListView, ListView, Workflow,
-        WorkflowDetail, WorkflowDraftMutationInput, WorkflowGraphSummary, WorkflowStateView,
-        WorkflowVersion,
+        ActiveVersionId, CredentialMetadataView, DraftMutationPrecondition, FolderListView,
+        ListView, Workflow, WorkflowDetail, WorkflowDraftMutationInput, WorkflowGraphSummary,
+        WorkflowStateView, WorkflowVersion,
     },
 };
 
@@ -203,6 +203,7 @@ struct DraftWritePlan {
 }
 
 const MAX_MCP_ACCESS_WORKFLOWS: usize = 1_000;
+const MCP_ACCESS_LIST_LIMIT: u64 = 100;
 const MCP_ACCESS_READBACK_DIGEST_DOMAIN_V2: &[u8] = b"fwc-n8n.mcp-access-readback.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -875,9 +876,27 @@ impl N8nConnector {
     ) -> Result<Value, N8nError> {
         let reconcile = parse_mcp_access_input(input)?;
         let server_id = self.configured_server_id()?;
-        let workflows = self
-            .list_mcp_access_workflows(client, context.clone())
-            .await?;
+        let workflows = if reconcile.scope == McpAccessScope::WorkflowIds {
+            let ids = reconcile
+                .workflow_ids
+                .as_ref()
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            let mut workflows = Vec::with_capacity(ids.len());
+            for id in ids {
+                match client.get_workflow_typed(id, context.clone()).await {
+                    Ok(workflow) if workflow.id == *id => {
+                        workflows.push(workflow_summary_from_detail(workflow))
+                    }
+                    Ok(_) => return Err(N8nError::MalformedProviderResponse),
+                    Err(N8nError::NotFound { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            workflows
+        } else {
+            self.list_mcp_access_workflows(client, context.clone())
+                .await?
+        };
         let plan = plan_mcp_access_reconcile(&reconcile, &workflows, server_id)?;
         if reconcile.dry_run {
             return serde_json::to_value(plan).map_err(N8nError::from);
@@ -961,7 +980,7 @@ impl N8nConnector {
             };
 
             if let Err(error) = client
-                .update_workflow_mcp_access(&item.id, reconcile.desired, context.clone())
+                .update_workflow_mcp_access(&baseline, reconcile.desired, context.clone())
                 .await
             {
                 exceptions.push(mcp_access_exception(
@@ -1048,7 +1067,7 @@ impl N8nConnector {
         let mut cursor = None;
         let mut seen_cursors = BTreeSet::new();
         loop {
-            let query = ListQuery::new(MAX_LIST_LIMIT, cursor.clone())?;
+            let query = ListQuery::new(MCP_ACCESS_LIST_LIMIT, cursor.clone())?;
             let page = client.list_workflows_typed(&query, context.clone()).await?;
             workflows.extend(page.data);
             if workflows.len() > MAX_MCP_ACCESS_WORKFLOWS {
@@ -2755,6 +2774,28 @@ fn mcp_access_reconcile_digest(
         "exceptions": sorted_mcp_access_items(exceptions),
     });
     digest_canonical_json(MCP_ACCESS_READBACK_DIGEST_DOMAIN_V2, &digest_input)
+}
+
+fn workflow_summary_from_detail(detail: WorkflowDetail) -> Workflow {
+    let active_version_id = match detail.active_version_id.into_option() {
+        Some(value) => ActiveVersionId::Value(value),
+        None => ActiveVersionId::Null,
+    };
+    Workflow {
+        id: detail.id,
+        name: detail.name,
+        description: detail.description,
+        active: Some(detail.active),
+        version_id: Some(detail.version_id),
+        active_version_id,
+        is_archived: Some(detail.is_archived),
+        project_id: detail.project_id,
+        parent_folder_id: detail.parent_folder_id,
+        created_at: detail.created_at,
+        updated_at: detail.updated_at,
+        settings: detail.settings,
+        tags: detail.tags,
+    }
 }
 
 fn plan_mcp_access_reconcile(

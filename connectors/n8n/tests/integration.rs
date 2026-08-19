@@ -3161,28 +3161,8 @@ async fn tags_list_timeout_uses_shared_transport_error_mapping() {
 // -- Workflows Get --
 
 #[fcp_async_core::runtime::test]
-async fn mcp_access_apply_uses_settings_only_and_independent_readback() {
+async fn mcp_access_apply_preserves_workflow_payload_and_independent_readback() {
     let server = MockServer::start().await;
-    let list_response = json!({
-        "data": [{
-            "id": "wf-mcp",
-            "name": "Disposable MCP test",
-            "active": false,
-            "versionId": "draft-v1",
-            "activeVersionId": null,
-            "isArchived": false,
-            "settings": {"availableInMCP": false}
-        }],
-        "nextCursor": null
-    });
-    Mock::given(method("GET"))
-        .and(path("/api/v1/workflows"))
-        .and(query_param("limit", "200"))
-        .and(query_param("excludePinnedData", "true"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(list_response))
-        .mount(&server)
-        .await;
-
     let baseline = json!({
         "id": "wf-mcp",
         "name": "Disposable MCP test",
@@ -3217,12 +3197,20 @@ async fn mcp_access_apply_uses_settings_only_and_independent_readback() {
     });
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/wf-mcp"))
-        .respond_with(SequentialJsonResponse::new(vec![baseline, readback]))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            baseline.clone(),
+            baseline,
+            readback,
+        ]))
         .mount(&server)
         .await;
     Mock::given(method("PUT"))
         .and(path("/api/v1/workflows/wf-mcp"))
         .and(body_json(json!({
+            "name": "Disposable MCP test",
+            "nodes": [{"id": "manual", "type": "n8n-nodes-base.manualTrigger"}],
+            "connections": {},
             "settings": {"availableInMCP": true}
         })))
         .respond_with(ResponseTemplate::new(204))
@@ -3264,20 +3252,29 @@ async fn mcp_access_apply_uses_settings_only_and_independent_readback() {
     assert!(applied["exceptions"].as_array().unwrap().is_empty());
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 5, "dry-run list, apply list, GET, PUT, GET");
+    assert_eq!(
+        requests.len(),
+        5,
+        "dry-run GET, apply plan GET, recheck GET, PUT, independent GET"
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn mcp_access_apply_rejects_stale_digest_before_workflow_read_or_write() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/api/v1/workflows"))
+        .and(path("/api/v1/workflows/wf-stale-mcp"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{
-                "id": "wf-stale-mcp",
-                "isArchived": false,
-                "settings": {"availableInMCP": false}
-            }]
+            "id": "wf-stale-mcp",
+            "name": "Stale MCP",
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "nodes": [{"id": "manual"}],
+            "connections": {},
+            "settings": {"availableInMCP": false},
+            "activeVersion": null
         })))
         .mount(&server)
         .await;
@@ -3333,12 +3330,20 @@ async fn mcp_access_apply_reports_readback_mismatch_without_retry() {
     });
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/wf-mismatch-mcp"))
-        .respond_with(SequentialJsonResponse::new(vec![detail.clone(), detail]))
+        .respond_with(SequentialJsonResponse::new(vec![
+            detail.clone(),
+            detail.clone(),
+            detail.clone(),
+            detail,
+        ]))
         .mount(&server)
         .await;
     Mock::given(method("PUT"))
         .and(path("/api/v1/workflows/wf-mismatch-mcp"))
         .and(body_json(json!({
+            "name": "Mismatch MCP",
+            "nodes": [{"id": "manual"}],
+            "connections": {},
             "settings": {"availableInMCP": true}
         })))
         .respond_with(ResponseTemplate::new(204))

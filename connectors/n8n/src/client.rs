@@ -765,22 +765,42 @@ impl N8nClient {
 
     /// Change only the allow-listed official MCP availability setting.
     ///
-    /// The payload deliberately contains no graph, lifecycle, credential, or
-    /// execution fields. The caller must perform an independent detail GET
-    /// before and after this single provider attempt.
+    /// n8n's public workflow PUT requires the workflow name, nodes,
+    /// connections, and settings even for a settings-only change. Build the
+    /// provider payload from the already verified detail read, preserving
+    /// static/pinned data when present. Lifecycle and published-version fields
+    /// are deliberately never sent; the caller performs independent detail
+    /// reads before and after this single provider attempt.
     pub(crate) async fn update_workflow_mcp_access(
         &self,
-        id: &str,
+        detail: &WorkflowDetail,
         desired: bool,
         context: Option<HostEgressContext>,
     ) -> N8nResult<()> {
-        let url =
-            self.resolve_path_segments(&[("path segment", "workflows"), ("workflow id", id)])?;
-        let payload = serde_json::json!({
-            "settings": {
-                "availableInMCP": desired,
-            },
+        let url = self
+            .resolve_path_segments(&[("path segment", "workflows"), ("workflow id", &detail.id)])?;
+        let name = detail
+            .name
+            .clone()
+            .ok_or(N8nError::MalformedProviderResponse)?;
+        let mut settings = match detail.settings.clone() {
+            None | Some(serde_json::Value::Null) => serde_json::Map::new(),
+            Some(serde_json::Value::Object(settings)) => settings,
+            Some(_) => return Err(N8nError::MalformedProviderResponse),
+        };
+        settings.insert("availableInMCP".into(), serde_json::Value::Bool(desired));
+        let mut payload = serde_json::json!({
+            "name": name,
+            "nodes": detail.nodes,
+            "connections": detail.connections,
+            "settings": settings,
         });
+        if let Some(static_data) = &detail.static_data {
+            payload["staticData"] = static_data.clone();
+        }
+        if let Some(pin_data) = &detail.pin_data {
+            payload["pinData"] = pin_data.clone();
+        }
         let _ = self
             .write_json(Method::PUT, url, &payload, context, false)
             .await?;
